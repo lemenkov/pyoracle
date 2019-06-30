@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: © 2026 Peter Lemenkov
+# SPDX-License-Identifier: CC0-1.0
+
+*$py.class
+*.cover
+*.egg
+*.egg-info/
+*.py,cover
+*.py[cod]
+*.so
+*.swp
+*~
+.coverage
+.coverage.*
+.nox/
+.pytest_cache/
+.tox/
+MANIFEST
+__pycache__/
+build/
+dist/
+htmlcov/
+sdist/
+wheels/

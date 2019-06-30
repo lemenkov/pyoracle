@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: © 2026 Peter Lemenkov
+# SPDX-License-Identifier: CC0-1.0
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "pyoracle"
+version = "0.1"
+description = "Python module to interact with a proprietary database"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSES/MIT.txt"]
+requires-python = ">=3.10"
+authors = [
+    { name = "Peter Lemenkov", email = "lemenkov@gmail.com" },
+]
+
+dependencies = [
+    "pycryptodome",
+]
+
+[project.urls]
+Homepage = "https://github.com/lemenkov/pyoracle"
+
+[tool.setuptools.packages.find]
+include = ["oracle*"]
