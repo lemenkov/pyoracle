@@ -72,7 +72,11 @@ def decode_packet(Data: bytes, Acc: object) -> object:
         case t if t == TTI_RXH:
             return decode_token_rxh(Data, Acc)
         case t if t == TTI_RPA:
-            return decode_token_rpa(Data, Acc)
+            # In auth flow, RPA is decoded directly via _handle_rpa (which strips
+            # the token byte first). The only caller of decode_packet is the SQL
+            # response handler, where RPA is a server-side session-state
+            # piggyback that precedes the trailing OER — skip it and continue.
+            return decode_token_rpa_piggyback(Data, Acc)
         case t if t == TTI_STA:  # tran
             return (True, Acc)
         case t if t == TTI_UDS:
@@ -83,40 +87,117 @@ def decode_packet(Data: bytes, Acc: object) -> object:
             raise Exception("Can't decode unknown type", Token, Data, Acc)
 
 def decode_token_bvc(Data: bytes, Acc: object) -> tuple:
-    # Bit vector for changed columns (section 6.3)
-    # TTI_BVC | NumColumns(UB2) | BitVector...
+    # Bit vector indicating which columns changed since the previous row.
+    # NumColumnsSent is variable ub2 (not fixed 2 bytes BE); bit vector size
+    # is derived from the cursor's total column count, not from NumColumnsSent.
     (Cursor, RowFormat, Rows) = Acc
-    NumCols = struct.unpack(">H", Data[1:3])[0]
-    # Bit vector: one bit per column, packed into bytes
+    Rest = Data[1:]
+    (_, Rest) = decode_ub4(Rest)
+    NumCols = len(RowFormat) if isinstance(RowFormat, list) else 0
     VecLen = (NumCols + 7) // 8
-    BitVec = Data[3:3+VecLen]
-    Rest = Data[3+VecLen:]
+    Rest = Rest[VecLen:]
     return decode_packet(Rest, (Cursor, RowFormat, Rows))
 
+def _skip_chunked_bytes(Data: bytes) -> bytes:
+    # Mirrors oracledb's skip_bytes: 1-byte length, then either that many raw
+    # bytes (length < 254), nothing (length == 255 NULL marker), or a chunked
+    # sequence of ub4-prefixed segments terminated by a zero-length segment
+    # (length == 254 LONG marker).
+    Length = Data[0]
+    if Length == 254:
+        Rest = Data[1:]
+        while True:
+            (ChunkLen, Rest) = decode_ub4(Rest)
+            if ChunkLen == 0:
+                return Rest
+            Rest = Rest[ChunkLen:]
+    elif Length == 255:
+        return Data[1:]
+    else:
+        return Data[1 + Length:]
+
+def _skip_bytes_with_length(Data: bytes) -> bytes:
+    (NumBytes, Rest) = decode_ub4(Data)
+    if NumBytes > 0:
+        Rest = _skip_chunked_bytes(Rest)
+    return Rest
+
+def _read_str_with_length(Data: bytes) -> tuple[bytes, bytes]:
+    (NumBytes, Rest) = decode_ub4(Data)
+    if NumBytes > 0:
+        return decode_dalc(Rest)
+    return (b"", Rest)
+
 def decode_token_dcb(Data: bytes, Acc: object) -> tuple:
-    # Describe information - column metadata (section 6.4)
-    # NumColumns followed by OAC+name for each column
-    (Cursor, RowFormat, Rows) = Acc
-    Rest = Data[1:]  # skip token byte
+    # Describe Information block. Layout reverse-engineered against Oracle 11g
+    # XE, cross-referenced with python-oracledb's _process_describe_info.
+    #
+    #   1B   token (TTI_DCB)
+    #   ...  describe-info preamble (chunked DALC: cursor uuid + timestamp)
+    #   ub4  max row size                              (skip)
+    #   ub4  num_columns
+    #   1B   reserved (only present when num_columns > 0)
+    #   per column (see _decode_dcb_column)
+    #   bytes_with_length  current date                (skip)
+    #   ub4  dcbflag                                   (skip)
+    #   ub4  dcbmdbz                                   (skip)
+    #   ub4  dcbmnpr                                   (skip)
+    #   ub4  dcbmxpr                                   (skip)
+    #   bytes_with_length  dcbqcky                     (skip)
+    (Cursor, _, Rows) = Acc
+    Rest = Data[1:]
+    Rest = _skip_chunked_bytes(Rest)
+    (_, Rest) = decode_ub4(Rest)
     (NumCols, Rest) = decode_ub4(Rest)
+    if NumCols > 0:
+        Rest = Rest[1:]
     Columns = []
     for _ in range(NumCols):
-        (DataType, MaxDataLength, DataScale, Charset, Rest) = decode_token_oac(Rest, None)
-        NullOk = Rest[0]
-        Rest = Rest[1:]
-        (ColName, Rest) = decode_dalc(Rest)
-        (SchemaName, Rest) = decode_dalc(Rest)
-        (TypeName, Rest) = decode_dalc(Rest)
-        Rest = Rest[1:]  # skip a reserved byte
-        Columns.append({
-            'column_name': ColName,
-            'data_type': DataType,
-            'data_length': MaxDataLength,
-            'data_scale': DataScale,
-            'charset': Charset,
-            'null_ok': NullOk,
-        })
+        (Col, Rest) = _decode_dcb_column(Rest)
+        Columns.append(Col)
+    Rest = _skip_bytes_with_length(Rest)
+    for _ in range(4):
+        (_, Rest) = decode_ub4(Rest)
+    Rest = _skip_bytes_with_length(Rest)
     return decode_packet(Rest, (Cursor, Columns, Rows))
+
+def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
+    # Per-column metadata, 11g layout. Where 12c+ uses sb1 for precision/scale,
+    # 11g uses sb1 precision but sb4-style variable encoding for scale (so
+    # NUMBER's -127 default arrives as 0x81 0x7f).
+    DataType = Rest[0]
+    Precision = Rest[2]   # sb1
+    Rest = Rest[3:]
+    (DataScale, Rest) = decode_ub4(Rest)
+    (BufferSize, Rest) = decode_ub4(Rest)
+    (_, Rest) = decode_ub4(Rest)              # max_array_elems
+    (_, Rest) = decode_ub4(Rest)              # cont_flags
+    (OidLen, Rest) = decode_ub4(Rest)
+    if OidLen > 0:
+        Rest = _skip_chunked_bytes(Rest)
+    (_, Rest) = decode_ub4(Rest)              # version
+    (Charset, Rest) = decode_ub4(Rest)        # charset id
+    Csfrm = Rest[0]                           # noqa: F841
+    Rest = Rest[1:]
+    (MaxSize, Rest) = decode_ub4(Rest)
+    NullOk = Rest[0]
+    Rest = Rest[2:]                           # skip nulls_allowed-byte AND v7 name length
+    (ColName, Rest) = _read_str_with_length(Rest)
+    (_, Rest) = _read_str_with_length(Rest)   # schema
+    (_, Rest) = _read_str_with_length(Rest)   # type name
+    (_, Rest) = decode_ub4(Rest)              # column position
+    (_, Rest) = decode_ub4(Rest)              # uds flags
+    Col = {
+        'column_name': ColName,
+        'data_type': DataType,
+        'data_length': BufferSize,
+        'data_scale': DataScale,
+        'precision': Precision,
+        'max_size': MaxSize,
+        'charset': Charset,
+        'null_ok': NullOk,
+    }
+    return (Col, Rest)
 
 def decode_token_iov(Data: bytes, Acc: object) -> tuple:
     # I/O vector for PL/SQL OUT parameters (section 6.5)
@@ -168,9 +249,9 @@ def decode_token_oer(Data: bytes, Acc: tuple) -> tuple:
         (Unknown12, R12) = decode_ub4(R11[2:]) # Row ID rba
         (Unknown13, R13) = decode_ub4(R12) # partitionid
         Unknown14 = R13[0] # tableid
-        (Unknown15, R14) = decode_ub4(R14[1:]) # blocknumber
-        (Unknown16, R15) = decode_ub4(R15) # slotnumber
-        (Unknown17, R16) = decode_ub4(R16) # Operating System Error
+        (Unknown15, R14) = decode_ub4(R13[1:]) # blocknumber
+        (Unknown16, R15) = decode_ub4(R14) # slotnumber
+        (Unknown17, R16) = decode_ub4(R15) # Operating System Error
         Unknown18 = R16[0] # Statement number
         Unknown19 = R16[1] # Procedure call number
         (Unknown20, R17) = decode_ub4(R16[2:]) # Pad
@@ -205,6 +286,33 @@ def decode_token_rpa(Data: bytes, Acc: object) -> tuple:
         return (TTI_AUTH, Resp, Ver, SessId)
     else:
         return (TTI_SESS, SessKey, Salt, DerivedSalt)
+
+_KNOWN_TTI_TOKENS = frozenset((TTI_OER, TTI_RXH, TTI_RXD, TTI_RPA, TTI_STA,
+                               TTI_IOV, TTI_UDS, TTI_OAC, TTI_LOB, TTI_WRN,
+                               TTI_DCB, TTI_FOB, TTI_BVC))
+
+def decode_token_rpa_piggyback(Data: bytes, Acc: tuple) -> object:
+    # Walks past a server-side session-state piggyback so the next decode_packet
+    # call lands on the real status token (OER). The block layout is opaque
+    # enough that empirically what works is: read Num, consume that many
+    # ub4-encoded fields, skip trailing alignment zeros, then continue.
+    Rest = Data[1:]
+    try:
+        (Num, Rest) = decode_ub4(Rest)
+    except IndexError:
+        return (True, Acc)
+    for _ in range(max(Num, 0)):
+        if not Rest or Rest[0] in _KNOWN_TTI_TOKENS:
+            break
+        try:
+            (_, Rest) = decode_ub4(Rest)
+        except IndexError:
+            return (True, Acc)
+    while Rest and Rest[0] == 0:
+        Rest = Rest[1:]
+    if Rest:
+        return decode_packet(Rest, Acc)
+    return (True, Acc)
 
 def decode_token_uds(Data: bytes, Acc: object) -> tuple:
     # User describe information
@@ -245,19 +353,21 @@ def decode_token_rxd(Data: bytes, Acc: object) -> tuple:
     return decode_packet(Rest, (Cursor, RowFormat, Rows + [Row]))
 
 def decode_token_rxh(Data: bytes, Acc: object) -> tuple:
-    # Row transfer header (section 6.1)
-    # TTI_RXH | Flags(UB1) | NumRequests(UB2) | IterNum(UB2) |
-    # NumItersThisTime(UB2) | UACBufferLength(UB2) | BitVector(DALC) | Reserved(DALC)
+    # Row Transfer Header. Fields use Oracle's variable ub1/ub2/ub4 encoding
+    # (1-byte length prefix + value bytes), not the fixed 2-byte big-endian
+    # layout the older version of this decoder assumed. See python-oracledb's
+    # _process_row_header.
     (Cursor, RowFormat, Rows) = Acc
-    Rest = Data[1:]  # skip token byte
-    Flags = Rest[0]
-    (NumRequests,) = struct.unpack(">H", Rest[1:3])
-    (IterNum,) = struct.unpack(">H", Rest[3:5])
-    (NumIters,) = struct.unpack(">H", Rest[5:7])
-    (UACLen,) = struct.unpack(">H", Rest[7:9])
-    Rest = Rest[9:]
-    (BitVec, Rest) = decode_dalc(Rest)
-    (Reserved, Rest) = decode_dalc(Rest)
+    Rest = Data[2:]                          # skip token + 1B flags
+    (_, Rest) = decode_ub4(Rest)             # num requests
+    (_, Rest) = decode_ub4(Rest)             # iteration number
+    (_, Rest) = decode_ub4(Rest)             # num iters
+    (_, Rest) = decode_ub4(Rest)             # buffer length
+    (NumBytes, Rest) = decode_ub4(Rest)      # bit vector length
+    if NumBytes > 0:
+        Rest = Rest[1:]                      # skip repeated length
+        Rest = Rest[NumBytes:]               # skip bit vector
+    Rest = _skip_bytes_with_length(Rest)     # rxhrid
     return decode_packet(Rest, (Cursor, RowFormat, Rows))
 
 def decode_token_wrn(Data: bytes, Acc: object) -> tuple:
@@ -607,26 +717,29 @@ def encode_chr(String: str | bytes) -> bytes:
     return bytes([Length]) + Bytes
 
 def decode_kv(Data: bytes, Num: int, Acc: list) -> tuple[list, bytes]:
-    if Num == 0:
+    if Num <= 0 or not Data:
         return (sorted(Acc), Data)
-    else:
-        def decode_to_bin(D):
-            if D[0] == 0:
-                return (bytes([0]), D[1:])
+    def decode_to_bin(D):
+        if D[0] == 0:
+            return (bytes([0]), D[1:])
+        else:
+            (Size, R) = decode_ub4(D)
+            if R[0] == Size:
+                return (R[1:1+Size], R[1+Size:])
+            elif R[0] == 254:
+                return decode_chr(R)
             else:
-                (Size, R) = decode_ub4(D)
-                if R[0] == Size:
-                    return (R[1:1+Size], R[1+Size:])
-                elif R[0] == 254:
-                    return decode_chr(R)
-                else:
-                    # FIXME a there are any other options?
-                    return decode_chr(R)
-        (Key, R0) = decode_to_bin(Data)
-        (Val, R1) = decode_to_bin(R0)
-        if Val == bytes([0]):
-            Val = None
-        return decode_kv(R1[R1[0]+1:], Num-1, Acc + [(Key, Val)])
+                # FIXME a there are any other options?
+                return decode_chr(R)
+    (Key, R0) = decode_to_bin(Data)
+    (Val, R1) = decode_to_bin(R0)
+    if Val == bytes([0]):
+        Val = None
+    NewAcc = Acc + [(Key, Val)]
+    if not R1:
+        return (sorted(NewAcc), R1)
+    Skip = R1[0] + 1
+    return decode_kv(R1[Skip:], Num - 1, NewAcc)
 
 def encode_kv(Key: bytes, Val: bytes, Padding: int = 0) -> bytes:
     def encode_to_bin(Data):
