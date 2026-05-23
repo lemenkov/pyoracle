@@ -22,6 +22,11 @@ What works so far:
   `Cursor.execute / fetchone / fetchmany / fetchall / description /
   rowcount`, iteration protocol, context managers, PEP 249 exception
   hierarchy
+- Bind variables: `cur.execute(sql, [v1, v2])` (positional) or
+  `cur.execute(sql, {"name": v})` (named, `:name` placeholders, case-
+  insensitive); accepted bind types are `int`, `float`, `Decimal`,
+  `str`, `bytes`, `bool`, `datetime.date` / `datetime` (with optional
+  timezone and microseconds), and `None`
 - Python type coercion for fetched values: NUMBER → `int` / `Decimal`,
   VARCHAR2 / CHAR → `str` (charset-aware), DATE / TIMESTAMP / TIMESTAMP
   WITH TIME ZONE → `datetime.datetime`, NULL → `None`
@@ -30,8 +35,6 @@ What works so far:
 
 What is still in progress:
 
-- Bind variables (the encoder side already accepts them; the missing
-  piece is plumbing them through `Cursor.execute(sql, parameters)`)
 - Cursor caching
 - LOB support
 - SSL/TLS connections
@@ -58,7 +61,10 @@ import oracle
 with oracle.connect(host="dbhost", port=1521, user="scott",
                     password="tiger", service_name="MYDB") as conn:
     with conn.cursor() as cur:
-        cur.execute("SELECT id, name FROM employees ORDER BY id")
+        cur.execute(
+            "SELECT id, name FROM employees WHERE dept = :dept ORDER BY id",
+            {"dept": "ENG"},
+        )
         for row in cur:
             print(row)
 ```

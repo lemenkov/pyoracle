@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2019 Peter Lemenkov <lemenkov@gmail.com>
 # SPDX-License-Identifier: MIT
 
+import datetime
+from decimal import Decimal
 from functools import reduce
 from oracle.crypto import o5logon
 from oracle.cursor import cursor
@@ -87,16 +89,19 @@ def decode_packet(Data: bytes, Acc: object) -> object:
             raise Exception("Can't decode unknown type", Token, Data, Acc)
 
 def decode_token_bvc(Data: bytes, Acc: object) -> tuple:
-    # Bit vector indicating which columns changed since the previous row.
-    # NumColumnsSent is variable ub2 (not fixed 2 bytes BE); bit vector size
-    # is derived from the cursor's total column count, not from NumColumnsSent.
-    (Cursor, RowFormat, Rows) = Acc
+    # Bit vector identifying columns whose value is REPEATED from the previous
+    # row (so the following RXD only carries the columns whose bits are set).
+    # NumColumnsSent is variable ub2; bit vector size is derived from the
+    # cursor's total column count. Stash the bytes onto Acc so the next RXD
+    # can consult them.
+    (Cursor, RowFormat, Rows, *_) = Acc
     Rest = Data[1:]
     (_, Rest) = decode_ub4(Rest)
     NumCols = len(RowFormat) if isinstance(RowFormat, list) else 0
     VecLen = (NumCols + 7) // 8
+    BitVec = bytes(Rest[:VecLen])
     Rest = Rest[VecLen:]
-    return decode_packet(Rest, (Cursor, RowFormat, Rows))
+    return decode_packet(Rest, (Cursor, RowFormat, Rows, BitVec))
 
 def _skip_chunked_bytes(Data: bytes) -> bytes:
     # Mirrors oracledb's skip_bytes: 1-byte length, then either that many raw
@@ -341,15 +346,32 @@ def decode_token_rxd(Data: bytes, Acc: object) -> tuple:
     # Row data (section 6.2). Each column value is a DALC blob whose raw bytes
     # we hand to oracle.types.decode_value, which dispatches on the column's
     # TNS data type from the describe-info block.
+    #
+    # If a BVC token preceded this RXD, Acc carries a bit vector: a set bit
+    # means "this column is in the RXD"; an unset bit means "reuse the
+    # previous row's value". The bit vector applies to a single RXD and is
+    # cleared from Acc on the way out.
     from oracle.types import decode_value
-    (Cursor, RowFormat, Rows) = Acc
+    (Cursor, RowFormat, Rows, *Extra) = Acc
+    BitVec = Extra[0] if Extra else None
     Rest = Data[1:]
     Row = []
     if RowFormat:
-        for Col in RowFormat:
+        PrevRow = Rows[-1] if Rows else None
+        for Idx, Col in enumerate(RowFormat):
+            if BitVec is not None and not _bvc_bit_set(BitVec, Idx):
+                Row.append(PrevRow[Idx] if PrevRow else None)
+                continue
             (Val, Rest) = decode_dalc(Rest)
             Row.append(decode_value(Col, Val))
     return decode_packet(Rest, (Cursor, RowFormat, Rows + [Row]))
+
+def _bvc_bit_set(BitVec: bytes, Idx: int) -> bool:
+    Byte = Idx // 8
+    Bit = Idx % 8
+    if Byte >= len(BitVec):
+        return False
+    return bool(BitVec[Byte] & (1 << Bit))
 
 def decode_token_rxh(Data: bytes, Acc: object) -> tuple:
     # Row Transfer Header. Fields use Oracle's variable ub1/ub2/ub4 encoding
@@ -764,52 +786,117 @@ def encode_tokens_oac(Tokens: list, Binary: bytes) -> bytes:
     return Binary + Out
 
 def encode_token_rxd(Token: object) -> bytes:
-    if isinstance(Token, (int, float, complex)):
+    if Token is None:
+        return bytes([0])
+    if isinstance(Token, bool):
+        # bool is an int subclass; reject explicitly so callers don't get a
+        # surprise integer 0/1 when they meant something more specific.
+        Bytes = encode_token_num(int(Token))
+        return bytes([len(Bytes)]) + Bytes
+    if isinstance(Token, int):
         Bytes = encode_token_num(Token)
         return bytes([len(Bytes)]) + Bytes
-    elif isinstance(Token, str):
+    if isinstance(Token, Decimal):
+        Bytes = encode_token_decimal(Token)
+        return bytes([len(Bytes)]) + Bytes
+    if isinstance(Token, (float, complex)):
+        Bytes = encode_token_num(Token)
+        return bytes([len(Bytes)]) + Bytes
+    if isinstance(Token, str):
         return encode_chr(Token)
-    elif isinstance(Token, (bytes, bytearray)):
+    if isinstance(Token, (bytes, bytearray)):
         return encode_chr(Token.decode('utf-8').encode('utf-16be'))
-    elif Token is None:
-        return bytes([0])
-    elif isinstance(Token, cursor):
-        return bytes([1,0])
-    elif isinstance(Token, date):
+    if isinstance(Token, cursor):
+        return bytes([1, 0])
+    if isinstance(Token, date):
+        # Legacy oracle.date.date with has_timestamp / timestamptz flags;
+        # keep it on its own path so callers who built one explicitly still
+        # get the bytes they expected.
         Bytes = encode_token_date(Token)
         return bytes([len(Bytes)]) + Bytes
-    else:
-        raise Exception("Unknown RXD token", Token)
+    if isinstance(Token, datetime.datetime):
+        Bytes = encode_token_datetime(Token)
+        return bytes([len(Bytes)]) + Bytes
+    if isinstance(Token, datetime.date):
+        Bytes = encode_token_datetime(
+            datetime.datetime(Token.year, Token.month, Token.day)
+        )
+        return bytes([len(Bytes)]) + Bytes
+    raise Exception("Unknown RXD token", Token)
 
 def encode_token_oac(Token: object) -> bytes:
-    if isinstance(Token, (int, float, complex)):
+    if Token is None:
+        return encode_token_raw(TNS_TYPE_VARCHAR, 4000, 16, UTF8_CHARSET, 0)
+    if isinstance(Token, (int, float, complex, Decimal)):
         return encode_token_raw(TNS_TYPE_NUMBER, 22, 0, 0, 0)
-    elif isinstance(Token, str):
+    if isinstance(Token, str):
         return encode_token_raw(TNS_TYPE_VARCHAR, 4000, 16, UTF8_CHARSET, 0)
-    elif isinstance(Token, (bytes, bytearray)):
+    if isinstance(Token, (bytes, bytearray)):
         return encode_token_raw(TNS_TYPE_VARCHAR, 4000, 16, AL16UTF16_CHARSET, 0)
-    elif Token is None:
-        return encode_token_raw(TNS_TYPE_VARCHAR, 4000, 16, UTF8_CHARSET, 0)
-    elif isinstance(Token, cursor):
+    if isinstance(Token, cursor):
         return encode_token_raw(TNS_TYPE_REFCURSOR, 1, 0, UTF8_CHARSET, 0)
-    elif isinstance(Token, date):
+    if isinstance(Token, date):
         if Token.has_timestamp and Token.timestamptz:
             return encode_token_raw(TNS_TYPE_TIMESTAMPTZ, 13, 0, 0, 0)
-        elif Token.has_timestamp:
+        if Token.has_timestamp:
             return encode_token_raw(TNS_TYPE_TIMESTAMP, 11, 0, 0, 0)
+        return encode_token_raw(TNS_TYPE_DATE, 7, 0, 0, 0)
+    if isinstance(Token, datetime.datetime):
+        if Token.tzinfo is not None:
+            return encode_token_raw(TNS_TYPE_TIMESTAMPTZ, 13, 0, 0, 0)
+        if Token.microsecond > 0:
+            return encode_token_raw(TNS_TYPE_TIMESTAMP, 11, 0, 0, 0)
+        return encode_token_raw(TNS_TYPE_DATE, 7, 0, 0, 0)
+    if isinstance(Token, datetime.date):
+        return encode_token_raw(TNS_TYPE_DATE, 7, 0, 0, 0)
+    raise Exception("Unknown OAC token", Token)
+
+def encode_token_decimal(Value: Decimal) -> bytes:
+    # The base-100 NUMBER encoder works on int and float; route Decimal through
+    # the right one based on whether it has a fractional component. This keeps
+    # exact-integer Decimals exact and accepts the usual float lossy path for
+    # the rest.
+    if Value == Value.to_integral_value():
+        return encode_token_num(int(Value))
+    return encode_token_num(float(Value))
+
+def encode_token_datetime(DT: datetime.datetime) -> bytes:
+    # 7-byte DATE prefix is shared by all three temporal formats. TIMESTAMP
+    # appends 4 BE bytes of nanoseconds. TIMESTAMP WITH TIME ZONE normalises
+    # the wall clock to UTC, appends nanoseconds, then the offset bias bytes.
+    if DT.tzinfo is not None:
+        Utc = DT.astimezone(datetime.timezone.utc)
+        Base = _encode_date_prefix(Utc)
+        Nanos = (DT.microsecond * 1000).to_bytes(4, 'big')
+        Offset = DT.utcoffset()
+        Total = int(Offset.total_seconds() // 60)
+        if Total < 0:
+            HH, MM = divmod(-Total, 60)
+            HH, MM = -HH, -MM
         else:
-            return encode_token_raw(TNS_TYPE_DATE, 7, 0, 0, 0)
-    else:
-        raise Exception("Unknown OAC token", Token)
+            HH, MM = divmod(Total, 60)
+        return Base + Nanos + bytes([HH + 20, MM + 60])
+    if DT.microsecond > 0:
+        return _encode_date_prefix(DT) + (DT.microsecond * 1000).to_bytes(4, 'big')
+    return _encode_date_prefix(DT)
+
+def _encode_date_prefix(DT: datetime.datetime) -> bytes:
+    return bytes([
+        DT.year // 100 + 100, DT.year % 100 + 100,
+        DT.month, DT.day,
+        DT.hour + 1, DT.minute + 1, DT.second + 1,
+    ])
 
 def encode_token_date(Token: date) -> bytes:
+    # Retained for any caller that still constructs the legacy oracle.date.date
+    # subclass. New code should pass a stdlib datetime.datetime instead.
     if Token.has_timestamp and Token.timestamptz:
         T = Token.set_timestamptz(Token.timestamptz)
-        return bytes([T.year // 100 + 100, T.year % 100 + 100, T.month, T.day, T.hour + 1, T.minute + 1, T.second + 1])+ (Token.microsecond).to_bytes(4, byteorder='little') + bytes([Token.timestamptz // 3600 + 20, 60])
+        return bytes([T.year // 100 + 100, T.year % 100 + 100, T.month, T.day, T.hour + 1, T.minute + 1, T.second + 1])+ (Token.microsecond * 1000).to_bytes(4, 'big') + bytes([Token.timestamptz // 3600 + 20, 60])
     elif Token.has_timestamp:
-        return bytes([Token.year // 100 + 100, Token.year % 100 + 100, Token.month, Token.day, Token.hour + 1, Token.minute + 1, Token.second + 1]) + (Token.microsecond).to_bytes(4, byteorder='little')
+        return bytes([Token.year // 100 + 100, Token.year % 100 + 100, Token.month, Token.day, Token.hour + 1, Token.minute + 1, Token.second + 1]) + (Token.microsecond * 1000).to_bytes(4, 'big')
     else:
-        return bytes([Token.year // 100 + 100, Token.year % 100 + 100, Token.month, Token.day, Token.hour + 1, Token.minute + 1, Token.second + 1]) 
+        return bytes([Token.year // 100 + 100, Token.year % 100 + 100, Token.month, Token.day, Token.hour + 1, Token.minute + 1, Token.second + 1])
 
 def encode_token_num(Token: int | float) -> bytes:
     if Token == 0:

@@ -345,10 +345,6 @@ class CursorIntegration(_IntegrationBase):
             self.cur.execute(f"SELECT * FROM nope_{os.getpid()}_xyz")
         self.assertEqual(ctx.exception.code, 942)
 
-    def test_parameters_argument_not_supported(self):
-        with self.assertRaises(oracle.NotSupportedError):
-            self.cur.execute("SELECT 1 FROM dual", [1])
-
     # ----- closed-state guards -----
 
     def test_fetch_without_execute_raises(self):
@@ -359,6 +355,202 @@ class CursorIntegration(_IntegrationBase):
         self.cur.close()
         with self.assertRaises(oracle.InterfaceError):
             self.cur.execute("SELECT 1 FROM dual")
+
+
+@unittest.skipUnless(_USER, _SKIP_REASON)
+class BindIntegration(_IntegrationBase):
+    """Verify Cursor.execute parameter binding."""
+
+    # ----- positional binds -----
+
+    def test_positional_int_string(self):
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} (id NUMBER, name VARCHAR2(40))"
+        )
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES (:1, :2)", [7, "alpha"]
+        )
+        self.cur.execute(f"SELECT id, name FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchall(), [(7, "alpha")])
+
+    def test_positional_tuple_accepted(self):
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} (id NUMBER, name VARCHAR2(40))"
+        )
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES (:1, :2)", (8, "beta")
+        )
+        self.cur.execute(f"SELECT id, name FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchall(), [(8, "beta")])
+
+    def test_null_bind(self):
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} (id NUMBER, name VARCHAR2(40))"
+        )
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES (:1, :2)", [9, None]
+        )
+        self.cur.execute(f"SELECT name FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchall(), [(None,)])
+
+    # ----- types -----
+
+    def test_decimal_round_trip(self):
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} (v NUMBER(12, 4))"
+        )
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES (:1)", [Decimal("3.1415")]
+        )
+        self.cur.execute(f"SELECT v FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchone(), (Decimal("3.1415"),))
+
+    def test_integer_decimal_round_trips_as_int(self):
+        # A Decimal with no fractional part comes back as int, not Decimal.
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} (v NUMBER)"
+        )
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES (:1)", [Decimal("42")]
+        )
+        self.cur.execute(f"SELECT v FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchone(), (42,))
+
+    def test_date_round_trip(self):
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (d DATE)")
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES (:1)",
+            [datetime.datetime(2026, 5, 23, 10, 11, 12)],
+        )
+        self.cur.execute(f"SELECT d FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchone(),
+                         (datetime.datetime(2026, 5, 23, 10, 11, 12),))
+
+    def test_timestamp_round_trip(self):
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (t TIMESTAMP)")
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES (:1)",
+            [datetime.datetime(2026, 5, 23, 10, 11, 12, 345678)],
+        )
+        self.cur.execute(f"SELECT t FROM {self.TABLE}")
+        self.assertEqual(
+            self.cur.fetchone(),
+            (datetime.datetime(2026, 5, 23, 10, 11, 12, 345678),),
+        )
+
+    def test_timestamptz_round_trip(self):
+        Tz = datetime.timezone(datetime.timedelta(hours=-5, minutes=-30))
+        Value = datetime.datetime(2026, 5, 23, 10, 11, 12, 345678, tzinfo=Tz)
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} (t TIMESTAMP WITH TIME ZONE)"
+        )
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES (:1)", [Value]
+        )
+        self.cur.execute(f"SELECT t FROM {self.TABLE}")
+        Got = self.cur.fetchone()[0]
+        # The instant must match; the tagged offset must round-trip.
+        self.assertEqual(Got, Value)
+        self.assertEqual(Got.utcoffset(), Value.utcoffset())
+
+    # ----- named binds -----
+
+    def test_named_dict_binds(self):
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} (id NUMBER, name VARCHAR2(40))"
+        )
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES (:id, :name)",
+            {"id": 10, "name": "named"},
+        )
+        self.cur.execute(f"SELECT id, name FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchall(), [(10, "named")])
+
+    def test_named_binds_are_case_insensitive(self):
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} (id NUMBER, name VARCHAR2(40))"
+        )
+        # Mixed case on both sides; bind names normalised lower-case.
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES (:ID, :Name)",
+            {"id": 11, "NAME": "case"},
+        )
+        self.cur.execute(f"SELECT id, name FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchall(), [(11, "case")])
+
+    def test_named_binds_repeated_placeholder(self):
+        # `:x` referenced twice in the SQL, but only one bind value is needed.
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (a NUMBER, b NUMBER)")
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES (:x, :x)", {"x": 42}
+        )
+        self.cur.execute(f"SELECT a, b FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchall(), [(42, 42)])
+
+    def test_named_binds_missing_key_raises(self):
+        # ProgrammingError is the right slot in the PEP 249 hierarchy for
+        # "the caller supplied bad inputs".
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} (id NUMBER, name VARCHAR2(40))"
+        )
+        with self.assertRaises(oracle.ProgrammingError):
+            self.cur.execute(
+                f"INSERT INTO {self.TABLE} VALUES (:id, :name)",
+                {"id": 12},   # missing :name
+            )
+
+    # ----- type validation -----
+
+    def test_bad_parameters_type_raises(self):
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
+        with self.assertRaises(oracle.NotSupportedError):
+            self.cur.execute(
+                f"INSERT INTO {self.TABLE} VALUES (:1)", "not-a-sequence"
+            )
+
+    # ----- SELECT with binds -----
+
+    def test_select_with_bind_filter(self):
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} (id NUMBER, name VARCHAR2(40))"
+        )
+        for Row in [(1, "a"), (2, "b"), (3, "c")]:
+            self.cur.execute(
+                f"INSERT INTO {self.TABLE} VALUES (:1, :2)", list(Row)
+            )
+        self.cur.execute(
+            f"SELECT name FROM {self.TABLE} WHERE id = :1", [2]
+        )
+        self.assertEqual(self.cur.fetchall(), [("b",)])
+
+    def test_select_with_named_bind(self):
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} (id NUMBER, name VARCHAR2(40))"
+        )
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES (:1, :2)", [5, "five"]
+        )
+        self.cur.execute(
+            f"SELECT name FROM {self.TABLE} WHERE id = :target",
+            {"target": 5},
+        )
+        self.assertEqual(self.cur.fetchall(), [("five",)])
+
+    # ----- safety: literal colons in strings shouldn't confuse bind parsing -----
+
+    def test_colon_inside_string_literal_is_not_a_bind(self):
+        # The SQL contains a `:not_a_bind` inside a quoted string. The bind
+        # extractor must ignore it; only the real :v should require a value.
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (v VARCHAR2(40))")
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES ('hello :not_a_bind ' || :v)",
+            {"v": "world"},
+        )
+        self.cur.execute(f"SELECT v FROM {self.TABLE}")
+        self.assertEqual(
+            self.cur.fetchall(),
+            [("hello :not_a_bind world",)],
+        )
 
 
 if __name__ == "__main__":

@@ -1,9 +1,17 @@
 # SPDX-FileCopyrightText: 2019 Peter Lemenkov <lemenkov@gmail.com>
 # SPDX-License-Identifier: MIT
 
+import re
+
 from oracle.exceptions import (
-    DatabaseError, InterfaceError, NotSupportedError,
+    DatabaseError, InterfaceError, NotSupportedError, ProgrammingError,
 )
+
+
+# `:name` placeholder. Names are case-insensitive and follow normal SQL
+# identifier rules; pure-digit forms (`:1`, `:2`) are handled separately as
+# positional indices.
+_NAMED_BIND_RE = re.compile(r':([A-Za-z_]\w*)')
 
 
 class cursor:
@@ -56,12 +64,8 @@ class Cursor:
 
     def execute(self, operation: str, parameters=None) -> 'Cursor':
         self._check_open()
-        if parameters:
-            raise NotSupportedError(
-                "bind variables are not yet supported; inline literals for now"
-            )
-
-        Result = self._connection.execute(operation)
+        Bind = _resolve_parameters(operation, parameters)
+        Result = self._connection.execute(operation, Bind=Bind)
         # Wire result tuple: (RetCode, OraCode, CursorHandle, RetFormat, Rows).
         # RetCode is the OPI status; OraCode carries the Oracle error number
         # (0 on plain success, 1403 at end-of-fetch).
@@ -155,6 +159,49 @@ class Cursor:
 
     def __exit__(self, exc_type, exc, tb):
         self.close()
+
+
+def _resolve_parameters(SQL: str, Params) -> list:
+    # Translate the caller-supplied parameters into a positional list in the
+    # order the placeholders first appear in the SQL. The wire protocol always
+    # sends bind values positionally; named placeholders (`:foo`) just give
+    # the caller a way to refer to them by name.
+    if Params is None:
+        return []
+    if isinstance(Params, (list, tuple)):
+        return list(Params)
+    if isinstance(Params, dict):
+        Names = _extract_bind_names(SQL)
+        Lower = {str(k).lower(): v for k, v in Params.items()}
+        Out = []
+        for N in Names:
+            if N not in Lower:
+                raise ProgrammingError(
+                    f"missing bind value for :{N}"
+                )
+            Out.append(Lower[N])
+        return Out
+    raise NotSupportedError(
+        f"parameters must be a list, tuple, or dict; got {type(Params).__name__}"
+    )
+
+
+def _extract_bind_names(SQL: str) -> list[str]:
+    # First-occurrence order of `:name` placeholders, case-folded to lower,
+    # with quoted strings and SQL comments stripped so we don't match inside
+    # them.
+    Cleaned = re.sub(r"'(?:''|[^'])*'", "''", SQL)
+    Cleaned = re.sub(r'"(?:""|[^"])*"', '""', Cleaned)
+    Cleaned = re.sub(r'--[^\n]*', '', Cleaned)
+    Cleaned = re.sub(r'/\*.*?\*/', '', Cleaned, flags=re.S)
+    Seen: list[str] = []
+    Found = set()
+    for M in _NAMED_BIND_RE.finditer(Cleaned):
+        N = M.group(1).lower()
+        if N not in Found:
+            Found.add(N)
+            Seen.append(N)
+    return Seen
 
 
 def _column_description(Col: dict) -> tuple:
