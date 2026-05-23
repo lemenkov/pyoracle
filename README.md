@@ -17,37 +17,27 @@ What works so far:
 - TTC presentation layer (token encoding/decoding)
 - Authentication handshake (O3LOGON, O5LOGON with 128/192/256-bit keys)
 - Session setup and teardown
-- SQL statement execution
-- Result set decoding at the wire level (DCB column metadata, RXH/RXD/BVC
-  row data) — values are returned as raw Oracle bytes
+- SQL statement execution, full result-set decoding (DCB / RXH / RXD / BVC)
+- DB-API 2.0 surface: `oracle.connect()`, `Connection.cursor()`,
+  `Cursor.execute / fetchone / fetchmany / fetchall / description /
+  rowcount`, iteration protocol, context managers, PEP 249 exception
+  hierarchy
+- Python type coercion for fetched values: NUMBER → `int` / `Decimal`,
+  VARCHAR2 / CHAR → `str` (charset-aware), DATE / TIMESTAMP / TIMESTAMP
+  WITH TIME ZONE → `datetime.datetime`, NULL → `None`
 - Transaction control (commit, rollback, ping)
 - Multiple character set support
 
 What is still in progress:
 
+- Bind variables (the encoder side already accepts them; the missing
+  piece is plumbing them through `Cursor.execute(sql, parameters)`)
 - Cursor caching
 - LOB support
 - SSL/TLS connections
 - Connection pooling
-- Comprehensive error handling
-
-## Roadmap
-
-In rough order of leverage for making this usable beyond protocol experiments:
-
-1. **Python type coercion for fetched values.** The wire bytes are already
-   surfaced in the row tuples — NUMBER comes back as e.g. `b'\xc1\x02'`,
-   DATE as a 7-byte Oracle date, VARCHAR as UTF-8 bytes. Convert these to
-   `int` / `float` / `Decimal` / `datetime` / `str` based on the column
-   metadata from the DCB block.
-2. **DB-API 2.0 `Cursor` with `fetchone` / `fetchmany` / `fetchall` /
-   `description`.** Today `OracleConnect.execute` returns the raw decoder
-   tuple; PEP 249 callers expect a cursor object with the standard methods.
-3. **Bind variables.** `execute(sql, [1, 'alpha'])` instead of inlining
-   literals into the SQL string. The encoding side (`encode_token_rxd` /
-   `encode_token_oac` in `oracle/tns.py`) already supports binds; the
-   missing piece is plumbing them through the cursor API. Also closes a
-   SQL-injection footgun.
+- Comprehensive error handling (Oracle error message text is not yet
+  extracted from OER — currently surfaced as `"ORA-NNNNN"` codes only)
 
 ## Requirements
 
@@ -63,23 +53,46 @@ pip install .
 ## Quick start
 
 ```python
-from oracle.connection import OracleConnect
+import oracle
 
-conn = OracleConnect(
-    host="dbhost",
-    port=1521,
-    user="scott",
-    password="tiger",
-    service_name="MYDB",
-)
-conn.connect()
+with oracle.connect(host="dbhost", port=1521, user="scott",
+                    password="tiger", service_name="MYDB") as conn:
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, name FROM employees ORDER BY id")
+        for row in cur:
+            print(row)
 ```
 
 ## Running tests
 
+The default test suite is offline (encoders, crypto, packet round-trips):
+
 ```
 python3 -m unittest discover -v tests/
 ```
+
+A second suite of **integration tests** exercises type coercion and the
+Cursor API against a real database. They are skipped unless connection
+parameters are exported in the environment:
+
+```
+export PYORACLE_TEST_USER=pyo
+export PYORACLE_TEST_PASSWORD=pyo123
+export PYORACLE_TEST_HOST=localhost          # optional, default localhost
+export PYORACLE_TEST_PORT=1521               # optional, default 1521
+export PYORACLE_TEST_SERVICE=XE              # optional, default XE
+python3 -m unittest discover -v tests/
+```
+
+The user only needs `CREATE SESSION` and `CREATE TABLE` privileges plus
+a writable tablespace. Each test creates and drops its own scratch
+table.
+
+> **Known flake.** A small number of integration tests occasionally fail
+> with `ORA-01013` ("user requested cancel of current operation") under
+> rapid connect/disconnect churn — a residual protocol-state issue in the
+> driver that surfaces when the same socket is hammered with statements
+> in quick succession. A single re-run typically clears it.
 
 ## Contributing
 
