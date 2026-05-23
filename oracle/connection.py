@@ -285,3 +285,16 @@ class OracleConnect:
             self.sock.close()
             self.sock = None
         self.conn_state = CONN_STATE_DISCONNECTED
+
+    def cursor(self):
+        # PEP 249 cursor factory.
+        from oracle.cursor import Cursor
+        return Cursor(self)
+
+    def __enter__(self):
+        if self.sock is None:
+            self.connect()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
