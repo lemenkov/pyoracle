@@ -1,6 +1,17 @@
 # Oracle TNS/TTC Protocol Description
 
-This document describes the Oracle Net Services protocol The library communicates with Oracle Database over TCP/IP (or TLS) using the Transparent Network Substrate (TNS) transport layer and the Two-Task Common (TTC/TTI) presentation layer.
+This document describes the Oracle Net Services protocol as used by
+this library. pyoracle communicates with Oracle Database over TCP/IP
+(or TLS) using the Transparent Network Substrate (TNS) transport
+layer and the Two-Task Common (TTC/TTI) presentation layer.
+
+The structures here were derived clean-room from public artifacts —
+python-oracledb's open-source thin-mode implementation (UPL / Apache
+2.0), publicly-available reverse-engineering writeups, and packet
+captures of authorized Oracle servers. See `CONTRIBUTING.md` for the
+sourcing rules. Where the protocol differs between Oracle versions
+(notably 11g vs 12c+) the document calls it out per section; pyoracle
+is currently validated against Oracle XE 11g.
 
 ## 1. Transport Layer: TNS Packets
 
@@ -196,17 +207,18 @@ Client                              Server
 
 Client sends:
 ```
-TTI_PRO | 6 | 0 | "beam" | 0
+TTI_PRO | 6 | 5 | 4 | 3 | 2 | 1 | 0 | "python" | 0
 ```
-- `6`: Protocol version.
-- `0`: Flags.
-- `"beam"`: Client driver name (null-terminated).
+- `6, 5, 4, 3, 2, 1, 0`: Protocol version vector (descending preference).
+- `"python"`: Client driver name (null-terminated).
 
 ### 4.2 Data Type Negotiation (TTI_DTY)
 
 Client sends a TTI_DTY message containing:
 - Client character set ID (UB2, little-endian).
-- Client national character set ID (UB2, little-endian). For CJK character sets the national charset falls back to UTF-8 (871).
+- Client national character set ID (UB2, little-endian). pyoracle today
+  sends the same charset for both; a future revision may differentiate
+  the national charset for CJK environments.
 - A capability bitmap listing supported Oracle data types and their representations.
 
 ### 4.3 Session Setup (TTI_FUN/TTI_SESS)
@@ -265,7 +277,7 @@ TTI_FUN | TTI_AUTH | SeqNum | 1 | UserLen | AuthMode | 1 | NumPairs | 1 | 1 |
   [KV("AUTH_NEWPASSWORD", encrypted_new_password)] |
   [KV("AUTH_PBKDF2_SPEEDY_KEY", encrypted_speedy_key)] |
   KV("AUTH_SESSKEY", encrypted_client_session_key) |
-  KV("SESSION_CLIENT_DRIVER_NAME", "beam") |
+  KV("SESSION_CLIENT_DRIVER_NAME", "python") |
   KV("SESSION_CLIENT_VERSION", "186647296")
 ```
 
@@ -327,7 +339,11 @@ Common option combinations:
 `[Options, FetchCount, 0, 0, 0, 0, 0, Type, 0, 0, 0, 0, 0]`
 - Type: `1` for SELECT, `0` for DML/PL/SQL.
 
-**Cursor reuse**: The library caches cursor IDs keyed by the CRC32 of the SQL text. When re-executing a previously parsed statement, the cursor ID is sent instead of the SQL text, avoiding re-parse overhead. Up to 128 cursors are cached before a reset cycle.
+**Cursor reuse** *(not yet implemented)*: The protocol supports reusing
+a previously-parsed cursor ID instead of resending the SQL text, which
+avoids server-side re-parse overhead. pyoracle currently sends
+`cursor = 0` on every execute (parse-every-time). A cursor cache is
+on the roadmap.
 
 ### 5.2 Fetch (TTI_FUN/TTI_FETCH)
 
@@ -355,16 +371,18 @@ OID(0) | Version(0) | CharsetID(SB4) | CharsetForm(UB1) | MXLC(SB4)
 
 Bind values are encoded inline following OAC descriptors:
 
-| Erlang Type   | Wire Encoding                                          |
-|---------------|--------------------------------------------------------|
-| Integer/Float | Oracle NUMBER format (length-prefixed mantissa bytes)  |
-| String/List   | Length-prefixed character data (chunked if > 64 bytes) |
-| Binary        | Length-prefixed raw data (chunked if > 64 bytes)       |
-| Date tuple    | 7-byte Oracle DATE (century, year, month, day, h, m, s)|
-| Timestamp     | 11-byte (DATE + 4-byte fractional seconds nanoseconds) |
-| Timestamp TZ  | 13-byte (TIMESTAMP + 2-byte timezone offset/zone ID)   |
-| `null`        | Single `0x00` byte                                     |
-| `cursor`      | `0x01, 0x00`                                           |
+| Python Type             | Wire Encoding                                          |
+|-------------------------|--------------------------------------------------------|
+| `int`, `bool`           | Oracle NUMBER format (length-prefixed mantissa bytes)  |
+| `float`, `complex`      | Oracle NUMBER format                                   |
+| `decimal.Decimal`       | Oracle NUMBER (integer-valued decimals via int path, fractional via float) |
+| `str`                   | Length-prefixed UTF-8 character data (chunked if > 64 bytes) |
+| `bytes` / `bytearray`   | Length-prefixed AL16UTF16 character data               |
+| `datetime.date`         | 7-byte Oracle DATE (century, year, month, day, h, m, s) |
+| `datetime.datetime`     | 7-byte DATE if microsecond == 0; otherwise 11-byte TIMESTAMP (+ 4-byte BE nanoseconds) |
+| `datetime.datetime` w/ `tzinfo` | 13-byte TIMESTAMP WITH TIME ZONE (UTC wall clock + offset bias bytes) |
+| `None`                  | Single `0x00` byte                                     |
+| `oracle.cursor.cursor`  | `0x01, 0x00` (REFCURSOR placeholder)                   |
 
 **Chunked encoding** (for data > 64 bytes): `0xFE` header, then repeated `<length><data>` chunks of up to 64 bytes each, terminated by `0x00`.
 
@@ -372,15 +390,19 @@ Bind values are encoded inline following OAC descriptors:
 
 ### 6.1 Row Header (TTI_RXH)
 
-Precedes row data in SELECT results:
+Precedes row data in SELECT results. All numeric fields use Oracle's
+variable-length integer encoding (`§12.1`), not fixed BE widths:
 
 ```
-TTI_RXH | Flags(UB1) | NumRequests(UB2) | IterNum(UB2) |
-NumItersThisTime(UB2) | UACBufferLength(UB2) |
-BitVector(DALC) | Reserved(DALC)
+TTI_RXH | Flags(UB1) | NumRequests(UB2) | IterationNumber(UB4) |
+NumIters(UB4) | BufferLength(UB2) |
+BitVectorLength(UB4) | [SkippedLengthByte(UB1) | BitVector(N bytes)] |
+Rxhrid(bytes_with_length)
 ```
 
-The **bit vector** indicates which columns have changed values versus the previous row (optimization for repeated values in result sets).
+When `BitVectorLength` is non-zero, a single repeated length byte
+follows and then `BitVectorLength` raw bytes of bit vector. The
+trailing `rxhrid` is a `bytes_with_length` (ub4 count + chunked DALC).
 
 ### 6.2 Row Data (TTI_RXD)
 
@@ -388,17 +410,61 @@ Contains the actual column values for one row, encoded according to each column'
 
 ### 6.3 Bit Vector for Changed Columns (TTI_BVC)
 
-When the server uses differential row encoding, TTI_BVC tokens indicate which column positions contain new data. Unchanged columns reuse values from the previous row.
+When the server uses differential row encoding it emits a BVC token
+between consecutive RXDs. The token body is a `NumColumnsSent` ub2
+followed by a packed bit vector. The vector has `ceil(num_columns / 8)`
+bytes; bit semantics are LSB-first within each byte (column 0 = bit 0
+of byte 0, column 8 = bit 0 of byte 1, etc.).
+
+- **Bit set** → the column is present in the next RXD's data section.
+- **Bit unset** → the column value is duplicated from the previous row
+  and is *not* carried in the next RXD.
+
+Without honouring the bit vector, the RXD decoder reads too many DALCs
+and walks off the end of the packet.
 
 ### 6.4 Describe Information (TTI_DCB)
 
-Column metadata for result sets. Contains the number of columns followed by UDS (User Describe) entries, each consisting of:
+Column metadata for result sets. The 11g layout begins with a header
+block that older documents tend to omit:
 
-- OAC descriptor (data type, length, scale, charset)
-- Null allowed flag
-- Column name (DALC-encoded)
-- Schema name, type name
-- Column position
+```
+TTI_DCB |
+  describe-info preamble (chunked DALC: cursor UUID + Oracle DATE) |
+  max_row_size (ub4, skipped) |
+  num_columns (ub4) |
+  [reserved byte, present only when num_columns > 0] |
+  per-column metadata x num_columns (see below) |
+  current_date (bytes_with_length, skipped) |
+  dcbflag (ub4, skipped) |
+  dcbmdbz (ub4, skipped) |
+  dcbmnpr (ub4, skipped) |
+  dcbmxpr (ub4, skipped) |
+  dcbqcky (bytes_with_length, skipped)
+```
+
+Per-column metadata on 11g:
+
+```
+ora_type_num (ub1) | flags (ub1, skipped) |
+precision (sb1) | scale (sb4, variable) |
+buffer_size (ub4) | max_array_elems (ub4, skipped) |
+cont_flags (ub4, skipped) |
+oid (bytes_with_length) |
+version (ub2, skipped) | charset_id (ub2) |
+csfrm (ub1) | max_size (ub4) |
+nulls_allowed (ub1) | v7_name_length (ub1, skipped) |
+column_name (str_with_length) |
+schema_name (str_with_length, skipped) |
+type_name (str_with_length, skipped) |
+column_position (ub2, skipped) | uds_flags (ub4, skipped)
+```
+
+12c+ uses `sb1` for scale rather than the variable-length sb4 of 11g
+and inserts an additional `oaccolid` ub4 after `max_size`. The 11g
+layout is what pyoracle currently parses; supporting newer formats
+would need a capability-version gate keyed on the negotiated TTC
+field version.
 
 ### 6.5 I/O Vector (TTI_IOV)
 
@@ -412,16 +478,57 @@ Contains cursor information and bookkeeping after statement execution. For authe
 
 ### 6.7 Error Response (TTI_OER)
 
+The OER block is emitted at the end of every server response, success
+or failure. The layout is unified — there is no separate "error" vs
+"success" structure on the wire; instead every field is always present
+and the error code distinguishes the outcome. On 11g:
+
 ```
-TTI_OER | EndOfCallStatus(UB2) | SeqNumber(UB2) | CurrentRowNumber(UB4) |
-ReturnCode(UB2) | ...
+TTI_OER |
+  call_status (ub4) |
+  end_to_end_seq# (ub2, skipped) |
+  current_row_number (ub4)    -- the DML rowcount on 11g (see note) |
+  ora_error_code (ub2)        -- 0 on success |
+  array_elem_error (ub2, skipped) | array_elem_error (ub2, skipped) |
+  cursor_id (ub2) |
+  error_position (sb2) |
+  sql_type, fatal, flags, user_cursor_options, upi_param,
+    warn_flags (6 x ub1) |
+  rowid (ub4 rba + ub2 part_id + ub1 + ub4 block_num + ub2 slot) |
+  os_error (ub4, skipped) |
+  statement_number (ub1, skipped) | call_number (ub1, skipped) |
+  padding (ub2, skipped) |
+  successful_iterations (ub4)  -- always 1 for non-array execute on 11g |
+  oerrdd (bytes_with_length, skipped) |
+  num_batch_error_codes (ub2)   [+ batch error codes block]
+  num_batch_error_offsets (ub4) [+ batch offsets block]
+  num_batch_error_messages (ub2)[+ batch messages block]
+  [trailing message DALC iff ora_error_code != 0]
 ```
 
-**Return codes**:
+**11g rowcount quirk.** The field labelled "current row number" in
+newer Oracle (and in python-oracledb's source) doubles as the affected
+row count on 11g: an UPDATE / DELETE / INSERT writes the number of
+rows touched there. The later `successful_iterations` field is the
+call iteration count — always 1 for a single non-array execute — so
+it cannot serve as the rowcount the caller wants. 12c+ moved the
+affected count to a separate ub8 field at the end of the OER (after
+two additional `info.num` / `info.rowcount` extensions); pyoracle
+doesn't parse that variant yet.
+
+**Common error codes**:
 - `0`: Success.
-- `1403`: No more data (end of result set).
-- `1405`: Cursor fetch error.
-- Other: Oracle error code, followed by diagnostic fields (error position, SQL type, flags, etc.) and an error message string.
+- `1`: ORA-00001 — unique constraint violated.
+- `942`: ORA-00942 — table or view does not exist.
+- `1403`: ORA-01403 — no more data (end of result set; normal SELECT
+  completion).
+- `1722`: ORA-01722 — invalid number.
+
+**Trailing message.** When `ora_error_code != 0`, a single DALC
+follows the batch-error-messages count carrying the human-readable
+`"ORA-NNNNN: ..."` string. Forward this verbatim to callers — do not
+embed a copy of Oracle's error-message catalogue in the driver
+(`CONTRIBUTING.md` calls this out explicitly).
 
 ### 6.8 Status (TTI_STA)
 
@@ -487,11 +594,25 @@ Modes: `2` = immediate, `4` = normal, `8` = final, `64` = abort, `128` = transac
 TTI_FUN | TTI_LOGOFF | SeqNum
 ```
 
-Before logoff, the library:
+Before closing the socket, the library:
 1. Rolls back uncommitted transactions (if autocommit is off).
-2. Closes all cached cursors via piggyback TTI_CANA/TTI_OCCA.
-3. Sends TTI_LOGOFF.
-4. Closes the TCP/TLS socket.
+2. Closes any cached cursors via piggyback TTI_CANA / TTI_OCCA.
+3. Sends TTI_LOGOFF and reads its response.
+4. **Sends a final empty TNS_DATA packet with `data_flags = 0x0040`**
+   (the TNS EOF marker). Without this byte the server can hold the
+   session in a half-released state long enough that rapid reconnect
+   cycles exhaust the listener and start surfacing ORA-01013 on new
+   connections.
+5. `shutdown(SHUT_WR)` the socket so the FIN flushes the queued EOF
+   packet to the server, then `close()`.
+
+The 10-byte EOF packet wire format is the standard TNS_DATA header
+with no body:
+
+```
+00 0a | 00 00 | 06 | 00 | 00 40
+length | flags | typ| f | data_flags = EOF
+```
 
 ## 11. Data Type Encoding
 
@@ -518,11 +639,24 @@ Century+100 | Year+100 | Month | Day | Hour+1 | Minute+1 | Second+1
 
 ### 11.4 TIMESTAMP WITH TIME ZONE
 
-13 bytes: 11-byte TIMESTAMP + 2-byte timezone encoding.
+13 bytes: the 11-byte TIMESTAMP wall clock (which the server expresses
+in UTC) plus a 2-byte timezone encoding.
 
 Timezone encoding has two forms:
-- **Offset-based**: `Hour+20`, `Minute+60` (when high bit of first byte is 0).
-- **Named zone**: Zone ID encoded as `((byte1 & 0x7F) << 6) | ((byte2 & 0xFC) >> 2)`, mapped to an IANA timezone name via a built-in zone ID table.
+- **Offset-based**: `Hour + 20`, `Minute + 60` (when bit 0x80 of the
+  first byte is clear). pyoracle handles this form.
+- **Named zone (region ID)**: when bit 0x80 of the first byte is set,
+  the remaining bits encode an Oracle timezone region ID that maps to
+  an IANA timezone name via Oracle's built-in zone table. pyoracle
+  does not currently ship that table; it surfaces such timestamps as
+  naive `datetime.datetime` (no `tzinfo`) rather than guessing.
+
+When decoding, pyoracle treats the wall-clock bytes as UTC and then
+shifts to the tagged offset, so the resulting Python `datetime` both
+compares equal to the original instant and prints with the original
+local time. The encoder is symmetric: a `datetime` with `tzinfo` is
+first converted to UTC for the wall-clock bytes, then tagged with the
+original offset.
 
 ### 11.5 INTERVAL YEAR TO MONTH
 
@@ -561,9 +695,10 @@ Variable-length data with a length prefix:
 
 | Length     | Encoding                                                     |
 |------------|--------------------------------------------------------------|
-| 0 (empty)  | `0x00`                                                      |
-| 1..253     | `<length>, <data>, <skip-byte>`                             |
-| 254+       | `0xFE`, then chunked: repeated `<chunk_len>, <chunk_data>` (max 64 bytes per chunk), terminated by `0x00` |
+| 0 (empty)  | `0x00`                                                       |
+| 1..253     | `<length>, <data>`                                           |
+| 254 (long) | `0xFE`, then chunked: repeated `<chunk_len>, <chunk_data>` (max 64 bytes per chunk), terminated by `0x00` |
+| 255 (null) | `0xFF` — null marker, no data follows                        |
 
 ### 12.3 Key-Value Pair Encoding
 
