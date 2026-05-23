@@ -84,15 +84,56 @@ class OracleConnect:
 
     def connect(self) -> bool:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-        # FIXME upgrade to SSL if required
         self.sock.connect((self.host, self.port))
+        if self.ssl:
+            try:
+                self.sock = self._wrap_socket_tls(self.sock)
+            except BaseException:
+                # If the TLS wrap fails (bad config, cert verification, etc.)
+                # release the raw TCP socket before surfacing the error.
+                try:
+                    self.sock.close()
+                finally:
+                    self.sock = None
+                raise
         Data = encode_dictionary(self._make_dict(DictionaryType.login))
 
         self.send(TNS_CONNECT, Data)
         self.handle_login()
 
         return True
+
+    def _wrap_socket_tls(self, RawSock: socket.socket) -> socket.socket:
+        # Promote the freshly-connected TCP socket to TLS before any TNS bytes
+        # are exchanged. The ``ssl`` constructor argument accepts:
+        #
+        #   True      — system trust store, hostname verification on
+        #   dict      — keyword arguments forwarded to a default context:
+        #                 ca_certs, certfile, keyfile, check_hostname,
+        #                 verify_mode (ssl.CERT_NONE / CERT_REQUIRED), and
+        #                 server_hostname (override the SNI hostname)
+        #   SSLContext — used verbatim
+        import ssl as _ssl
+        Server = self.host
+        if isinstance(self.ssl, _ssl.SSLContext):
+            Ctx = self.ssl
+        elif isinstance(self.ssl, dict):
+            Opts = dict(self.ssl)
+            Server = Opts.pop("server_hostname", Server)
+            Ctx = _ssl.create_default_context(cafile=Opts.pop("ca_certs", None))
+            if "check_hostname" in Opts:
+                Ctx.check_hostname = bool(Opts.pop("check_hostname"))
+            if "verify_mode" in Opts:
+                Ctx.verify_mode = Opts.pop("verify_mode")
+            CertFile = Opts.pop("certfile", None)
+            KeyFile = Opts.pop("keyfile", None)
+            if CertFile:
+                Ctx.load_cert_chain(CertFile, KeyFile)
+            if Opts:
+                raise ValueError(f"unknown ssl options: {sorted(Opts)}")
+        else:
+            Ctx = _ssl.create_default_context()
+        return Ctx.wrap_socket(RawSock, server_hostname=Server)
 
     def handle_login(self) -> int | None:
         (Type, Packet) = self.recv(b"", b"")

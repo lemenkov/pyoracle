@@ -30,6 +30,9 @@ What works so far:
 - Python type coercion for fetched values: NUMBER → `int` / `Decimal`,
   VARCHAR2 / CHAR → `str` (charset-aware), DATE / TIMESTAMP / TIMESTAMP
   WITH TIME ZONE → `datetime.datetime`, NULL → `None`
+- TLS connections (pass `ssl=True` to `oracle.connect` for the system
+  trust store; or `ssl={"ca_certs": ..., "certfile": ..., ...}` for a
+  custom configuration; or hand in an `ssl.SSLContext` directly)
 - Transaction control (commit, rollback, ping)
 - Multiple character set support
 
@@ -37,7 +40,6 @@ What is still in progress:
 
 - Cursor caching
 - LOB support
-- SSL/TLS connections
 - Connection pooling
 - Comprehensive error handling (Oracle error message text is not yet
   extracted from OER — currently surfaced as `"ORA-NNNNN"` codes only)

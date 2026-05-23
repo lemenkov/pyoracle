@@ -15,10 +15,18 @@
 
 import datetime
 import os
+import ssl
 import unittest
 from decimal import Decimal
 
 import oracle
+
+# Resolve the TLS proxy fixture without depending on the `tests` package
+# layout (works under both `python -m unittest tests.test_integration` and
+# discovery from the repo root).
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(__file__))
+from _tls_proxy import CERT_PATH, TLSProxy  # noqa: E402
 
 
 _USER = os.environ.get('PYORACLE_TEST_USER')
@@ -551,6 +559,91 @@ class BindIntegration(_IntegrationBase):
             self.cur.fetchall(),
             [("hello :not_a_bind world",)],
         )
+
+
+@unittest.skipUnless(_USER, _SKIP_REASON)
+class SSLIntegration(unittest.TestCase):
+    """Verify the TLS wrap by talking to Oracle through a local TLS proxy.
+
+    The proxy terminates TLS on a random local port and forwards plaintext
+    to the configured Oracle listener, so we can exercise the full TLS
+    handshake + encrypted TNS exchange without reconfiguring Oracle itself.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.proxy = TLSProxy(_HOST, _PORT)
+        cls.proxy.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        if getattr(cls, "proxy", None) is not None:
+            cls.proxy.stop()
+            cls.proxy = None
+
+    def _connect_via_tls(self, **overrides):
+        Kwargs = dict(
+            host="127.0.0.1",
+            port=self.proxy.listen_port,
+            user=_USER, password=_PASSWORD, service_name=_SERVICE,
+            autocommit=True,
+            ssl={"ca_certs": CERT_PATH, "server_hostname": "localhost"},
+        )
+        Kwargs.update(overrides)
+        return oracle.connect(**Kwargs)
+
+    def test_tls_select_round_trip(self):
+        with self._connect_via_tls() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 'tls works', 7 FROM dual")
+            self.assertEqual(cur.fetchone(), ("tls works", 7))
+
+    def test_tls_with_explicit_ssl_context(self):
+        Ctx = ssl.create_default_context(cafile=CERT_PATH)
+        with self._connect_via_tls(ssl=Ctx) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM dual")
+            self.assertEqual(cur.fetchone(), (1,))
+
+    def test_tls_no_ca_fails_handshake(self):
+        # Default context with no extra trust → our self-signed cert is
+        # rejected. The exact exception class is platform-dependent (SSLError
+        # vs SSLCertVerificationError); both are subclasses of OSError.
+        with self.assertRaises((ssl.SSLError, OSError)):
+            self._connect_via_tls(ssl=True)
+
+    def test_tls_hostname_mismatch_fails(self):
+        # Cert SAN covers localhost / 127.0.0.1; pretend we asked for a
+        # different hostname and expect the cert to fail verification.
+        with self.assertRaises((ssl.SSLError, OSError)):
+            self._connect_via_tls(
+                ssl={"ca_certs": CERT_PATH, "server_hostname": "elsewhere.test"},
+            )
+
+    def test_tls_verify_disabled_accepts_self_signed(self):
+        with self._connect_via_tls(
+            ssl={"check_hostname": False, "verify_mode": ssl.CERT_NONE},
+        ) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 'no-verify' FROM dual")
+            self.assertEqual(cur.fetchone(), ("no-verify",))
+
+    def test_tls_unknown_option_rejected(self):
+        with self.assertRaises(ValueError):
+            self._connect_via_tls(ssl={"ca_certs": CERT_PATH,
+                                       "server_hostname": "localhost",
+                                       "made_up_option": True})
+
+    def test_ssl_none_still_plain(self):
+        # Connecting directly to the plaintext Oracle port with ssl=None
+        # should work unchanged — this guards against regressions in the
+        # default code path.
+        with oracle.connect(host=_HOST, port=_PORT, user=_USER,
+                            password=_PASSWORD, service_name=_SERVICE,
+                            autocommit=True) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM dual")
+            self.assertEqual(cur.fetchone(), (1,))
 
 
 if __name__ == "__main__":
