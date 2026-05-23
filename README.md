@@ -37,6 +37,10 @@ What works so far:
 - TLS connections (pass `ssl=True` to `oracle.connect` for the system
   trust store; or `ssl={"ca_certs": ..., "certfile": ..., ...}` for a
   custom configuration; or hand in an `ssl.SSLContext` directly)
+- DML rowcount and full server error messages: `cursor.rowcount`
+  reflects the rows affected by `INSERT` / `UPDATE` / `DELETE` (read
+  from the OER block); `DatabaseError(code=NNN)` carries the full
+  `"ORA-NNNNN: ..."` text the server sent, not just the numeric code
 - Transaction control (commit, rollback, ping)
 - Multiple character set support
 
@@ -45,8 +49,6 @@ What is still in progress:
 - Cursor caching
 - LOB support
 - Connection pooling
-- Comprehensive error handling (Oracle error message text is not yet
-  extracted from OER — currently surfaced as `"ORA-NNNNN"` codes only)
 
 ## Requirements
 

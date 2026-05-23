@@ -225,44 +225,88 @@ def decode_token_lob(Data: bytes, Acc: object) -> tuple:
 def decode_token_net(Data: bytes, Acc: object) -> None:
     pass
 def decode_token_oer(Data: bytes, Acc: tuple) -> tuple:
-    (Cursor, RowFormat, Rows) = Acc
-    (Unknown0, R0) = decode_ub4(Data)
-    (SequenceNumber, R1) = decode_ub4(R0)
-    (RowNumber, R2) = decode_ub4(R1)
-    (CurrentRowNumber, R3) = decode_ub4(R1)
-    (RetCode, R4) = decode_ub4(R3)
-
-    RetFormat = None
-    if RetCode == 0 or RetCode == 1403:
-        (Unknown1, R4) = decode_ub4(R3)
-        (Unknown2, R5) = decode_ub4(R4)
-        (Unknown3, R6) = decode_ub4(R5)
-        (DefCols, R7) = decode_ub4(R6)
-        RetFormat = (DefCols, RowFormat)
-    else:
-        (Unknown1, R4) = decode_ub4(R3) # Returned Code
-        (Unknown2, R5) = decode_ub4(R4) # Array Element w/error
-        (Unknown3, R6) = decode_ub4(R5) # Array Element errno
-        (Unknown4, R7) = decode_ub4(R6) # Current Cursor ID
-        (Unknown5, R8) = decode_ub4(R7) # Error Position
-        Unknown6 = R8[0] # SQL command type
-        (Unknown7, R9) = decode_ub4(R8[1:]) # Fatal
-        (Unknown8, R10) = decode_ub4(R9) # Various flags
-        (Unknown9, R11) = decode_ub4(R10) # User cursor options
-        Unknown10 = R11[0] # UPI parameter that generated the error
-        Unknown11 = R11[1] # Warning flags
-        (Unknown12, R12) = decode_ub4(R11[2:]) # Row ID rba
-        (Unknown13, R13) = decode_ub4(R12) # partitionid
-        Unknown14 = R13[0] # tableid
-        (Unknown15, R14) = decode_ub4(R13[1:]) # blocknumber
-        (Unknown16, R15) = decode_ub4(R14) # slotnumber
-        (Unknown17, R16) = decode_ub4(R15) # Operating System Error
-        Unknown18 = R16[0] # Statement number
-        Unknown19 = R16[1] # Procedure call number
-        (Unknown20, R17) = decode_ub4(R16[2:]) # Pad
-        (Unknown21, R18) = decode_ub4(R17) # Successful iterations
-        RetFormat = (Cursor, decode_dalc(R18))
-    return (RetCode, RowNumber, Cursor, RetFormat, Rows)
+    # OER ("Oracle Error" return-status TTC token; emitted at the end of every
+    # server response — success or failure). Unified layout: every field is
+    # always present and we walk through them sequentially rather than
+    # branching on success-vs-error. The trailing length-prefixed bytes are
+    # the human-readable message ("ORA-NNNNN: ...") which the server
+    # populates when the error number is non-zero.
+    #
+    # Field order cross-referenced with python-oracledb's _process_error_info,
+    # adjusted for Oracle 11g: the extended ub4 error number + ub8 rowcount
+    # that 12c+ adds are not present, so the message DALC comes directly
+    # after the batch-error-messages count.
+    (Cursor, RowFormat, Rows) = Acc[:3]
+    Rest = Data[1:]                                  # consume the OER token
+    (CallStatus, Rest) = decode_ub4(Rest)
+    (_, Rest) = decode_ub4(Rest)                     # end-to-end seq#
+    # In 11g the "current row number" field doubles as the DML affected-row
+    # count: UPDATE/DELETE/INSERT set it to the number of rows touched by
+    # the call. 12c+ moved the rowcount to a separate ub8 at the end of the
+    # OER, but we don't have that here.
+    (RowCount, Rest) = decode_ub4(Rest)
+    (ErrCode, Rest) = decode_ub4(Rest)               # ORA-NNNN error number
+    (_, Rest) = decode_ub4(Rest)                     # array elem error #1
+    (_, Rest) = decode_ub4(Rest)                     # array elem error #2
+    (CursorId, Rest) = decode_ub4(Rest)              # current cursor id
+    (_, Rest) = decode_ub4(Rest)                     # error position
+    Rest = Rest[6:]                                  # 6 single-byte fields:
+                                                     #   sql_type, fatal,
+                                                     #   flags, user_cursor_opts,
+                                                     #   upi_param, warn_flags
+    # rowid: ub4 rba, ub2 part_id, ub1 (reserved), ub4 block, ub2 slot
+    (_, Rest) = decode_ub4(Rest)                     # rowid.rba
+    (_, Rest) = decode_ub4(Rest)                     # rowid.partition_id
+    Rest = Rest[1:]                                  # rowid reserved byte
+    (_, Rest) = decode_ub4(Rest)                     # rowid.block_num
+    (_, Rest) = decode_ub4(Rest)                     # rowid.slot_num
+    (_, Rest) = decode_ub4(Rest)                     # os error
+    Rest = Rest[2:]                                  # statement #, call #
+    (_, Rest) = decode_ub4(Rest)                     # padding (ub2)
+    (_, Rest) = decode_ub4(Rest)                     # successful iterations
+                                                     #   (always 1 for a
+                                                     #   single non-array
+                                                     #   execute on 11g — the
+                                                     #   real DML rowcount is
+                                                     #   the "current row
+                                                     #   number" field above)
+    Rest = _skip_bytes_with_length(Rest)             # oerrdd (logical rowid)
+    # Batch error codes / offsets / messages — three optional arrays. For
+    # plain (non-batch) statements all three counts are zero, so the loops
+    # never execute. Decoded for completeness.
+    (NumBatchErrCodes, Rest) = decode_ub4(Rest)
+    if NumBatchErrCodes > 0:
+        Rest = Rest[1:]                              # first_byte indicator
+        for _ in range(NumBatchErrCodes):
+            (_, Rest) = decode_ub4(Rest)
+    (NumBatchOffsets, Rest) = decode_ub4(Rest)
+    if NumBatchOffsets > 0:
+        Rest = Rest[1:]
+        for _ in range(NumBatchOffsets):
+            (_, Rest) = decode_ub4(Rest)
+    (NumBatchMessages, Rest) = decode_ub4(Rest)
+    if NumBatchMessages > 0:
+        Rest = Rest[1:]
+        for _ in range(NumBatchMessages):
+            (_, Rest) = decode_ub4(Rest)             # chunk length
+            Rest = _skip_bytes_with_length(Rest)     # message bytes
+            Rest = Rest[2:]                          # end marker
+    # On 11g the trailing message DALC comes right here. 12c+ has two more
+    # extended-precision fields (ub4 error num + ub8 rowcount) ahead of it,
+    # which would need a capability-version gate we don't surface yet.
+    Message = None
+    if ErrCode != 0 and Rest:
+        try:
+            (Bytes, _) = decode_dalc(Rest)
+        except IndexError:
+            Bytes = None
+        if Bytes:
+            try:
+                Message = bytes(Bytes).decode('utf-8', errors='replace').rstrip()
+            except (TypeError, AttributeError):
+                Message = None
+    RetFormat = (RowCount, RowFormat)
+    return (CallStatus, ErrCode, CursorId, RetFormat, Rows, Message)
 
 def decode_token_oac(Data: bytes, Acc: object) -> tuple[int, int, int, int, bytes]:
     (DataType, Flg, Pre) = struct.unpack(">BBB", Data[:3])

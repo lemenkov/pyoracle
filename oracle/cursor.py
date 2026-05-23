@@ -66,33 +66,45 @@ class Cursor:
         self._check_open()
         Bind = _resolve_parameters(operation, parameters)
         Result = self._connection.execute(operation, Bind=Bind)
-        # Wire result tuple: (RetCode, OraCode, CursorHandle, RetFormat, Rows).
-        # RetCode is the OPI status; OraCode carries the Oracle error number
-        # (0 on plain success, 1403 at end-of-fetch).
+        # Wire result tuple from decode_token_oer:
+        #   (call_status, oracle_error_code, cursor_id, (rowcount, col_meta),
+        #    rows, message_or_none)
+        # The trailing message slot is present for the new OER decoder. Earlier
+        # decoders returned a 5-tuple; tolerate either shape so a stale build
+        # doesn't crash here.
         try:
-            (_, OraCode, _, RetFormat, Rows) = Result
-        except (TypeError, ValueError) as exc:
+            CallStatus = Result[0]
+            OraCode = Result[1]
+            RetFormat = Result[3]
+            Rows = Result[4]
+            Message = Result[5] if len(Result) > 5 else None
+        except (TypeError, IndexError, ValueError) as exc:
             raise DatabaseError(f"unexpected wire response: {Result!r}") from exc
 
         if OraCode not in (0, 1403):
-            raise DatabaseError(f"ORA-{OraCode:05d}", code=OraCode)
+            Detail = Message or f"ORA-{OraCode:05d}"
+            raise DatabaseError(Detail, code=OraCode)
 
+        ServerRowCount = None
         ColMeta = None
-        if isinstance(RetFormat, tuple) and len(RetFormat) >= 2 \
-                and isinstance(RetFormat[1], list):
-            ColMeta = RetFormat[1]
+        if isinstance(RetFormat, tuple) and len(RetFormat) >= 2:
+            ServerRowCount = RetFormat[0]
+            if isinstance(RetFormat[1], list):
+                ColMeta = RetFormat[1]
 
         if ColMeta:
             self._description = [_column_description(C) for C in ColMeta]
             self._rows = list(Rows or [])
+            # For SELECT, the OER's success-iters value is the per-call fetch
+            # count, not the total result set size; len(rows) is the answer
+            # callers expect from cursor.rowcount.
             self._rowcount = len(self._rows)
         else:
-            # DDL/DML or other non-result-set statements. The OER block carries
-            # an affected-row count which the decoder doesn't surface yet, so
-            # leave rowcount unknown rather than lie.
+            # DDL / DML / non-result-set statement. OER carries the affected
+            # row count in its success-iters field; surface it.
             self._description = None
             self._rows = []
-            self._rowcount = -1
+            self._rowcount = ServerRowCount if isinstance(ServerRowCount, int) else -1
 
         self._row_index = 0
         return self

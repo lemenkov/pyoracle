@@ -103,16 +103,42 @@ class TestTnsCommandDecoders(unittest.TestCase):
         self.assertEqual(decode_token_oac(Data, None), (11,1,0,0,Rest))
 
     def test_tns_decode_token_oer_04(self):
-        Data = bytes([1,1,1,4,1,1,2,5,123,0,0,1,1,1,14,3,0,0,0,0,0,0,0,0,0,0,0,
-                     0,5,0,1,1,25,79,82,65,45,48,49,52,48,51,58,32,110,111,32,
-                     100,97,116,97,32,102,111,117,110,100,10])
-        Cursor = 1
-        RowFormat = [{'column_name':b"DUMMY", 'param':'in', 'data_type':1, 'data_length':1, 'data_scale':0, 'charset':AL32UTF8_CHARSET}]
-        Rows = [[b"X"]]
-        RetCode = 1403
-        RowNumber = 1
-        RetFormat = (1, RowFormat)
-        self.assertEqual(decode_token_oer(Data, (Cursor, RowFormat, Rows)), (RetCode, RowNumber, Cursor, RetFormat, Rows))
+        # Real OER bytes captured from Oracle XE 11g for
+        # "DROP TABLE nonexistent_xyz" — ORA-00942 with the full message
+        # text as the trailing length-prefixed DALC. Exercises the unified
+        # OER decoder end to end: extended error number, DML rowcount = 0,
+        # and the human-readable message round-tripping cleanly.
+        Data = bytes([
+            0x04,                                       # TTI_OER token
+            0x01, 0x05,                                 # call_status = 5
+            0x01, 0x04,                                 # end-to-end seq# = 4
+            0x00,                                       # current row # / rowcount = 0
+            0x02, 0x03, 0xae,                           # ORA error code = 942
+            0x00, 0x00,                                 # array elem error x2
+            0x01, 0x01,                                 # cursor id = 1
+            0x01, 0x0b,                                 # error position = 11
+            0x0c, 0x00, 0x00, 0x00, 0x00, 0x00,         # 6 ub1 fields
+            0x00, 0x00, 0x00, 0x00, 0x00,               # rowid (all zero)
+            0x00,                                       # OS error
+            0x00, 0x07,                                 # stmt #, call # (7)
+            0x00,                                       # padding
+            0x00,                                       # success_iters
+            0x00,                                       # oerrdd len = 0
+            0x00, 0x00, 0x00,                           # 3 batch-error counts
+            0x28,                                       # DALC length = 40
+        ]) + b"ORA-00942: table or view does not exist\n"
+        Cursor = None
+        RowFormat = None
+        Rows = []
+        self.assertEqual(
+            decode_token_oer(Data, (Cursor, RowFormat, Rows)),
+            (5,             # call_status
+             942,           # ORA-00942
+             1,             # cursor id
+             (0, None),     # rowcount, row_format
+             [],            # rows
+             "ORA-00942: table or view does not exist"),
+        )
 
     def test_tns_decode_token_rpa_00(self):
         Data = bytes([1,3,1,12,12,65,85,84,72,95,83,69,83,83,75,69,89,1,96,

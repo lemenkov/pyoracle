@@ -562,6 +562,68 @@ class BindIntegration(_IntegrationBase):
 
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
+class ErrorAndRowcountIntegration(_IntegrationBase):
+    """Verify that DatabaseError carries the server's message text and that
+    Cursor.rowcount reflects the affected-row count from the OER block."""
+
+    def test_error_message_includes_ora_text(self):
+        with self.assertRaises(oracle.DatabaseError) as ctx:
+            self.cur.execute(f"SELECT * FROM nope_{os.getpid()}_xyz")
+        # Exception code: the ORA number; str(): the full server message.
+        self.assertEqual(ctx.exception.code, 942)
+        self.assertIn("ORA-00942", str(ctx.exception))
+        self.assertIn("table or view does not exist", str(ctx.exception))
+
+    def test_error_message_for_invalid_number(self):
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
+        with self.assertRaises(oracle.DatabaseError) as ctx:
+            self.cur.execute(f"INSERT INTO {self.TABLE} VALUES ('not-a-number')")
+        self.assertEqual(ctx.exception.code, 1722)
+        self.assertIn("ORA-01722", str(ctx.exception))
+        self.assertIn("invalid number", str(ctx.exception))
+
+    def test_error_message_for_unique_constraint(self):
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} (id NUMBER PRIMARY KEY)"
+        )
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (1)")
+        with self.assertRaises(oracle.DatabaseError) as ctx:
+            self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (1)")
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertIn("ORA-00001", str(ctx.exception))
+        self.assertIn("unique constraint", str(ctx.exception))
+
+    def test_rowcount_insert_single(self):
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (1)")
+        self.assertEqual(self.cur.rowcount, 1)
+
+    def test_rowcount_update_affecting_multiple(self):
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
+        for n in (1, 2, 3, 4):
+            self.cur.execute(f"INSERT INTO {self.TABLE} VALUES ({n})")
+        self.cur.execute(f"UPDATE {self.TABLE} SET id = id + 10 WHERE id <= 3")
+        self.assertEqual(self.cur.rowcount, 3)
+
+    def test_rowcount_update_no_match(self):
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (1)")
+        self.cur.execute(f"UPDATE {self.TABLE} SET id = 99 WHERE id > 1000")
+        self.assertEqual(self.cur.rowcount, 0)
+
+    def test_rowcount_delete(self):
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
+        for n in (1, 2, 3):
+            self.cur.execute(f"INSERT INTO {self.TABLE} VALUES ({n})")
+        self.cur.execute(f"DELETE FROM {self.TABLE} WHERE id < 3")
+        self.assertEqual(self.cur.rowcount, 2)
+
+    def test_rowcount_ddl_is_zero(self):
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
+        self.assertEqual(self.cur.rowcount, 0)
+
+
+@unittest.skipUnless(_USER, _SKIP_REASON)
 class SSLIntegration(unittest.TestCase):
     """Verify the TLS wrap by talking to Oracle through a local TLS proxy.
 
