@@ -230,21 +230,36 @@ class OracleConnect:
         self._handle_response()
 
     def close(self) -> None:
+        # Best-effort orderly shutdown, then always disconnect so the OS socket
+        # gets reclaimed even if the server-side handshake has gone sideways.
         if self.conn_state == CONN_STATE_DISCONNECTED:
             return
-        if self.conn_state == CONN_STATE_AUTHENTICATED:
-            if not self.autocommit:
-                self.rollback()
-            # Close all cached cursors via piggyback
-            if self.cursors:
-                from oracle.tns_consts import TTI_OCCA
-                Data = encode_dictionary(self._make_dict(DictionaryType.pig, req=TTI_OCCA, cursor=list(self.cursors.values())))
+        try:
+            if self.conn_state == CONN_STATE_AUTHENTICATED:
+                if not self.autocommit:
+                    self.rollback()
+                # Close all cached cursors via piggyback
+                if self.cursors:
+                    from oracle.tns_consts import TTI_OCCA
+                    Data = encode_dictionary(self._make_dict(DictionaryType.pig, req=TTI_OCCA, cursor=list(self.cursors.values())))
+                    self.send(TNS_DATA, Data)
+                # Logoff (the TTI_LOGOFF function call + its response)
+                Data = encode_dictionary(self._make_dict(DictionaryType.close))
                 self.send(TNS_DATA, Data)
-            # Logoff
-            Data = encode_dictionary(self._make_dict(DictionaryType.close))
-            self.send(TNS_DATA, Data)
-            self._handle_response()
-        self.disconnect()
+                self._handle_response()
+                # Final empty TNS_DATA packet with the EOF data flag, telling
+                # the server to fully release the session. Without this the
+                # session lingers server-side and accumulates over rapid
+                # reconnect cycles. Format: 10-byte header (PacketSize,
+                # PacketFlags, Type, Flags, DataFlags=0x0040 EOF).
+                if self.sock is not None:
+                    self.sock.send(struct.pack(">hhBBh", 10, 0, TNS_DATA, 0, 0x0040))
+        except (OSError, Exception):
+            # If the server already hung up or our state is out of sync, we
+            # still want to release the local socket.
+            pass
+        finally:
+            self.disconnect()
 
     def _handle_response(self) -> object:
         from oracle.tns import decode_packet
@@ -282,6 +297,17 @@ class OracleConnect:
 
     def disconnect(self) -> None:
         if self.sock:
+            # Half-close (SHUT_WR) flushes our pending writes (including the
+            # EOF marker close() just queued) and tells the server we won't
+            # send anything else, so it can complete session teardown before
+            # the local socket goes away. Without this, the server can hold a
+            # half-closed connection long enough that the next connect() trips
+            # over Oracle XE's per-second new-connection rate limit (which
+            # surfaces on the client as ORA-01013).
+            try:
+                self.sock.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
             self.sock.close()
             self.sock = None
         self.conn_state = CONN_STATE_DISCONNECTED

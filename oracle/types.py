@@ -106,18 +106,25 @@ def decode_date(Data: bytes) -> datetime.datetime | None:
         Nanos = int.from_bytes(Data[7:11], 'big')
         Microsecond = Nanos // 1000
 
+    # For TIMESTAMP WITH TIME ZONE Oracle stores the wall clock in UTC and
+    # tags it with the original session offset. To preserve the same instant
+    # we build a UTC datetime first, then convert to the tagged offset so the
+    # result both compares equal and prints with the original local time.
     Tz = None
     if len(Data) >= 13 and Data[11] != 0 and Data[12] != 0:
-        if Data[11] & _TZ_REGION_ID_FLAG:
-            # Named region IDs would need the Oracle timezone tables; surface
-            # the timestamp as naive rather than guessing.
-            Tz = None
-        else:
+        if not (Data[11] & _TZ_REGION_ID_FLAG):
             TzHours = Data[11] - _TZ_HOUR_OFFSET
             TzMinutes = Data[12] - _TZ_MINUTE_OFFSET
             Tz = datetime.timezone(datetime.timedelta(hours=TzHours, minutes=TzMinutes))
+        # Named region IDs (top bit of byte 11) would need the Oracle timezone
+        # tables; fall through with Tz=None and surface as naive.
 
-    return datetime.datetime(Year, Month, Day, Hour, Minute, Second, Microsecond, tzinfo=Tz)
+    if Tz is None:
+        return datetime.datetime(Year, Month, Day, Hour, Minute, Second, Microsecond)
+
+    Utc = datetime.datetime(Year, Month, Day, Hour, Minute, Second, Microsecond,
+                            tzinfo=datetime.timezone.utc)
+    return Utc.astimezone(Tz)
 
 
 def decode_string(Data: bytes, Charset: int = AL32UTF8_CHARSET) -> str | None:
