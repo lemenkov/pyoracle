@@ -9,7 +9,11 @@ No proprietary client libraries or SDKs are required.
 ## Status
 
 This project is in early development. The wire protocol is being
-reverse-engineered and implemented incrementally.
+reverse-engineered and implemented incrementally as a clean-room
+effort — see [`CONTRIBUTING.md`](CONTRIBUTING.md) for the rules
+contributors are expected to follow (no Oracle proprietary sources,
+no decompiled binaries, no copied error-message catalogs; public
+references and packet captures are fine).
 
 What works so far:
 
@@ -104,7 +108,11 @@ table.
 
 ## Contributing
 
-Pull requests are welcome.
+Pull requests are welcome. Please read
+[`CONTRIBUTING.md`](CONTRIBUTING.md) first — pyoracle's clean-room
+posture means there are a few sources you must NOT consult when
+preparing a contribution, and a few citation expectations to follow
+when you open a PR.
 
 ## License
 

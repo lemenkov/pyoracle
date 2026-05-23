@@ -7,7 +7,7 @@ SPDX-PackageSupplier = "Peter Lemenkov <lemenkov@gmail.com>"
 SPDX-PackageDownloadLocation = "https://github.com/lemenkov/pyoracle"
 
 [[annotations]]
-path = ["README.md", "docs/PROTOCOL.md"]
+path = ["README.md", "docs/PROTOCOL.md", "CONTRIBUTING.md"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2019 Peter Lemenkov <lemenkov@gmail.com>"
 SPDX-License-Identifier = "MIT"
