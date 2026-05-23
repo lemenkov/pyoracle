@@ -355,6 +355,21 @@ TTI_FUN | TTI_FETCH | SeqNum | Cursor(SB4) | RowsToFetch(SB4)
 
 The default fetch size is 15 rows (configurable via the `fetch` parameter).
 
+**When a follow-up FETCH is required.** The execute response carries
+the OER `call_status` field (`§6.7`). When that value is non-zero it
+signals "the server has returned what it can in this packet; more rows
+are available on the cursor". The client must then issue a TTI_FETCH
+against the open cursor handle to receive the actual row data. This
+happens unconditionally when at least one column is a LOB (`§11.9`) —
+Oracle returns DCB + RPA piggyback + OER with `call_status = 1` and
+no inline rows for LOB queries, regardless of the result-set size.
+
+pyoracle today only consumes whatever rows the server bundles into the
+execute response. The follow-up FETCH flow is on the roadmap; without
+it, SELECT statements that reference LOB columns or that exceed the
+server's inline-row budget return zero rows even though the metadata
+parses correctly.
+
 ### 5.3 OAC (Oracle Access Column) Descriptor
 
 Each bind variable or column is described by an OAC structure:
@@ -674,6 +689,47 @@ IEEE 754 float/double with sign bit manipulation: negative values are bitwise-in
 
 Encoded as four components: Object ID (UB4), Partition ID (UB2), Block Number (UB4), Slot Number (UB2). Rendered as an 18-character base-64 string (A-Z, a-z, 0-9, +, /) with fixed field widths 6+3+6+3.
 
+### 11.9 LOB Locators (CLOB, NCLOB, BLOB, BFILE)
+
+LOBs are *not* sent inline with row data. What appears in RXD for a
+LOB column is a fixed-size **locator** — an opaque server-side handle
+(~40 bytes) plus a couple of metadata fields. Reading the actual LOB
+content requires a separate `TTI_LOBOPS` round-trip per locator
+(`§14`).
+
+The per-column wire layout in RXD for a LOB:
+
+```
+ub4    num_bytes           # 0 = NULL LOB; otherwise size of locator block
+[
+  ub8    size                # in bytes (CLOB/NCLOB: characters)
+  ub4    chunk_size          # server-preferred read chunk size
+  DALC   locator             # opaque locator bytes
+]                            # CLOB / NCLOB / BLOB
+
+[ DALC   locator ]           # BFILE (no size / chunk_size prefix)
+```
+
+Per python-oracledb the locator buffer is canonically 40 bytes;
+internal flags inside the locator (`TNS_LOB_LOC_OFFSET_FLAG_*`)
+distinguish temporary LOBs that need cleanup on close from regular
+ones. Embedding the locator format isn't necessary on the client
+side — the bytes are opaque to anything other than `TTI_LOBOPS`.
+
+The TNS data type numbers (`§3.1`) for LOBs are:
+
+| Type    | TNS code |
+|---------|----------|
+| CLOB    | 112      |
+| BLOB    | 113      |
+| BFILE   | 114      |
+| NCLOB   | 112 + national charset form |
+
+pyoracle does not currently parse the locator structure or issue the
+`TTI_LOBOPS` round-trip; LOB columns will fail to decode under the
+current row reader, and SELECT statements that reference LOB columns
+hit the no-rows-inline path described in `§5.2` regardless.
+
 ## 12. Wire Encoding Primitives
 
 ### 12.1 Variable-Length Integer (SB4/SB2)
@@ -725,13 +781,92 @@ The library supports a wide range of Oracle character sets, identified by Oracle
 
 The default character set is AL32UTF8 (873). For CJK and AL16UTF16 character sets, the national character set is set to UTF-8 for proper conversion.
 
-## 14. TNS Marker Protocol
+## 14. LOB Operations (TTI_LOBOPS)
+
+LOB content is transferred via the `TTI_LOBOPS` function call
+(`TTI_FUN | TTI_LOBOPS | …`). The same function multiplexes a family
+of opcodes — read, write, get length, trim, get chunk size, create
+temporary LOB, free temporary LOB, open, close, plus BFILE-specific
+operations. The wire layout is the same for all of them; the opcode
+field selects behaviour.
+
+### 14.1 Common request layout
+
+```
+TTI_FUN | TTI_LOBOPS | SeqNum |
+  ub1 source_pointer_flag    # 1 if source locator is sent, else 0
+  ub4 source_locator_length  # bytes following at the locator slot
+  ub1 dest_pointer_flag      # 0 for plain reads
+  ub4 dest_length            # read amount target (bytes/chars)
+  ub4 short_source_offset    # 0; long offset goes below
+  ub4 short_dest_offset      # 0
+  ub1 charset_pointer_flag   # 0 except for CREATE_TEMP
+  ub1 short_amount_flag      # 0; long amount goes below
+  ub1 null_lob_pointer_flag  # 1 for CREATE_TEMP / IS_OPEN / FILE_*
+  ub4 operation              # opcode, see below
+  ub1 scn_array_pointer_flag # 0
+  ub1 scn_array_length       # 0
+  ub8 source_offset          # 1-based offset into the LOB
+  ub8 dest_offset            # 0 for plain reads
+  ub1 amount_pointer_flag    # 1 if amount is sent at end
+  ub16be 0, 0, 0             # three reserved array-LOB slots
+  [ raw  locator ]           # raw bytes, length = source_locator_length
+  [ ub8  amount ]            # if amount_pointer_flag == 1
+```
+
+### 14.2 Opcodes
+
+| Value     | Name              | Description                          |
+|-----------|-------------------|--------------------------------------|
+| `0x0001`  | GET_LENGTH        | Total length of the LOB              |
+| `0x0002`  | READ              | Read content from the LOB            |
+| `0x0020`  | TRIM              | Truncate the LOB                     |
+| `0x0040`  | WRITE             | Write content into the LOB           |
+| `0x0100`  | FILE_OPEN         | Open a BFILE                         |
+| `0x0200`  | FILE_CLOSE        | Close a BFILE                        |
+| `0x0400`  | FILE_ISOPEN       | Test whether a BFILE is open         |
+| `0x0800`  | FILE_EXISTS       | Test whether a BFILE exists          |
+| `0x4000`  | GET_CHUNK_SIZE    | Server-preferred chunk size          |
+| `0x0110`  | CREATE_TEMP       | Allocate a temporary LOB             |
+| `0x0111`  | FREE_TEMP         | Release a temporary LOB              |
+| `0x8000`  | OPEN              | Open the LOB                         |
+| `0x10000` | CLOSE             | Close the LOB                        |
+| `0x11000` | IS_OPEN           | Test whether the LOB is open         |
+| `0x80000` | ARRAY             | Array-style operation                |
+
+### 14.3 Response
+
+The server returns a `TNS_MSG_TYPE_LOB_DATA` (= 14) message carrying
+the LOB chunk as length-prefixed bytes:
+
+```
+0x0E  msg_type = LOB_DATA
+DALC  data            # raw bytes for BLOB/BFILE;
+                      # decode as per-LOB charset for CLOB/NCLOB
+```
+
+For `GET_LENGTH` / `READ` / similar value-returning opcodes, the
+server then emits the standard `TTI_RPA` return-parameters block
+followed by the OER status. The `RPA` return block echoes the
+updated locator (the server may rewrite internal flags) and, for
+operations declared with `send_amount`, an `sb8` carrying the actual
+amount read/written. `IS_OPEN`, `FILE_EXISTS`, `FILE_ISOPEN` add a
+trailing `ub1` boolean flag.
+
+### 14.4 Status (not implemented)
+
+pyoracle does not currently issue `TTI_LOBOPS` requests or handle the
+`TNS_MSG_TYPE_LOB_DATA` response. Implementing this is the second
+half of LOB support; the first half is the call-status-driven FETCH
+flow described in `§5.2`.
+
+## 15. TNS Marker Protocol
 
 TNS_MARKER packets serve as break/attention signals. The marker body is 3 bytes:
 
 - `0x01, 0x00, 0x02`: Standard marker. Client responds with the same marker pattern.
 - `0x01, 0x00, 0x01`: Break marker. Triggers a read-timeout mode where the client reads with a short timeout to collect remaining data.
 
-## 15. Sequence Numbers
+## 16. Sequence Numbers
 
 Each TTC function call includes an incrementing sequence number (1 byte, wrapping from 127 back to 1). The sequence number is managed per-connection and ensures ordered request processing.

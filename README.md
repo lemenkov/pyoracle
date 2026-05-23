@@ -47,7 +47,19 @@ What works so far:
 What is still in progress:
 
 - Cursor caching
-- LOB support
+- **Follow-up FETCH flow.** When the server returns metadata + an OER
+  with `call_status != 0` (no inline rows), the client is expected to
+  issue a `TTI_FETCH` round-trip against the open cursor. pyoracle
+  currently consumes only the rows the server bundles into the
+  execute response; SELECTs that hit this path (notably any LOB
+  query — see `docs/PROTOCOL.md §5.2`) come back empty. Implementing
+  this is a prerequisite for LOB support and also useful on its own
+  for large result sets.
+- **LOB support.** Builds on the FETCH flow above. Read-side LOB
+  values arrive as opaque locators in RXD; fetching the content
+  requires `TTI_LOBOPS` round-trips (`docs/PROTOCOL.md §11.9` and
+  `§14`). Both the locator parsing and the LOBOPS request/response
+  decoder still need to be written.
 - Connection pooling
 
 ## Requirements
