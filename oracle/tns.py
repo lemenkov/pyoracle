@@ -338,18 +338,17 @@ def decode_token_uds(Data: bytes, Acc: object) -> tuple:
     return decode_packet(Rest, (Cursor, NewFormat, Rows))
 
 def decode_token_rxd(Data: bytes, Acc: object) -> tuple:
-    # Row data (section 6.2)
-    # Contains column values for one row encoded per column data type
+    # Row data (section 6.2). Each column value is a DALC blob whose raw bytes
+    # we hand to oracle.types.decode_value, which dispatches on the column's
+    # TNS data type from the describe-info block.
+    from oracle.types import decode_value
     (Cursor, RowFormat, Rows) = Acc
-    Rest = Data[1:]  # skip token byte
+    Rest = Data[1:]
     Row = []
     if RowFormat:
         for Col in RowFormat:
             (Val, Rest) = decode_dalc(Rest)
-            if Val == [] or Val == b'':
-                Row.append(None)
-            else:
-                Row.append(Val)
+            Row.append(decode_value(Col, Val))
     return decode_packet(Rest, (Cursor, RowFormat, Rows + [Row]))
 
 def decode_token_rxh(Data: bytes, Acc: object) -> tuple:
