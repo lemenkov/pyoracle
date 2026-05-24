@@ -730,10 +730,19 @@ The TNS data type numbers (`§3.1`) for LOBs are:
 | BFILE   | 114      |
 | NCLOB   | 112 + national charset form |
 
-pyoracle does not currently parse the locator structure or issue the
-`TTI_LOBOPS` round-trip; LOB columns will fail to decode under the
-current row reader, and SELECT statements that reference LOB columns
-hit the no-rows-inline path described in `§5.2` regardless.
+pyoracle's row decoder reads the LOB column as `ub4 num_bytes |
+num_bytes raw bytes | 1 trailing byte` (total `num_bytes + 3`), then
+hands the raw locator+content blob to the caller as an
+`oracle.lob.LOB` object. NULL LOBs (single `0x00` byte) come back as
+Python `None`. Reverse-engineered against captured XE 11g responses
+for NULL / EMPTY_CLOB / 1-char / 10-char inputs; `num_bytes` scales
+with content as `102 + 2 × utf16_chars` for CLOBs and
+`102 + content_bytes` for BLOBs.
+
+Content extraction is not yet implemented. The inline content section
+sits at a variable offset inside the locator block (after the metadata
+header) and needs further reverse-engineering to extract reliably for
+small LOBs; large LOBs need the `TTI_LOBOPS` round-trip from `§14`.
 
 ## 12. Wire Encoding Primitives
 

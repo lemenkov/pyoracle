@@ -13,8 +13,9 @@ from oracle.tns_consts import (
     TTI_DCB, TTI_DTY, TTI_FETCH, TTI_FOB, TTI_FUN, TTI_IOV, TTI_LOB,
     TTI_LOGOFF, TTI_OAC, TTI_OER, TTI_PFN, TTI_PRO, TTI_RPA, TTI_RXD,
     TTI_RXH, TTI_SESS, TTI_SPFP, TTI_STA, TTI_STRT, TTI_STOP, TTI_UDS,
-    TTI_WRN, TNS_TYPE_DATE, TNS_TYPE_NUMBER, TNS_TYPE_REFCURSOR,
-    TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_VARCHAR, UTF8_CHARSET,
+    TTI_WRN, TNS_TYPE_BFILE, TNS_TYPE_BLOB, TNS_TYPE_CLOB, TNS_TYPE_DATE,
+    TNS_TYPE_NUMBER, TNS_TYPE_REFCURSOR, TNS_TYPE_TIMESTAMP,
+    TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_VARCHAR, UTF8_CHARSET,
 )
 import logging
 import os
@@ -386,16 +387,24 @@ def decode_token_uds(Data: bytes, Acc: object) -> tuple:
     NewFormat = RowFormat + [Col] if isinstance(RowFormat, list) else [Col]
     return decode_packet(Rest, (Cursor, NewFormat, Rows))
 
+_LOB_DATA_TYPES = frozenset((TNS_TYPE_CLOB, TNS_TYPE_BLOB, TNS_TYPE_BFILE))
+
 def decode_token_rxd(Data: bytes, Acc: object) -> tuple:
-    # Row data (section 6.2). Each column value is a DALC blob whose raw bytes
-    # we hand to oracle.types.decode_value, which dispatches on the column's
-    # TNS data type from the describe-info block.
+    # Row data (section 6.2). Each column value is normally a DALC blob whose
+    # raw bytes we hand to oracle.types.decode_value, which dispatches on the
+    # column's TNS data type from the describe-info block.
+    #
+    # LOB columns are special: instead of a single DALC they carry a small
+    # length-prefixed locator block (`_read_lob_column`). The locator and
+    # any inline content stay opaque for now — surfaced to the caller as an
+    # oracle.lob.LOB object — until the LOB-content extraction work lands.
     #
     # If a BVC token preceded this RXD, Acc carries a bit vector: a set bit
     # means "this column is in the RXD"; an unset bit means "reuse the
     # previous row's value". The bit vector applies to a single RXD and is
     # cleared from Acc on the way out.
     from oracle.types import decode_value
+    from oracle.lob import LOB
     (Cursor, RowFormat, Rows, *Extra) = Acc
     BitVec = Extra[0] if Extra else None
     Rest = Data[1:]
@@ -406,9 +415,42 @@ def decode_token_rxd(Data: bytes, Acc: object) -> tuple:
             if BitVec is not None and not _bvc_bit_set(BitVec, Idx):
                 Row.append(PrevRow[Idx] if PrevRow else None)
                 continue
+            DataType = Col.get('data_type')
+            if DataType in _LOB_DATA_TYPES:
+                (Locator, Rest) = _read_lob_column(Rest)
+                Row.append(None if Locator is None else LOB(DataType, Locator))
+                continue
             (Val, Rest) = decode_dalc(Rest)
             Row.append(decode_value(Col, Val))
     return decode_packet(Rest, (Cursor, RowFormat, Rows + [Row]))
+
+def _read_lob_column(Rest: bytes) -> tuple[bytes | None, bytes]:
+    # LOB column layout in RXD (Oracle 11g):
+    #
+    #   ub1 0x00              → NULL LOB; total column size = 1 byte.
+    #   ub4 num_bytes         → otherwise the leading variable-length integer
+    #                           gives the size of the locator + inline-content
+    #                           block that follows.
+    #   raw num_bytes bytes   → locator metadata interleaved with any inline
+    #                           content for small LOBs (the inline section
+    #                           sits at a variable offset inside this block).
+    #   ub1                   → single trailing byte (consumed but discarded).
+    #
+    # Total LOB column size = num_bytes + 3 (2-byte ub4 prefix + num_bytes
+    # content + 1 trailing byte). Confirmed against captured XE 11g
+    # responses for NULL / EMPTY_CLOB / 'x' / 'hello clob' inputs.
+    if not Rest:
+        return (None, Rest)
+    if Rest[0] == 0x00:
+        return (None, Rest[1:])
+    (NumBytes, Body) = decode_ub4(Rest)
+    if NumBytes <= 0 or len(Body) < NumBytes + 1:
+        # Defensive: malformed or unexpected layout. Surface what we have
+        # rather than overrunning the buffer.
+        return (bytes(Body), b"")
+    Blob = bytes(Body[:NumBytes])
+    Tail = Body[NumBytes + 1:]                       # drop trailing 1 byte
+    return (Blob, Tail)
 
 def _bvc_bit_set(BitVec: bytes, Idx: int) -> bool:
     Byte = Idx // 8

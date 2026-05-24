@@ -677,6 +677,119 @@ class FetchFlowIntegration(_IntegrationBase):
 
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
+class LOBIntegration(_IntegrationBase):
+    """Verify the LOB column row format.
+
+    Today the driver surfaces LOBs as opaque locator+content blobs wrapped
+    in `oracle.lob.LOB`; content extraction (parsing the inline section,
+    plus TTI_LOBOPS for out-of-line content) is a follow-up. The point
+    here is to confirm that:
+
+      - the right number of bytes get consumed (so subsequent columns and
+        the trailing OER parse correctly), and
+      - NULL LOBs come back as Python None.
+    """
+
+    def _setup(self, ddl_extra: str = ""):
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} (id NUMBER, c CLOB, b BLOB){ddl_extra}"
+        )
+
+    def test_null_lobs_are_none(self):
+        self._setup()
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (1, NULL, NULL)")
+        self.cur.execute(f"SELECT id, c, b FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchone(), (1, None, None))
+
+    def test_empty_lob_is_lob_object(self):
+        # EMPTY_CLOB() / EMPTY_BLOB() are non-NULL LOBs with zero-length
+        # content. They still carry a locator, so they round-trip as LOB
+        # objects (not None).
+        from oracle.lob import LOB
+        self._setup()
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES (1, EMPTY_CLOB(), EMPTY_BLOB())"
+        )
+        self.cur.execute(f"SELECT c, b FROM {self.TABLE}")
+        (c, b) = self.cur.fetchone()
+        self.assertIsInstance(c, LOB)
+        self.assertIsInstance(b, LOB)
+        self.assertTrue(c.is_character)
+        self.assertTrue(b.is_binary)
+
+    def test_non_null_clob(self):
+        from oracle.lob import LOB
+        self._setup()
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES (1, 'hello clob', NULL)"
+        )
+        self.cur.execute(f"SELECT c FROM {self.TABLE}")
+        (c,) = self.cur.fetchone()
+        self.assertIsInstance(c, LOB)
+        self.assertTrue(c.is_character)
+        # The locator grows by 2 bytes per UTF-16BE char of inline content
+        # on top of a 102-byte fixed locator overhead.
+        self.assertEqual(len(c), 102 + 2 * len("hello clob"))
+
+    def test_non_null_blob(self):
+        from oracle.lob import LOB
+        self._setup()
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES (1, NULL, HEXTORAW('DEADBEEF'))"
+        )
+        self.cur.execute(f"SELECT b FROM {self.TABLE}")
+        (b,) = self.cur.fetchone()
+        self.assertIsInstance(b, LOB)
+        self.assertTrue(b.is_binary)
+        # 4 bytes of inline binary content on top of the 102-byte locator.
+        self.assertEqual(len(b), 102 + 4)
+
+    def test_multiple_rows_with_lobs(self):
+        # Walks the row decoder across several rows so any byte-count
+        # mistake in the LOB reader would derail the next row.
+        from oracle.lob import LOB
+        self._setup()
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (1, NULL, NULL)")
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES (2, EMPTY_CLOB(), EMPTY_BLOB())"
+        )
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES (3, 'three', HEXTORAW('A1'))"
+        )
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES (4, 'four bytes more', "
+            f"HEXTORAW('1234567890ABCDEF'))"
+        )
+        self.cur.execute(f"SELECT id, c, b FROM {self.TABLE} ORDER BY id")
+        rows = self.cur.fetchall()
+        self.assertEqual(len(rows), 4)
+        # Row IDs preserved → no byte-count drift across rows.
+        self.assertEqual([r[0] for r in rows], [1, 2, 3, 4])
+        # NULLs / non-NULLs in the expected slots.
+        self.assertIsNone(rows[0][1]); self.assertIsNone(rows[0][2])
+        self.assertIsInstance(rows[1][1], LOB)
+        self.assertIsInstance(rows[2][1], LOB)
+        self.assertIsInstance(rows[3][2], LOB)
+
+    def test_lob_alongside_other_columns(self):
+        # Mix a LOB with surrounding non-LOB columns so we exercise the
+        # decoder's transition into and out of the LOB code path.
+        from oracle.lob import LOB
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} "
+            f"(prefix VARCHAR2(10), c CLOB, suffix NUMBER)"
+        )
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES ('alpha', 'middle clob', 42)"
+        )
+        self.cur.execute(f"SELECT prefix, c, suffix FROM {self.TABLE}")
+        (prefix, c, suffix) = self.cur.fetchone()
+        self.assertEqual(prefix, "alpha")
+        self.assertIsInstance(c, LOB)
+        self.assertEqual(suffix, 42)
+
+
+@unittest.skipUnless(_USER, _SKIP_REASON)
 class SSLIntegration(unittest.TestCase):
     """Verify the TLS wrap by talking to Oracle through a local TLS proxy.
 

@@ -44,19 +44,23 @@ What works so far:
 - Follow-up `TTI_FETCH` flow for result sets larger than a single
   server response — `OracleConnect.execute` automatically drains the
   cursor when the EXEC OER signals `call_status = 1`
+- LOB column row format: CLOB / BLOB / NULL LOB values in a SELECT
+  result no longer crash the row decoder. NULL LOBs come back as
+  `None`; non-NULL LOBs are surfaced as `oracle.lob.LOB` objects that
+  hold the raw locator+content blob
 - Transaction control (commit, rollback, ping)
 - Multiple character set support
 
 What is still in progress:
 
 - Cursor caching
-- **LOB column row format.** With the FETCH flow in place,
-  SELECTs that reference LOB columns now reach the row stage — but
-  the row decoder doesn't yet understand the LOB column structure
-  (`ub4 num_bytes | ub8 size | ub4 chunk_size | DALC locator`, plus
-  inline content for small CLOBs). See `docs/PROTOCOL.md §11.9` for
-  the wire layout. Once that's in, a follow-up `TTI_LOBOPS` round
-  trip (`§14`) can resolve out-of-line LOB content.
+- **LOB content extraction.** The row decoder now consumes LOB
+  columns correctly and surfaces a `LOB` object holding the raw
+  locator+content blob, but doesn't yet extract the actual content.
+  Two follow-ups: parse the inline content section inside the locator
+  block (works for small LOBs that arrive inline) and implement
+  `TTI_LOBOPS` READ for out-of-line content. See `docs/PROTOCOL.md
+  §11.9` and `§14`.
 - Connection pooling
 
 ## Requirements
