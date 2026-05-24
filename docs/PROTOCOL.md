@@ -731,28 +731,25 @@ The TNS data type numbers (`§3.1`) for LOBs are:
 | NCLOB   | 112 + national charset form |
 
 pyoracle's row decoder reads the LOB column as `ub4 num_bytes |
-num_bytes + 1 raw bytes` (total `num_bytes + 3` bytes of the LOB
-column). The `num_bytes + 1` block is locator metadata followed by
-the inline content section. NULL LOBs (single `0x00` byte) come back
-as Python `None`; non-NULL LOBs come back as `oracle.lob.LOB` objects
+ub1 num_bytes_echo | num_bytes raw bytes` (total `num_bytes + 3`
+bytes of the LOB column). The `num_bytes` block is the locator
+metadata followed by the inline content section, and is exactly what
+the server expects back as the source pointer in a `TTI_LOBOPS` READ
+request (verified by diffing pyoracle's RXD locator against
+sqlplus's `TTI_LOBOPS` request bytes — they match byte-for-byte
+for the same row). NULL LOBs (single `0x00` byte) come back as
+Python `None`; non-NULL LOBs come back as `oracle.lob.LOB` objects
 that `Cursor.execute` automatically resolves to `str` (CLOB) or
 `bytes` (BLOB) via `LOB.read()`.
 
 Confirmed against XE 11g captures: `num_bytes` scales with content
 as `102 + 2 × utf16_chars` for CLOBs and `102 + content_bytes` for
-BLOBs. The full locator block is 103 bytes of metadata followed by
-the content; `LOB.read()` slices the final `content_size` bytes off
-the locator block and decodes UTF-16BE for CLOB or surfaces raw
-bytes for BLOB. Works for small-to-medium LOBs whose content fits
-inside the inline budget the server packs into the locator block.
-
-Out-of-line content (large LOBs that overflow the inline budget)
-needs the `TTI_LOBOPS` round-trip from `§14`. The request encoder is
-implemented in `encode_dictionary_lobops`, but XE 11g currently
-returns `ORA-22275: invalid LOB locator` against the locator bytes
-we extract from the RXD column — the wire-level locator format the
-server expects as input differs from what it returns in row data,
-and the difference still needs reverse-engineering.
+BLOBs. `LOB.read()` issues `TTI_LOBOPS` READ (`§14`) and decodes the
+returned chunk as UTF-16BE for CLOB or surfaces raw bytes for BLOB.
+EMPTY_CLOB() / EMPTY_BLOB() short-circuit without a round-trip.
+The same path handles both inline-content LOBs and out-of-line LOBs
+uniformly (the server packs content inline or fetches it from storage
+as needed — that detail is opaque to the client).
 
 ## 12. Wire Encoding Primitives
 
@@ -877,12 +874,34 @@ operations declared with `send_amount`, an `sb8` carrying the actual
 amount read/written. `IS_OPEN`, `FILE_EXISTS`, `FILE_ISOPEN` add a
 trailing `ub1` boolean flag.
 
-### 14.4 Status (not implemented)
+### 14.4 Implementation status
 
-pyoracle does not currently issue `TTI_LOBOPS` requests or handle the
-`TNS_MSG_TYPE_LOB_DATA` response. Implementing this is the second
-half of LOB support; the first half is the call-status-driven FETCH
-flow described in `§5.2`.
+pyoracle implements `TTI_LOBOPS` READ (`encode_dictionary_lobops`
+in `oracle/tns.py`, response handling in
+`OracleConnect._read_lob_response`) and uses it transparently from
+`LOB.read()` for every non-empty LOB cell. Worth noting:
+
+- **Don't send `amount = 0xFFFFFFFF`.** XE 11g quietly stops
+  responding when the request asks for `uint32` max. Use a large but
+  finite value instead — pyoracle defaults to `0x40000000` (1 GiB),
+  comfortably past any realistic LOB while staying inside signed
+  int32.
+- **Locator bytes go on the wire as-is.** The bytes pyoracle extracts
+  from the RXD column (after skipping the `ub4 num_bytes` prefix +
+  the 1-byte size echo) are exactly what the server expects as the
+  source pointer; no DALC wrapping, no length prefix beyond what the
+  request body already carries.
+- **The response carries `TTI_LOB` (content) + `TTI_RPA`
+  (updated locator) + `TTI_OER` (call status)** in a single packet.
+  pyoracle decodes the LOB chunk(s) and skips past the RPA block by
+  scanning forward for the OER `04 01 XX 01` signature — the RPA
+  layout is complex enough that we don't try to parse it, and we
+  don't need anything out of it.
+
+Out-of-line LOB *writes* (large LOB binds on INSERT / UPDATE) still
+go through the regular VARCHAR2 / RAW bind path and hit Oracle's
+4 KiB literal cap (`ORA-01461`); a client-side `TTI_LOBOPS` WRITE
+implementation would lift that.
 
 ## 15. TNS Marker Protocol
 

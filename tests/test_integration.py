@@ -783,6 +783,22 @@ class LOBIntegration(_IntegrationBase):
         self.assertEqual(self.cur.fetchone(),
                          ("alpha", "middle clob", 42))
 
+    def test_clob_larger_than_inline_budget(self):
+        # A CLOB whose content makes the locator+inline section big enough
+        # that Oracle would normally not pack it inline. We can't tell from
+        # the client side whether the server chose inline or out-of-line
+        # storage; what matters is that the TTI_LOBOPS round-trip in
+        # LOB.read() returns the full content either way.
+        self._setup()
+        Text = "abcdefghij" * 200            # 2000 chars, fits in a SQL literal
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE}(id, c) VALUES (1, '{Text}')"
+        )
+        self.cur.execute(f"SELECT c FROM {self.TABLE}")
+        (Got,) = self.cur.fetchone()
+        self.assertEqual(len(Got), len(Text))
+        self.assertEqual(Got, Text)
+
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class SSLIntegration(unittest.TestCase):

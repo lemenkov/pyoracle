@@ -431,18 +431,14 @@ def _read_lob_column(Rest: bytes) -> tuple[bytes | None, bytes]:
     #   ub4 num_bytes         → otherwise the leading variable-length integer
     #                           gives the size of the locator block that
     #                           follows.
-    #   ub1 dalc_length       → redundantly num_bytes again (this byte plus
-    #                           the next `num_bytes` bytes form a DALC).
-    #   num_bytes raw bytes   → the actual LOB locator that gets handed back
-    #                           to the server via TTI_LOBOPS to read content.
-    #                           For small LOBs the inline content is woven in
-    #                           with the locator metadata; we don't pull it
-    #                           apart, instead handing the whole blob to
-    #                           LOBOPS which will return the content for us.
-    #   ub1                   → single trailing byte (consumed, discarded).
+    #   ub1 size_repeat       → echoes num_bytes as a single byte (skipped).
+    #   num_bytes raw bytes   → the LOB locator + inline content section.
+    #                           This is exactly what the server expects back
+    #                           in TTI_LOBOPS — verified by diffing against
+    #                           sqlplus's LOBOPS request locator bytes.
     #
     # Total LOB column size = num_bytes + 3. Confirmed against captured XE
-    # 11g responses for NULL / EMPTY_CLOB / 'x' / 'hello clob'.
+    # 11g responses for NULL / EMPTY_CLOB / 'x' / 10-char and 23-char CLOBs.
     if not Rest:
         return (None, Rest)
     if Rest[0] == 0x00:
@@ -452,11 +448,11 @@ def _read_lob_column(Rest: bytes) -> tuple[bytes | None, bytes]:
         # Defensive: malformed or unexpected layout. Surface what we have
         # rather than overrunning the buffer.
         return (bytes(Body), b"")
-    # The locator + inline content block is `num_bytes + 1` bytes long
-    # (the +1 is part of the inline content section, not a separate
-    # trailing field — discarding it truncates the last byte of content).
-    Locator = bytes(Body[:NumBytes + 1])
-    Tail = Body[NumBytes + 1:]
+    # Skip the 1-byte size echo (Body[0]) and take the next num_bytes bytes.
+    # That gives the locator format the server emitted *and* the format it
+    # expects on input for TTI_LOBOPS round-trips.
+    Locator = bytes(Body[1:1 + NumBytes])
+    Tail = Body[1 + NumBytes:]
     return (Locator, Tail)
 
 def _bvc_bit_set(BitVec: bytes, Idx: int) -> bool:
@@ -667,7 +663,15 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
     # same shape by varying `operation` and the pointer flags.
     Tseq = Dictionary['seq']
     Locator = Dictionary['locator']
-    Amount = Dictionary.get('amount', 0xFFFFFFFF)        # uint32 max = "all"
+    # `amount` is in chars for CLOB / NCLOB and in bytes for BLOB / BFILE.
+    # Don't pass the obvious-looking 0xFFFFFFFF "all" sentinel — XE 11g
+    # quietly stops responding when given it (presumably Oracle tries to
+    # allocate / range-check uint32-max and gets unhappy). 0x40000000
+    # (= 1 GiB) is well over any real LOB we're likely to see while
+    # staying inside signed-int32 territory, and the server returns just
+    # the LOB's actual content rather than padding to the requested
+    # ceiling.
+    Amount = Dictionary.get('amount', 0x40000000)
     Operation = Dictionary.get('operation', TNS_LOB_OP_READ)
     SourceOffset = Dictionary.get('source_offset', 1)    # 1-based: start
     LocatorLen = len(Locator)

@@ -44,26 +44,23 @@ What works so far:
 - Follow-up `TTI_FETCH` flow for result sets larger than a single
   server response — `OracleConnect.execute` automatically drains the
   cursor when the EXEC OER signals `call_status = 1`
-- LOB content: CLOB / BLOB columns in a SELECT now round-trip as
-  `str` / `bytes` for any LOB whose content fits inside the locator
-  block (the common case for small-to-medium LOBs). NULL LOBs come
-  back as `None`; `EMPTY_CLOB()` / `EMPTY_BLOB()` as `""` / `b""`
+- LOB content: CLOB / BLOB columns in a SELECT round-trip as `str` /
+  `bytes` of any size. `Cursor.execute` automatically issues a
+  `TTI_LOBOPS` READ for each non-empty LOB cell, materialising the
+  content from the server. NULL LOBs come back as `None`;
+  `EMPTY_CLOB()` / `EMPTY_BLOB()` as `""` / `b""`
 - Transaction control (commit, rollback, ping)
 - Multiple character set support
 
 What is still in progress:
 
 - Cursor caching
-- **Out-of-line LOB content.** Inline content extraction works (small
-  LOBs round-trip through `Cursor.execute`), but large LOBs whose
-  content overflows the locator block's inline budget need a server-side
-  `TTI_LOBOPS` READ round-trip the driver doesn't yet issue. The
-  request encoder is in place (`encode_dictionary_lobops`), but
-  Oracle XE 11g returns `ORA-22275: invalid LOB locator` against the
-  locator-as-stored-in-RXD — the wire-level locator format the server
-  expects on input is subtly different from what it sends back in the
-  row, and the difference still needs reverse-engineering. See
-  `docs/PROTOCOL.md §14`.
+- Large-LOB *binds* on INSERT / UPDATE. SELECTs of arbitrarily large
+  LOBs work today via the `TTI_LOBOPS` READ round-trip, but inserts
+  go through the regular VARCHAR2 / RAW bind path which Oracle caps
+  at 4000 bytes (`ORA-01461`). For now, large LOB content has to be
+  loaded server-side (e.g. via `DBMS_LOB` / `INSERT ... SELECT FROM
+  EXTERNAL`); a client-side `TTI_LOBOPS` WRITE path is on the roadmap.
 - Connection pooling
 
 ## Requirements

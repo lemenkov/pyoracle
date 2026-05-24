@@ -318,9 +318,11 @@ class OracleConnect:
 
     def _read_lob_response(self) -> bytes:
         # Walk the LOBOPS response packets, accumulating LOB_DATA chunks
-        # until we hit the trailing OER. The OER itself is consumed but its
-        # status isn't surfaced; on an Oracle error the existing OER decoder
-        # raises through Cursor anyway.
+        # until we hit the trailing OER. A LOBOPS response packet on 11g
+        # carries: TTI_LOB (content) + TTI_RPA (updated locator) + TTI_OER
+        # (call status). We pull the content out of the LOB chunk(s) and
+        # use OER as the stop signal; everything between LOB and OER is
+        # RPA-shaped metadata we don't need.
         from oracle.tns_consts import TNS_MARKER, TTI_LOB, TTI_OER
         Buffer = b""
         while True:
@@ -331,11 +333,12 @@ class OracleConnect:
                     continue
                 raise Exception("Unexpected LOBOPS response type", Type)
             Pos = 0
+            OerSeen = False
             while Pos < len(Packet):
                 Token = Packet[Pos]
                 if Token == TTI_LOB:
-                    # LOB content chunk. Format: token + 1-byte length + data,
-                    # or token + 0xFE + chunked sequence.
+                    # Content chunk. Format: token + 1-byte length + data, or
+                    # token + 0xFE + chunked sequence of <ub1 len><bytes>.
                     Pos += 1
                     if Pos >= len(Packet):
                         break
@@ -344,8 +347,6 @@ class OracleConnect:
                     if Length == 0:
                         continue
                     if Length == 0xFE:
-                        # Chunked: repeated <chunk_len ub1> <chunk bytes> until
-                        # a zero-length chunk terminates.
                         while Pos < len(Packet):
                             ChunkLen = Packet[Pos]
                             Pos += 1
@@ -357,13 +358,27 @@ class OracleConnect:
                         Buffer += Packet[Pos:Pos + Length]
                         Pos += Length
                 elif Token == TTI_OER:
-                    # End of call. Everything after this is fluff we ignore.
-                    return Buffer
-                else:
-                    # Unknown / RPA / etc — give up parsing this packet, hope
-                    # the next one has the OER. In practice the OER is in the
-                    # same packet so this branch is rarely hit.
+                    # End of call. Anything after is fluff.
+                    OerSeen = True
                     break
+                else:
+                    # Likely TTI_RPA (0x08) carrying the updated locator and
+                    # actual amount read — we don't decode it. Scan forward
+                    # for OER's `04 01 XX 01` signature so we don't leave
+                    # unread bytes in the socket and block the next call.
+                    Found = -1
+                    for I in range(Pos, len(Packet) - 3):
+                        if (Packet[I] == TTI_OER and Packet[I + 1] == 0x01
+                                and Packet[I + 3] == 0x01):
+                            Found = I
+                            break
+                    if Found >= 0:
+                        Pos = Found
+                        continue
+                    # No OER in this packet — fall out and recv the next one.
+                    break
+            if OerSeen:
+                return Buffer
             # Packet exhausted without hitting OER; loop and recv the next.
 
     def commit(self) -> None:
