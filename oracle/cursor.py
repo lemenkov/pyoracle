@@ -94,7 +94,8 @@ class Cursor:
 
         if ColMeta:
             self._description = [_column_description(C) for C in ColMeta]
-            self._rows = list(Rows or [])
+            self._rows = [_resolve_lobs(self._connection, row)
+                          for row in (Rows or [])]
             # For SELECT, the OER's success-iters value is the per-call fetch
             # count, not the total result set size; len(rows) is the answer
             # callers expect from cursor.rowcount.
@@ -171,6 +172,20 @@ class Cursor:
 
     def __exit__(self, exc_type, exc, tb):
         self.close()
+
+
+def _resolve_lobs(Connection, Row: list) -> list:
+    # Replace any LOB cells in the row with their resolved Python value.
+    # CLOB → str, BLOB → bytes, empty → "" / b"", NULL stays as None (the
+    # row decoder already handed back None for NULL LOBs before they ever
+    # became LOB objects).
+    from oracle.lob import LOB
+    Out = list(Row)
+    for I, Val in enumerate(Out):
+        if isinstance(Val, LOB):
+            Val._connection = Connection
+            Out[I] = Val.read()
+    return Out
 
 
 def _resolve_parameters(SQL: str, Params) -> list:

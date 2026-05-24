@@ -13,9 +13,9 @@ from oracle.tns_consts import (
     TTI_DCB, TTI_DTY, TTI_FETCH, TTI_FOB, TTI_FUN, TTI_IOV, TTI_LOB,
     TTI_LOGOFF, TTI_OAC, TTI_OER, TTI_PFN, TTI_PRO, TTI_RPA, TTI_RXD,
     TTI_RXH, TTI_SESS, TTI_SPFP, TTI_STA, TTI_STRT, TTI_STOP, TTI_UDS,
-    TTI_WRN, TNS_TYPE_BFILE, TNS_TYPE_BLOB, TNS_TYPE_CLOB, TNS_TYPE_DATE,
-    TNS_TYPE_NUMBER, TNS_TYPE_REFCURSOR, TNS_TYPE_TIMESTAMP,
-    TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_VARCHAR, UTF8_CHARSET,
+    TTI_WRN, TNS_LOB_OP_READ, TNS_TYPE_BFILE, TNS_TYPE_BLOB, TNS_TYPE_CLOB,
+    TNS_TYPE_DATE, TNS_TYPE_NUMBER, TNS_TYPE_REFCURSOR, TNS_TYPE_TIMESTAMP,
+    TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_VARCHAR, TTI_LOBOPS, UTF8_CHARSET,
 )
 import logging
 import os
@@ -429,16 +429,20 @@ def _read_lob_column(Rest: bytes) -> tuple[bytes | None, bytes]:
     #
     #   ub1 0x00              → NULL LOB; total column size = 1 byte.
     #   ub4 num_bytes         → otherwise the leading variable-length integer
-    #                           gives the size of the locator + inline-content
-    #                           block that follows.
-    #   raw num_bytes bytes   → locator metadata interleaved with any inline
-    #                           content for small LOBs (the inline section
-    #                           sits at a variable offset inside this block).
-    #   ub1                   → single trailing byte (consumed but discarded).
+    #                           gives the size of the locator block that
+    #                           follows.
+    #   ub1 dalc_length       → redundantly num_bytes again (this byte plus
+    #                           the next `num_bytes` bytes form a DALC).
+    #   num_bytes raw bytes   → the actual LOB locator that gets handed back
+    #                           to the server via TTI_LOBOPS to read content.
+    #                           For small LOBs the inline content is woven in
+    #                           with the locator metadata; we don't pull it
+    #                           apart, instead handing the whole blob to
+    #                           LOBOPS which will return the content for us.
+    #   ub1                   → single trailing byte (consumed, discarded).
     #
-    # Total LOB column size = num_bytes + 3 (2-byte ub4 prefix + num_bytes
-    # content + 1 trailing byte). Confirmed against captured XE 11g
-    # responses for NULL / EMPTY_CLOB / 'x' / 'hello clob' inputs.
+    # Total LOB column size = num_bytes + 3. Confirmed against captured XE
+    # 11g responses for NULL / EMPTY_CLOB / 'x' / 'hello clob'.
     if not Rest:
         return (None, Rest)
     if Rest[0] == 0x00:
@@ -448,9 +452,12 @@ def _read_lob_column(Rest: bytes) -> tuple[bytes | None, bytes]:
         # Defensive: malformed or unexpected layout. Surface what we have
         # rather than overrunning the buffer.
         return (bytes(Body), b"")
-    Blob = bytes(Body[:NumBytes])
-    Tail = Body[NumBytes + 1:]                       # drop trailing 1 byte
-    return (Blob, Tail)
+    # The locator + inline content block is `num_bytes + 1` bytes long
+    # (the +1 is part of the inline content section, not a separate
+    # trailing field — discarding it truncates the last byte of content).
+    Locator = bytes(Body[:NumBytes + 1])
+    Tail = Body[NumBytes + 1:]
+    return (Locator, Tail)
 
 def _bvc_bit_set(BitVec: bytes, Idx: int) -> bool:
     Byte = Idx // 8
@@ -517,6 +524,8 @@ def encode_dictionary(Dictionary: dict) -> bytes | tuple[bytes, bytes]:
             return encode_dictionary_exec(Dictionary)
         case DictionaryType.fetch:
             return encode_dictionary_fetch(Dictionary)
+        case DictionaryType.lobops:
+            return encode_dictionary_lobops(Dictionary)
         case DictionaryType.login:
             return encode_dictionary_login(Dictionary)
         case DictionaryType.pig:
@@ -650,6 +659,39 @@ def encode_dictionary_fetch(Dictionary: dict) -> bytes:
     Cursor = encode_sb4(Dictionary['cursor'])
     Fetch = encode_sb4(Dictionary['fetch'])
     return bytes([TTI_FUN, TTI_FETCH, Tseq]) + Cursor + Fetch
+
+def encode_dictionary_lobops(Dictionary: dict) -> bytes:
+    # TTI_LOBOPS request. See docs/PROTOCOL.md §14 for the field layout.
+    # This builds a READ request specifically (operation = 0x0002) since
+    # that's all the driver currently issues; other opcodes plug into the
+    # same shape by varying `operation` and the pointer flags.
+    Tseq = Dictionary['seq']
+    Locator = Dictionary['locator']
+    Amount = Dictionary.get('amount', 0xFFFFFFFF)        # uint32 max = "all"
+    Operation = Dictionary.get('operation', TNS_LOB_OP_READ)
+    SourceOffset = Dictionary.get('source_offset', 1)    # 1-based: start
+    LocatorLen = len(Locator)
+
+    Out = bytes([TTI_FUN, TTI_LOBOPS, Tseq])
+    Out += bytes([1])                       # source pointer present
+    Out += encode_sb4(LocatorLen)           # source locator length
+    Out += bytes([0])                       # dest pointer absent
+    Out += encode_sb4(0)                    # dest_length
+    Out += encode_sb4(0)                    # short source offset
+    Out += encode_sb4(0)                    # short dest offset
+    Out += bytes([0])                       # charset pointer absent
+    Out += bytes([0])                       # short amount absent
+    Out += bytes([0])                       # null lob pointer absent
+    Out += encode_sb4(Operation)            # operation code
+    Out += bytes([0])                       # scn array pointer absent
+    Out += bytes([0])                       # scn array length
+    Out += encode_sb4(SourceOffset)         # source offset (ub8; small fits sb4)
+    Out += encode_sb4(0)                    # dest offset (ub8)
+    Out += bytes([1])                       # amount pointer present
+    Out += struct.pack(">HHH", 0, 0, 0)     # three reserved ub16be slots
+    Out += Locator                          # raw locator bytes (no DALC)
+    Out += encode_sb4(Amount)               # amount to read
+    return Out
 
 def encode_dictionary_login(Dictionary: dict) -> bytes:
     PacketVersion = bytes([1,57]) # Packet version number

@@ -731,18 +731,28 @@ The TNS data type numbers (`§3.1`) for LOBs are:
 | NCLOB   | 112 + national charset form |
 
 pyoracle's row decoder reads the LOB column as `ub4 num_bytes |
-num_bytes raw bytes | 1 trailing byte` (total `num_bytes + 3`), then
-hands the raw locator+content blob to the caller as an
-`oracle.lob.LOB` object. NULL LOBs (single `0x00` byte) come back as
-Python `None`. Reverse-engineered against captured XE 11g responses
-for NULL / EMPTY_CLOB / 1-char / 10-char inputs; `num_bytes` scales
-with content as `102 + 2 × utf16_chars` for CLOBs and
-`102 + content_bytes` for BLOBs.
+num_bytes + 1 raw bytes` (total `num_bytes + 3` bytes of the LOB
+column). The `num_bytes + 1` block is locator metadata followed by
+the inline content section. NULL LOBs (single `0x00` byte) come back
+as Python `None`; non-NULL LOBs come back as `oracle.lob.LOB` objects
+that `Cursor.execute` automatically resolves to `str` (CLOB) or
+`bytes` (BLOB) via `LOB.read()`.
 
-Content extraction is not yet implemented. The inline content section
-sits at a variable offset inside the locator block (after the metadata
-header) and needs further reverse-engineering to extract reliably for
-small LOBs; large LOBs need the `TTI_LOBOPS` round-trip from `§14`.
+Confirmed against XE 11g captures: `num_bytes` scales with content
+as `102 + 2 × utf16_chars` for CLOBs and `102 + content_bytes` for
+BLOBs. The full locator block is 103 bytes of metadata followed by
+the content; `LOB.read()` slices the final `content_size` bytes off
+the locator block and decodes UTF-16BE for CLOB or surfaces raw
+bytes for BLOB. Works for small-to-medium LOBs whose content fits
+inside the inline budget the server packs into the locator block.
+
+Out-of-line content (large LOBs that overflow the inline budget)
+needs the `TTI_LOBOPS` round-trip from `§14`. The request encoder is
+implemented in `encode_dictionary_lobops`, but XE 11g currently
+returns `ORA-22275: invalid LOB locator` against the locator bytes
+we extract from the RXD column — the wire-level locator format the
+server expects as input differs from what it returns in row data,
+and the difference still needs reverse-engineering.
 
 ## 12. Wire Encoding Primitives
 

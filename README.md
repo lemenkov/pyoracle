@@ -44,23 +44,26 @@ What works so far:
 - Follow-up `TTI_FETCH` flow for result sets larger than a single
   server response — `OracleConnect.execute` automatically drains the
   cursor when the EXEC OER signals `call_status = 1`
-- LOB column row format: CLOB / BLOB / NULL LOB values in a SELECT
-  result no longer crash the row decoder. NULL LOBs come back as
-  `None`; non-NULL LOBs are surfaced as `oracle.lob.LOB` objects that
-  hold the raw locator+content blob
+- LOB content: CLOB / BLOB columns in a SELECT now round-trip as
+  `str` / `bytes` for any LOB whose content fits inside the locator
+  block (the common case for small-to-medium LOBs). NULL LOBs come
+  back as `None`; `EMPTY_CLOB()` / `EMPTY_BLOB()` as `""` / `b""`
 - Transaction control (commit, rollback, ping)
 - Multiple character set support
 
 What is still in progress:
 
 - Cursor caching
-- **LOB content extraction.** The row decoder now consumes LOB
-  columns correctly and surfaces a `LOB` object holding the raw
-  locator+content blob, but doesn't yet extract the actual content.
-  Two follow-ups: parse the inline content section inside the locator
-  block (works for small LOBs that arrive inline) and implement
-  `TTI_LOBOPS` READ for out-of-line content. See `docs/PROTOCOL.md
-  §11.9` and `§14`.
+- **Out-of-line LOB content.** Inline content extraction works (small
+  LOBs round-trip through `Cursor.execute`), but large LOBs whose
+  content overflows the locator block's inline budget need a server-side
+  `TTI_LOBOPS` READ round-trip the driver doesn't yet issue. The
+  request encoder is in place (`encode_dictionary_lobops`), but
+  Oracle XE 11g returns `ORA-22275: invalid LOB locator` against the
+  locator-as-stored-in-RXD — the wire-level locator format the server
+  expects on input is subtly different from what it sends back in the
+  row, and the difference still needs reverse-engineering. See
+  `docs/PROTOCOL.md §14`.
 - Connection pooling
 
 ## Requirements

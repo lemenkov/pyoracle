@@ -101,7 +101,10 @@ TTI_SPFP = 138
 TTI_KPFC = 139
 TTI_PING = 147
 
-DictionaryType = Enum('DictionaryType', 'auth close description dty exec fetch login pig pro sess spfp start stop tran')
+DictionaryType = Enum('DictionaryType', 'auth close description dty exec fetch lobops login pig pro sess spfp start stop tran')
+
+TNS_LOB_OP_GET_LENGTH = 0x0001
+TNS_LOB_OP_READ = 0x0002
 
 ISO_LATIN_1_CHARSET = 31
 UTF8_CHARSET = 871

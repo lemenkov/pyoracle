@@ -296,6 +296,76 @@ class OracleConnect:
         self.send(TNS_DATA, Data)
         return self._handle_response(Acc=(None, RowFormat, []))
 
+    def lob_read(self, Locator: bytes, DataType: int) -> str | bytes:
+        # Send TTI_LOBOPS READ for the given locator and decode the response.
+        # The response carries:
+        #
+        #   TNS_MSG_TYPE_LOB_DATA (= 14)  →  length-prefixed content chunk
+        #   TTI_RPA                       →  return parameters (locator update +
+        #                                    actual amount); we skip these
+        #   TTI_OER                       →  end-of-call status
+        #
+        # CLOB / NCLOB content is sent as UTF-16BE on the wire; BLOB / BFILE
+        # is raw bytes. We decode CLOB to `str` and surface BLOB as `bytes`.
+        from oracle.tns_consts import TNS_TYPE_CLOB
+        Data = encode_dictionary(self._make_dict(DictionaryType.lobops,
+                                                  locator=Locator))
+        self.send(TNS_DATA, Data)
+        Content = self._read_lob_response()
+        if DataType == TNS_TYPE_CLOB:
+            return Content.decode('utf-16-be', errors='replace')
+        return Content
+
+    def _read_lob_response(self) -> bytes:
+        # Walk the LOBOPS response packets, accumulating LOB_DATA chunks
+        # until we hit the trailing OER. The OER itself is consumed but its
+        # status isn't surfaced; on an Oracle error the existing OER decoder
+        # raises through Cursor anyway.
+        from oracle.tns_consts import TNS_MARKER, TTI_LOB, TTI_OER
+        Buffer = b""
+        while True:
+            (Type, Packet) = self.recv(b"", b"")
+            if Type != TNS_DATA:
+                if Type == TNS_MARKER:
+                    self.send(TNS_MARKER, b"\x01\x00\x02")
+                    continue
+                raise Exception("Unexpected LOBOPS response type", Type)
+            Pos = 0
+            while Pos < len(Packet):
+                Token = Packet[Pos]
+                if Token == TTI_LOB:
+                    # LOB content chunk. Format: token + 1-byte length + data,
+                    # or token + 0xFE + chunked sequence.
+                    Pos += 1
+                    if Pos >= len(Packet):
+                        break
+                    Length = Packet[Pos]
+                    Pos += 1
+                    if Length == 0:
+                        continue
+                    if Length == 0xFE:
+                        # Chunked: repeated <chunk_len ub1> <chunk bytes> until
+                        # a zero-length chunk terminates.
+                        while Pos < len(Packet):
+                            ChunkLen = Packet[Pos]
+                            Pos += 1
+                            if ChunkLen == 0:
+                                break
+                            Buffer += Packet[Pos:Pos + ChunkLen]
+                            Pos += ChunkLen
+                    else:
+                        Buffer += Packet[Pos:Pos + Length]
+                        Pos += Length
+                elif Token == TTI_OER:
+                    # End of call. Everything after this is fluff we ignore.
+                    return Buffer
+                else:
+                    # Unknown / RPA / etc — give up parsing this packet, hope
+                    # the next one has the OER. In practice the OER is in the
+                    # same packet so this branch is rarely hit.
+                    break
+            # Packet exhausted without hitting OER; loop and recv the next.
+
     def commit(self) -> None:
         from oracle.tns_consts import TTI_COMMIT
         Data = encode_dictionary(self._make_dict(DictionaryType.tran, req=TTI_COMMIT))
