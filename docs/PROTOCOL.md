@@ -364,11 +364,16 @@ happens unconditionally when at least one column is a LOB (`§11.9`) —
 Oracle returns DCB + RPA piggyback + OER with `call_status = 1` and
 no inline rows for LOB queries, regardless of the result-set size.
 
-pyoracle today only consumes whatever rows the server bundles into the
-execute response. The follow-up FETCH flow is on the roadmap; without
-it, SELECT statements that reference LOB columns or that exceed the
-server's inline-row budget return zero rows even though the metadata
-parses correctly.
+pyoracle implements the FETCH flow in `OracleConnect._drain_cursor`:
+after the initial EXEC response, if `call_status == 1` and a cursor
+handle was returned, it loops issuing `TTI_FETCH` (with the prior
+DCB's RowFormat threaded into the decoder via `_handle_response`'s
+`Acc` parameter, since FETCH responses don't repeat the DCB) until
+the server returns `ORA-01403` end-of-fetch. Rows are concatenated
+across responses and surfaced as one result set; the 1403 sentinel
+is masked to 0 so it doesn't reach the caller as an error. Works for
+any large non-LOB SELECT; LOB column data still needs a per-column
+row decoder (`§11.9`).
 
 ### 5.3 OAC (Oracle Access Column) Descriptor
 

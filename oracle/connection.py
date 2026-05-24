@@ -243,14 +243,58 @@ class OracleConnect:
         }
         Data = encode_dictionary(self._make_dict(DictionaryType.exec, query=QueryDict))
         self.send(TNS_DATA, Data)
-        return self._handle_response()
+        Result = self._handle_response()
+        return self._drain_cursor(Result)
 
-    def fetch_more(self, CursorId: int, Rows: int | None = None) -> object:
+    def _drain_cursor(self, Result: object) -> object:
+        # The EXEC response either bundles all rows inline (small SELECTs,
+        # all DDL/DML) or only returns column metadata and signals "more on
+        # this cursor" via OER.call_status == 1. In the latter case the
+        # client is expected to issue follow-up TTI_FETCH calls until the
+        # server returns ORA-01403 (end-of-fetch). This applies to any
+        # large result set and to *every* SELECT that touches a LOB column,
+        # regardless of size — see docs/PROTOCOL.md §5.2.
+        if not isinstance(Result, tuple) or len(Result) < 6:
+            return Result
+        (CallStatus, OraCode, CursorId, RetFormat, Rows, *Tail) = Result
+        AllRows = list(Rows or [])
+        RowFormat = None
+        if isinstance(RetFormat, tuple) and len(RetFormat) > 1 \
+                and isinstance(RetFormat[1], list):
+            RowFormat = RetFormat[1]
+        # No row format means there's nothing further to fetch (DDL / DML
+        # responses), and CursorId == 0 means no cursor to fetch from.
+        if RowFormat and CursorId and CallStatus == 1 and OraCode != 1403:
+            while True:
+                FetchResult = self.fetch_more(CursorId, self.fetch,
+                                              RowFormat=RowFormat)
+                if not isinstance(FetchResult, tuple) or len(FetchResult) < 6:
+                    break
+                (CallStatus, OraCode, _, _, MoreRows, *_) = FetchResult
+                if MoreRows:
+                    AllRows.extend(MoreRows)
+                # ORA-01403 is the server saying "you've drained the cursor";
+                # call_status != 1 means the same thing via a different field.
+                if OraCode == 1403 or CallStatus != 1:
+                    break
+        # Hide the ORA-01403 sentinel from callers; it was an internal
+        # protocol marker, not a user-visible error.
+        if OraCode == 1403:
+            OraCode = 0
+        return (CallStatus, OraCode, CursorId, RetFormat, AllRows) + tuple(Tail)
+
+    def fetch_more(self, CursorId: int, Rows: int | None = None,
+                   RowFormat: list | None = None) -> object:
+        # FETCH responses carry RXH / RXD / OER but no DCB — the column
+        # metadata was already established during the original EXEC. Seed
+        # the decoder Acc with the prior RowFormat so the per-row DALC
+        # parser knows how many columns to read.
         if Rows is None:
             Rows = self.fetch
-        Data = encode_dictionary(self._make_dict(DictionaryType.fetch, cursor=CursorId, fetch=Rows))
+        Data = encode_dictionary(self._make_dict(DictionaryType.fetch,
+                                                  cursor=CursorId, fetch=Rows))
         self.send(TNS_DATA, Data)
-        return self._handle_response()
+        return self._handle_response(Acc=(None, RowFormat, []))
 
     def commit(self) -> None:
         from oracle.tns_consts import TTI_COMMIT
@@ -302,16 +346,22 @@ class OracleConnect:
         finally:
             self.disconnect()
 
-    def _handle_response(self) -> object:
+    def _handle_response(self, Acc: tuple | None = None) -> object:
+        # Acc seeds the decoder context (Cursor, RowFormat, Rows). The
+        # default `(None, None, [])` is right for any response that starts
+        # with a DCB (which sets RowFormat for the subsequent RXDs). FETCH
+        # responses skip the DCB and need the prior RowFormat passed in.
         from oracle.tns import decode_packet
+        if Acc is None:
+            Acc = (None, None, [])
         (Type, Packet) = self.recv(b"", b"")
         match Type:
             case t if t == TNS_DATA:
-                return decode_packet(Packet, (None, None, []))
+                return decode_packet(Packet, Acc)
             case t if t == TNS_MARKER:
                 logger.debug("response: marker")
                 self.send(TNS_MARKER, b"\x01\x00\x02")
-                return self._handle_response()
+                return self._handle_response(Acc)
             case _:
                 raise Exception("Unexpected response type", Type)
 

@@ -624,6 +624,59 @@ class ErrorAndRowcountIntegration(_IntegrationBase):
 
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
+class FetchFlowIntegration(_IntegrationBase):
+    """Verify the follow-up TTI_FETCH flow.
+
+    When a SELECT result set exceeds the per-call fetch size, the server
+    returns the first N rows inline plus OER.call_status == 1 ("more on
+    this cursor"). The driver must then issue TTI_FETCH against the open
+    cursor until the server signals ORA-01403 (end of fetch).
+    """
+
+    def _populate(self, num_rows: int):
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} (id NUMBER, name VARCHAR2(40))"
+        )
+        for n in range(1, num_rows + 1):
+            self.cur.execute(
+                f"INSERT INTO {self.TABLE} VALUES (:1, :2)", [n, f"row{n}"]
+            )
+
+    def test_select_within_fetch_size(self):
+        # 3 rows, default fetch (15) — single round-trip, no follow-up needed.
+        self._populate(3)
+        self.cur.execute(f"SELECT id, name FROM {self.TABLE} ORDER BY id")
+        rows = self.cur.fetchall()
+        self.assertEqual(len(rows), 3)
+        self.assertEqual([r[0] for r in rows], [1, 2, 3])
+
+    def test_select_spans_multiple_fetches(self):
+        # 50 rows with fetch=7 → 8 round-trips (1 EXEC + 7 FETCH).
+        self._populate(50)
+        self.conn.fetch = 7
+        self.cur.execute(f"SELECT id, name FROM {self.TABLE} ORDER BY id")
+        rows = self.cur.fetchall()
+        self.assertEqual(len(rows), 50)
+        self.assertEqual([r[0] for r in rows], list(range(1, 51)))
+        self.assertEqual(rows[-1], (50, "row50"))
+
+    def test_select_exactly_one_fetch_boundary(self):
+        # Row count exactly equal to fetch size — boundary case where the
+        # server may or may not signal "more available" on the initial EXEC.
+        self._populate(7)
+        self.conn.fetch = 7
+        self.cur.execute(f"SELECT id FROM {self.TABLE} ORDER BY id")
+        rows = self.cur.fetchall()
+        self.assertEqual([r[0] for r in rows], list(range(1, 8)))
+
+    def test_select_empty_table(self):
+        # Zero-row SELECT — the FETCH loop must not fire.
+        self._populate(0)
+        self.cur.execute(f"SELECT id FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchall(), [])
+
+
+@unittest.skipUnless(_USER, _SKIP_REASON)
 class SSLIntegration(unittest.TestCase):
     """Verify the TLS wrap by talking to Oracle through a local TLS proxy.
 

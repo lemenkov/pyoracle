@@ -41,25 +41,22 @@ What works so far:
   reflects the rows affected by `INSERT` / `UPDATE` / `DELETE` (read
   from the OER block); `DatabaseError(code=NNN)` carries the full
   `"ORA-NNNNN: ..."` text the server sent, not just the numeric code
+- Follow-up `TTI_FETCH` flow for result sets larger than a single
+  server response — `OracleConnect.execute` automatically drains the
+  cursor when the EXEC OER signals `call_status = 1`
 - Transaction control (commit, rollback, ping)
 - Multiple character set support
 
 What is still in progress:
 
 - Cursor caching
-- **Follow-up FETCH flow.** When the server returns metadata + an OER
-  with `call_status != 0` (no inline rows), the client is expected to
-  issue a `TTI_FETCH` round-trip against the open cursor. pyoracle
-  currently consumes only the rows the server bundles into the
-  execute response; SELECTs that hit this path (notably any LOB
-  query — see `docs/PROTOCOL.md §5.2`) come back empty. Implementing
-  this is a prerequisite for LOB support and also useful on its own
-  for large result sets.
-- **LOB support.** Builds on the FETCH flow above. Read-side LOB
-  values arrive as opaque locators in RXD; fetching the content
-  requires `TTI_LOBOPS` round-trips (`docs/PROTOCOL.md §11.9` and
-  `§14`). Both the locator parsing and the LOBOPS request/response
-  decoder still need to be written.
+- **LOB column row format.** With the FETCH flow in place,
+  SELECTs that reference LOB columns now reach the row stage — but
+  the row decoder doesn't yet understand the LOB column structure
+  (`ub4 num_bytes | ub8 size | ub4 chunk_size | DALC locator`, plus
+  inline content for small CLOBs). See `docs/PROTOCOL.md §11.9` for
+  the wire layout. Once that's in, a follow-up `TTI_LOBOPS` round
+  trip (`§14`) can resolve out-of-line LOB content.
 - Connection pooling
 
 ## Requirements
