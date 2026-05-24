@@ -30,7 +30,9 @@ What works so far:
   `cur.execute(sql, {"name": v})` (named, `:name` placeholders, case-
   insensitive); accepted bind types are `int`, `float`, `Decimal`,
   `str`, `bytes`, `bool`, `datetime.date` / `datetime` (with optional
-  timezone and microseconds), and `None`
+  timezone and microseconds), and `None`. `str` and `bytes` binds
+  reach up to ~7 KiB on the default 8 KiB SDU, suitable for most
+  CLOB / BLOB inserts; see "still in progress" for the larger case
 - Python type coercion for fetched values: NUMBER → `int` / `Decimal`,
   VARCHAR2 / CHAR → `str` (charset-aware), DATE / TIMESTAMP / TIMESTAMP
   WITH TIME ZONE → `datetime.datetime`, NULL → `None`
@@ -55,12 +57,16 @@ What works so far:
 What is still in progress:
 
 - Cursor caching
-- Large-LOB *binds* on INSERT / UPDATE. SELECTs of arbitrarily large
-  LOBs work today via the `TTI_LOBOPS` READ round-trip, but inserts
-  go through the regular VARCHAR2 / RAW bind path which Oracle caps
-  at 4000 bytes (`ORA-01461`). For now, large LOB content has to be
-  loaded server-side (e.g. via `DBMS_LOB` / `INSERT ... SELECT FROM
-  EXTERNAL`); a client-side `TTI_LOBOPS` WRITE path is on the roadmap.
+- Very large LOB binds (more than one SDU's worth in a single bind).
+  CLOB / BLOB inserts up to ~7 KiB on the default 8 KiB SDU work
+  through the regular RAW / VARCHAR2 bind path today; past that the
+  request would span multiple TNS packets and the current packet-
+  fragmentation code doesn't produce a layout the server accepts
+  (`ORA-12592 TNS:bad packet`). The proper fix is a `TTI_LOBOPS`
+  WRITE path (allocate a temp LOB, stream content into it, bind the
+  locator) — that bypasses the SDU ceiling. Until then, content past
+  ~7 KiB needs to be loaded server-side via `DBMS_LOB` / SQL
+  literals.
 - Connection pooling
 
 ## Requirements

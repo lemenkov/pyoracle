@@ -799,6 +799,36 @@ class LOBIntegration(_IntegrationBase):
         self.assertEqual(len(Got), len(Text))
         self.assertEqual(Got, Text)
 
+    def test_clob_bind_above_varchar2_cap(self):
+        # SQL VARCHAR2 binds top out at 4000 bytes. Anything bigger used
+        # to trip ORA-01461 ("can bind a LONG value only for insert into a
+        # LONG column"). The bind OAC now declares max_size = 32767 so
+        # multi-KiB CLOB binds reach the column.
+        self._setup()
+        Text = "abcdefghij" * 700            # 7000 chars
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE}(id, c) VALUES (1, :c)", {"c": Text}
+        )
+        self.cur.execute(f"SELECT c FROM {self.TABLE}")
+        (Got,) = self.cur.fetchone()
+        self.assertEqual(Got, Text)
+
+    def test_blob_bind_round_trip_all_byte_values(self):
+        # Two things at once: bytes binds used to be decoded as UTF-8 and
+        # re-encoded as UTF-16BE — which corrupted anything outside ASCII
+        # and outright crashed on 0x80+ bytes — and they used to share the
+        # 4000-byte VARCHAR2 cap. Now they're bound as RAW with the same
+        # 32767-byte ceiling. This payload exercises every possible byte
+        # value and is past the old cap.
+        self._setup()
+        Payload = bytes(range(256)) * 25     # 6400 bytes
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE}(id, b) VALUES (1, :b)", {"b": Payload}
+        )
+        self.cur.execute(f"SELECT b FROM {self.TABLE}")
+        (Got,) = self.cur.fetchone()
+        self.assertEqual(Got, Payload)
+
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class SSLIntegration(unittest.TestCase):

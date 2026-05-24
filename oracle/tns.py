@@ -14,8 +14,9 @@ from oracle.tns_consts import (
     TTI_LOGOFF, TTI_OAC, TTI_OER, TTI_PFN, TTI_PRO, TTI_RPA, TTI_RXD,
     TTI_RXH, TTI_SESS, TTI_SPFP, TTI_STA, TTI_STRT, TTI_STOP, TTI_UDS,
     TTI_WRN, TNS_LOB_OP_READ, TNS_TYPE_BFILE, TNS_TYPE_BLOB, TNS_TYPE_CLOB,
-    TNS_TYPE_DATE, TNS_TYPE_NUMBER, TNS_TYPE_REFCURSOR, TNS_TYPE_TIMESTAMP,
-    TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_VARCHAR, TTI_LOBOPS, UTF8_CHARSET,
+    TNS_TYPE_DATE, TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_REFCURSOR,
+    TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_VARCHAR, TTI_LOBOPS,
+    UTF8_CHARSET,
 )
 import logging
 import os
@@ -937,7 +938,10 @@ def encode_token_rxd(Token: object) -> bytes:
     if isinstance(Token, str):
         return encode_chr(Token)
     if isinstance(Token, (bytes, bytearray)):
-        return encode_chr(Token.decode('utf-8').encode('utf-16be'))
+        # RAW binds: hand the bytes through verbatim. The old code path
+        # round-tripped them through utf-8 → utf-16be which corrupted
+        # anything that wasn't ASCII (and outright failed on 0x80+ bytes).
+        return encode_chr(bytes(Token))
     if isinstance(Token, cursor):
         return bytes([1, 0])
     if isinstance(Token, date):
@@ -957,14 +961,22 @@ def encode_token_rxd(Token: object) -> bytes:
     raise Exception("Unknown RXD token", Token)
 
 def encode_token_oac(Token: object) -> bytes:
+    # The OAC field tells the server the maximum size we *might* send for
+    # this bind. Oracle rejects with ORA-01461 ("can bind a LONG value only
+    # for insert into a LONG column") if the actual value exceeds it, even
+    # when the target is a CLOB / BLOB that could comfortably hold more.
+    # 32767 = PL/SQL VARCHAR2 / RAW max, the largest the regular bind path
+    # accepts on 11g; larger payloads need TTI_LOBOPS WRITE.
     if Token is None:
-        return encode_token_raw(TNS_TYPE_VARCHAR, 4000, 16, UTF8_CHARSET, 0)
+        return encode_token_raw(TNS_TYPE_VARCHAR, 32767, 16, UTF8_CHARSET, 0)
     if isinstance(Token, (int, float, complex, Decimal)):
         return encode_token_raw(TNS_TYPE_NUMBER, 22, 0, 0, 0)
     if isinstance(Token, str):
-        return encode_token_raw(TNS_TYPE_VARCHAR, 4000, 16, UTF8_CHARSET, 0)
+        return encode_token_raw(TNS_TYPE_VARCHAR, 32767, 16, UTF8_CHARSET, 0)
     if isinstance(Token, (bytes, bytearray)):
-        return encode_token_raw(TNS_TYPE_VARCHAR, 4000, 16, AL16UTF16_CHARSET, 0)
+        # Bind as RAW so arbitrary byte sequences (non-UTF8, control bytes,
+        # 0x80+) round-trip verbatim into RAW / BLOB columns.
+        return encode_token_raw(TNS_TYPE_RAW, 32767, 16, 0, 0)
     if isinstance(Token, cursor):
         return encode_token_raw(TNS_TYPE_REFCURSOR, 1, 0, UTF8_CHARSET, 0)
     if isinstance(Token, date):

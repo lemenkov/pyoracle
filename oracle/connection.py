@@ -461,15 +461,26 @@ class OracleConnect:
 
     def recv(self, Acc: bytes, Data: bytes) -> tuple[int, bytes] | bool:
         NetworkData = self.sock.recv(self.sdu)
-        (Flag, Type, Body, Rest) = assemble_packet(Acc + NetworkData, self.sdu)
+        if not NetworkData:
+            # Peer closed the connection.
+            return False
+        Buf = Acc + NetworkData
+        (Flag, Type, Body, Rest) = assemble_packet(Buf, self.sdu)
         if Flag is True and Type == TNS_MARKER:
             return (TNS_MARKER, b"")
         elif Flag is True and Rest == b"":
             return (Type, Data + Body)
         elif Flag is True and Rest != b"":
             return self.recv(Rest, Data + Body)
+        elif Body is not None:
+            # assemble_packet returned a continuation fragment (Flag=False
+            # but Body extracted). Consume the body and keep reading; the
+            # next packet's header is in Rest.
+            return self.recv(Rest or b"", Data + Body)
         else:
-            return False
+            # Not enough bytes yet for a full packet header / body. Keep
+            # what we have and read more.
+            return self.recv(Buf, Data)
 
     def disconnect(self) -> None:
         if self.sock:

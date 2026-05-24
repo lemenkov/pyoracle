@@ -449,7 +449,9 @@ class TestTnsBaseEncoders(unittest.TestCase):
         self.assertEqual(encode_token_oac(2), bytes([2,3,0,0,1,22,0,0,0,0,0,1,0]))
 
     def test_encode_token_oac_2(self):
-        self.assertEqual(encode_token_oac(None), bytes([1,3,0,0,2,15,160,0,1,16,0,0,2,3,103,1,0]))
+        # max_size is now 32767 (PL/SQL VARCHAR2 cap) instead of 4000 — see
+        # comment on encode_token_oac for why.
+        self.assertEqual(encode_token_oac(None), bytes([1,3,0,0,2,127,255,0,1,16,0,0,2,3,103,1,0]))
 
     def test_encode_token_oac_3(self):
         self.assertEqual(encode_token_oac(cursor()), bytes([102,3,0,0,1,1,0,0,0,0,2,3,103,1,0]))
@@ -478,7 +480,10 @@ class TestTnsBaseEncoders(unittest.TestCase):
         self.assertEqual(encode_token_rxd("hello"), bytes([5,104,101,108,108,111]))
 
     def test_encode_token_rxd_3(self):
-        self.assertEqual(encode_token_rxd(b"hello"), bytes([10,0,104,0,101,0,108,0,108,0,111]))
+        # Bytes now go on the wire verbatim as RAW. The old expectation
+        # (length-prefixed UTF-16BE) came from a now-fixed bug that
+        # decoded bytes as UTF-8 first and re-encoded them.
+        self.assertEqual(encode_token_rxd(b"hello"), bytes([5,104,101,108,108,111]))
 
     def test_encode_token_rxd_4(self):
         self.assertEqual(encode_token_rxd(1024), bytes([3,194,11,25]))
