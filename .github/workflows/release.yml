@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: © 2026 Peter Lemenkov
+# SPDX-License-Identifier: CC0-1.0
+
+name: Release
+
+on:
+  push:
+    tags:
+      # Matches the existing convention (0.1, 0.2, …) plus v-prefixed
+      # tags for future flexibility.
+      - '[0-9]+.[0-9]+'
+      - '[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write   # required by `gh release create`
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Full history so the auto-generated notes can reach the
+          # previous tag for the "Full Changelog" diff link.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install build + runtime dependencies
+        run: pip install --upgrade pip build pycryptodome
+
+      - name: Run offline test suite
+        # Gate the release on the offline-safe tests. The DB-backed
+        # integration tests stay opt-in via PYORACLE_TEST_USER and are
+        # not run here — they need a live Oracle and can't gate CI.
+        run: python -m unittest -v
+                tests.test_crypto
+                tests.test_tns_decode
+                tests.test_tns_encode
+
+      - name: Build sdist + wheel
+        run: python -m build
+
+      - name: Verify build artifacts
+        run: |
+          ls -la dist/
+          python -m pip install --user twine
+          python -m twine check dist/*
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # `--generate-notes` produces GitHub's standard auto-generated
+          # release summary: "What's Changed" (PRs since the previous
+          # tag, or commits if no PRs), "New Contributors", and a "Full
+          # Changelog" comparison link. Same format as clicking
+          # "Generate release notes" in the GitHub UI.
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "pyoracle ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --verify-tag \
+            dist/*
