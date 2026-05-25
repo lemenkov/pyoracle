@@ -136,57 +136,70 @@ class OracleConnect:
         return Ctx.wrap_socket(RawSock, server_hostname=Server)
 
     def handle_login(self) -> int | None:
-        (Type, Packet) = self.recv(b"", b"")
-        match Type:
-            case t if t == TNS_ACCEPT:
-                logger.debug("handle_login: accept")
-                # Extract negotiated SDU from the accept body
-                (Ver, Opts, Sdu) = struct.unpack(">hhh", Packet[:6])
-                self.sdu = Sdu
-                self.conn_state = CONN_STATE_CONNECTED
-                logger.debug("handle_login: Ver=%s, Opts=%s, Sdu=%s", Ver, Opts, Sdu)
-                Data = encode_dictionary(self._make_dict(DictionaryType.pro))
-                self.send(TNS_DATA, Data)
-                return self.handle_login()
-            case t if t == TNS_DATA:
-                match Packet[0]:
-                    case p if p == TTI_PRO:
-                        logger.debug("handle_login: recv PRO")
-                        Data = encode_dictionary(self._make_dict(DictionaryType.dty))
-                        self.send(TNS_DATA, Data)
-                    case p if p == TTI_DTY:
-                        logger.debug("handle_login: recv DTY")
-                        Data = encode_dictionary(self._make_dict(DictionaryType.sess))
-                        self.send(TNS_DATA, Data)
-                    case p if p == TTI_RPA:
-                        logger.debug("handle_login: recv RPA")
-                        return self._handle_rpa(Packet[1:])
-                    case p if p == TTI_WRN:
-                        logger.debug("handle_login: recv WRN %s", Packet[1:])
-                    case _:
-                        logger.debug("handle_login: unknown token %s", Packet[0])
-                return self.handle_login()
-            case t if t == TNS_MARKER:
-                logger.debug("handle_login: marker")
-                # Respond to marker with same marker pattern
-                self.send(TNS_MARKER, b"\x01\x00\x02")
-                return self.handle_login()
-            case t if t == TNS_REDIRECT:
-                logger.debug("handle_login: redirect %s", Packet)
-                # FIXME: parse redirect address and reconnect
-            case t if t == TNS_REFUSE:
-                logger.debug("handle_login: refuse")
-                self.disconnect()
+        # Iterative login state machine. Each round either: completes the
+        # handshake (TTI_RPA → _handle_rpa), terminates (TNS_REFUSE /
+        # unexpected / EOF), or sends the next request and loops to read
+        # the server's reply. Was previously recursive — a few-round
+        # handshake could approach Python's default recursion limit, and
+        # an EOF during the handshake crashed unpacking `recv() → False`.
+        while True:
+            Received = self.recv(b"", b"")
+            if Received is False:
+                # Peer closed during handshake.
+                logger.debug("handle_login: connection closed by peer")
                 return 1
-            case t if t == TNS_RESEND:
-                logger.debug("handle_login: resend")
-                self.conn_state = CONN_STATE_AUTH_NEGOTIATE
-                Data = encode_dictionary(self._make_dict(DictionaryType.login))
-                self.send(TNS_CONNECT, Data)
-                return self.handle_login()
-            case _:
-                logger.debug("handle_login: unexpected %s", Type)
-                return 1
+            (Type, Packet) = Received
+            match Type:
+                case t if t == TNS_ACCEPT:
+                    logger.debug("handle_login: accept")
+                    # Extract negotiated SDU from the accept body
+                    (Ver, Opts, Sdu) = struct.unpack(">hhh", Packet[:6])
+                    self.sdu = Sdu
+                    self.conn_state = CONN_STATE_CONNECTED
+                    logger.debug("handle_login: Ver=%s, Opts=%s, Sdu=%s", Ver, Opts, Sdu)
+                    Data = encode_dictionary(self._make_dict(DictionaryType.pro))
+                    self.send(TNS_DATA, Data)
+                    continue
+                case t if t == TNS_DATA:
+                    match Packet[0]:
+                        case p if p == TTI_PRO:
+                            logger.debug("handle_login: recv PRO")
+                            Data = encode_dictionary(self._make_dict(DictionaryType.dty))
+                            self.send(TNS_DATA, Data)
+                        case p if p == TTI_DTY:
+                            logger.debug("handle_login: recv DTY")
+                            Data = encode_dictionary(self._make_dict(DictionaryType.sess))
+                            self.send(TNS_DATA, Data)
+                        case p if p == TTI_RPA:
+                            logger.debug("handle_login: recv RPA")
+                            return self._handle_rpa(Packet[1:])
+                        case p if p == TTI_WRN:
+                            logger.debug("handle_login: recv WRN %s", Packet[1:])
+                        case _:
+                            logger.debug("handle_login: unknown token %s", Packet[0])
+                    continue
+                case t if t == TNS_MARKER:
+                    logger.debug("handle_login: marker")
+                    # Respond to marker with same marker pattern
+                    self.send(TNS_MARKER, b"\x01\x00\x02")
+                    continue
+                case t if t == TNS_REDIRECT:
+                    logger.debug("handle_login: redirect %s", Packet)
+                    # FIXME: parse redirect address and reconnect
+                    return 1
+                case t if t == TNS_REFUSE:
+                    logger.debug("handle_login: refuse")
+                    self.disconnect()
+                    return 1
+                case t if t == TNS_RESEND:
+                    logger.debug("handle_login: resend")
+                    self.conn_state = CONN_STATE_AUTH_NEGOTIATE
+                    Data = encode_dictionary(self._make_dict(DictionaryType.login))
+                    self.send(TNS_CONNECT, Data)
+                    continue
+                case _:
+                    logger.debug("handle_login: unexpected %s", Type)
+                    return 1
 
     def _handle_rpa(self, Data: bytes) -> int | None:
         Result = decode_token_rpa(Data, None)
@@ -439,48 +452,72 @@ class OracleConnect:
         from oracle.tns import decode_packet
         if Acc is None:
             Acc = (None, None, [])
-        (Type, Packet) = self.recv(b"", b"")
-        match Type:
-            case t if t == TNS_DATA:
-                return decode_packet(Packet, Acc)
-            case t if t == TNS_MARKER:
-                logger.debug("response: marker")
-                self.send(TNS_MARKER, b"\x01\x00\x02")
-                return self._handle_response(Acc)
-            case _:
-                raise Exception("Unexpected response type", Type)
+        # Iterative TNS_MARKER passthrough — keep replying to markers
+        # until a real TNS_DATA arrives. (Was recursive; the recursion
+        # depth could in principle grow if the server sent many markers
+        # in a row, and EOF crashed unpacking `recv() → False`.)
+        while True:
+            Received = self.recv(b"", b"")
+            if Received is False:
+                raise Exception("Connection closed while awaiting response")
+            (Type, Packet) = Received
+            match Type:
+                case t if t == TNS_DATA:
+                    return decode_packet(Packet, Acc)
+                case t if t == TNS_MARKER:
+                    logger.debug("response: marker")
+                    self.send(TNS_MARKER, b"\x01\x00\x02")
+                    continue
+                case _:
+                    raise Exception("Unexpected response type", Type)
 
     def send(self, Type: int, Data: bytes | None) -> bool | None:
-        if Data is None:
-            logger.debug("Send OK")
-            return True
-        else:
+        # Iterative split-and-send. Was previously recursive, which blew
+        # Python's default recursion limit on payloads big enough to
+        # cross more than a few SDU boundaries (test_basic crashed with
+        # RecursionError on the auth handshake).
+        while Data is not None:
             (Packet, Rest) = encode_packet(Type, Data, self.sdu)
             self.sock.send(Packet)
-            self.send(Type, Rest)
+            Data = Rest
+        logger.debug("Send OK")
+        return True
 
     def recv(self, Acc: bytes, Data: bytes) -> tuple[int, bytes] | bool:
-        NetworkData = self.sock.recv(self.sdu)
-        if not NetworkData:
-            # Peer closed the connection.
-            return False
-        Buf = Acc + NetworkData
-        (Flag, Type, Body, Rest) = assemble_packet(Buf, self.sdu)
-        if Flag is True and Type == TNS_MARKER:
-            return (TNS_MARKER, b"")
-        elif Flag is True and Rest == b"":
-            return (Type, Data + Body)
-        elif Flag is True and Rest != b"":
-            return self.recv(Rest, Data + Body)
-        elif Body is not None:
-            # assemble_packet returned a continuation fragment (Flag=False
-            # but Body extracted). Consume the body and keep reading; the
-            # next packet's header is in Rest.
-            return self.recv(Rest or b"", Data + Body)
-        else:
-            # Not enough bytes yet for a full packet header / body. Keep
-            # what we have and read more.
-            return self.recv(Buf, Data)
+        # Iterative receive + reassemble. Was previously recursive — for a
+        # multi-KiB response (e.g. a LOB content fetch that spans many
+        # SDU-sized TCP segments) the recursion depth blew the default
+        # Python limit during the auth handshake on some setups.
+        while True:
+            NetworkData = self.sock.recv(self.sdu)
+            if not NetworkData:
+                # Peer closed the connection.
+                return False
+            Acc = Acc + NetworkData
+            # Drain as many complete packets as `Acc` already contains
+            # before going back to the socket for more bytes. Need at
+            # least 8 bytes for a TNS header before assemble_packet can
+            # do anything useful.
+            while len(Acc) >= 8:
+                (Flag, Type, Body, Rest) = assemble_packet(Acc, self.sdu)
+                if Flag is True and Type == TNS_MARKER:
+                    return (TNS_MARKER, b"")
+                if Flag is True and Rest == b"":
+                    return (Type, Data + Body)
+                if Flag is True and Rest != b"":
+                    Acc = Rest
+                    Data = Data + Body
+                    continue
+                if Body is not None:
+                    # Continuation fragment: Flag=False but a Body was
+                    # extracted. Consume the body and keep reading; the
+                    # next packet's header is in Rest (may be empty,
+                    # in which case the outer loop will read more).
+                    Acc = Rest or b""
+                    Data = Data + Body
+                    continue
+                # Not enough bytes yet for a full packet — back to recv.
+                break
 
     def disconnect(self) -> None:
         if self.sock:
