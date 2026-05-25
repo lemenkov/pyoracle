@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: © 2026 Peter Lemenkov
 # SPDX-License-Identifier: CC0-1.0
 
+.claude/
 *$py.class
 *.cover
 *.egg
