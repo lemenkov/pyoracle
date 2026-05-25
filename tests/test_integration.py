@@ -619,6 +619,32 @@ class ErrorAndRowcountIntegration(_IntegrationBase):
         self.assertIn("ORA-00001", str(ctx.exception))
         self.assertIn("unique constraint", str(ctx.exception))
 
+    # ----- PEP 249 exception subclass dispatch -----
+
+    def test_unique_constraint_raises_integrity_error(self):
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} (id NUMBER PRIMARY KEY)"
+        )
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (1)")
+        with self.assertRaises(oracle.IntegrityError):
+            self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (1)")
+
+    def test_invalid_number_raises_data_error(self):
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
+        with self.assertRaises(oracle.DataError):
+            self.cur.execute(f"INSERT INTO {self.TABLE} VALUES ('not-a-number')")
+
+    def test_missing_table_raises_programming_error(self):
+        with self.assertRaises(oracle.ProgrammingError):
+            self.cur.execute(f"SELECT * FROM nope_{os.getpid()}_xyz")
+
+    def test_subclass_still_catchable_as_database_error(self):
+        # All the subclasses inherit from DatabaseError, so existing
+        # callers that catch the base class keep working.
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
+        with self.assertRaises(oracle.DatabaseError):
+            self.cur.execute(f"INSERT INTO {self.TABLE} VALUES ('not-a-number')")
+
     def test_rowcount_insert_single(self):
         self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
         self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (1)")

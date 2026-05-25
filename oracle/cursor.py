@@ -5,6 +5,7 @@ import re
 
 from oracle.exceptions import (
     DatabaseError, InterfaceError, NotSupportedError, ProgrammingError,
+    from_ora_code,
 )
 
 
@@ -83,7 +84,7 @@ class Cursor:
 
         if OraCode not in (0, 1403):
             Detail = Message or f"ORA-{OraCode:05d}"
-            raise DatabaseError(Detail, code=OraCode)
+            raise from_ora_code(OraCode)(Detail, code=OraCode)
 
         ServerRowCount = None
         ColMeta = None
