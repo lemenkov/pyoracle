@@ -60,10 +60,13 @@ What works so far:
   object
 - Transaction control (commit, rollback, ping)
 - Multiple character set support
+- Cursor caching for DML: repeat `execute()` of the same INSERT /
+  UPDATE / DELETE reuses the server-side cursor handle and skips
+  the parse step. Cache size capped at 32 entries per connection
+  (LRU eviction)
 
 What is still in progress:
 
-- Cursor caching
 - Very large LOB binds (more than one SDU's worth in a single bind).
   CLOB / BLOB inserts up to ~7 KiB on the default 8 KiB SDU work
   through the regular RAW / VARCHAR2 bind path today; past that the

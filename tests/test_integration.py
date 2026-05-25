@@ -676,6 +676,68 @@ class ErrorAndRowcountIntegration(_IntegrationBase):
 
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
+class CursorCacheIntegration(_IntegrationBase):
+    """Verify the cursor cache hands out a non-zero handle on the first
+    DML execute and reuses it (with a smaller wire request) on repeats."""
+
+    def test_repeated_dml_reuses_cursor(self):
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER, v VARCHAR2(10))")
+        Sql = f"INSERT INTO {self.TABLE} VALUES (:id, :v)"
+        # First execute: parses + caches.
+        self.cur.execute(Sql, {"id": 1, "v": "a"})
+        self.assertIn(Sql, self.conn._cursor_cache)
+        FirstCursor = self.conn._cursor_cache[Sql]
+        self.assertGreater(FirstCursor, 0)
+        # Second execute of identical SQL: same cached handle.
+        self.cur.execute(Sql, {"id": 2, "v": "b"})
+        self.assertEqual(self.conn._cursor_cache[Sql], FirstCursor)
+        # Different SQL → different cache entry.
+        Sql2 = f"UPDATE {self.TABLE} SET v = :v WHERE id = 1"
+        self.cur.execute(Sql2, {"v": "z"})
+        self.assertIn(Sql2, self.conn._cursor_cache)
+        self.assertNotEqual(
+            self.conn._cursor_cache[Sql], self.conn._cursor_cache[Sql2]
+        )
+        # And the rows are what we expect.
+        self.cur.execute(f"SELECT id, v FROM {self.TABLE} ORDER BY id")
+        self.assertEqual(self.cur.fetchall(), [(1, "z"), (2, "b")])
+
+    def test_cache_does_not_apply_to_select(self):
+        # SELECT cache is intentionally skipped — caching a SELECT would
+        # also need to remember the row format from the first DCB. Make
+        # sure repeat SELECT works (i.e., we re-parse cleanly each time)
+        # and that the cache stays SELECT-free.
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (1)")
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (2)")
+        Sql = f"SELECT id FROM {self.TABLE} WHERE id = :x"
+        self.cur.execute(Sql, {"x": 1})
+        self.assertEqual(self.cur.fetchall(), [(1,)])
+        self.cur.execute(Sql, {"x": 2})
+        self.assertEqual(self.cur.fetchall(), [(2,)])
+        self.assertNotIn(Sql, self.conn._cursor_cache)
+
+    def test_cache_evicts_oldest_when_full(self):
+        # Drive past `_cursor_cache_max` distinct DML statements and
+        # confirm the cache stays bounded and keeps the most recent.
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
+        Max = self.conn._cursor_cache_max
+        for i in range(Max + 5):
+            # Each statement text is distinct, so each occupies its own
+            # cache slot rather than sharing a handle.
+            self.cur.execute(
+                f"INSERT INTO {self.TABLE} /*{i}*/ VALUES ({i})"
+            )
+        self.assertEqual(len(self.conn._cursor_cache), Max)
+        # The most recent insert's SQL must still be cached; the
+        # earliest ones must have been evicted.
+        Latest = f"INSERT INTO {self.TABLE} /*{Max + 4}*/ VALUES ({Max + 4})"
+        Earliest = f"INSERT INTO {self.TABLE} /*0*/ VALUES (0)"
+        self.assertIn(Latest, self.conn._cursor_cache)
+        self.assertNotIn(Earliest, self.conn._cursor_cache)
+
+
+@unittest.skipUnless(_USER, _SKIP_REASON)
 class FetchFlowIntegration(_IntegrationBase):
     """Verify the follow-up TTI_FETCH flow.
 

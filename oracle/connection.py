@@ -73,6 +73,12 @@ class OracleConnect:
         self.server_version = 0
         self.session_id = None
         self.cursors: dict[int, int] = {}
+        # Cursor cache: SQL text → server-side cursor handle. Lets repeat
+        # `execute()` of the same SQL skip the parse step on the server.
+        # Capped to keep memory predictable; LRU eviction via insertion
+        # order (Python's regular dict).
+        self._cursor_cache: dict[str, int] = {}
+        self._cursor_cache_max = 32
 
     def _next_seq(self) -> int:
         seq = self.seq
@@ -271,20 +277,53 @@ class OracleConnect:
             Def = []
         Type = 'select' if Query.strip().upper().startswith('SELECT') else 'change'
         Auto = 1 if self.autocommit else 0
+        # Cursor cache lookup: if we've executed this SQL before and the
+        # server returned a non-zero cursor id, reuse that handle and
+        # skip the parse step. Limited to DML for now — caching SELECT
+        # would also need to remember the row format the server sent in
+        # the DCB during the first parse (a cached SELECT doesn't get
+        # a fresh DCB), and that's a wider change. `Def` (output
+        # definitions) varying also breaks the cache contract.
+        CachedCursor = 0
+        if Type == 'change' and not Def:
+            CachedCursor = self._cursor_cache.get(Query, 0)
+        SendQuery = "" if CachedCursor else Query
         QueryDict = {
             'type': Type,
             'auto': Auto,
             'fetch': self.fetch,
             'server_version': self.server_version,
-            'cursor': 0,
-            'query': Query,
+            'cursor': CachedCursor,
+            'query': SendQuery,
             'bind': Bind,
             'batch': [],
             'def': Def,
         }
         Data = encode_dictionary(self._make_dict(DictionaryType.exec, query=QueryDict))
         self.send(TNS_DATA, Data)
-        Result = self._handle_response()
+        try:
+            Result = self._handle_response()
+        except Exception:
+            # If reusing a cached cursor blew up, drop it from the cache
+            # so the next attempt re-parses from scratch.
+            if CachedCursor:
+                self._cursor_cache.pop(Query, None)
+            raise
+        # Stash the cursor id the server returned so the next execute of
+        # the same SQL can skip parsing. Same scoping as the lookup:
+        # DML only, no Def overrides.
+        if (Type == 'change' and not Def
+                and isinstance(Result, tuple) and len(Result) >= 3
+                and isinstance(Result[2], int) and Result[2] > 0
+                and Result[1] in (0, 1403)):
+            CursorId = Result[2]
+            # LRU bump: move the entry to the end on hit; evict the oldest
+            # entry when the cache fills up.
+            self._cursor_cache.pop(Query, None)
+            self._cursor_cache[Query] = CursorId
+            while len(self._cursor_cache) > self._cursor_cache_max:
+                Oldest = next(iter(self._cursor_cache))
+                self._cursor_cache.pop(Oldest, None)
         return self._drain_cursor(Result)
 
     def _drain_cursor(self, Result: object) -> object:
