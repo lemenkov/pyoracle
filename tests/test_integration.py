@@ -944,6 +944,97 @@ class LOBIntegration(_IntegrationBase):
         self.assertEqual(Got, Payload)
 
 
+@unittest.skipUnless(_USER, _SKIP_REASON)
+class PoolIntegration(unittest.TestCase):
+    """Verify the connection pool: pre-warm, acquire/release, capacity,
+    and timeout behaviour."""
+
+    def _kwargs(self, **extra):
+        return dict(
+            host=_HOST, port=_PORT,
+            user=_USER, password=_PASSWORD,
+            service_name=_SERVICE,
+            autocommit=True,
+            **extra,
+        )
+
+    def test_pre_warms_to_min_and_runs_query(self):
+        Pool = oracle.create_pool(min=2, max=3, **self._kwargs())
+        try:
+            self.assertEqual(Pool.opened, 2)
+            self.assertEqual(Pool.busy, 0)
+            with Pool.acquire() as Conn:
+                self.assertEqual(Pool.busy, 1)
+                Cur = Conn.cursor()
+                Cur.execute("SELECT 1 FROM dual")
+                self.assertEqual(Cur.fetchone(), (1,))
+            self.assertEqual(Pool.busy, 0)
+        finally:
+            Pool.close()
+
+    def test_grows_to_max_and_releases_for_reuse(self):
+        Pool = oracle.create_pool(min=1, max=3, **self._kwargs())
+        try:
+            G1 = Pool.acquire(); G1.__enter__()
+            G2 = Pool.acquire(); G2.__enter__()
+            G3 = Pool.acquire(); G3.__enter__()
+            # All three checked out; pool can't grow further.
+            self.assertEqual(Pool.busy, 3)
+            self.assertEqual(Pool.opened, 3)
+            G1.__exit__(None, None, None)
+            self.assertEqual(Pool.busy, 2)
+            # New acquire reuses, doesn't grow.
+            with Pool.acquire() as _:
+                self.assertEqual(Pool.busy, 3)
+                self.assertEqual(Pool.opened, 3)
+            G2.__exit__(None, None, None)
+            G3.__exit__(None, None, None)
+        finally:
+            Pool.close()
+
+    def test_acquire_times_out_when_full(self):
+        Pool = oracle.create_pool(min=1, max=1, timeout=0.5, **self._kwargs())
+        try:
+            G = Pool.acquire(); G.__enter__()
+            try:
+                with self.assertRaises(oracle.InterfaceError):
+                    Pool.acquire()
+            finally:
+                G.__exit__(None, None, None)
+        finally:
+            Pool.close()
+
+    def test_acquire_after_close_raises(self):
+        Pool = oracle.create_pool(min=1, max=2, **self._kwargs())
+        Pool.close()
+        with self.assertRaises(oracle.InterfaceError):
+            Pool.acquire()
+
+    def test_health_check_replaces_dead_connection(self):
+        # idle_timeout=0 forces a health-check on every acquire. Kill
+        # the underlying socket between release and acquire and verify
+        # the pool transparently swaps in a fresh connection.
+        Pool = oracle.create_pool(min=1, max=2, idle_timeout=0,
+                                   **self._kwargs())
+        try:
+            G = Pool.acquire()
+            Conn = G.__enter__()
+            G.__exit__(None, None, None)
+            # Sabotage the underlying socket.
+            try:
+                Conn.sock.close()
+            except Exception:
+                pass
+            # Next acquire must succeed (with a fresh connection,
+            # ping caught the dead one).
+            with Pool.acquire() as Conn2:
+                Cur = Conn2.cursor()
+                Cur.execute("SELECT 1 FROM dual")
+                self.assertEqual(Cur.fetchone(), (1,))
+        finally:
+            Pool.close()
+
+
 _BFILE_TEST_DIR = "PYORACLE_BFILE_TEST_DIR"
 _BFILE_TEST_FILE = "pyoracle_bfile_test.txt"
 _BFILE_TEST_CONTENT = b"hello bfile from disk"

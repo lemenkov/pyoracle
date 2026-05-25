@@ -64,6 +64,12 @@ What works so far:
   UPDATE / DELETE reuses the server-side cursor handle and skips
   the parse step. Cache size capped at 32 entries per connection
   (LRU eviction)
+- Connection pool: `oracle.create_pool(host=..., user=...,
+  password=..., service_name=..., min=2, max=10)` returns a
+  thread-safe pool of warm authenticated connections. `pool.acquire()`
+  returns a context manager that releases on `__exit__`. Idle
+  connections health-check on next acquire (configurable via
+  `idle_timeout`)
 
 What is still in progress:
 
@@ -77,7 +83,6 @@ What is still in progress:
   locator) — that bypasses the SDU ceiling. Until then, content past
   ~7 KiB needs to be loaded server-side via `DBMS_LOB` / SQL
   literals.
-- Connection pooling
 
 ## Requirements
 
