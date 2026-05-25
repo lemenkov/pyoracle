@@ -19,6 +19,34 @@ import struct
 
 logger = logging.getLogger(__name__)
 
+# Server-side helper used by `OracleConnect.bfile_read`. Reads a BFILE
+# end-to-end into a temporary BLOB and returns that BLOB by value, which
+# lets the client get the file contents back over the regular CLOB/BLOB
+# wire path without needing a BFILE-specific TTI_LOBOPS OPEN opcode.
+# Created lazily on first BFILE read; CREATE OR REPLACE so a stale
+# version from an earlier driver release gets overwritten.
+_BFILE_HELPER_NAME = "pyoracle_bfile_read"
+_BFILE_HELPER_SQL = """\
+CREATE OR REPLACE FUNCTION pyoracle_bfile_read (
+    p_dir IN VARCHAR2,
+    p_file IN VARCHAR2
+) RETURN BLOB IS
+    loc BFILE := BFILENAME(p_dir, p_file);
+    result BLOB;
+    src_offset INTEGER := 1;
+    dst_offset INTEGER := 1;
+    src_len INTEGER;
+BEGIN
+    DBMS_LOB.CREATETEMPORARY(result, TRUE);
+    DBMS_LOB.FILEOPEN(loc, DBMS_LOB.LOB_READONLY);
+    src_len := DBMS_LOB.GETLENGTH(loc);
+    DBMS_LOB.LOADBLOBFROMFILE(result, loc, src_len, dst_offset, src_offset);
+    DBMS_LOB.FILECLOSE(loc);
+    RETURN result;
+END;
+"""
+
+
 class OracleConnect:
     def __init__(self, host: str = "localhost", port: int = 1521, user: str = "", password: str = "", sid: str = "", service_name: str = "", ssl: object = None, socket_options: object = None, timeout: int = 15000, autocommit: bool = True, fetch: int = 15, role: int = 0, prelim: int = 0, sdu: int = 8192, charset: str = "utf-8", app_name: str = "pyoracle"):
         self.host = host
@@ -328,6 +356,41 @@ class OracleConnect:
         if DataType == TNS_TYPE_CLOB:
             return Content.decode('utf-16-be', errors='replace')
         return Content
+
+    def bfile_read(self, directory_name: str, file_name: str) -> bytes:
+        # BFILE READ goes through a server-side helper that does the
+        # DBMS_LOB.FILEOPEN / READ / FILECLOSE dance into a temporary
+        # BLOB, then returns that BLOB by value. The driver creates
+        # the helper on first use, then re-uses it across calls.
+        #
+        # Why the helper instead of inlining everything in TTI_LOBOPS:
+        # BFILEs need an explicit FILEOPEN before READ, and the LOBOPS
+        # opcode for that hasn't been reverse-engineered (the unmodified
+        # READ opcode returns empty bytes against an unopened BFILE).
+        # The helper sidesteps the opcode question by going through
+        # PL/SQL — and uses two same-type VARCHAR2 binds so it also
+        # sidesteps the mixed-type bind bug (#13).
+        from oracle.exceptions import DatabaseError
+        Cur = self.cursor()
+        try:
+            Cur.execute(
+                f"SELECT {_BFILE_HELPER_NAME}(:d, :f) FROM DUAL",
+                {"d": directory_name, "f": file_name},
+            )
+        except DatabaseError as exc:
+            # ORA-00904 (invalid identifier) or ORA-06550 (PL/SQL compile
+            # — "PLS-00201: identifier must be declared") both mean the
+            # helper isn't installed yet. Install it and retry.
+            if exc.code not in (904, 6550):
+                raise
+            Install = self.cursor()
+            Install.execute(_BFILE_HELPER_SQL)
+            Cur = self.cursor()
+            Cur.execute(
+                f"SELECT {_BFILE_HELPER_NAME}(:d, :f) FROM DUAL",
+                {"d": directory_name, "f": file_name},
+            )
+        return Cur.fetchone()[0]
 
     def _read_lob_response(self) -> bytes:
         # Walk the LOBOPS response packets, accumulating LOB_DATA chunks

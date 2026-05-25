@@ -12,6 +12,12 @@
 # is woven into the same block and we could pluck it out without a round-
 # trip. We don't bother — going through TTI_LOBOPS works for inline and
 # out-of-line content uniformly and is simpler.
+#
+# BFILE locators have a different layout (43+ bytes carrying the directory
+# name and filename in plain ASCII) and require an explicit FILEOPEN before
+# READ — the LOBOPS opcode for that hasn't been reverse-engineered. We
+# work around it via a tiny server-side helper function that does the
+# FILEOPEN/READ/FILECLOSE dance and returns a temporary BLOB.
 
 from oracle.tns_consts import (
     TNS_TYPE_BFILE, TNS_TYPE_BLOB, TNS_TYPE_CLOB,
@@ -42,9 +48,59 @@ class LOB:
         return self.data_type == TNS_TYPE_CLOB
 
     @property
+    def is_file(self) -> bool:
+        return self.data_type == TNS_TYPE_BFILE
+
+    @property
+    def directory_name(self) -> str | None:
+        # BFILE only: the DIRECTORY object name from the locator. Returns
+        # None for non-BFILE LOBs and for malformed BFILE locators.
+        parts = self._parse_bfile_locator()
+        return parts[0] if parts else None
+
+    @property
+    def filename(self) -> str | None:
+        # BFILE only: the filename portion of the locator.
+        parts = self._parse_bfile_locator()
+        return parts[1] if parts else None
+
+    def _parse_bfile_locator(self) -> tuple[str, str] | None:
+        # BFILE locator wire format (43+ bytes):
+        #   ub2 BE  inner_length      offset 0..1
+        #   16 bytes  flags / metadata
+        #   ub1     dir_name_length   offset 17
+        #   N bytes dir_name (ASCII)
+        #   ub1 0x00
+        #   ub1     filename_length
+        #   M bytes filename (ASCII)
+        # Anchored by parsing the two length-prefixed ASCII strings.
+        if not self.is_file or len(self.raw) < 19:
+            return None
+        try:
+            DirLen = self.raw[17]
+            DirStart = 18
+            DirEnd = DirStart + DirLen
+            if DirEnd + 1 >= len(self.raw):
+                return None
+            Directory = self.raw[DirStart:DirEnd].decode("ascii")
+            # next byte is a 0x00 separator, then the filename length
+            FileLen = self.raw[DirEnd + 1]
+            FileStart = DirEnd + 2
+            FileEnd = FileStart + FileLen
+            if FileEnd > len(self.raw):
+                return None
+            Filename = self.raw[FileStart:FileEnd].decode("ascii")
+            return (Directory, Filename)
+        except (UnicodeDecodeError, IndexError):
+            return None
+
+    @property
     def content_size(self) -> int:
-        # Size of the inline content section, in bytes. Used as a fast path
-        # for EMPTY_CLOB() / EMPTY_BLOB() (returns 0) without round-tripping.
+        # Size of the inline content section for *regular* CLOB / BLOB
+        # locators. Always 0 for BFILE and temporary-LOB locators (those
+        # are shorter than the regular 102-byte overhead and don't carry
+        # inline content — their content lives server-side and only
+        # comes back via the TTI_LOBOPS round-trip).
         if len(self.raw) <= _LOCATOR_OVERHEAD:
             return 0
         return len(self.raw) - _LOCATOR_OVERHEAD
@@ -52,12 +108,25 @@ class LOB:
     def read(self) -> str | bytes:
         # Round-trip TTI_LOBOPS READ to materialise the actual content.
         # CLOB / NCLOB decode UTF-16BE to `str`; BLOB / BFILE surface as
-        # raw `bytes`. Empty LOBs short-circuit without a round-trip.
-        if self.content_size == 0:
+        # raw `bytes`. Truly-empty regular LOBs (EMPTY_CLOB() /
+        # EMPTY_BLOB() — exactly the locator overhead, no inline content)
+        # short-circuit without a round-trip. BFILE and temporary-LOB
+        # locators are *shorter* than the regular overhead but still
+        # carry server-side content, so they round-trip normally.
+        if len(self.raw) == _LOCATOR_OVERHEAD:
             return "" if self.is_character else b""
         if self._connection is None:
             from oracle.exceptions import InterfaceError
             raise InterfaceError("LOB has no connection to read from")
+        if self.is_file:
+            # BFILE: TTI_LOBOPS READ alone returns empty because BFILEs
+            # need an explicit FILEOPEN before reading. Route through a
+            # server-side helper that does FILEOPEN + READ + FILECLOSE
+            # and returns a temporary BLOB.
+            parts = self._parse_bfile_locator()
+            if parts is None:
+                raise ValueError("malformed BFILE locator")
+            return self._connection.bfile_read(*parts)
         return self._connection.lob_read(self.raw, self.data_type)
 
     def __repr__(self) -> str:

@@ -882,6 +882,70 @@ class LOBIntegration(_IntegrationBase):
         self.assertEqual(Got, Payload)
 
 
+_BFILE_TEST_DIR = "PYORACLE_BFILE_TEST_DIR"
+_BFILE_TEST_FILE = "pyoracle_bfile_test.txt"
+_BFILE_TEST_CONTENT = b"hello bfile from disk"
+
+
+@unittest.skipUnless(
+    _USER and os.environ.get("PYORACLE_TEST_BFILE_DIR"),
+    "BFILE tests need PYORACLE_TEST_BFILE_DIR (Oracle DIRECTORY object "
+    "name that already exists, with READ granted to the test user, plus "
+    "a file named `pyoracle_bfile_test.txt` containing the text "
+    "'hello bfile from disk'). The test user also needs EXECUTE on "
+    "DBMS_LOB and CREATE PROCEDURE so the helper function can install "
+    "itself on first call.",
+)
+class BFILEIntegration(unittest.TestCase):
+    """Verify BFILE read round-trips."""
+
+    def setUp(self):
+        self.conn = oracle.connect(
+            host=os.environ.get("PYORACLE_TEST_HOST", "localhost"),
+            port=int(os.environ.get("PYORACLE_TEST_PORT", "1521")),
+            user=os.environ["PYORACLE_TEST_USER"],
+            password=os.environ["PYORACLE_TEST_PASSWORD"],
+            service_name=os.environ.get("PYORACLE_TEST_SERVICE", "XE"),
+            autocommit=True,
+        )
+        self.cur = self.conn.cursor()
+        self.dir = os.environ["PYORACLE_TEST_BFILE_DIR"]
+
+    def tearDown(self):
+        self.conn.close()
+
+    def test_bfile_select_returns_file_contents(self):
+        # The user-facing path: a plain SELECT of a BFILE column returns
+        # the file content as bytes (via the auto-resolve in Cursor.execute).
+        self.cur.execute(
+            "SELECT BFILENAME(:d, :f) FROM DUAL",
+            {"d": self.dir, "f": _BFILE_TEST_FILE},
+        )
+        (Got,) = self.cur.fetchone()
+        self.assertEqual(Got, _BFILE_TEST_CONTENT)
+
+    def test_bfile_locator_parsing(self):
+        # The LOB-object surface: directory_name / filename / is_file
+        # attributes from the locator bytes. Auto-resolve has to be off
+        # to see the LOB object before it's read.
+        import oracle.cursor as _cm
+        Saved = _cm._resolve_lobs
+        _cm._resolve_lobs = lambda c, r: r
+        try:
+            self.cur.execute(
+                "SELECT BFILENAME(:d, :f) FROM DUAL",
+                {"d": self.dir, "f": _BFILE_TEST_FILE},
+            )
+            (Lob,) = self.cur.fetchone()
+        finally:
+            _cm._resolve_lobs = Saved
+        self.assertTrue(Lob.is_file)
+        self.assertTrue(Lob.is_binary)
+        self.assertFalse(Lob.is_character)
+        self.assertEqual(Lob.directory_name, self.dir)
+        self.assertEqual(Lob.filename, _BFILE_TEST_FILE)
+
+
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class SSLIntegration(unittest.TestCase):
     """Verify the TLS wrap by talking to Oracle through a local TLS proxy.

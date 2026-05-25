@@ -51,6 +51,13 @@ What works so far:
   `TTI_LOBOPS` READ for each non-empty LOB cell, materialising the
   content from the server. NULL LOBs come back as `None`;
   `EMPTY_CLOB()` / `EMPTY_BLOB()` as `""` / `b""`
+- BFILE read: SELECT of a `BFILENAME(...)` / BFILE column round-trips
+  the file contents as `bytes`. The driver auto-installs a small
+  server-side helper (`pyoracle_bfile_read`) on first use that does
+  the `DBMS_LOB.FILEOPEN` / `READ` / `FILECLOSE` dance and returns
+  the result as a temporary BLOB. The test user needs EXECUTE on
+  `DBMS_LOB`, CREATE PROCEDURE, and READ on the relevant DIRECTORY
+  object
 - Transaction control (commit, rollback, ping)
 - Multiple character set support
 
