@@ -26,7 +26,7 @@ import struct
 logger = logging.getLogger(__name__)
 
 def assemble_packet(Data: bytes, Length: int) -> tuple[bool, int | None, bytes | None, bytes | None]:
-    (PacketSize, PacketFlags, Type, Flags, Zero) = struct.unpack(">hhBBh", Data[:8])
+    (PacketSize, PacketFlags, Type, Flags, Zero) = struct.unpack(">HhBBh", Data[:8])
     if Type == TNS_DATA and Zero == 0:
         BodySize = PacketSize - 10
         Rest = Data[10:]
@@ -500,12 +500,16 @@ def encode_packet(Type: int, Data: bytes, Length: int) -> tuple[bytes, bytes | N
         if (PacketSize > Length) and (BodySize < len(Data)):
             PacketBody = Data[:BodySize]
             Rest = Data[BodySize:]
-            return (struct.pack(">hhBBhBI", PacketSize, 0, Type, 0, 0, 0, 32) + PacketBody, Rest)
+            return (struct.pack(">HhBBhBI", PacketSize, 0, Type, 0, 0, 0, 32) + PacketBody, Rest)
         else:
-            return (struct.pack(">hhBBhh", PacketSize, 0, Type, 0, 0, 0) + Data, None)
+            # PacketSize is a uint16 on the wire — use `>H` so requests
+            # in the 32 KiB..64 KiB range (e.g. mid-size LOB inserts done
+            # via a single PL/SQL block with multiple chunk binds) don't
+            # overflow signed-short range and crash with `struct.error`.
+            return (struct.pack(">HhBBhh", PacketSize, 0, Type, 0, 0, 0) + Data, None)
     else:
         PacketSize = len(Data) + 8
-        return (struct.pack(">hhBBh", PacketSize, 0, Type, 0, 0) + Data, None)
+        return (struct.pack(">HhBBh", PacketSize, 0, Type, 0, 0) + Data, None)
 
 def encode_dictionary(Dictionary: dict) -> bytes | tuple[bytes, bytes]:
     match Dictionary['type']:
