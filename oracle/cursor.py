@@ -189,16 +189,21 @@ def _resolve_lobs(Connection, Row: list) -> list:
 
 
 def _resolve_parameters(SQL: str, Params) -> list:
-    # Translate the caller-supplied parameters into a positional list in the
-    # order the placeholders first appear in the SQL. The wire protocol always
-    # sends bind values positionally; named placeholders (`:foo`) just give
-    # the caller a way to refer to them by name.
+    # Translate the caller-supplied parameters into a positional list. The
+    # wire protocol sends bind values positionally; named placeholders
+    # (`:foo`) just give the caller a way to refer to them by name.
+    #
+    # For plain SQL each `:name` occurrence is a distinct bind position
+    # — Oracle expects N values when `:name` appears N times. For PL/SQL
+    # blocks Oracle dedupes by unique placeholder name (per the OCI
+    # binding contract), so we emit each unique name once. The
+    # difference is detected on the SQL itself by `_is_plsql`.
     if Params is None:
         return []
     if isinstance(Params, (list, tuple)):
         return list(Params)
     if isinstance(Params, dict):
-        Names = _extract_bind_names(SQL)
+        Names = _extract_bind_names(SQL, dedupe=_is_plsql(SQL))
         Lower = {str(k).lower(): v for k, v in Params.items()}
         Out = []
         for N in Names:
@@ -213,22 +218,39 @@ def _resolve_parameters(SQL: str, Params) -> list:
     )
 
 
-def _extract_bind_names(SQL: str) -> list[str]:
-    # First-occurrence order of `:name` placeholders, case-folded to lower,
-    # with quoted strings and SQL comments stripped so we don't match inside
-    # them.
+def _extract_bind_names(SQL: str, dedupe: bool = False) -> list[str]:
+    # `:name` placeholders in left-to-right SQL order, case-folded to
+    # lower, with quoted strings and SQL comments stripped so we don't
+    # match inside them.
+    #
+    # If `dedupe` is True (PL/SQL path), keep only the first occurrence
+    # of each name. Otherwise (plain SQL path) return every occurrence
+    # — Oracle expects one bind value per textual occurrence in DML.
     Cleaned = re.sub(r"'(?:''|[^'])*'", "''", SQL)
     Cleaned = re.sub(r'"(?:""|[^"])*"', '""', Cleaned)
     Cleaned = re.sub(r'--[^\n]*', '', Cleaned)
     Cleaned = re.sub(r'/\*.*?\*/', '', Cleaned, flags=re.S)
     Seen: list[str] = []
-    Found = set()
+    Found: set[str] = set()
     for M in _NAMED_BIND_RE.finditer(Cleaned):
         N = M.group(1).lower()
-        if N not in Found:
-            Found.add(N)
+        if dedupe:
+            if N not in Found:
+                Found.add(N)
+                Seen.append(N)
+        else:
             Seen.append(N)
     return Seen
+
+
+def _is_plsql(SQL: str) -> bool:
+    # PL/SQL blocks start with BEGIN or DECLARE after stripping leading
+    # whitespace and SQL comments. Anonymous blocks, packaged calls
+    # wrapped in BEGIN...END;, and DECLARE...BEGIN forms all match.
+    Stripped = re.sub(r'^\s*(?:--[^\n]*\n|/\*.*?\*/|\s)+', '',
+                      SQL, flags=re.S)
+    Head = Stripped[:8].upper()
+    return Head.startswith("BEGIN") or Head.startswith("DECLARE")
 
 
 def _column_description(Col: dict) -> tuple:

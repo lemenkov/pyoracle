@@ -487,13 +487,39 @@ class BindIntegration(_IntegrationBase):
         self.assertEqual(self.cur.fetchall(), [(11, "case")])
 
     def test_named_binds_repeated_placeholder(self):
-        # `:x` referenced twice in the SQL, but only one bind value is needed.
+        # `:x` referenced twice in the SQL — the same value gets bound to
+        # each textual occurrence. Each occurrence is a distinct bind
+        # position on the wire (Oracle expects N OAC + N RXD entries for
+        # N placeholder occurrences in plain SQL), but the caller only
+        # has to provide one mapping.
         self.cur.execute(f"CREATE TABLE {self.TABLE} (a NUMBER, b NUMBER)")
         self.cur.execute(
             f"INSERT INTO {self.TABLE} VALUES (:x, :x)", {"x": 42}
         )
         self.cur.execute(f"SELECT a, b FROM {self.TABLE}")
         self.assertEqual(self.cur.fetchall(), [(42, 42)])
+
+    def test_named_binds_repeated_in_predicate(self):
+        # Reproducer from issue #15: `:x` referenced twice in a WHERE
+        # clause used to trip ORA-01008 ("not all variables bound")
+        # because the resolver deduplicated by name and only sent one
+        # bind value where Oracle wanted two.
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (1)")
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (2)")
+        # Match-on-value
+        self.cur.execute(
+            f"SELECT id FROM {self.TABLE} WHERE id = :x OR :x IS NULL",
+            {"x": 1},
+        )
+        self.assertEqual(self.cur.fetchall(), [(1,)])
+        # Match-on-NULL: `:x IS NULL` triggers the second branch and
+        # returns every row regardless of value.
+        self.cur.execute(
+            f"SELECT id FROM {self.TABLE} WHERE id = :x OR :x IS NULL",
+            {"x": None},
+        )
+        self.assertEqual(sorted(self.cur.fetchall()), [(1,), (2,)])
 
     def test_named_binds_missing_key_raises(self):
         # ProgrammingError is the right slot in the PEP 249 hierarchy for
