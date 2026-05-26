@@ -1163,6 +1163,52 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
             if e.code != 942:
                 raise
 
+    async def test_ping_succeeds(self):
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            # Ping completes cleanly on a freshly-authenticated session;
+            # the test just verifies no exception escapes.
+            await Conn.ping()
+
+    async def test_commit_persists_dml(self):
+        # autocommit=False, then explicit commit. A second connection
+        # sees the row.
+        Kw = self._kwargs()
+        Kw["autocommit"] = False
+        async with await oracle.connect_async(**Kw) as Conn:
+            async with Conn.cursor() as Cur:
+                await self._drop_async(Cur, "PYORACLE_ASYNC_TX")
+                # CREATE TABLE auto-commits server-side regardless of the
+                # client flag, so we issue it first and then test commit /
+                # rollback against the rows.
+                await Cur.execute(
+                    "CREATE TABLE PYORACLE_ASYNC_TX (id NUMBER)"
+                )
+                await Cur.execute("INSERT INTO PYORACLE_ASYNC_TX VALUES (1)")
+                await Conn.commit()
+        async with await oracle.connect_async(**Kw) as Conn2:
+            async with Conn2.cursor() as Cur:
+                await Cur.execute("SELECT id FROM PYORACLE_ASYNC_TX")
+                self.assertEqual(await Cur.fetchall(), [(1,)])
+                await Cur.execute("DROP TABLE PYORACLE_ASYNC_TX")
+
+    async def test_rollback_discards_dml(self):
+        Kw = self._kwargs()
+        Kw["autocommit"] = False
+        async with await oracle.connect_async(**Kw) as Conn:
+            async with Conn.cursor() as Cur:
+                await self._drop_async(Cur, "PYORACLE_ASYNC_RB")
+                await Cur.execute(
+                    "CREATE TABLE PYORACLE_ASYNC_RB (id NUMBER)"
+                )
+                await Cur.execute("INSERT INTO PYORACLE_ASYNC_RB VALUES (1)")
+                await Cur.execute("INSERT INTO PYORACLE_ASYNC_RB VALUES (2)")
+                await Conn.rollback()
+                # After rollback, the table exists (DDL auto-committed)
+                # but the rows are gone.
+                await Cur.execute("SELECT COUNT(*) FROM PYORACLE_ASYNC_RB")
+                self.assertEqual(await Cur.fetchone(), (0,))
+                await Cur.execute("DROP TABLE PYORACLE_ASYNC_RB")
+
     async def test_lob_auto_resolve(self):
         # CLOB / BLOB / NULL / EMPTY all surface as Python str/bytes/None
         # through the auto-resolve in `AsyncCursor.execute`.

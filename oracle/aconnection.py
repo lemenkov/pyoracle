@@ -489,6 +489,29 @@ class AsyncOracleConnect:
             if OerSeen:
                 return Buffer
 
+    # ----- transaction control -----
+
+    async def commit(self) -> None:
+        from oracle.tns_consts import TTI_COMMIT
+        Data = encode_dictionary(self._make_dict(DictionaryType.tran,
+                                                  req=TTI_COMMIT))
+        await self.send(TNS_DATA, Data)
+        await self._handle_response()
+
+    async def rollback(self) -> None:
+        from oracle.tns_consts import TTI_ROLLBACK
+        Data = encode_dictionary(self._make_dict(DictionaryType.tran,
+                                                  req=TTI_ROLLBACK))
+        await self.send(TNS_DATA, Data)
+        await self._handle_response()
+
+    async def ping(self) -> None:
+        from oracle.tns_consts import TTI_PING
+        Data = encode_dictionary(self._make_dict(DictionaryType.tran,
+                                                  req=TTI_PING))
+        await self.send(TNS_DATA, Data)
+        await self._handle_response()
+
     # ----- teardown -----
 
     async def close(self) -> None:
