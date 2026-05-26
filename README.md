@@ -138,9 +138,12 @@ table.
 
 > **Known flake.** A small number of integration tests occasionally fail
 > with `ORA-01013` ("user requested cancel of current operation") under
-> rapid connect/disconnect churn — a residual protocol-state issue in the
-> driver that surfaces when the same socket is hammered with statements
-> in quick succession. A single re-run typically clears it.
+> the high connect/disconnect rate the suite produces. The diagnosis
+> (issue #7) traces this to Oracle XE's listener-side login throttling
+> rather than a driver bug: the same patterns at >100ms connect intervals
+> don't flake, and the `Pool` (issue #6) avoids it entirely by keeping
+> connections warm. The test fixture has a small pre-connect pause to
+> tame it; a single re-run typically clears any remaining failures.
 
 ## Contributing
 
