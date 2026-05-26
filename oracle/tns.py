@@ -592,21 +592,111 @@ def encode_dictionary_description(Dictionary: dict) -> bytes:
     return b"(DESCRIPTION=(CONNECT_DATA=(" + Sn + b")(CID=(PROGRAM=" + AppName + b")(HOST=" + Hostname + b")(USER=" + User + b")))(ADDRESS=(PROTOCOL=" + Proto + b")(HOST=" + Host + b")(PORT=" + Port + b")))"
 
 def encode_dictionary_dty(Dictionary: dict) -> bytes:
+    # TTI_DTY (Data Type Negotiation). Sent during the TTC handshake right
+    # after TTI_PRO. Tells the server which native Oracle data types this
+    # client understands and what wire representation it wants for each.
+    #
+    # On-wire structure:
+    #
+    #   TTI_DTY              1 byte   message token
+    #   charset_in           2 bytes  LE, NLS_LANGUAGE charset id (DB)
+    #   charset_out          2 bytes  LE, NLS_NCHAR    charset id (client)
+    #   flag                 1 byte   capability flag (1 = standard)
+    #   capability header   39 bytes  Wtf0 — client/version metadata
+    #   table count + pad    8 bytes  Wtf1 — count of entries that follow
+    #   identity table     980 bytes  Wtf2 — default "type N → repr N"
+    #                                 for type ids 1..245 (245 × 4 bytes)
+    #   override table     ~92 bytes  Wtf3 — explicit non-identity mappings,
+    #                                 terminated by `0 0`
+    #
+    # The full message is the same on every connection — none of it varies
+    # with the user's query workload. python-oracledb hard-codes the same
+    # bytes (with version-dependent tweaks); the OCI thick client builds
+    # them from a static C table at link time. We hardcode them as bytes
+    # literals here for the same reason: the table is the *protocol*
+    # capability surface, not anything we want to reason about per call.
     logger.debug("encode_dictionary_dty: %s", Dictionary)
-    # FIXME put utf8 into charset KV
     Charset = struct.pack("<H", CharsetDict.get(Dictionary['req'], UTF8_CHARSET))
-    Wtf0 = bytes([38,6,1,0,0,106,1,1,6,1,1,1,1,1,1,0,41,144,3,7,3,0,1,0,79,1,55,4,0,0,0,0,12,0,0,6,0,1,1])
-    Wtf1 = bytes([7,2,0,0,0,0,0,0])
-    Wtf2 = bytes(reduce(lambda y, z: y + z, [[]] + [ [x, x, 1, 0] for x in range(1,246)]))
-    Wtf3 = bytes([
-                2,2,10,0,3,2,10,0,4,2,10,0,5,1,1,0,6,2,10,0,7,2,10,0,9,1,1,0,12,12,10,0,13,0,14,0,15,
-                23,1,0,16,0,17,0,18,0,19,0,20,0,21,0,22,0,39,120,1,0,58,0,68,2,10,0,69,0,70,0,74,0,
-                6,0,91,2,10,0,94,1,1,0,95,23,1,0,96,96,1,0,97,96,1,0,104,11,1,0,105,0,108,109,1,0,
-                110,111,1,0,116,102,1,0,118,0,119,0,121,0,122,0,123,0,136,0,146,146,1,0,147,0,
-                152,2,10,0,153,2,10,0,154,2,10,0,155,1,1,0,156,12,10,0,172,2,10,0,209,0,3,0,0
+
+    # Capability header. The first three bytes (38,6,1) look like a
+    # version triple; the rest are flag bytes whose meaning we haven't
+    # reverse-engineered. Conservative defaults that match what every
+    # Oracle 11g-compatible client sends.
+    Wtf0 = bytes([
+        38, 6, 1, 0, 0, 106, 1, 1, 6, 1, 1, 1, 1, 1, 1, 0,
+        41, 144, 3, 7, 3, 0, 1, 0, 79, 1, 55, 4, 0, 0, 0, 0,
+        12, 0, 0, 6, 0, 1, 1,
     ])
-    # We use the same charset for IN and OUT
-    return  bytes([TTI_DTY]) + Charset + Charset + bytes([1]) + Wtf0 + Wtf1 + Wtf2 + Wtf3
+
+    # Count prefix for the identity table that follows. `7, 2, ...` looks
+    # like (group_count=7, sub_count=2, ...) but again unverified — the
+    # values are constant on the wire.
+    Wtf1 = bytes([7, 2, 0, 0, 0, 0, 0, 0])
+
+    # Identity map: for type id N in 1..245, emit (N, N, 1, 0) — "I know
+    # type N and want it on the wire as type N with format flag 1". This
+    # is the default assertion; Wtf3 overrides specific entries.
+    Wtf2 = bytes(reduce(lambda y, z: y + z,
+                        [[]] + [[x, x, 1, 0] for x in range(1, 246)]))
+
+    # Override table. Each entry is `(client_type, server_repr, format,
+    # flags)` — when this client encounters data of type `client_type`,
+    # negotiate `server_repr` as the wire representation with the given
+    # format. Terminated by `0, 0`. Annotated against oracle.tns_consts:
+    #
+    #   (2,  2, 10)   NUMBER   → NUMBER (extended precision format 10)
+    #   (3,  2, 10)   INTEGER  → NUMBER
+    #   (4,  2, 10)   FLOAT    → NUMBER
+    #   (5,  1,  1)   STRING   → VARCHAR
+    #   (6,  2, 10)   VARNUM   → NUMBER
+    #   (7,  2, 10)   DECIMAL  → NUMBER
+    #   (9,  1,  1)   VCS      → VARCHAR
+    #   (12,12, 10)   DATE     → DATE (format 10)
+    #   (15,23,  1)   VBI      → RAW
+    #   (39,120, 1)              named-type / collection variant
+    #   (91, 2, 10)              NUMBER variant
+    #   (94, 1,  1)   CHARZ    → VARCHAR
+    #   (95,23,  1)              RAW variant
+    #   (96,96,  1)   CHAR     → CHAR
+    #   (97,96,  1)   CHAR_VAR → CHAR
+    #   (104,11, 1)   ROWID    → RID (universal rowid → physical)
+    #   (108,109,1)   NAMEDTYP → ADT
+    #   (110,111,1)              → REF
+    #   (116,102,1)   RSET     → REFCURSOR
+    #   (146,146,1)              fixed-id self-map
+    #   (152..154,2,10)          extended NUMBER subtypes → NUMBER
+    #   (155, 1, 1)              → VARCHAR
+    #   (156,12, 10)             → DATE
+    #   (172, 2, 10)             → NUMBER
+    #   (209, 0,  3)  UROWID
+    #
+    # Single-pair entries like `(13, 0)` are unknown types we don't have
+    # a name for in tns_consts; they're left in for byte-level parity
+    # with what every other Oracle client sends.
+    Wtf3 = bytes([
+        2, 2, 10, 0, 3, 2, 10, 0, 4, 2, 10, 0, 5, 1, 1, 0,
+        6, 2, 10, 0, 7, 2, 10, 0, 9, 1, 1, 0, 12, 12, 10, 0,
+        13, 0, 14, 0,
+        15, 23, 1, 0, 16, 0, 17, 0, 18, 0, 19, 0, 20, 0, 21, 0, 22, 0,
+        39, 120, 1, 0,
+        58, 0,
+        68, 2, 10, 0, 69, 0, 70, 0, 74, 0,
+        6, 0,
+        91, 2, 10, 0, 94, 1, 1, 0, 95, 23, 1, 0,
+        96, 96, 1, 0, 97, 96, 1, 0,
+        104, 11, 1, 0, 105, 0,
+        108, 109, 1, 0, 110, 111, 1, 0,
+        116, 102, 1, 0,
+        118, 0, 119, 0, 121, 0, 122, 0, 123, 0, 136, 0,
+        146, 146, 1, 0, 147, 0,
+        152, 2, 10, 0, 153, 2, 10, 0, 154, 2, 10, 0,
+        155, 1, 1, 0, 156, 12, 10, 0,
+        172, 2, 10, 0,
+        209, 0, 3, 0,
+        0,  # terminator
+    ])
+    # Same charset for IN (server-side) and OUT (client-side) negotiation.
+    return bytes([TTI_DTY]) + Charset + Charset + bytes([1]) + Wtf0 + Wtf1 + Wtf2 + Wtf3
 
 def encode_dictionary_exec(Dictionary: dict) -> bytes:
     Type = Dictionary['query']['type']
