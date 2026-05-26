@@ -602,12 +602,12 @@ def encode_dictionary_dty(Dictionary: dict) -> bytes:
     #   charset_in           2 bytes  LE, NLS_LANGUAGE charset id (DB)
     #   charset_out          2 bytes  LE, NLS_NCHAR    charset id (client)
     #   flag                 1 byte   capability flag (1 = standard)
-    #   capability header   39 bytes  Wtf0 — client/version metadata
-    #   table count + pad    8 bytes  Wtf1 — count of entries that follow
-    #   identity table     980 bytes  Wtf2 — default "type N → repr N"
+    #   capability header   39 bytes  `CapabilityHeader` — version + flags
+    #   table count + pad    8 bytes  `TableHeader` — count of entries that follow
+    #   identity table     980 bytes  `IdentityMap` — default "type N → repr N"
     #                                 for type ids 1..245 (245 × 4 bytes)
-    #   override table     ~92 bytes  Wtf3 — explicit non-identity mappings,
-    #                                 terminated by `0 0`
+    #   override table     ~92 bytes  `TypeOverrides` — explicit non-identity
+    #                                 mappings, terminated by `0 0`
     #
     # The full message is the same on every connection — none of it varies
     # with the user's query workload. python-oracledb hard-codes the same
@@ -622,7 +622,7 @@ def encode_dictionary_dty(Dictionary: dict) -> bytes:
     # version triple; the rest are flag bytes whose meaning we haven't
     # reverse-engineered. Conservative defaults that match what every
     # Oracle 11g-compatible client sends.
-    Wtf0 = bytes([
+    CapabilityHeader = bytes([
         38, 6, 1, 0, 0, 106, 1, 1, 6, 1, 1, 1, 1, 1, 1, 0,
         41, 144, 3, 7, 3, 0, 1, 0, 79, 1, 55, 4, 0, 0, 0, 0,
         12, 0, 0, 6, 0, 1, 1,
@@ -631,13 +631,14 @@ def encode_dictionary_dty(Dictionary: dict) -> bytes:
     # Count prefix for the identity table that follows. `7, 2, ...` looks
     # like (group_count=7, sub_count=2, ...) but again unverified — the
     # values are constant on the wire.
-    Wtf1 = bytes([7, 2, 0, 0, 0, 0, 0, 0])
+    TableHeader = bytes([7, 2, 0, 0, 0, 0, 0, 0])
 
     # Identity map: for type id N in 1..245, emit (N, N, 1, 0) — "I know
     # type N and want it on the wire as type N with format flag 1". This
-    # is the default assertion; Wtf3 overrides specific entries.
-    Wtf2 = bytes(reduce(lambda y, z: y + z,
-                        [[]] + [[x, x, 1, 0] for x in range(1, 246)]))
+    # is the default assertion; `TypeOverrides` (below) overrides
+    # specific entries.
+    IdentityMap = bytes(reduce(lambda y, z: y + z,
+                               [[]] + [[x, x, 1, 0] for x in range(1, 246)]))
 
     # Override table. Each entry is `(client_type, server_repr, format,
     # flags)` — when this client encounters data of type `client_type`,
@@ -673,7 +674,7 @@ def encode_dictionary_dty(Dictionary: dict) -> bytes:
     # Single-pair entries like `(13, 0)` are unknown types we don't have
     # a name for in tns_consts; they're left in for byte-level parity
     # with what every other Oracle client sends.
-    Wtf3 = bytes([
+    TypeOverrides = bytes([
         2, 2, 10, 0, 3, 2, 10, 0, 4, 2, 10, 0, 5, 1, 1, 0,
         6, 2, 10, 0, 7, 2, 10, 0, 9, 1, 1, 0, 12, 12, 10, 0,
         13, 0, 14, 0,
@@ -696,7 +697,8 @@ def encode_dictionary_dty(Dictionary: dict) -> bytes:
         0,  # terminator
     ])
     # Same charset for IN (server-side) and OUT (client-side) negotiation.
-    return bytes([TTI_DTY]) + Charset + Charset + bytes([1]) + Wtf0 + Wtf1 + Wtf2 + Wtf3
+    return (bytes([TTI_DTY]) + Charset + Charset + bytes([1])
+            + CapabilityHeader + TableHeader + IdentityMap + TypeOverrides)
 
 def encode_dictionary_exec(Dictionary: dict) -> bytes:
     Type = Dictionary['query']['type']
