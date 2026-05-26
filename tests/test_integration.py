@@ -1071,6 +1071,92 @@ _BFILE_TEST_FILE = "pyoracle_bfile_test.txt"
 _BFILE_TEST_CONTENT = b"hello bfile from disk"
 
 
+@unittest.skipUnless(_USER, _SKIP_REASON)
+class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
+    """Verify the async surface: connect_async, AsyncCursor, fetch
+    flow, async iteration, context managers."""
+
+    def _kwargs(self):
+        return dict(
+            host=_HOST, port=_PORT,
+            user=_USER, password=_PASSWORD,
+            service_name=_SERVICE,
+            autocommit=True,
+        )
+
+    async def test_connect_and_simple_query(self):
+        Conn = await oracle.connect_async(**self._kwargs())
+        try:
+            Cur = Conn.cursor()
+            await Cur.execute("SELECT 1 FROM dual")
+            self.assertEqual(await Cur.fetchone(), (1,))
+            await Cur.close()
+        finally:
+            await Conn.close()
+
+    async def test_context_managers(self):
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                await Cur.execute("SELECT 'hi' FROM dual")
+                self.assertEqual(await Cur.fetchone(), ("hi",))
+
+    async def test_async_iteration_yields_all_rows(self):
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                await Cur.execute(
+                    "SELECT LEVEL FROM dual CONNECT BY LEVEL <= 5"
+                )
+                Rows = [row async for row in Cur]
+                self.assertEqual(Rows, [(1,), (2,), (3,), (4,), (5,)])
+
+    async def test_fetchall_and_fetchmany(self):
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                await Cur.execute(
+                    "SELECT LEVEL FROM dual CONNECT BY LEVEL <= 4"
+                )
+                # fetchmany(2) → first batch
+                First = await Cur.fetchmany(2)
+                self.assertEqual(First, [(1,), (2,)])
+                # fetchall() → remainder
+                Rest = await Cur.fetchall()
+                self.assertEqual(Rest, [(3,), (4,)])
+
+    async def test_named_bind(self):
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                await Cur.execute(
+                    "SELECT :v FROM dual", {"v": 42}
+                )
+                self.assertEqual(await Cur.fetchone(), (42,))
+
+    async def test_ddl_dml_roundtrip(self):
+        # DDL → DML → SELECT round-trip using a scratch table.
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                try:
+                    await Cur.execute("DROP TABLE PYORACLE_ASYNC_TEST")
+                except oracle.DatabaseError as e:
+                    if e.code != 942:
+                        raise
+                await Cur.execute(
+                    "CREATE TABLE PYORACLE_ASYNC_TEST (id NUMBER, v VARCHAR2(10))"
+                )
+                for n in range(3):
+                    await Cur.execute(
+                        "INSERT INTO PYORACLE_ASYNC_TEST VALUES (:id, :v)",
+                        {"id": n, "v": f"r{n}"},
+                    )
+                await Cur.execute(
+                    "SELECT id, v FROM PYORACLE_ASYNC_TEST ORDER BY id"
+                )
+                self.assertEqual(
+                    await Cur.fetchall(),
+                    [(0, "r0"), (1, "r1"), (2, "r2")],
+                )
+                await Cur.execute("DROP TABLE PYORACLE_ASYNC_TEST")
+
+
 @unittest.skipUnless(
     _USER and os.environ.get("PYORACLE_TEST_BFILE_DIR"),
     "BFILE tests need PYORACLE_TEST_BFILE_DIR (Oracle DIRECTORY object "

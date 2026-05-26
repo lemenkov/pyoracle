@@ -70,6 +70,12 @@ What works so far:
   returns a context manager that releases on `__exit__`. Idle
   connections health-check on next acquire (configurable via
   `idle_timeout`)
+- Async (asyncio) API: `await oracle.connect_async(...)` returns
+  an `AsyncOracleConnect`; `conn.cursor()` returns an
+  `AsyncCursor` with `await cur.execute(...)`, `await cur.fetchone()`,
+  `async for row in cur` iteration, and `async with` context
+  managers. Same protocol code, same cursor cache, same bind
+  semantics as the sync path
 
 What is still in progress:
 

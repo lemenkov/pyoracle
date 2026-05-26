@@ -6,6 +6,7 @@ apilevel = "2.0"
 threadsafety = 1            # threads may share the module, not connections
 paramstyle = "named"        # bind variables not yet wired through Cursor
 
+from oracle.aconnection import AsyncOracleConnect
 from oracle.connection import OracleConnect
 from oracle.exceptions import (
     DataError, DatabaseError, Error, IntegrityError, InterfaceError,
@@ -19,6 +20,14 @@ def connect(*args, **kwargs) -> OracleConnect:
     """PEP 249 connect() factory. Returns a connected OracleConnect."""
     Conn = OracleConnect(*args, **kwargs)
     Conn.connect()
+    return Conn
+
+
+async def connect_async(*args, **kwargs) -> AsyncOracleConnect:
+    """Async counterpart to `connect()`. Returns a connected
+    `AsyncOracleConnect`. Same constructor arguments as `connect`."""
+    Conn = AsyncOracleConnect(*args, **kwargs)
+    await Conn.connect()
     return Conn
 
 
@@ -46,7 +55,8 @@ def create_pool(*args, **kwargs) -> Pool:
 
 __all__ = [
     "apilevel", "threadsafety", "paramstyle",
-    "connect", "create_pool", "OracleConnect", "Pool",
+    "connect", "connect_async", "create_pool",
+    "OracleConnect", "AsyncOracleConnect", "Pool",
     "Warning", "Error", "InterfaceError", "DatabaseError", "DataError",
     "OperationalError", "IntegrityError", "InternalError",
     "ProgrammingError", "NotSupportedError",
