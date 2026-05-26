@@ -121,6 +121,52 @@ with oracle.connect(host="dbhost", port=1521, user="scott",
             print(row)
 ```
 
+## Quick start (async)
+
+```python
+import asyncio
+import oracle
+
+
+async def main():
+    async with await oracle.connect_async(
+        host="dbhost", port=1521, user="scott",
+        password="tiger", service_name="MYDB",
+    ) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT id, name FROM employees WHERE dept = :dept ORDER BY id",
+                {"dept": "ENG"},
+            )
+            async for row in cur:
+                print(row)
+
+
+asyncio.run(main())
+```
+
+A connection pool keeps authenticated sessions warm. Sync:
+
+```python
+pool = oracle.create_pool(host="dbhost", user="scott",
+                          password="tiger", service_name="MYDB",
+                          min=2, max=10)
+with pool.acquire() as conn:
+    ...
+pool.close()
+```
+
+Async:
+
+```python
+pool = await oracle.create_pool_async(host="dbhost", user="scott",
+                                       password="tiger", service_name="MYDB",
+                                       min=2, max=10)
+async with pool.acquire() as conn:
+    ...
+await pool.close()
+```
+
 ## Running tests
 
 The default test suite is offline (encoders, crypto, packet round-trips):
