@@ -7,6 +7,7 @@ threadsafety = 1            # threads may share the module, not connections
 paramstyle = "named"        # bind variables not yet wired through Cursor
 
 from oracle.aconnection import AsyncOracleConnect
+from oracle.apool import AsyncPool
 from oracle.connection import OracleConnect
 from oracle.exceptions import (
     DataError, DatabaseError, Error, IntegrityError, InterfaceError,
@@ -29,6 +30,17 @@ async def connect_async(*args, **kwargs) -> AsyncOracleConnect:
     Conn = AsyncOracleConnect(*args, **kwargs)
     await Conn.connect()
     return Conn
+
+
+async def create_pool_async(*args, **kwargs) -> AsyncPool:
+    """Create an `AsyncPool` and pre-warm `min` connections.
+
+    Same keyword arguments as `create_pool` (plus the regular
+    `oracle.connect()` kwargs forwarded to each pooled connection).
+    """
+    Pool_ = AsyncPool(*args, **kwargs)
+    await Pool_.prewarm()
+    return Pool_
 
 
 def create_pool(*args, **kwargs) -> Pool:
@@ -55,8 +67,8 @@ def create_pool(*args, **kwargs) -> Pool:
 
 __all__ = [
     "apilevel", "threadsafety", "paramstyle",
-    "connect", "connect_async", "create_pool",
-    "OracleConnect", "AsyncOracleConnect", "Pool",
+    "connect", "connect_async", "create_pool", "create_pool_async",
+    "OracleConnect", "AsyncOracleConnect", "Pool", "AsyncPool",
     "Warning", "Error", "InterfaceError", "DatabaseError", "DataError",
     "OperationalError", "IntegrityError", "InternalError",
     "ProgrammingError", "NotSupportedError",

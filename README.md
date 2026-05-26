@@ -74,8 +74,12 @@ What works so far:
   an `AsyncOracleConnect`; `conn.cursor()` returns an
   `AsyncCursor` with `await cur.execute(...)`, `await cur.fetchone()`,
   `async for row in cur` iteration, and `async with` context
-  managers. Same protocol code, same cursor cache, same bind
-  semantics as the sync path
+  managers. LOB cells (CLOB / BLOB / BFILE) auto-resolve through
+  `await lob.aread()` exactly like the sync path. Async pool
+  via `await oracle.create_pool_async(...)` with the same
+  `acquire/release/idle health-check` semantics as the sync `Pool`.
+  Shares the protocol code with the sync APIs; the duplication is
+  just the I/O layer
 
 What is still in progress:
 

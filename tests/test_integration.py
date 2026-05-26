@@ -1278,6 +1278,95 @@ class AsyncBFILEIntegration(unittest.IsolatedAsyncioTestCase):
 
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
+class AsyncPoolIntegration(unittest.IsolatedAsyncioTestCase):
+    """AsyncPool: pre-warm, acquire / release, capacity, timeout,
+    health-check on dead connection."""
+
+    def _kwargs(self, **extra):
+        return dict(
+            host=_HOST, port=_PORT,
+            user=_USER, password=_PASSWORD,
+            service_name=_SERVICE,
+            autocommit=True,
+            **extra,
+        )
+
+    async def test_pre_warms_to_min_and_runs_query(self):
+        Pool = await oracle.create_pool_async(min=2, max=3, **self._kwargs())
+        try:
+            self.assertEqual(Pool.opened, 2)
+            self.assertEqual(Pool.busy, 0)
+            async with Pool.acquire() as Conn:
+                self.assertEqual(Pool.busy, 1)
+                Cur = Conn.cursor()
+                await Cur.execute("SELECT 1 FROM dual")
+                self.assertEqual(await Cur.fetchone(), (1,))
+            self.assertEqual(Pool.busy, 0)
+        finally:
+            await Pool.close()
+
+    async def test_grows_to_max_and_releases_for_reuse(self):
+        Pool = await oracle.create_pool_async(min=1, max=3, **self._kwargs())
+        try:
+            G1 = Pool.acquire(); await G1.__aenter__()
+            G2 = Pool.acquire(); await G2.__aenter__()
+            G3 = Pool.acquire(); await G3.__aenter__()
+            self.assertEqual(Pool.busy, 3)
+            self.assertEqual(Pool.opened, 3)
+            await G1.__aexit__(None, None, None)
+            self.assertEqual(Pool.busy, 2)
+            async with Pool.acquire():
+                # Pool reused the released entry; should NOT have grown.
+                self.assertEqual(Pool.busy, 3)
+                self.assertEqual(Pool.opened, 3)
+            await G2.__aexit__(None, None, None)
+            await G3.__aexit__(None, None, None)
+        finally:
+            await Pool.close()
+
+    async def test_acquire_times_out_when_full(self):
+        Pool = await oracle.create_pool_async(
+            min=1, max=1, timeout=0.3, **self._kwargs(),
+        )
+        try:
+            async with Pool.acquire():
+                with self.assertRaises(oracle.InterfaceError):
+                    async with Pool.acquire():
+                        pass
+        finally:
+            await Pool.close()
+
+    async def test_acquire_after_close_raises(self):
+        Pool = await oracle.create_pool_async(min=1, max=2, **self._kwargs())
+        await Pool.close()
+        with self.assertRaises(oracle.InterfaceError):
+            async with Pool.acquire():
+                pass
+
+    async def test_health_check_replaces_dead_connection(self):
+        Pool = await oracle.create_pool_async(
+            min=1, max=2, idle_timeout=0, **self._kwargs(),
+        )
+        try:
+            G = Pool.acquire()
+            Conn = await G.__aenter__()
+            await G.__aexit__(None, None, None)
+            # Sabotage the underlying writer to force the next health-check
+            # to see a dead session.
+            try:
+                Conn._writer.close()
+                await Conn._writer.wait_closed()
+            except Exception:
+                pass
+            async with Pool.acquire() as Conn2:
+                Cur = Conn2.cursor()
+                await Cur.execute("SELECT 1 FROM dual")
+                self.assertEqual(await Cur.fetchone(), (1,))
+        finally:
+            await Pool.close()
+
+
+@unittest.skipUnless(_USER, _SKIP_REASON)
 class SSLIntegration(unittest.TestCase):
     """Verify the TLS wrap by talking to Oracle through a local TLS proxy.
 
