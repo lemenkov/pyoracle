@@ -82,11 +82,20 @@ class AsyncCursor:
 
         if ColMeta:
             self._description = [_column_description(C) for C in ColMeta]
-            # LOB auto-resolve needs to be async-aware. For the first cut
-            # we hand back the raw `oracle.lob.LOB` objects; the user can
-            # `await lob.aread()` (see #76) once that lands. NULL LOBs
-            # already arrive as Python None from the row decoder.
-            self._rows = [list(row) for row in (Rows or [])]
+            # Async LOB auto-resolve: same shape as sync `_resolve_lobs`
+            # but each `LOB.aread()` is awaited individually. CLOB → str,
+            # BLOB / BFILE → bytes, NULL LOBs stay as None (already
+            # filtered out at the row-decoder level).
+            from oracle.lob import LOB
+            ResolvedRows = []
+            for Row in (Rows or []):
+                NewRow = list(Row)
+                for I, Val in enumerate(NewRow):
+                    if isinstance(Val, LOB):
+                        Val._connection = self._connection
+                        NewRow[I] = await Val.aread()
+                ResolvedRows.append(NewRow)
+            self._rows = ResolvedRows
             self._rowcount = len(self._rows)
         else:
             self._description = None

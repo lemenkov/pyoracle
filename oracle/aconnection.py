@@ -395,6 +395,100 @@ class AsyncOracleConnect:
         await self.send(TNS_DATA, Data)
         return await self._handle_response(Acc=(None, RowFormat, []))
 
+    # ----- LOB read (async mirror of `OracleConnect.lob_read`) -----
+
+    async def lob_read(self, Locator: bytes, DataType: int) -> str | bytes:
+        """Async port of the sync `lob_read`. See its docstring for
+        the wire format we walk through."""
+        from oracle.tns_consts import TNS_TYPE_CLOB
+        Data = encode_dictionary(self._make_dict(DictionaryType.lobops,
+                                                  locator=Locator))
+        await self.send(TNS_DATA, Data)
+        Content = await self._read_lob_response()
+        if DataType == TNS_TYPE_CLOB:
+            return Content.decode('utf-16-be', errors='replace')
+        return Content
+
+    async def bfile_read(self, directory_name: str, file_name: str) -> bytes:
+        """Async port of the sync `bfile_read`. Uses the same server-side
+        helper function (auto-installed on first use)."""
+        from oracle.connection import _BFILE_HELPER_NAME, _BFILE_HELPER_SQL
+        from oracle.exceptions import DatabaseError
+        Cur = self.cursor()
+        try:
+            await Cur.execute(
+                f"SELECT {_BFILE_HELPER_NAME}(:d, :f) FROM DUAL",
+                {"d": directory_name, "f": file_name},
+            )
+        except DatabaseError as exc:
+            if exc.code not in (904, 6550):
+                raise
+            Install = self.cursor()
+            await Install.execute(_BFILE_HELPER_SQL)
+            Cur = self.cursor()
+            await Cur.execute(
+                f"SELECT {_BFILE_HELPER_NAME}(:d, :f) FROM DUAL",
+                {"d": directory_name, "f": file_name},
+            )
+        Row = await Cur.fetchone()
+        return Row[0]
+
+    async def _read_lob_response(self) -> bytes:
+        """Async port of the sync `_read_lob_response`. Same token
+        walk; everything between TTI_LOB content and TTI_OER is RPA
+        metadata we don't decode."""
+        from oracle.tns_consts import TTI_LOB, TTI_OER
+        Buffer = b""
+        while True:
+            Received = await self.recv(b"", b"")
+            if Received is False:
+                raise InterfaceError("connection closed during LOBOPS response")
+            (Type, Packet) = Received
+            if Type != TNS_DATA:
+                if Type == TNS_MARKER:
+                    await self.send(TNS_MARKER, b"\x01\x00\x02")
+                    continue
+                raise Exception("Unexpected LOBOPS response type", Type)
+            Pos = 0
+            OerSeen = False
+            while Pos < len(Packet):
+                Token = Packet[Pos]
+                if Token == TTI_LOB:
+                    Pos += 1
+                    if Pos >= len(Packet):
+                        break
+                    Length = Packet[Pos]
+                    Pos += 1
+                    if Length == 0:
+                        continue
+                    if Length == 0xFE:
+                        while Pos < len(Packet):
+                            ChunkLen = Packet[Pos]
+                            Pos += 1
+                            if ChunkLen == 0:
+                                break
+                            Buffer += Packet[Pos:Pos + ChunkLen]
+                            Pos += ChunkLen
+                    else:
+                        Buffer += Packet[Pos:Pos + Length]
+                        Pos += Length
+                elif Token == TTI_OER:
+                    OerSeen = True
+                    break
+                else:
+                    Found = -1
+                    for I in range(Pos, len(Packet) - 3):
+                        if (Packet[I] == TTI_OER and Packet[I + 1] == 0x01
+                                and Packet[I + 3] == 0x01):
+                            Found = I
+                            break
+                    if Found >= 0:
+                        Pos = Found
+                        continue
+                    break
+            if OerSeen:
+                return Buffer
+
     # ----- teardown -----
 
     async def close(self) -> None:

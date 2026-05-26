@@ -1156,6 +1156,44 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                 )
                 await Cur.execute("DROP TABLE PYORACLE_ASYNC_TEST")
 
+    async def _drop_async(self, cur, table):
+        try:
+            await cur.execute(f"DROP TABLE {table}")
+        except oracle.DatabaseError as e:
+            if e.code != 942:
+                raise
+
+    async def test_lob_auto_resolve(self):
+        # CLOB / BLOB / NULL / EMPTY all surface as Python str/bytes/None
+        # through the auto-resolve in `AsyncCursor.execute`.
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                await self._drop_async(Cur, "PYORACLE_ASYNC_LOB")
+                await Cur.execute(
+                    "CREATE TABLE PYORACLE_ASYNC_LOB (id NUMBER, c CLOB, b BLOB)"
+                )
+                await Cur.execute(
+                    "INSERT INTO PYORACLE_ASYNC_LOB VALUES (1, NULL, NULL)"
+                )
+                await Cur.execute(
+                    "INSERT INTO PYORACLE_ASYNC_LOB VALUES "
+                    "(2, EMPTY_CLOB(), EMPTY_BLOB())"
+                )
+                await Cur.execute(
+                    "INSERT INTO PYORACLE_ASYNC_LOB VALUES "
+                    "(3, 'hello async clob', HEXTORAW('DEADBEEF'))"
+                )
+                await Cur.execute(
+                    "SELECT id, c, b FROM PYORACLE_ASYNC_LOB ORDER BY id"
+                )
+                Rows = await Cur.fetchall()
+                self.assertEqual(Rows, [
+                    (1, None, None),
+                    (2, "", b""),
+                    (3, "hello async clob", b"\xde\xad\xbe\xef"),
+                ])
+                await Cur.execute("DROP TABLE PYORACLE_ASYNC_LOB")
+
 
 @unittest.skipUnless(
     _USER and os.environ.get("PYORACLE_TEST_BFILE_DIR"),
@@ -1214,6 +1252,29 @@ class BFILEIntegration(unittest.TestCase):
         self.assertFalse(Lob.is_character)
         self.assertEqual(Lob.directory_name, self.dir)
         self.assertEqual(Lob.filename, _BFILE_TEST_FILE)
+
+
+@unittest.skipUnless(
+    _USER and os.environ.get("PYORACLE_TEST_BFILE_DIR"),
+    "Async BFILE tests share the same fixture requirements as the "
+    "sync BFILEIntegration.",
+)
+class AsyncBFILEIntegration(unittest.IsolatedAsyncioTestCase):
+    async def test_async_bfile_select_returns_file_contents(self):
+        Dir = os.environ["PYORACLE_TEST_BFILE_DIR"]
+        async with await oracle.connect_async(
+            host=_HOST, port=_PORT,
+            user=_USER, password=_PASSWORD,
+            service_name=_SERVICE,
+            autocommit=True,
+        ) as Conn:
+            async with Conn.cursor() as Cur:
+                await Cur.execute(
+                    "SELECT BFILENAME(:d, :f) FROM DUAL",
+                    {"d": Dir, "f": _BFILE_TEST_FILE},
+                )
+                (Got,) = await Cur.fetchone()
+                self.assertEqual(Got, _BFILE_TEST_CONTENT)
 
 
 @unittest.skipUnless(_USER, _SKIP_REASON)

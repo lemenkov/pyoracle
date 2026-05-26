@@ -106,28 +106,35 @@ class LOB:
         return len(self.raw) - _LOCATOR_OVERHEAD
 
     def read(self) -> str | bytes:
-        # Round-trip TTI_LOBOPS READ to materialise the actual content.
-        # CLOB / NCLOB decode UTF-16BE to `str`; BLOB / BFILE surface as
-        # raw `bytes`. Truly-empty regular LOBs (EMPTY_CLOB() /
-        # EMPTY_BLOB() — exactly the locator overhead, no inline content)
-        # short-circuit without a round-trip. BFILE and temporary-LOB
-        # locators are *shorter* than the regular overhead but still
-        # carry server-side content, so they round-trip normally.
+        # Sync read. See `aread` below for the async equivalent.
         if len(self.raw) == _LOCATOR_OVERHEAD:
             return "" if self.is_character else b""
         if self._connection is None:
             from oracle.exceptions import InterfaceError
             raise InterfaceError("LOB has no connection to read from")
         if self.is_file:
-            # BFILE: TTI_LOBOPS READ alone returns empty because BFILEs
-            # need an explicit FILEOPEN before reading. Route through a
-            # server-side helper that does FILEOPEN + READ + FILECLOSE
-            # and returns a temporary BLOB.
             parts = self._parse_bfile_locator()
             if parts is None:
                 raise ValueError("malformed BFILE locator")
             return self._connection.bfile_read(*parts)
         return self._connection.lob_read(self.raw, self.data_type)
+
+    async def aread(self) -> str | bytes:
+        """Async equivalent of `read()`. Use this when the LOB came
+        out of an `AsyncCursor`; the `_connection` attached to it is
+        an `AsyncOracleConnect` whose `lob_read` / `bfile_read` are
+        coroutines."""
+        if len(self.raw) == _LOCATOR_OVERHEAD:
+            return "" if self.is_character else b""
+        if self._connection is None:
+            from oracle.exceptions import InterfaceError
+            raise InterfaceError("LOB has no connection to read from")
+        if self.is_file:
+            parts = self._parse_bfile_locator()
+            if parts is None:
+                raise ValueError("malformed BFILE locator")
+            return await self._connection.bfile_read(*parts)
+        return await self._connection.lob_read(self.raw, self.data_type)
 
     def __repr__(self) -> str:
         Kind = "BLOB" if self.is_binary else ("CLOB" if self.is_character
