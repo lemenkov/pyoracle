@@ -275,6 +275,26 @@ class TypesIntegration(_IntegrationBase):
                              "INTERVAL '-1-2' YEAR TO MONTH")
         self.assertEqual(v, IntervalYM(-1, -2))
 
+    # ----- ROWID -----
+
+    def test_rowid_matches_rowidtochar(self):
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
+        for i in range(3):
+            self.cur.execute(f"INSERT INTO {self.TABLE} VALUES ({i})")
+        self.cur.execute(
+            f"SELECT ROWID, ROWIDTOCHAR(ROWID) FROM {self.TABLE} ORDER BY id")
+        for driver_rowid, ref in self.cur.fetchall():
+            self.assertIsInstance(driver_rowid, str)
+            self.assertEqual(driver_rowid, ref)
+
+    def test_rowid_usable_as_bind(self):
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (42)")
+        self.cur.execute(f"SELECT ROWID FROM {self.TABLE}")
+        rid = self.cur.fetchone()[0]
+        self.cur.execute(f"SELECT id FROM {self.TABLE} WHERE ROWID = :r", [rid])
+        self.assertEqual(self.cur.fetchone(), (42,))
+
     # ----- NULL -----
 
     def test_null_number(self):

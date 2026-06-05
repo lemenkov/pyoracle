@@ -17,7 +17,7 @@ from oracle.tns_consts import (
     TTI_WRN, TNS_LOB_OP_READ, TNS_TYPE_BDOUBLE, TNS_TYPE_BFILE,
     TNS_TYPE_BFLOAT, TNS_TYPE_BLOB, TNS_TYPE_CLOB, TNS_TYPE_DATE,
     TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_NUMBER, TNS_TYPE_RAW,
-    TNS_TYPE_REFCURSOR, TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ,
+    TNS_TYPE_REFCURSOR, TNS_TYPE_RID, TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ,
     TNS_TYPE_VARCHAR, TTI_LOBOPS, UTF8_CHARSET,
 )
 import logging
@@ -391,6 +391,7 @@ def decode_token_uds(Data: bytes, Acc: object) -> tuple:
     return decode_packet(Rest, (Cursor, NewFormat, Rows))
 
 _LOB_DATA_TYPES = frozenset((TNS_TYPE_CLOB, TNS_TYPE_BLOB, TNS_TYPE_BFILE))
+_ROWID_DATA_TYPES = frozenset((TNS_TYPE_RID,))
 
 def decode_token_rxd(Data: bytes, Acc: object) -> tuple:
     # Row data (section 6.2). Each column value is normally a DALC blob whose
@@ -422,6 +423,10 @@ def decode_token_rxd(Data: bytes, Acc: object) -> tuple:
             if DataType in _LOB_DATA_TYPES:
                 (Locator, Rest) = _read_lob_column(Rest)
                 Row.append(None if Locator is None else LOB(DataType, Locator))
+                continue
+            if DataType in _ROWID_DATA_TYPES:
+                (Val, Rest) = _read_rowid_column(Rest)
+                Row.append(Val)
                 continue
             (Val, Rest) = decode_dalc(Rest)
             Row.append(decode_value(Col, Val))
@@ -457,6 +462,26 @@ def _read_lob_column(Rest: bytes) -> tuple[bytes | None, bytes]:
     Locator = bytes(Body[1:1 + NumBytes])
     Tail = Body[1 + NumBytes:]
     return (Locator, Tail)
+
+def _read_rowid_column(Rest: bytes) -> tuple[str | None, bytes]:
+    # ROWID (TNS type 11) in RXD: a 1-byte present indicator (the size the
+    # server reserved; 0 / 0xff means NULL) followed by a structured physical
+    # rowid -- data object (ub4), relative file (ub2), an unused ub1, block
+    # (ub4) and slot (ub2). Mirrors oracledb's read_rowid; the byte counts and
+    # the base64 rendering were verified against ROWIDTOCHAR on a live XE row.
+    from oracle.types import rowid_to_string
+    if not Rest:
+        return (None, Rest)
+    Indicator = Rest[0]
+    Rest = Rest[1:]
+    if Indicator in (0, 0xFF):
+        return (None, Rest)
+    (Obj, Rest) = decode_ub4(Rest)
+    (File, Rest) = decode_ub4(Rest)
+    (_, Rest) = decode_ub4(Rest)             # unused ub1
+    (Block, Rest) = decode_ub4(Rest)
+    (Slot, Rest) = decode_ub4(Rest)
+    return (rowid_to_string(Obj, File, Block, Slot), Rest)
 
 def _bvc_bit_set(BitVec: bytes, Idx: int) -> bool:
     Byte = Idx // 8

@@ -43,7 +43,8 @@ What works so far:
   VARCHAR2 / CHAR → `str` (charset-aware), DATE / TIMESTAMP / TIMESTAMP
   WITH TIME ZONE → `datetime.datetime`, BINARY_FLOAT / BINARY_DOUBLE →
   `float`, INTERVAL DAY TO SECOND → `datetime.timedelta`, INTERVAL YEAR
-  TO MONTH → `oracle.IntervalYM`, NULL → `None`
+  TO MONTH → `oracle.IntervalYM`, ROWID → `str` (the 18-char extended
+  rowid, usable directly in a `WHERE ROWID = :r` bind), NULL → `None`
 - TLS connections (pass `ssl=True` to `oracle.connect` for the system
   trust store; or `ssl={"ca_certs": ..., "certfile": ..., ...}` for a
   custom configuration; or hand in an `ssl.SSLContext` directly)

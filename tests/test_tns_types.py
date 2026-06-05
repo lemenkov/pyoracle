@@ -14,7 +14,7 @@ import unittest
 
 from oracle.datatypes import BinaryDouble, BinaryFloat, IntervalYM
 from oracle.tns import (
-    encode_token_binary_double, encode_token_binary_float,
+    _read_rowid_column, encode_token_binary_double, encode_token_binary_float,
     encode_token_interval_ds, encode_token_interval_ym, encode_token_oac,
     encode_token_rxd,
 )
@@ -23,7 +23,7 @@ from oracle.tns_consts import (
 )
 from oracle.types import (
     decode_binary_double, decode_binary_float, decode_interval_ds,
-    decode_interval_ym,
+    decode_interval_ym, rowid_to_string,
 )
 
 
@@ -147,6 +147,32 @@ class TestIntervalYM(unittest.TestCase):
                    IntervalYM(-5, -11)):
             self.assertEqual(
                 decode_interval_ym(encode_token_interval_ym(iv)), iv)
+
+
+class TestRowid(unittest.TestCase):
+    # Bytes captured from a live XE row whose ROWIDTOCHAR was
+    # "AAAK6JAAEAAACGPAAA" (obj 44681, file 4, block 8591, slot 0).
+
+    def test_rowid_to_string(self):
+        self.assertEqual(rowid_to_string(44681, 4, 8591, 0),
+                         "AAAK6JAAEAAACGPAAA")
+
+    def test_rowid_to_string_slot(self):
+        # Slot increments map to the trailing base64 digit.
+        self.assertEqual(rowid_to_string(44681, 4, 8591, 4)[-3:], "AAE")
+
+    def test_read_rowid_column(self):
+        # 1-byte present indicator (0x0e) + structured rowid, then a trailing
+        # byte that must be left for the next token.
+        Wire = bytes.fromhex("0e02ae8901040002218f00") + b"\x08"
+        Value, Rest = _read_rowid_column(Wire)
+        self.assertEqual(Value, "AAAK6JAAEAAACGPAAA")
+        self.assertEqual(Rest, b"\x08")
+
+    def test_read_rowid_null(self):
+        Value, Rest = _read_rowid_column(b"\x00\x04rest")
+        self.assertIsNone(Value)
+        self.assertEqual(Rest, b"\x04rest")
 
 
 class TestBindDispatch(unittest.TestCase):

@@ -176,6 +176,25 @@ def decode_interval_ym(Data: bytes) -> IntervalYM | None:
     return IntervalYM(Years, Months)
 
 
+# Oracle's base64 alphabet for the printable extended ROWID (not RFC 4648).
+_ROWID_ALPHABET = (
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/')
+
+
+def _rowid_b64(Value: int, NumChars: int) -> str:
+    # Big-endian, zero-padded base64 of Value across exactly NumChars digits.
+    return ''.join(
+        _ROWID_ALPHABET[(Value >> (6 * (NumChars - 1 - I))) & 0x3F]
+        for I in range(NumChars))
+
+
+def rowid_to_string(Obj: int, File: int, Block: int, Slot: int) -> str:
+    # Extended ROWID: OOOOOO (data object) FFF (rel file) BBBBBB (block)
+    # RRR (slot), e.g. "AAAK6JAAEAAACGPAAA".
+    return (_rowid_b64(Obj, 6) + _rowid_b64(File, 3)
+            + _rowid_b64(Block, 6) + _rowid_b64(Slot, 3))
+
+
 def decode_string(Data: bytes, Charset: int = AL32UTF8_CHARSET) -> str | None:
     if not Data:
         return None
