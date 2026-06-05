@@ -14,12 +14,14 @@
 # writable tablespace. Each test creates and drops its own scratch table.
 
 import datetime
+import math
 import os
 import ssl
 import unittest
 from decimal import Decimal
 
 import oracle
+from oracle import BinaryDouble, BinaryFloat, IntervalYM
 
 # Resolve the TLS proxy fixture without depending on the `tests` package
 # layout (works under both `python -m unittest tests.test_integration` and
@@ -224,6 +226,54 @@ class TypesIntegration(_IntegrationBase):
             "TIMESTAMP '2026-05-23 10:11:12 +14:00'",
         )
         self.assertEqual(v.utcoffset(), datetime.timedelta(hours=14))
+
+    # ----- BINARY_FLOAT / BINARY_DOUBLE -----
+
+    def test_binary_float(self):
+        v = self._round_trip("BINARY_FLOAT", "1.5f")
+        self.assertEqual(v, 1.5)
+        self.assertIsInstance(v, float)
+
+    def test_binary_float_negative(self):
+        self.assertEqual(self._round_trip("BINARY_FLOAT", "-2.25f"), -2.25)
+
+    def test_binary_double(self):
+        v = self._round_trip("BINARY_DOUBLE", "1234.5678d")
+        self.assertEqual(v, 1234.5678)
+        self.assertIsInstance(v, float)
+
+    def test_binary_double_infinity(self):
+        self.assertEqual(self._round_trip("BINARY_DOUBLE", "binary_double_infinity"),
+                         math.inf)
+
+    def test_binary_double_nan(self):
+        self.assertTrue(math.isnan(
+            self._round_trip("BINARY_DOUBLE", "binary_double_nan")))
+
+    # ----- INTERVAL -----
+
+    def test_interval_ds(self):
+        v = self._round_trip("INTERVAL DAY(4) TO SECOND(6)",
+                             "INTERVAL '5 04:03:02.123456' DAY TO SECOND")
+        self.assertEqual(v, datetime.timedelta(days=5, hours=4, minutes=3,
+                                               seconds=2, microseconds=123456))
+        self.assertIsInstance(v, datetime.timedelta)
+
+    def test_interval_ds_negative(self):
+        v = self._round_trip("INTERVAL DAY(4) TO SECOND(6)",
+                             "INTERVAL '-0 00:00:01.5' DAY TO SECOND")
+        self.assertEqual(v, datetime.timedelta(seconds=-1.5))
+
+    def test_interval_ym(self):
+        v = self._round_trip("INTERVAL YEAR(4) TO MONTH",
+                             "INTERVAL '3-7' YEAR TO MONTH")
+        self.assertEqual(v, IntervalYM(3, 7))
+        self.assertIsInstance(v, IntervalYM)
+
+    def test_interval_ym_negative(self):
+        v = self._round_trip("INTERVAL YEAR(4) TO MONTH",
+                             "INTERVAL '-1-2' YEAR TO MONTH")
+        self.assertEqual(v, IntervalYM(-1, -2))
 
     # ----- NULL -----
 
@@ -491,6 +541,47 @@ class BindIntegration(_IntegrationBase):
         # The instant must match; the tagged offset must round-trip.
         self.assertEqual(Got, Value)
         self.assertEqual(Got.utcoffset(), Value.utcoffset())
+
+    def test_binary_float_bind(self):
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (v BINARY_FLOAT)")
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (:1)",
+                         [BinaryFloat(-2.25)])
+        self.cur.execute(f"SELECT v FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchone(), (-2.25,))
+
+    def test_binary_double_bind(self):
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (v BINARY_DOUBLE)")
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (:1)",
+                         [BinaryDouble(1234.5678)])
+        self.cur.execute(f"SELECT v FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchone(), (1234.5678,))
+
+    def test_binary_double_nonfinite_bind(self):
+        # inf / nan can't be NUMBER; a plain float auto-routes to BINARY_DOUBLE.
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (v BINARY_DOUBLE)")
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (:1)", [float("inf")])
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (:1)", [float("nan")])
+        self.cur.execute(f"SELECT v FROM {self.TABLE} ORDER BY 1")
+        rows = self.cur.fetchall()
+        self.assertEqual(rows[0], (math.inf,))
+        self.assertTrue(math.isnan(rows[1][0]))
+
+    def test_interval_ds_bind(self):
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} (v INTERVAL DAY(4) TO SECOND(6))")
+        Value = datetime.timedelta(days=5, hours=4, minutes=3, seconds=2,
+                                   microseconds=123456)
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (:1)", [Value])
+        self.cur.execute(f"SELECT v FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchone(), (Value,))
+
+    def test_interval_ym_bind(self):
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} (v INTERVAL YEAR(4) TO MONTH)")
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (:1)",
+                         [IntervalYM(3, 7)])
+        self.cur.execute(f"SELECT v FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchone(), (IntervalYM(3, 7),))
 
     # ----- named binds -----
 

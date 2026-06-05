@@ -6,6 +6,7 @@ from decimal import Decimal
 from functools import reduce
 from oracle.crypto import o5logon
 from oracle.cursor import cursor
+from oracle.datatypes import BinaryDouble, BinaryFloat, IntervalYM
 from oracle.date import date
 from oracle.tns_consts import (
     AL16UTF16_CHARSET, CharsetDict, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_SID,
@@ -13,10 +14,11 @@ from oracle.tns_consts import (
     TTI_DCB, TTI_DTY, TTI_FETCH, TTI_FOB, TTI_FUN, TTI_IOV, TTI_LOB,
     TTI_LOGOFF, TTI_OAC, TTI_OER, TTI_PFN, TTI_PRO, TTI_RPA, TTI_RXD,
     TTI_RXH, TTI_SESS, TTI_SPFP, TTI_STA, TTI_STRT, TTI_STOP, TTI_UDS,
-    TTI_WRN, TNS_LOB_OP_READ, TNS_TYPE_BFILE, TNS_TYPE_BLOB, TNS_TYPE_CLOB,
-    TNS_TYPE_DATE, TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_REFCURSOR,
-    TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_VARCHAR, TTI_LOBOPS,
-    UTF8_CHARSET,
+    TTI_WRN, TNS_LOB_OP_READ, TNS_TYPE_BDOUBLE, TNS_TYPE_BFILE,
+    TNS_TYPE_BFLOAT, TNS_TYPE_BLOB, TNS_TYPE_CLOB, TNS_TYPE_DATE,
+    TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_NUMBER, TNS_TYPE_RAW,
+    TNS_TYPE_REFCURSOR, TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ,
+    TNS_TYPE_VARCHAR, TTI_LOBOPS, UTF8_CHARSET,
 )
 import logging
 import os
@@ -1028,8 +1030,29 @@ def encode_token_rxd(Token: object) -> bytes:
     if isinstance(Token, Decimal):
         Bytes = encode_token_decimal(Token)
         return bytes([len(Bytes)]) + Bytes
-    if isinstance(Token, (float, complex)):
+    if isinstance(Token, BinaryFloat):
+        Bytes = encode_token_binary_float(Token)
+        return bytes([len(Bytes)]) + Bytes
+    if isinstance(Token, BinaryDouble):
+        Bytes = encode_token_binary_double(Token)
+        return bytes([len(Bytes)]) + Bytes
+    if isinstance(Token, float):
+        # NUMBER can't represent inf / nan; route the non-finite values to a
+        # native BINARY_DOUBLE so they round-trip instead of blowing up the
+        # base-100 encoder. Finite floats keep the historical NUMBER binding.
+        if Token != Token or Token in (float("inf"), float("-inf")):
+            Bytes = encode_token_binary_double(Token)
+            return bytes([len(Bytes)]) + Bytes
         Bytes = encode_token_num(Token)
+        return bytes([len(Bytes)]) + Bytes
+    if isinstance(Token, complex):
+        Bytes = encode_token_num(Token)
+        return bytes([len(Bytes)]) + Bytes
+    if isinstance(Token, datetime.timedelta):
+        Bytes = encode_token_interval_ds(Token)
+        return bytes([len(Bytes)]) + Bytes
+    if isinstance(Token, IntervalYM):
+        Bytes = encode_token_interval_ym(Token)
         return bytes([len(Bytes)]) + Bytes
     if isinstance(Token, str):
         return encode_chr(Token)
@@ -1065,8 +1088,21 @@ def encode_token_oac(Token: object) -> bytes:
     # accepts on 11g; larger payloads need TTI_LOBOPS WRITE.
     if Token is None:
         return encode_token_raw(TNS_TYPE_VARCHAR, 32767, 16, UTF8_CHARSET, 0)
+    if isinstance(Token, BinaryFloat):
+        return encode_token_raw(TNS_TYPE_BFLOAT, 4, 0, 0, 0)
+    if isinstance(Token, BinaryDouble):
+        return encode_token_raw(TNS_TYPE_BDOUBLE, 8, 0, 0, 0)
+    if isinstance(Token, float) and (
+        Token != Token or Token in (float("inf"), float("-inf"))
+    ):
+        # Non-finite floats bind as native BINARY_DOUBLE (see encode_token_rxd).
+        return encode_token_raw(TNS_TYPE_BDOUBLE, 8, 0, 0, 0)
     if isinstance(Token, (int, float, complex, Decimal)):
         return encode_token_raw(TNS_TYPE_NUMBER, 22, 0, 0, 0)
+    if isinstance(Token, datetime.timedelta):
+        return encode_token_raw(TNS_TYPE_INTERVALDS, 11, 0, 0, 0)
+    if isinstance(Token, IntervalYM):
+        return encode_token_raw(TNS_TYPE_INTERVALYM, 5, 0, 0, 0)
     if isinstance(Token, str):
         return encode_token_raw(TNS_TYPE_VARCHAR, 32767, 16, UTF8_CHARSET, 0)
     if isinstance(Token, (bytes, bytearray)):
@@ -1147,6 +1183,52 @@ def encode_token_num(Token: int | float) -> bytes:
         return bytes(lnxfmt(lnxren(abs(Token),0), Token))
     else:
         raise Exception("Unhandled number token", Token)
+
+def encode_token_binary_float(Value: float) -> bytes:
+    # BINARY_FLOAT is a 32-bit IEEE-754 value stored in Oracle's order-
+    # preserving form: for a positive number the sign bit is set, for a
+    # negative number every bit is flipped. Decoding reverses this.
+    Raw = struct.pack(">f", Value)
+    if Raw[0] & 0x80:
+        return bytes(B ^ 0xFF for B in Raw)
+    return bytes([Raw[0] ^ 0x80]) + Raw[1:]
+
+def encode_token_binary_double(Value: float) -> bytes:
+    # BINARY_DOUBLE: same order-preserving transform as BINARY_FLOAT over the
+    # 64-bit IEEE-754 representation.
+    Raw = struct.pack(">d", Value)
+    if Raw[0] & 0x80:
+        return bytes(B ^ 0xFF for B in Raw)
+    return bytes([Raw[0] ^ 0x80]) + Raw[1:]
+
+def encode_token_interval_ds(TD: datetime.timedelta) -> bytes:
+    # INTERVAL DAY TO SECOND: 4-byte days biased by 2**31, then hours / minutes
+    # / seconds each biased by 60, then 4-byte nanoseconds biased by 2**31. All
+    # fields share the interval's sign, so collapse the timedelta (which keeps
+    # days negative but seconds/microseconds positive) to a single signed total
+    # before splitting it back out.
+    TotalUs = (TD.days * 86400 + TD.seconds) * 1_000_000 + TD.microseconds
+    Negative = TotalUs < 0
+    TotalUs = abs(TotalUs)
+    Days, Rest = divmod(TotalUs, 86_400_000_000)
+    Hours, Rest = divmod(Rest, 3_600_000_000)
+    Minutes, Rest = divmod(Rest, 60_000_000)
+    Seconds, Micros = divmod(Rest, 1_000_000)
+    Nanos = Micros * 1000
+    if Negative:
+        Days, Hours, Minutes, Seconds, Nanos = (
+            -Days, -Hours, -Minutes, -Seconds, -Nanos)
+    return (
+        (Days + 2**31).to_bytes(4, "big")
+        + bytes([Hours + 60, Minutes + 60, Seconds + 60])
+        + (Nanos + 2**31).to_bytes(4, "big")
+    )
+
+def encode_token_interval_ym(IV: IntervalYM) -> bytes:
+    # INTERVAL YEAR TO MONTH: 4-byte years biased by 2**31, then 1-byte months
+    # biased by 60. IntervalYM has already normalised the two fields to share a
+    # sign with abs(months) < 12.
+    return (IV.years + 2**31).to_bytes(4, "big") + bytes([IV.months + 60])
 
 def encode_token_raw(DataType: int, Length: int, Flag: int, Charset: int, Max: int) -> bytes:
     FormOfUse = 2 if Charset == AL16UTF16_CHARSET else 1

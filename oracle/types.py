@@ -8,12 +8,16 @@
 # Algorithms cross-referenced with python-oracledb's decoders.pyx.
 
 import datetime
+import struct
 from decimal import Decimal
 
+from oracle.datatypes import IntervalYM
 from oracle.tns_consts import (
     AL16UTF16_CHARSET, AL32UTF8_CHARSET, ISO_LATIN_1_CHARSET, UTF8_CHARSET,
-    TNS_TYPE_CHAR, TNS_TYPE_DATE, TNS_TYPE_NUMBER, TNS_TYPE_TIMESTAMP,
-    TNS_TYPE_TIMESTAMPLTZ, TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_VARCHAR,
+    TNS_TYPE_BDOUBLE, TNS_TYPE_BFLOAT, TNS_TYPE_CHAR, TNS_TYPE_DATE,
+    TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_NUMBER,
+    TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPLTZ, TNS_TYPE_TIMESTAMPTZ,
+    TNS_TYPE_VARCHAR,
 )
 
 # Oracle stores a TZ offset as (hour + 20, minute + 60); a top bit set on the
@@ -127,6 +131,51 @@ def decode_date(Data: bytes) -> datetime.datetime | None:
     return Utc.astimezone(Tz)
 
 
+def decode_binary_float(Data: bytes) -> float | None:
+    # Reverse of the order-preserving transform: a positive value has its sign
+    # bit set (clear it), a negative value has every bit flipped (flip back).
+    if not Data or len(Data) < 4:
+        return None
+    if Data[0] & 0x80:
+        Raw = bytes([Data[0] & 0x7F]) + Data[1:4]
+    else:
+        Raw = bytes(B ^ 0xFF for B in Data[:4])
+    return struct.unpack(">f", Raw)[0]
+
+
+def decode_binary_double(Data: bytes) -> float | None:
+    if not Data or len(Data) < 8:
+        return None
+    if Data[0] & 0x80:
+        Raw = bytes([Data[0] & 0x7F]) + Data[1:8]
+    else:
+        Raw = bytes(B ^ 0xFF for B in Data[:8])
+    return struct.unpack(">d", Raw)[0]
+
+
+def decode_interval_ds(Data: bytes) -> datetime.timedelta | None:
+    # 4-byte days biased by 2**31, hours / minutes / seconds biased by 60, then
+    # 4-byte nanoseconds biased by 2**31. timedelta sums the signed components.
+    if not Data or len(Data) < 11:
+        return None
+    Days = int.from_bytes(Data[0:4], 'big') - 2**31
+    Hours = Data[4] - 60
+    Minutes = Data[5] - 60
+    Seconds = Data[6] - 60
+    Nanos = int.from_bytes(Data[7:11], 'big') - 2**31
+    return datetime.timedelta(days=Days, hours=Hours, minutes=Minutes,
+                              seconds=Seconds, microseconds=Nanos // 1000)
+
+
+def decode_interval_ym(Data: bytes) -> IntervalYM | None:
+    # 4-byte years biased by 2**31, 1-byte months biased by 60.
+    if not Data or len(Data) < 5:
+        return None
+    Years = int.from_bytes(Data[0:4], 'big') - 2**31
+    Months = Data[4] - 60
+    return IntervalYM(Years, Months)
+
+
 def decode_string(Data: bytes, Charset: int = AL32UTF8_CHARSET) -> str | None:
     if not Data:
         return None
@@ -149,4 +198,12 @@ def decode_value(Column: dict, Data: bytes | list) -> object:
     if DataType in (TNS_TYPE_DATE, TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ,
                     TNS_TYPE_TIMESTAMPLTZ):
         return decode_date(Data)
+    if DataType == TNS_TYPE_BFLOAT:
+        return decode_binary_float(Data)
+    if DataType == TNS_TYPE_BDOUBLE:
+        return decode_binary_double(Data)
+    if DataType == TNS_TYPE_INTERVALDS:
+        return decode_interval_ds(Data)
+    if DataType == TNS_TYPE_INTERVALYM:
+        return decode_interval_ym(Data)
     return Data

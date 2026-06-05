@@ -30,12 +30,20 @@ What works so far:
   `cur.execute(sql, {"name": v})` (named, `:name` placeholders, case-
   insensitive); accepted bind types are `int`, `float`, `Decimal`,
   `str`, `bytes`, `bool`, `datetime.date` / `datetime` (with optional
-  timezone and microseconds), and `None`. `str` and `bytes` binds
-  reach up to ~7 KiB on the default 8 KiB SDU, suitable for most
-  CLOB / BLOB inserts; see "still in progress" for the larger case
+  timezone and microseconds), `datetime.timedelta` (→ INTERVAL DAY TO
+  SECOND), `oracle.IntervalYM(years, months)` (→ INTERVAL YEAR TO
+  MONTH), and `None`. A plain `float` binds as NUMBER; wrap it in
+  `oracle.BinaryFloat(x)` / `oracle.BinaryDouble(x)` to send a native
+  32/64-bit IEEE-754 binary float (the only way to bind `inf` / `nan`,
+  which a non-finite plain `float` also auto-routes to BINARY_DOUBLE).
+  `str` and `bytes` binds reach up to ~7 KiB on the default 8 KiB SDU,
+  suitable for most CLOB / BLOB inserts; see "still in progress" for
+  the larger case
 - Python type coercion for fetched values: NUMBER → `int` / `Decimal`,
   VARCHAR2 / CHAR → `str` (charset-aware), DATE / TIMESTAMP / TIMESTAMP
-  WITH TIME ZONE → `datetime.datetime`, NULL → `None`
+  WITH TIME ZONE → `datetime.datetime`, BINARY_FLOAT / BINARY_DOUBLE →
+  `float`, INTERVAL DAY TO SECOND → `datetime.timedelta`, INTERVAL YEAR
+  TO MONTH → `oracle.IntervalYM`, NULL → `None`
 - TLS connections (pass `ssl=True` to `oracle.connect` for the system
   trust store; or `ssl={"ca_certs": ..., "certfile": ..., ...}` for a
   custom configuration; or hand in an `ssl.SSLContext` directly)
