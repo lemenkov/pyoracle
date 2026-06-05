@@ -16,9 +16,10 @@ from oracle.tns_consts import (
     TTI_RXH, TTI_SESS, TTI_SPFP, TTI_STA, TTI_STRT, TTI_STOP, TTI_UDS,
     TTI_WRN, TNS_LOB_OP_READ, TNS_TYPE_BDOUBLE, TNS_TYPE_BFILE,
     TNS_TYPE_BFLOAT, TNS_TYPE_BLOB, TNS_TYPE_CLOB, TNS_TYPE_DATE,
-    TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_NUMBER, TNS_TYPE_RAW,
-    TNS_TYPE_REFCURSOR, TNS_TYPE_RID, TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ,
-    TNS_TYPE_VARCHAR, TTI_LOBOPS, UTF8_CHARSET,
+    TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_LONG, TNS_TYPE_LONGRAW,
+    TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_REFCURSOR, TNS_TYPE_RID,
+    TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_VARCHAR, TTI_LOBOPS,
+    UTF8_CHARSET,
 )
 import logging
 import os
@@ -392,6 +393,7 @@ def decode_token_uds(Data: bytes, Acc: object) -> tuple:
 
 _LOB_DATA_TYPES = frozenset((TNS_TYPE_CLOB, TNS_TYPE_BLOB, TNS_TYPE_BFILE))
 _ROWID_DATA_TYPES = frozenset((TNS_TYPE_RID,))
+_LONG_DATA_TYPES = frozenset((TNS_TYPE_LONG, TNS_TYPE_LONGRAW))
 
 def decode_token_rxd(Data: bytes, Acc: object) -> tuple:
     # Row data (section 6.2). Each column value is normally a DALC blob whose
@@ -427,6 +429,10 @@ def decode_token_rxd(Data: bytes, Acc: object) -> tuple:
             if DataType in _ROWID_DATA_TYPES:
                 (Val, Rest) = _read_rowid_column(Rest)
                 Row.append(Val)
+                continue
+            if DataType in _LONG_DATA_TYPES:
+                (Val, Rest) = _read_long_column(Rest)
+                Row.append(decode_value(Col, Val))
                 continue
             (Val, Rest) = decode_dalc(Rest)
             Row.append(decode_value(Col, Val))
@@ -482,6 +488,40 @@ def _read_rowid_column(Rest: bytes) -> tuple[str | None, bytes]:
     (Block, Rest) = decode_ub4(Rest)
     (Slot, Rest) = decode_ub4(Rest)
     return (rowid_to_string(Obj, File, Block, Slot), Rest)
+
+def _read_long_column(Rest: bytes) -> tuple[bytes | None, bytes]:
+    # LONG / LONG RAW in RXD: a value followed by two trailing ub4 indicators
+    # (the actual/return lengths; 0 / 0 for an ordinary value). The value is
+    #   0x00            -> NULL, no body
+    #   0xfe            -> chunked: repeated [ub1 len][bytes] until a 0 length
+    #   else            -> ub1 length + that many bytes
+    # The two ub4 reads after the value keep the stream aligned regardless of
+    # NULL. Structure cross-referenced with python-oracledb's column read;
+    # verified against live XE captures (NULL, single-chunk, 700-byte multi-
+    # chunk, and LONG-not-last rows).
+    if not Rest:
+        return (None, Rest)
+    Marker = Rest[0]
+    if Marker == 0x00:
+        Val = None
+        Rest = Rest[1:]
+    elif Marker == 0xFE:
+        Rest = Rest[1:]
+        Chunks = b""
+        while Rest:
+            ChunkLen = Rest[0]
+            Rest = Rest[1:]
+            if ChunkLen == 0:
+                break
+            Chunks += bytes(Rest[:ChunkLen])
+            Rest = Rest[ChunkLen:]
+        Val = Chunks
+    else:
+        Val = bytes(Rest[1:1 + Marker])
+        Rest = Rest[1 + Marker:]
+    (_, Rest) = decode_ub4(Rest)
+    (_, Rest) = decode_ub4(Rest)
+    return (Val, Rest)
 
 def _bvc_bit_set(BitVec: bytes, Idx: int) -> bool:
     Byte = Idx // 8

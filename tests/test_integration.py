@@ -295,6 +295,37 @@ class TypesIntegration(_IntegrationBase):
         self.cur.execute(f"SELECT id FROM {self.TABLE} WHERE ROWID = :r", [rid])
         self.assertEqual(self.cur.fetchone(), (42,))
 
+    # ----- LONG / LONG RAW -----
+
+    def test_long(self):
+        v = self._round_trip("LONG", "'a long value'")
+        self.assertEqual(v, "a long value")
+        self.assertIsInstance(v, str)
+
+    def test_long_multichunk(self):
+        # > 1 wire chunk, exercising the chunk loop.
+        v = self._round_trip("LONG", "RPAD('X', 700, 'X')")
+        self.assertEqual(v, "X" * 700)
+
+    def test_long_null(self):
+        self.assertIsNone(self._round_trip("LONG", "NULL"))
+
+    def test_long_raw(self):
+        v = self._round_trip("LONG RAW", "HEXTORAW('DEADBEEFCAFE')")
+        self.assertEqual(v, bytes.fromhex("DEADBEEFCAFE"))
+        self.assertIsInstance(v, bytes)
+
+    def test_long_raw_null(self):
+        self.assertIsNone(self._round_trip("LONG RAW", "NULL"))
+
+    def test_long_not_last_column(self):
+        # A LONG followed by another column: the reader must leave the stream
+        # aligned for the trailing NUMBER.
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (txt LONG, id NUMBER)")
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES ('hi', 5)")
+        self.cur.execute(f"SELECT txt, id FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchone(), ("hi", 5))
+
     # ----- NULL -----
 
     def test_null_number(self):

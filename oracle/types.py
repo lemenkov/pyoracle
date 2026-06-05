@@ -15,9 +15,9 @@ from oracle.datatypes import IntervalYM
 from oracle.tns_consts import (
     AL16UTF16_CHARSET, AL32UTF8_CHARSET, ISO_LATIN_1_CHARSET, UTF8_CHARSET,
     TNS_TYPE_BDOUBLE, TNS_TYPE_BFLOAT, TNS_TYPE_CHAR, TNS_TYPE_DATE,
-    TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_NUMBER,
-    TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPLTZ, TNS_TYPE_TIMESTAMPTZ,
-    TNS_TYPE_VARCHAR,
+    TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_LONG, TNS_TYPE_LONGRAW,
+    TNS_TYPE_NUMBER, TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPLTZ,
+    TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_VARCHAR,
 )
 
 # Oracle stores a TZ offset as (hour + 20, minute + 60); a top bit set on the
@@ -212,8 +212,10 @@ def decode_value(Column: dict, Data: bytes | list) -> object:
     DataType = Column.get('data_type')
     if DataType == TNS_TYPE_NUMBER:
         return decode_number(Data)
-    if DataType in (TNS_TYPE_VARCHAR, TNS_TYPE_CHAR):
+    if DataType in (TNS_TYPE_VARCHAR, TNS_TYPE_CHAR, TNS_TYPE_LONG):
         return decode_string(Data, Column.get('charset', AL32UTF8_CHARSET))
+    if DataType == TNS_TYPE_LONGRAW:
+        return bytes(Data)
     if DataType in (TNS_TYPE_DATE, TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ,
                     TNS_TYPE_TIMESTAMPLTZ):
         return decode_date(Data)

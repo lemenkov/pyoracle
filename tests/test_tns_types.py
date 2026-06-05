@@ -14,16 +14,16 @@ import unittest
 
 from oracle.datatypes import BinaryDouble, BinaryFloat, IntervalYM
 from oracle.tns import (
-    _read_rowid_column, encode_token_binary_double, encode_token_binary_float,
-    encode_token_interval_ds, encode_token_interval_ym, encode_token_oac,
-    encode_token_rxd,
+    _read_long_column, _read_rowid_column, encode_token_binary_double,
+    encode_token_binary_float, encode_token_interval_ds,
+    encode_token_interval_ym, encode_token_oac, encode_token_rxd,
 )
 from oracle.tns_consts import (
     TNS_TYPE_BDOUBLE, TNS_TYPE_BFLOAT, TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM,
 )
 from oracle.types import (
     decode_binary_double, decode_binary_float, decode_interval_ds,
-    decode_interval_ym, rowid_to_string,
+    decode_interval_ym, decode_value, rowid_to_string,
 )
 
 
@@ -173,6 +173,47 @@ class TestRowid(unittest.TestCase):
         Value, Rest = _read_rowid_column(b"\x00\x04rest")
         self.assertIsNone(Value)
         self.assertEqual(Rest, b"\x04rest")
+
+
+class TestLong(unittest.TestCase):
+    # Bytes captured from live XE rows (value portion + the two trailing ub4
+    # indicators), with a trailing 0x04 / NUMBER standing in for the next token
+    # so we can assert the reader leaves the stream aligned.
+
+    def test_long_single(self):
+        Val, Rest = _read_long_column(bytes.fromhex("fe015a00000004"))
+        self.assertEqual(Val, b"Z")
+        self.assertEqual(Rest, b"\x04")
+
+    def test_long_then_number(self):
+        # 'AB' value, terminator 00, trailer 00 00, then NUMBER 02 c1 02 which
+        # must be left intact for the next column.
+        Val, Rest = _read_long_column(bytes.fromhex("fe02414200000002c102"))
+        self.assertEqual(Val, b"AB")
+        self.assertEqual(Rest, bytes.fromhex("02c102"))
+
+    def test_long_multichunk(self):
+        # Two chunks "AB" + "CD" then the zero terminator and two ub4 trailers.
+        Val, Rest = _read_long_column(bytes.fromhex("fe0241420243440000000a"))
+        self.assertEqual(Val, b"ABCD")
+        self.assertEqual(Rest, b"\x0a")
+
+    def test_long_null(self):
+        # NULL value (0x00) then the two ub4 indicators 81 01 / 02 05 7d, then
+        # a following NUMBER 02 c1 64.
+        Val, Rest = _read_long_column(bytes.fromhex("00810102057d02c164"))
+        self.assertIsNone(Val)
+        self.assertEqual(Rest, bytes.fromhex("02c164"))
+
+    def test_decode_value_long_is_str(self):
+        from oracle.tns_consts import TNS_TYPE_LONG
+        self.assertEqual(decode_value({'data_type': TNS_TYPE_LONG}, b"hi"), "hi")
+
+    def test_decode_value_longraw_is_bytes(self):
+        from oracle.tns_consts import TNS_TYPE_LONGRAW
+        Out = decode_value({'data_type': TNS_TYPE_LONGRAW}, b"\xde\xad")
+        self.assertEqual(Out, b"\xde\xad")
+        self.assertIsInstance(Out, bytes)
 
 
 class TestBindDispatch(unittest.TestCase):
