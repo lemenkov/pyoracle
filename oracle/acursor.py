@@ -6,8 +6,10 @@
 
 from oracle.cursor import (
     _column_description,
+    _populate_out_binds,
     _resolve_parameters,
 )
+from oracle.datatypes import Var
 from oracle.exceptions import (
     DatabaseError, InterfaceError, from_ora_code,
 )
@@ -73,6 +75,10 @@ class AsyncCursor:
             Detail = Message or f"ORA-{OraCode:05d}"
             raise from_ora_code(OraCode)(Detail, code=OraCode)
 
+        # PL/SQL OUT / IN OUT binds: write returned values back into any Var
+        # objects the caller passed (shared with the sync cursor).
+        _populate_out_binds(Bind, Result)
+
         ServerRowCount = None
         ColMeta = None
         if isinstance(RetFormat, tuple) and len(RetFormat) >= 2:
@@ -104,6 +110,21 @@ class AsyncCursor:
 
         self._row_index = 0
         return self
+
+    def var(self, typ, size=None) -> Var:
+        """Create a bind variable for an OUT / IN OUT argument. See
+        `oracle.cursor.Cursor.var`."""
+        return Var(typ, size)
+
+    async def callproc(self, name: str, parameters=None) -> list:
+        """Call a stored procedure. `parameters` is a positional list of plain
+        values (IN) and `Var` objects (OUT / IN OUT). Returns the list with
+        each `Var` replaced by its returned value."""
+        self._check_open()
+        Params = list(parameters) if parameters else []
+        Placeholders = ', '.join(f':{I + 1}' for I in range(len(Params)))
+        await self.execute(f"BEGIN {name}({Placeholders}); END;", Params)
+        return [P.getvalue() if isinstance(P, Var) else P for P in Params]
 
     async def executemany(self, operation: str, seq_of_parameters) -> 'AsyncCursor':
         self._check_open()

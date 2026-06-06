@@ -324,7 +324,15 @@ class AsyncOracleConnect:
             Bind = []
         if Def is None:
             Def = []
-        Type = 'select' if Query.strip().upper().startswith('SELECT') else 'change'
+        Head = Query.strip().upper()
+        if Head.startswith('SELECT'):
+            Type = 'select'
+        elif Head.startswith('BEGIN') or Head.startswith('DECLARE'):
+            # Anonymous PL/SQL block: dedicated 'block' exec option set, not the
+            # DML 'change' path (else ORA-00600 [12259]). Mirrors the sync path.
+            Type = 'block'
+        else:
+            Type = 'change'
         CachedCursor = 0
         if Type == 'change' and not Def:
             CachedCursor = self._cursor_cache.get(Query, 0)

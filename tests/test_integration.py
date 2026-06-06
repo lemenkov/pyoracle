@@ -1401,6 +1401,44 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                 ])
                 await Cur.execute("DROP TABLE PYORACLE_ASYNC_LOB")
 
+    async def test_async_plsql_in_bind(self):
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                await Cur.execute("CREATE TABLE PYORACLE_ASYNC_PLSQL (v NUMBER)")
+                try:
+                    await Cur.execute(
+                        "BEGIN INSERT INTO PYORACLE_ASYNC_PLSQL "
+                        "VALUES (:x); END;", [42])
+                    await Cur.execute("SELECT v FROM PYORACLE_ASYNC_PLSQL")
+                    self.assertEqual(await Cur.fetchone(), (42,))
+                finally:
+                    await Cur.execute("DROP TABLE PYORACLE_ASYNC_PLSQL")
+
+    async def test_async_callproc_out_and_inout(self):
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                await Cur.execute(
+                    "CREATE OR REPLACE PROCEDURE PYORACLE_ASYNC_PROC"
+                    "(p_in IN NUMBER, p_out OUT NUMBER, p_io IN OUT VARCHAR2) AS "
+                    "BEGIN p_out := p_in * 2; p_io := p_io || '!'; END;")
+                try:
+                    o = Cur.var(oracle.NUMBER)
+                    io = Cur.var(oracle.STRING)
+                    io.setvalue(0, "hi")
+                    ret = await Cur.callproc("PYORACLE_ASYNC_PROC", [5, o, io])
+                    self.assertEqual(ret, [5, 10, "hi!"])
+                    self.assertEqual(o.getvalue(), 10)
+                    self.assertEqual(io.getvalue(), "hi!")
+                finally:
+                    await Cur.execute("DROP PROCEDURE PYORACLE_ASYNC_PROC")
+
+    async def test_async_execute_out_var(self):
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                y = Cur.var(oracle.NUMBER)
+                await Cur.execute("BEGIN :y := 7 * 6; END;", [y])
+                self.assertEqual(y.getvalue(), 42)
+
 
 @unittest.skipUnless(
     _USER and os.environ.get("PYORACLE_TEST_BFILE_DIR"),
