@@ -51,6 +51,11 @@ What works so far:
   Stored functions: `cur.callfunc(name, return_type, [args...])` returns
   the function's value (`return_type` is a Python type or `oracle`
   constant). Available on both the sync and async cursors
+- Array DML: `cur.executemany(sql, [row1, row2, ...])` binds every row
+  and executes the whole batch in a single server round trip (one parse,
+  N iterations) instead of one `execute` per row; `cursor.rowcount`
+  reflects the total rows affected. Column types are taken from the
+  first row. Sync and async
 - Python type coercion for fetched values: NUMBER → `int` / `Decimal`,
   VARCHAR2 / CHAR → `str` (charset-aware), DATE / TIMESTAMP / TIMESTAMP
   WITH TIME ZONE → `datetime.datetime`, BINARY_FLOAT / BINARY_DOUBLE →

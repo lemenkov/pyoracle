@@ -270,11 +270,14 @@ class OracleConnect:
             logger.error("handle_login: unexpected RPA result %s", Result[0])
             return 1
 
-    def execute(self, Query: str, Bind: list | None = None, Def: list | None = None) -> object:
+    def execute(self, Query: str, Bind: list | None = None, Def: list | None = None,
+                Batch: list | None = None) -> object:
         if Bind is None:
             Bind = []
         if Def is None:
             Def = []
+        if Batch is None:
+            Batch = []
         Head = Query.strip().upper()
         if Head.startswith('SELECT'):
             Type = 'select'
@@ -305,7 +308,7 @@ class OracleConnect:
             'cursor': CachedCursor,
             'query': SendQuery,
             'bind': Bind,
-            'batch': [],
+            'batch': Batch,
             'def': Def,
         }
         Data = encode_dictionary(self._make_dict(DictionaryType.exec, query=QueryDict))

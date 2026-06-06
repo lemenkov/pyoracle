@@ -68,7 +68,10 @@ class Cursor:
     def execute(self, operation: str, parameters=None) -> 'Cursor':
         self._check_open()
         Bind = _resolve_parameters(operation, parameters)
-        Result = self._connection.execute(operation, Bind=Bind)
+        return self._run(operation, Bind)
+
+    def _run(self, operation: str, Bind: list, Batch: list | None = None) -> 'Cursor':
+        Result = self._connection.execute(operation, Bind=Bind, Batch=Batch)
         # Wire result tuple from decode_token_oer:
         #   (call_status, oracle_error_code, cursor_id, (rowcount, col_meta),
         #    rows, message_or_none)
@@ -154,15 +157,18 @@ class Cursor:
         return Ret.getvalue()
 
     def executemany(self, operation: str, seq_of_parameters) -> 'Cursor':
+        # Array DML: bind every row's values and execute them in a single
+        # server round trip (one parse, `len(rows)` iterations) rather than
+        # one execute() per row. Column types are taken from the first row.
         self._check_open()
-        Total = 0
-        for Params in seq_of_parameters:
-            self.execute(operation, Params)
-            if self._rowcount > 0:
-                Total += self._rowcount
-        if Total > 0:
-            self._rowcount = Total
-        return self
+        Rows = [_resolve_parameters(operation, P) for P in seq_of_parameters]
+        if not Rows:
+            self._description = None
+            self._rows = []
+            self._rowcount = 0
+            self._row_index = 0
+            return self
+        return self._run(operation, Rows[0], Batch=Rows[1:])
 
     def fetchone(self) -> tuple | None:
         self._check_open()

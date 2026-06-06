@@ -485,6 +485,49 @@ class CursorIntegration(_IntegrationBase):
             self.cur.execute(f"SELECT * FROM nope_{os.getpid()}_xyz")
         self.assertEqual(ctx.exception.code, 942)
 
+    # ----- executemany (array DML) -----
+
+    def test_executemany_insert(self):
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER, name VARCHAR2(20))")
+        rows = [(i, f"n{i}") for i in range(1, 21)]
+        self.cur.executemany(f"INSERT INTO {self.TABLE} VALUES (:1, :2)", rows)
+        self.assertEqual(self.cur.rowcount, 20)
+        self.cur.execute(f"SELECT id, name FROM {self.TABLE} ORDER BY id")
+        self.assertEqual(self.cur.fetchall(), rows)
+
+    def test_executemany_single_round_trip(self):
+        # The whole batch must go in one server round trip, not one per row.
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
+        import oracle.connection as _c
+        orig = _c.OracleConnect.send
+        sends = [0]
+        _c.OracleConnect.send = lambda s, T, D: (
+            sends.__setitem__(0, sends[0] + 1), orig(s, T, D))[1]
+        try:
+            self.cur.executemany(
+                f"INSERT INTO {self.TABLE} VALUES (:1)", [(i,) for i in range(50)])
+        finally:
+            _c.OracleConnect.send = orig
+        self.assertEqual(sends[0], 1)
+        self.assertEqual(self.cur.rowcount, 50)
+
+    def test_executemany_delete(self):
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
+        self.cur.executemany(
+            f"INSERT INTO {self.TABLE} VALUES (:1)", [(i,) for i in range(10)])
+        self.cur.executemany(
+            f"DELETE FROM {self.TABLE} WHERE id = :1", [(2,), (4,), (6,)])
+        self.assertEqual(self.cur.rowcount, 3)
+        self.cur.execute(f"SELECT COUNT(*) FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchone(), (7,))
+
+    def test_executemany_empty(self):
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
+        self.cur.executemany(f"INSERT INTO {self.TABLE} VALUES (:1)", [])
+        self.assertEqual(self.cur.rowcount, 0)
+        self.cur.execute(f"SELECT COUNT(*) FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchone(), (0,))
+
     # ----- closed-state guards -----
 
     def test_fetch_without_execute_raises(self):
@@ -1438,6 +1481,20 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                 y = Cur.var(oracle.NUMBER)
                 await Cur.execute("BEGIN :y := 7 * 6; END;", [y])
                 self.assertEqual(y.getvalue(), 42)
+
+    async def test_async_executemany(self):
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                await Cur.execute("CREATE TABLE PYORACLE_ASYNC_EM (id NUMBER)")
+                try:
+                    await Cur.executemany(
+                        "INSERT INTO PYORACLE_ASYNC_EM VALUES (:1)",
+                        [(i,) for i in range(8)])
+                    self.assertEqual(Cur.rowcount, 8)
+                    await Cur.execute("SELECT COUNT(*) FROM PYORACLE_ASYNC_EM")
+                    self.assertEqual(await Cur.fetchone(), (8,))
+                finally:
+                    await Cur.execute("DROP TABLE PYORACLE_ASYNC_EM")
 
     async def test_async_callfunc(self):
         async with await oracle.connect_async(**self._kwargs()) as Conn:

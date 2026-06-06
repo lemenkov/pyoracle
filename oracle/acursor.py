@@ -61,7 +61,11 @@ class AsyncCursor:
     async def execute(self, operation: str, parameters=None) -> 'AsyncCursor':
         self._check_open()
         Bind = _resolve_parameters(operation, parameters)
-        Result = await self._connection.execute(operation, Bind=Bind)
+        return await self._run(operation, Bind)
+
+    async def _run(self, operation: str, Bind: list,
+                   Batch: list | None = None) -> 'AsyncCursor':
+        Result = await self._connection.execute(operation, Bind=Bind, Batch=Batch)
         try:
             CallStatus = Result[0]
             OraCode = Result[1]
@@ -137,15 +141,16 @@ class AsyncCursor:
         return Ret.getvalue()
 
     async def executemany(self, operation: str, seq_of_parameters) -> 'AsyncCursor':
+        # Array DML in a single round trip; see Cursor.executemany.
         self._check_open()
-        Total = 0
-        for Params in seq_of_parameters:
-            await self.execute(operation, Params)
-            if self._rowcount > 0:
-                Total += self._rowcount
-        if Total > 0:
-            self._rowcount = Total
-        return self
+        Rows = [_resolve_parameters(operation, P) for P in seq_of_parameters]
+        if not Rows:
+            self._description = None
+            self._rows = []
+            self._rowcount = 0
+            self._row_index = 0
+            return self
+        return await self._run(operation, Rows[0], Batch=Rows[1:])
 
     async def fetchone(self) -> tuple | None:
         self._check_open()

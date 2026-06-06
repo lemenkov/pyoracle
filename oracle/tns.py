@@ -829,6 +829,10 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
     BindLen = len(Bind)
     BindFlag = 1 if (Cursor == 0) and (BindLen > 0) else 0
     Batch = Dictionary['query']['batch']
+    # Batch is a list of *additional* rows (each a list of column values) for
+    # array DML: the OAC describes the columns once (from `Bind`, the first
+    # row), the iteration count is 1 + len(Batch), and each row is sent as its
+    # own RXD token after the OAC.
     BatchLen = len(Batch)
     Def = Dictionary['query']['def']
     DefLen = len(Def)
@@ -851,9 +855,19 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
     if BindLen == DefLen == 0:
         Tokens = b""
     elif DefLen == QueryLen == 0:
-        Tokens = encode_tokens_rxd(Bind + Batch, b"")
+        if BatchLen > 0:
+            Tokens = b"".join(encode_tokens_rxd(R, b"") for R in [Bind] + Batch)
+        else:
+            Tokens = encode_tokens_rxd(Bind, b"")
     elif DefLen == 0:
-        Tokens = encode_tokens_rxd(Bind + Batch, encode_tokens_oac(Bind, b""))
+        Oac = encode_tokens_oac(Bind, b"")
+        if BatchLen > 0:
+            # Array DML: OAC describes the columns once, then one RXD row per
+            # iteration.
+            Tokens = Oac + b"".join(
+                encode_tokens_rxd(R, b"") for R in [Bind] + Batch)
+        else:
+            Tokens = encode_tokens_rxd(Bind, Oac)
     elif BindLen == QueryLen == 0:
         Tokens = encode_tokens_oac(Def, b"")
     else:
