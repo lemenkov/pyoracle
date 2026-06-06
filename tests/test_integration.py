@@ -1658,5 +1658,65 @@ class SSLIntegration(unittest.TestCase):
             self.assertEqual(cur.fetchone(), (1,))
 
 
+@unittest.skipUnless(_USER, _SKIP_REASON)
+class CallprocIntegration(_IntegrationBase):
+    """OUT / IN OUT binds via cursor.var + callproc against a real procedure."""
+
+    PROC = "PYORACLE_TEST_PROC"
+
+    def tearDown(self):
+        try:
+            c = self.conn.cursor()
+            try:
+                c.execute(f"DROP PROCEDURE {self.PROC}")
+            except oracle.DatabaseError:
+                pass            # ORA-04043: procedure does not exist
+            finally:
+                c.close()
+        finally:
+            super().tearDown()
+
+    def _make(self, signature_and_body: str):
+        self.cur.execute(
+            f"CREATE OR REPLACE PROCEDURE {self.PROC} {signature_and_body}")
+
+    def test_callproc_out(self):
+        self._make("(p_in IN NUMBER, p_out OUT NUMBER) AS "
+                   "BEGIN p_out := p_in * 2; END;")
+        o = self.cur.var(int)
+        ret = self.cur.callproc(self.PROC, [21, o])
+        self.assertEqual(o.getvalue(), 42)
+        self.assertEqual(ret, [21, 42])
+
+    def test_callproc_inout(self):
+        self._make("(p_io IN OUT VARCHAR2) AS "
+                   "BEGIN p_io := p_io || '!'; END;")
+        io = self.cur.var(str)
+        io.setvalue(0, "hi")
+        ret = self.cur.callproc(self.PROC, [io])
+        self.assertEqual(io.getvalue(), "hi!")
+        self.assertEqual(ret, ["hi!"])
+
+    def test_callproc_out_and_inout(self):
+        self._make("(p_in IN NUMBER, p_out OUT NUMBER, p_io IN OUT VARCHAR2) AS "
+                   "BEGIN p_out := p_in * 2; p_io := p_io || '!'; END;")
+        o = self.cur.var(oracle.NUMBER)
+        io = self.cur.var(oracle.STRING)
+        io.setvalue(0, "hi")
+        ret = self.cur.callproc(self.PROC, [5, o, io])
+        self.assertEqual(ret, [5, 10, "hi!"])
+
+    def test_callproc_string_out(self):
+        self._make("(p OUT VARCHAR2) AS BEGIN p := 'pyoracle'; END;")
+        s = self.cur.var(str)
+        self.cur.callproc(self.PROC, [s])
+        self.assertEqual(s.getvalue(), "pyoracle")
+
+    def test_execute_out_var(self):
+        y = self.cur.var(oracle.NUMBER)
+        self.cur.execute("BEGIN :y := 7 * 6; END;", [y])
+        self.assertEqual(y.getvalue(), 42)
+
+
 if __name__ == "__main__":
     unittest.main()

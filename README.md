@@ -39,6 +39,15 @@ What works so far:
   `str` and `bytes` binds reach up to ~7 KiB on the default 8 KiB SDU,
   suitable for most CLOB / BLOB inserts; see "still in progress" for
   the larger case
+- Anonymous PL/SQL blocks with bind variables: `cur.execute("BEGIN
+  ... :x ...; END;", [val])` runs the block server-side
+- Stored procedures and OUT / IN OUT binds: `cur.callproc(name,
+  [in_val, out_var, ...])` where an OUT / IN OUT argument is a
+  `cur.var(type)` (type is a Python type or an `oracle` constant like
+  `oracle.NUMBER` / `oracle.STRING`). Seed an IN OUT value with
+  `var.setvalue(0, v)`; read results with `var.getvalue()`. `callproc`
+  returns the argument list with OUT slots replaced by their values.
+  OUT binds also work through `cur.execute` directly (pass a `Var`)
 - Python type coercion for fetched values: NUMBER → `int` / `Decimal`,
   VARCHAR2 / CHAR → `str` (charset-aware), DATE / TIMESTAMP / TIMESTAMP
   WITH TIME ZONE → `datetime.datetime`, BINARY_FLOAT / BINARY_DOUBLE →

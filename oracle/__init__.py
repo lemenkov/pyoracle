@@ -9,7 +9,10 @@ paramstyle = "named"        # bind variables not yet wired through Cursor
 from oracle.aconnection import AsyncOracleConnect
 from oracle.apool import AsyncPool
 from oracle.connection import OracleConnect
-from oracle.datatypes import BinaryDouble, BinaryFloat, IntervalYM
+from oracle.datatypes import (
+    DB_TYPE_DATE, DB_TYPE_NUMBER, DB_TYPE_RAW, DB_TYPE_VARCHAR, NUMBER, STRING,
+    BinaryDouble, BinaryFloat, IntervalYM, Var,
+)
 from oracle.exceptions import (
     DataError, DatabaseError, Error, IntegrityError, InterfaceError,
     InternalError, NotSupportedError, OperationalError, ProgrammingError,
@@ -70,7 +73,9 @@ __all__ = [
     "apilevel", "threadsafety", "paramstyle",
     "connect", "connect_async", "create_pool", "create_pool_async",
     "OracleConnect", "AsyncOracleConnect", "Pool", "AsyncPool",
-    "BinaryFloat", "BinaryDouble", "IntervalYM",
+    "BinaryFloat", "BinaryDouble", "IntervalYM", "Var",
+    "NUMBER", "STRING", "DB_TYPE_NUMBER", "DB_TYPE_VARCHAR",
+    "DB_TYPE_RAW", "DB_TYPE_DATE",
     "Warning", "Error", "InterfaceError", "DatabaseError", "DataError",
     "OperationalError", "IntegrityError", "InternalError",
     "ProgrammingError", "NotSupportedError",

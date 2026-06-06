@@ -3,10 +3,12 @@
 
 import re
 
+from oracle.datatypes import Var
 from oracle.exceptions import (
     DatabaseError, InterfaceError, NotSupportedError, ProgrammingError,
     from_ora_code,
 )
+from oracle.tns_consts import UTF8_CHARSET
 
 
 # `:name` placeholder. Names are case-insensitive and follow normal SQL
@@ -86,6 +88,10 @@ class Cursor:
             Detail = Message or f"ORA-{OraCode:05d}"
             raise from_ora_code(OraCode)(Detail, code=OraCode)
 
+        # PL/SQL OUT / IN OUT binds: write the returned values back into any
+        # Var objects the caller passed (see _populate_out_binds).
+        _populate_out_binds(Bind, Result)
+
         ServerRowCount = None
         ColMeta = None
         if isinstance(RetFormat, tuple) and len(RetFormat) >= 2:
@@ -110,6 +116,28 @@ class Cursor:
 
         self._row_index = 0
         return self
+
+    def var(self, typ, size=None) -> Var:
+        """Create a bind variable that can receive an OUT / IN OUT value.
+
+        `typ` is a Python type (`int`, `str`, `bytes`, `datetime`, ...) or an
+        `oracle` type constant (`oracle.NUMBER`, `oracle.STRING`,
+        `oracle.DB_TYPE_*`). Pass the returned `Var` in a `callproc` /
+        `execute` parameter list and read the result with `getvalue()`.
+        """
+        return Var(typ, size)
+
+    def callproc(self, name: str, parameters=None) -> list:
+        """Call a stored procedure. `parameters` is a positional list of plain
+        values (IN) and `Var` objects (OUT / IN OUT). Returns the parameter
+        list with each `Var` replaced by its returned value (PEP 249 / oracledb
+        compatible).
+        """
+        self._check_open()
+        Params = list(parameters) if parameters else []
+        Placeholders = ', '.join(f':{I + 1}' for I in range(len(Params)))
+        self.execute(f"BEGIN {name}({Placeholders}); END;", Params)
+        return [P.getvalue() if isinstance(P, Var) else P for P in Params]
 
     def executemany(self, operation: str, seq_of_parameters) -> 'Cursor':
         self._check_open()
@@ -173,6 +201,27 @@ class Cursor:
 
     def __exit__(self, exc_type, exc, tb):
         self.close()
+
+
+def _populate_out_binds(Bind, Result) -> None:
+    # After a PL/SQL execute, the IOV decoder leaves an {'out_positions',
+    # 'out_values', ...} record as the single "row". Decode each raw OUT value
+    # by its Var's declared type and store it on the Var at that bind position.
+    if not isinstance(Bind, list) or not isinstance(Result, tuple) \
+            or len(Result) < 5:
+        return
+    Rows = Result[4]
+    if not Rows or not isinstance(Rows[0], dict) \
+            or 'out_positions' not in Rows[0]:
+        return
+    from oracle.types import decode_value
+    Record = Rows[0]
+    for Pos, Raw in zip(Record['out_positions'], Record['out_values']):
+        if Pos < len(Bind) and isinstance(Bind[Pos], Var):
+            Variable = Bind[Pos]
+            Column = {'data_type': Variable.dbtype.tns_type,
+                      'charset': UTF8_CHARSET}
+            Variable._value = decode_value(Column, Raw if Raw else None)
 
 
 def _resolve_lobs(Connection, Row: list) -> list:

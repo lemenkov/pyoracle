@@ -6,7 +6,7 @@ from decimal import Decimal
 from functools import reduce
 from oracle.crypto import o5logon
 from oracle.cursor import cursor
-from oracle.datatypes import BinaryDouble, BinaryFloat, IntervalYM
+from oracle.datatypes import BinaryDouble, BinaryFloat, IntervalYM, Var
 from oracle.date import date
 from oracle.tns_consts import (
     AL16UTF16_CHARSET, CharsetDict, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_SID,
@@ -1131,6 +1131,12 @@ def encode_tokens_oac(Tokens: list, Binary: bytes) -> bytes:
     return Binary + Out
 
 def encode_token_rxd(Token: object) -> bytes:
+    if isinstance(Token, Var):
+        # OUT / IN OUT bind: send the current value (NULL for an unseeded pure
+        # OUT). The server writes the result back in the IOV response.
+        if Token._value is None:
+            return bytes([0])
+        return encode_token_rxd(Token._value)
     if Token is None:
         return bytes([0])
     if isinstance(Token, bool):
@@ -1200,6 +1206,21 @@ def encode_token_oac(Token: object) -> bytes:
     # when the target is a CLOB / BLOB that could comfortably hold more.
     # 32767 = PL/SQL VARCHAR2 / RAW max, the largest the regular bind path
     # accepts on 11g; larger payloads need TTI_LOBOPS WRITE.
+    if isinstance(Token, Var):
+        # OAC is driven by the Var's declared type + size, NOT its (maybe NULL)
+        # value, so a pure-OUT bind still announces the right type and a buffer
+        # large enough for the server to return into.
+        DT = Token.dbtype.tns_type
+        if DT == TNS_TYPE_NUMBER:
+            return encode_token_raw(TNS_TYPE_NUMBER, 22, 0, 0, 0)
+        if DT == TNS_TYPE_VARCHAR:
+            return encode_token_raw(TNS_TYPE_VARCHAR, Token.size, 16,
+                                    UTF8_CHARSET, 0)
+        if DT == TNS_TYPE_RAW:
+            return encode_token_raw(TNS_TYPE_RAW, Token.size, 16, 0, 0)
+        if DT == TNS_TYPE_DATE:
+            return encode_token_raw(TNS_TYPE_DATE, 7, 0, 0, 0)
+        raise Exception("Unsupported Var OAC type", DT)
     if Token is None:
         return encode_token_raw(TNS_TYPE_VARCHAR, 32767, 16, UTF8_CHARSET, 0)
     if isinstance(Token, BinaryFloat):

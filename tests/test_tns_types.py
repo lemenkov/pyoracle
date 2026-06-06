@@ -216,6 +216,51 @@ class TestLong(unittest.TestCase):
         self.assertIsInstance(Out, bytes)
 
 
+class TestVar(unittest.TestCase):
+    def test_var_python_type(self):
+        from oracle.datatypes import Var
+        from oracle.tns_consts import TNS_TYPE_NUMBER, TNS_TYPE_VARCHAR
+        self.assertEqual(Var(int).dbtype.tns_type, TNS_TYPE_NUMBER)
+        self.assertEqual(Var(str).dbtype.tns_type, TNS_TYPE_VARCHAR)
+
+    def test_var_type_constant(self):
+        from oracle.datatypes import NUMBER, STRING, Var
+        from oracle.tns_consts import TNS_TYPE_NUMBER, TNS_TYPE_VARCHAR
+        self.assertEqual(Var(NUMBER).dbtype.tns_type, TNS_TYPE_NUMBER)
+        self.assertEqual(Var(STRING).dbtype.tns_type, TNS_TYPE_VARCHAR)
+
+    def test_var_size_default_and_override(self):
+        from oracle.datatypes import Var
+        self.assertEqual(Var(int).size, 22)
+        self.assertEqual(Var(str).size, 32767)
+        self.assertEqual(Var(str, 100).size, 100)
+
+    def test_var_setget(self):
+        from oracle.datatypes import Var
+        v = Var(int)
+        self.assertIsNone(v.getvalue())
+        self.assertFalse(v.has_value)
+        v.setvalue(0, 5)
+        self.assertEqual(v.getvalue(), 5)
+        self.assertTrue(v.has_value)
+
+    def test_var_oac_by_declared_type(self):
+        # OAC type comes from the Var's type even when the value is NULL.
+        from oracle.datatypes import Var
+        from oracle.tns_consts import TNS_TYPE_NUMBER, TNS_TYPE_VARCHAR
+        self.assertEqual(encode_token_oac(Var(int))[0], TNS_TYPE_NUMBER)
+        self.assertEqual(encode_token_oac(Var(str))[0], TNS_TYPE_VARCHAR)
+
+    def test_var_rxd_null_when_unseeded(self):
+        from oracle.datatypes import Var
+        self.assertEqual(encode_token_rxd(Var(int)), bytes([0]))
+
+    def test_var_rxd_seeded_value(self):
+        from oracle.datatypes import Var
+        v = Var(int); v.setvalue(0, 5)
+        self.assertEqual(encode_token_rxd(v), encode_token_rxd(5))
+
+
 class TestIov(unittest.TestCase):
     # TTI_IOV bodies captured from XE 11g. Common header is
     #   0b 05 01 <numreq> 00 01 01 00 00 00  then per-bind direction byte(s),
