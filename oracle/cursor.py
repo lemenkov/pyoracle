@@ -91,9 +91,13 @@ class Cursor:
             Detail = Message or f"ORA-{OraCode:05d}"
             raise from_ora_code(OraCode)(Detail, code=OraCode)
 
-        # PL/SQL OUT / IN OUT binds: write the returned values back into any
-        # Var objects the caller passed (see _populate_out_binds).
-        _populate_out_binds(Bind, Result)
+        # PL/SQL OUT / IN OUT binds: write returned values back into any Var
+        # objects the caller passed. REF CURSOR OUT binds are fetched here.
+        for Variable, Marker in _assign_out_binds(Bind, Result):
+            Rows = self._connection.fetch_all_rows(
+                Marker['cursor_id'], Marker['row_format'])
+            Variable._value = _build_refcursor_cursor(
+                self._connection, Rows, Marker)
 
         ServerRowCount = None
         ColMeta = None
@@ -223,25 +227,45 @@ class Cursor:
         self.close()
 
 
-def _populate_out_binds(Bind, Result) -> None:
+def _assign_out_binds(Bind, Result) -> list:
     # After a PL/SQL execute, the IOV decoder leaves an {'out_positions',
-    # 'out_values', ...} record as the single "row". Decode each raw OUT value
-    # by its Var's declared type and store it on the Var at that bind position.
+    # 'out_values', ...} record as the single "row". Decode each scalar OUT
+    # value by its Var's declared type and store it on the Var. REF CURSOR OUT
+    # values arrive as a marker dict ({'_refcursor', 'cursor_id',
+    # 'row_format'}); they need a server fetch to materialise, which differs
+    # between the sync and async cursors, so collect and return them as
+    # (Var, marker) pairs for the caller to finish.
     if not isinstance(Bind, list) or not isinstance(Result, tuple) \
             or len(Result) < 5:
-        return
+        return []
     Rows = Result[4]
     if not Rows or not isinstance(Rows[0], dict) \
             or 'out_positions' not in Rows[0]:
-        return
+        return []
     from oracle.types import decode_value
     Record = Rows[0]
-    for Pos, Raw in zip(Record['out_positions'], Record['out_values']):
-        if Pos < len(Bind) and isinstance(Bind[Pos], Var):
-            Variable = Bind[Pos]
+    RefCursors = []
+    for Pos, Value in zip(Record['out_positions'], Record['out_values']):
+        if Pos >= len(Bind) or not isinstance(Bind[Pos], Var):
+            continue
+        Variable = Bind[Pos]
+        if isinstance(Value, dict) and Value.get('_refcursor'):
+            RefCursors.append((Variable, Value))
+        else:
             Column = {'data_type': Variable.dbtype.tns_type,
                       'charset': UTF8_CHARSET}
-            Variable._value = decode_value(Column, Raw if Raw else None)
+            Variable._value = decode_value(Column, Value if Value else None)
+    return RefCursors
+
+
+def _build_refcursor_cursor(Connection, Rows, Marker) -> 'Cursor':
+    # Wrap an already-fetched REF CURSOR result set in a Cursor.
+    Nested = Cursor(Connection)
+    Nested._description = [_column_description(C) for C in Marker['row_format']]
+    Nested._rows = [_resolve_lobs(Connection, Row) for Row in Rows]
+    Nested._rowcount = len(Nested._rows)
+    Nested._row_index = 0
+    return Nested
 
 
 def _resolve_lobs(Connection, Row: list) -> list:

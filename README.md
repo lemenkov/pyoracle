@@ -50,7 +50,9 @@ What works so far:
   OUT binds also work through `cur.execute` directly (pass a `Var`).
   Stored functions: `cur.callfunc(name, return_type, [args...])` returns
   the function's value (`return_type` is a Python type or `oracle`
-  constant). Available on both the sync and async cursors
+  constant). A REF CURSOR OUT parameter is a `cur.var(oracle.CURSOR)`;
+  after the call `var.getvalue()` is a ready-to-fetch nested cursor.
+  Available on both the sync and async cursors
 - Array DML: `cur.executemany(sql, [row1, row2, ...])` binds every row
   and executes the whole batch in a single server round trip (one parse,
   N iterations) instead of one `execute` per row; `cursor.rowcount`

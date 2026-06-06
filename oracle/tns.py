@@ -154,7 +154,7 @@ def decode_token_dcb(Data: bytes, Acc: object) -> tuple:
     #   ub4  dcbmnpr                                   (skip)
     #   ub4  dcbmxpr                                   (skip)
     #   bytes_with_length  dcbqcky                     (skip)
-    (Cursor, _, Rows) = Acc
+    (Cursor, _, Rows) = Acc[:3]
     Rest = Data[1:]
     Rest = _skip_chunked_bytes(Rest)
     (_, Rest) = decode_ub4(Rest)
@@ -231,7 +231,8 @@ def decode_token_iov(Data: bytes, Acc: object) -> tuple:
     # accumulator as an {'out_*': ...} record the cursor maps back onto its
     # bind variables.
     (Cursor, RowFormat, Rows) = Acc[:3]
-    (Directions, OutValues, Rest) = _read_iov(Data)
+    Binds = Acc[3] if len(Acc) > 3 else None
+    (Directions, OutValues, Rest) = _read_iov(Data, Binds)
     OutPositions = [I for I, D in enumerate(Directions)
                     if D != TNS_BIND_DIR_INPUT]
     if OutPositions:
@@ -240,10 +241,22 @@ def decode_token_iov(Data: bytes, Acc: object) -> tuple:
                         'directions': Directions}]
     return decode_packet(Rest, (Cursor, RowFormat, Rows))
 
-def _read_iov(Data: bytes) -> tuple[list[int], list[bytes], bytes]:
+def _is_refcursor_bind(Bind: object) -> bool:
+    if isinstance(Bind, Var):
+        return Bind.dbtype.tns_type == TNS_TYPE_REFCURSOR
+    return isinstance(Bind, cursor)
+
+def _read_iov(Data: bytes, Binds: list | None = None
+              ) -> tuple[list[int], list[object], bytes]:
     # Parse a TTI_IOV body starting at the token byte. Returns the per-bind
-    # direction codes, the raw OUT/IN-OUT value bytes (in OUT-bind order), and
-    # the unconsumed tail (the RPA / OER that follow). See decode_token_iov.
+    # direction codes, the OUT/IN-OUT values (in OUT-bind order), and the
+    # unconsumed tail (the RPA / OER that follow). See decode_token_iov.
+    #
+    # A scalar OUT value is raw DALC bytes (the cursor decodes it by the bind's
+    # type). A REF CURSOR OUT value is instead an inline describe + cursor id;
+    # it is returned as a {'_refcursor': True, 'cursor_id', 'row_format'} record
+    # the cursor turns into a nested Cursor. Detecting which is which needs the
+    # bind list, threaded in via the decode Acc.
     Rest = Data[1:]                              # consume IOV token
     Rest = Rest[1:]                              # skip flag (ub1)
     (NumRequests, Rest) = decode_ub4(Rest)
@@ -263,13 +276,41 @@ def _read_iov(Data: bytes) -> tuple[list[int], list[bytes], bytes]:
     OutValues = []
     if HasOut and Rest and Rest[0] == TTI_RXD:
         Rest = Rest[1:]                          # consume RXD token
-        for D in Directions:
+        for Idx, D in enumerate(Directions):
             if D == TNS_BIND_DIR_INPUT:
                 continue
-            (Val, Rest) = decode_dalc(Rest)
-            Rest = Rest[1:]                      # per-value indicator byte
-            OutValues.append(b"" if Val == [] else bytes(Val))
+            Bind = Binds[Idx] if Binds and Idx < len(Binds) else None
+            if _is_refcursor_bind(Bind):
+                (Value, Rest) = _read_refcursor_out(Rest)
+                OutValues.append(Value)
+            else:
+                (Val, Rest) = decode_dalc(Rest)
+                Rest = Rest[1:]                  # per-value indicator byte
+                OutValues.append(b"" if Val == [] else bytes(Val))
     return (Directions, OutValues, Rest)
+
+def _read_refcursor_out(Rest: bytes) -> tuple[dict, bytes]:
+    # A REF CURSOR OUT value: a 1-byte length, then an inline describe (max row
+    # size, num columns, the same per-column metadata as a DCB), then the
+    # nested cursor id (ub2) and a 1-byte indicator. Mirrors oracledb's
+    # _create_cursor_from_describe; byte layout verified against XE 11g.
+    Rest = Rest[1:]                              # skip_ub1 (length)
+    (_, Rest) = decode_ub4(Rest)                 # max row size
+    (NumCols, Rest) = decode_ub4(Rest)
+    if NumCols > 0:
+        Rest = Rest[1:]                          # reserved byte
+    Columns = []
+    for _ in range(NumCols):
+        (Col, Rest) = _decode_dcb_column(Rest)
+        Columns.append(Col)
+    Rest = _skip_bytes_with_length(Rest)         # current date
+    for _ in range(4):                           # dcbflag / mdbz / mnpr / mxpr
+        (_, Rest) = decode_ub4(Rest)
+    Rest = _skip_bytes_with_length(Rest)         # dcbqcky
+    (CursorId, Rest) = decode_ub4(Rest)
+    Rest = Rest[1:]                              # per-value indicator byte
+    return ({'_refcursor': True, 'cursor_id': CursorId,
+             'row_format': Columns}, Rest)
 
 def decode_token_lob(Data: bytes, Acc: object) -> tuple:
     # LOB data - FIXME: full LOB handling not yet implemented
@@ -420,7 +461,7 @@ def decode_token_rpa_piggyback(Data: bytes, Acc: tuple) -> object:
 def decode_token_uds(Data: bytes, Acc: object) -> tuple:
     # User describe information
     # Contains OAC descriptor for a single column
-    (Cursor, RowFormat, Rows) = Acc
+    (Cursor, RowFormat, Rows) = Acc[:3]
     (DataType, MaxDataLength, DataScale, Charset, Rest) = decode_token_oac(Data[1:], None)
     NullOk = Rest[0]
     (ColName, Rest) = decode_dalc(Rest[1:])
@@ -584,7 +625,7 @@ def decode_token_rxh(Data: bytes, Acc: object) -> tuple:
     # (1-byte length prefix + value bytes), not the fixed 2-byte big-endian
     # layout the older version of this decoder assumed. See python-oracledb's
     # _process_row_header.
-    (Cursor, RowFormat, Rows) = Acc
+    (Cursor, RowFormat, Rows) = Acc[:3]
     Rest = Data[2:]                          # skip token + 1B flags
     (_, Rest) = decode_ub4(Rest)             # num requests
     (_, Rest) = decode_ub4(Rest)             # iteration number
@@ -1174,6 +1215,8 @@ def encode_token_rxd(Token: object) -> bytes:
     if isinstance(Token, Var):
         # OUT / IN OUT bind: send the current value (NULL for an unseeded pure
         # OUT). The server writes the result back in the IOV response.
+        if Token.dbtype.tns_type == TNS_TYPE_REFCURSOR:
+            return bytes([1, 0])            # REF CURSOR slot placeholder
         if Token._value is None:
             return bytes([0])
         return encode_token_rxd(Token._value)
@@ -1260,6 +1303,8 @@ def encode_token_oac(Token: object) -> bytes:
             return encode_token_raw(TNS_TYPE_RAW, Token.size, 16, 0, 0)
         if DT == TNS_TYPE_DATE:
             return encode_token_raw(TNS_TYPE_DATE, 7, 0, 0, 0)
+        if DT == TNS_TYPE_REFCURSOR:
+            return encode_token_raw(TNS_TYPE_REFCURSOR, 1, 0, UTF8_CHARSET, 0)
         raise Exception("Unsupported Var OAC type", DT)
     if Token is None:
         # NULL value (0 bytes): a minimal VARCHAR OAC, again avoiding the

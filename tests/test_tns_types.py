@@ -216,6 +216,39 @@ class TestLong(unittest.TestCase):
         self.assertIsInstance(Out, bytes)
 
 
+class TestRefCursor(unittest.TestCase):
+    # A TTI_IOV captured from XE 11g for BEGIN pyo_refcur(:1); END; where the
+    # proc opens a cursor over SELECT 1 a, 'x' b ... (one OUT REF CURSOR bind).
+    WIRE = bytes.fromhex(
+        "0b05010100010100000010074c0103010251020000817f0102000000000000"
+        "0001010101014100000000608000000101000000000203690101010101010101"
+        "420000010100010707787e0606100d040000000000010200080106031a0a6400"
+        "010101020000000000040105010401010000000101002f00000000000000000000"
+        "00000700010100000000")
+
+    def test_refcursor_iov_parse(self):
+        from oracle.cursor import cursor as RefCur
+        from oracle.tns import _read_iov
+        directions, out_values, _ = _read_iov(self.WIRE, [RefCur()])
+        self.assertEqual(directions, [16])               # one OUT bind
+        self.assertEqual(len(out_values), 1)
+        marker = out_values[0]
+        self.assertTrue(marker.get("_refcursor"))
+        self.assertIsInstance(marker["cursor_id"], int)
+        self.assertGreater(marker["cursor_id"], 0)
+        self.assertEqual([c.get("column_name") for c in marker["row_format"]],
+                         [b"A", b"B"])
+
+    def test_scalar_bind_not_treated_as_refcursor(self):
+        # Without a REF CURSOR bind, a scalar OUT value stays raw bytes.
+        from oracle.tns import _read_iov
+        wire = bytes([0x0b, 0x05, 0x01, 0x01, 0x00, 0x01, 0x01,
+                      0x00, 0x00, 0x00, 0x10,
+                      0x07, 0x02, 0xc1, 0x64, 0x00, 0x08])
+        _, out_values, _ = _read_iov(wire, [None])
+        self.assertEqual(out_values, [b"\xc1\x64"])
+
+
 class TestVar(unittest.TestCase):
     def test_var_python_type(self):
         from oracle.datatypes import Var

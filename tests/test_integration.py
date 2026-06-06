@@ -1525,6 +1525,25 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                 finally:
                     await Cur.execute("DROP TABLE PYORACLE_ASYNC_EM")
 
+    async def test_async_callproc_refcursor(self):
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                await Cur.execute(
+                    "CREATE OR REPLACE PROCEDURE PYORACLE_ASYNC_RC"
+                    "(p_rc OUT SYS_REFCURSOR) AS BEGIN OPEN p_rc FOR "
+                    "SELECT 1 AS a, 'x' AS b FROM dual "
+                    "UNION ALL SELECT 2, 'y' FROM dual; END;")
+                try:
+                    rc = Cur.var(oracle.CURSOR)
+                    await Cur.callproc("PYORACLE_ASYNC_RC", [rc])
+                    nested = rc.getvalue()
+                    self.assertEqual([d[0] for d in nested.description],
+                                     ["A", "B"])
+                    self.assertEqual(await nested.fetchall(),
+                                     [(1, "x"), (2, "y")])
+                finally:
+                    await Cur.execute("DROP PROCEDURE PYORACLE_ASYNC_RC")
+
     async def test_async_callfunc(self):
         async with await oracle.connect_async(**self._kwargs()) as Conn:
             async with Conn.cursor() as Cur:
@@ -1853,6 +1872,17 @@ class CallprocIntegration(_IntegrationBase):
         y = self.cur.var(oracle.NUMBER)
         self.cur.execute("BEGIN :y := 7 * 6; END;", [y])
         self.assertEqual(y.getvalue(), 42)
+
+    def test_callproc_refcursor(self):
+        self._make(
+            "(p_rc OUT SYS_REFCURSOR) AS BEGIN OPEN p_rc FOR "
+            "SELECT 1 AS a, 'x' AS b FROM dual "
+            "UNION ALL SELECT 2, 'y' FROM dual; END;")
+        rc = self.cur.var(oracle.CURSOR)
+        self.cur.callproc(self.PROC, [rc])
+        nested = rc.getvalue()
+        self.assertEqual([d[0] for d in nested.description], ["A", "B"])
+        self.assertEqual(nested.fetchall(), [(1, "x"), (2, "y")])
 
     def test_callfunc_number(self):
         fn = f"{self.PROC}_F"

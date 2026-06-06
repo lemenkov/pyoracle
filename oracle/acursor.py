@@ -5,8 +5,8 @@
 `async def` for every method that touches the wire."""
 
 from oracle.cursor import (
+    _assign_out_binds,
     _column_description,
-    _populate_out_binds,
     _resolve_parameters,
 )
 from oracle.datatypes import Var
@@ -79,9 +79,12 @@ class AsyncCursor:
             Detail = Message or f"ORA-{OraCode:05d}"
             raise from_ora_code(OraCode)(Detail, code=OraCode)
 
-        # PL/SQL OUT / IN OUT binds: write returned values back into any Var
-        # objects the caller passed (shared with the sync cursor).
-        _populate_out_binds(Bind, Result)
+        # PL/SQL OUT / IN OUT binds: scalars are assigned here; REF CURSOR OUT
+        # binds are fetched (async) and wrapped in a nested AsyncCursor.
+        for Variable, Marker in _assign_out_binds(Bind, Result):
+            Rows = await self._connection.fetch_all_rows(
+                Marker['cursor_id'], Marker['row_format'])
+            Variable._value = await self._build_refcursor(Rows, Marker)
 
         ServerRowCount = None
         ColMeta = None
@@ -114,6 +117,26 @@ class AsyncCursor:
 
         self._row_index = 0
         return self
+
+    async def _build_refcursor(self, Rows, Marker) -> 'AsyncCursor':
+        # Wrap an already-fetched REF CURSOR result set in a nested AsyncCursor,
+        # resolving any LOB cells with await (mirrors AsyncCursor.execute).
+        from oracle.lob import LOB
+        Nested = AsyncCursor(self._connection)
+        Nested._description = [_column_description(C)
+                               for C in Marker['row_format']]
+        Resolved = []
+        for Row in Rows:
+            NewRow = list(Row)
+            for I, Val in enumerate(NewRow):
+                if isinstance(Val, LOB):
+                    Val._connection = self._connection
+                    NewRow[I] = await Val.aread()
+            Resolved.append(NewRow)
+        Nested._rows = Resolved
+        Nested._rowcount = len(Resolved)
+        Nested._row_index = 0
+        return Nested
 
     def var(self, typ, size=None) -> Var:
         """Create a bind variable for an OUT / IN OUT argument. See

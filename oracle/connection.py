@@ -314,7 +314,9 @@ class OracleConnect:
         Data = encode_dictionary(self._make_dict(DictionaryType.exec, query=QueryDict))
         self.send(TNS_DATA, Data)
         try:
-            Result = self._handle_response()
+            # Seed the decoder with the bind list so the IOV decoder can tell a
+            # REF CURSOR OUT bind from a scalar one.
+            Result = self._handle_response((None, None, [], Bind))
         except Exception:
             # If reusing a cached cursor blew up, drop it from the cache
             # so the next attempt re-parses from scratch.
@@ -387,6 +389,21 @@ class OracleConnect:
                                                   cursor=CursorId, fetch=Rows))
         self.send(TNS_DATA, Data)
         return self._handle_response(Acc=(None, RowFormat, []))
+
+    def fetch_all_rows(self, CursorId: int, RowFormat: list) -> list:
+        # Drain a server cursor (e.g. a REF CURSOR returned by a procedure)
+        # by issuing TTI_FETCH until the server signals end-of-fetch.
+        AllRows: list = []
+        while True:
+            Result = self.fetch_more(CursorId, self.fetch, RowFormat=RowFormat)
+            if not isinstance(Result, tuple) or len(Result) < 6:
+                break
+            (CallStatus, OraCode, _, _, MoreRows, *_) = Result
+            if MoreRows:
+                AllRows.extend(MoreRows)
+            if OraCode == 1403 or CallStatus != 1:
+                break
+        return AllRows
 
     def lob_read(self, Locator: bytes, DataType: int) -> str | bytes:
         # Send TTI_LOBOPS READ for the given locator and decode the response.

@@ -353,7 +353,9 @@ class AsyncOracleConnect:
         Data = encode_dictionary(self._make_dict(DictionaryType.exec, query=QueryDict))
         await self.send(TNS_DATA, Data)
         try:
-            Result = await self._handle_response()
+            # Seed the decoder with the binds so the IOV decoder can tell a
+            # REF CURSOR OUT bind from a scalar one.
+            Result = await self._handle_response((None, None, [], Bind))
         except Exception:
             if CachedCursor:
                 self._cursor_cache.pop(Query, None)
@@ -404,6 +406,22 @@ class AsyncOracleConnect:
                                                   cursor=CursorId, fetch=Rows))
         await self.send(TNS_DATA, Data)
         return await self._handle_response(Acc=(None, RowFormat, []))
+
+    async def fetch_all_rows(self, CursorId: int, RowFormat: list) -> list:
+        # Async drain of a server cursor (e.g. a REF CURSOR). Mirrors
+        # OracleConnect.fetch_all_rows.
+        AllRows: list = []
+        while True:
+            Result = await self.fetch_more(CursorId, self.fetch,
+                                           RowFormat=RowFormat)
+            if not isinstance(Result, tuple) or len(Result) < 6:
+                break
+            (CallStatus, OraCode, _, _, MoreRows, *_) = Result
+            if MoreRows:
+                AllRows.extend(MoreRows)
+            if OraCode == 1403 or CallStatus != 1:
+                break
+        return AllRows
 
     # ----- LOB read (async mirror of `OracleConnect.lob_read`) -----
 
