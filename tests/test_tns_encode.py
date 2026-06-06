@@ -449,9 +449,25 @@ class TestTnsBaseEncoders(unittest.TestCase):
         self.assertEqual(encode_token_oac(2), bytes([2,3,0,0,1,22,0,0,0,0,0,1,0]))
 
     def test_encode_token_oac_2(self):
-        # max_size is now 32767 (PL/SQL VARCHAR2 cap) instead of 4000 — see
-        # comment on encode_token_oac for why.
-        self.assertEqual(encode_token_oac(None), bytes([1,3,0,0,2,127,255,0,1,16,0,0,2,3,103,1,0]))
+        # NULL bind: a minimal VARCHAR OAC (max_size 1). Sizing it to the
+        # actual value rather than 32767 avoids the LONG-reorder swap when a
+        # NULL/str bind precedes another bind — see encode_token_oac.
+        self.assertEqual(encode_token_oac(None), bytes([1,3,0,0,1,1,0,1,16,0,0,2,3,103,1,0]))
+
+    def test_encode_token_oac_str_sized_to_value(self):
+        # A VARCHAR bind's OAC max_size tracks the value's byte length, not a
+        # flat 32767 (which the server treats as a LONG and reorders, swapping
+        # the bind with the next one). "ab" -> max_size 2.
+        self.assertEqual(encode_token_oac("ab"),
+                         bytes([1,3,0,0,1,2,0,1,16,0,0,2,3,103,1,0]))
+
+    def test_encode_token_oac_str_large_keeps_long_size(self):
+        # A value over the 4000-byte VARCHAR2 cap keeps its true (large)
+        # max_size so the LONG path still handles multi-KiB CLOB binds.
+        Oac = encode_token_oac("x" * 5000)
+        # data_type 1 (VARCHAR), and max_size sb4 encodes 5000 (0x1388).
+        self.assertEqual(Oac[:4], bytes([1,3,0,0]))
+        self.assertEqual(Oac[4:7], bytes([2,0x13,0x88]))
 
     def test_encode_token_oac_3(self):
         self.assertEqual(encode_token_oac(cursor()), bytes([102,3,0,0,1,1,0,0,0,0,2,3,103,1,0]))

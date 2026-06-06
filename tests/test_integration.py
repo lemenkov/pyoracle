@@ -677,6 +677,35 @@ class BindIntegration(_IntegrationBase):
         self.cur.execute(f"SELECT v FROM {self.TABLE}")
         self.assertEqual(self.cur.fetchone(), (IntervalYM(3, 7),))
 
+    # ----- bind ordering (str before number) -----
+
+    def test_str_before_number_bind(self):
+        # A VARCHAR bind preceding a NUMBER bind used to be sized at 32767,
+        # which the server treated as a LONG and reordered — silently swapping
+        # the two binds. Both columns must round-trip correctly.
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (a VARCHAR2(20), b NUMBER)")
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (:1, :2)", ["hi", 7])
+        self.cur.execute(f"SELECT a, b FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchone(), ("hi", 7))
+
+    def test_update_set_str_where_number(self):
+        # The classic failing shape: SET <string> WHERE <number>.
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER, name VARCHAR2(20))")
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (1, 'orig')")
+        self.cur.execute(
+            f"UPDATE {self.TABLE} SET name = :1 WHERE id = :2", ["updated", 1])
+        self.assertEqual(self.cur.rowcount, 1)
+        self.cur.execute(f"SELECT name FROM {self.TABLE} WHERE id = 1")
+        self.assertEqual(self.cur.fetchone(), ("updated",))
+
+    def test_three_binds_str_in_middle(self):
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} (a NUMBER, b VARCHAR2(20), c NUMBER)")
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES (:1, :2, :3)", [11, "XX", 33])
+        self.cur.execute(f"SELECT a, b, c FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchone(), (11, "XX", 33))
+
     # ----- PL/SQL blocks with binds -----
 
     def test_plsql_block_in_bind(self):

@@ -816,6 +816,29 @@ def encode_dictionary_dty(Dictionary: dict) -> bytes:
     return (bytes([TTI_DTY]) + Charset + Charset + bytes([1])
             + CapabilityHeader + TableHeader + IdentityMap + TypeOverrides)
 
+def _oac_rep_row(Rows: list) -> list:
+    # For array DML, pick a representative value per column for the single OAC:
+    # the one with the largest declared size (str/bytes byte length), so the
+    # OAC's max-length covers every iteration. Fixed-size types (NUMBER, DATE,
+    # ...) keep the first row's value.
+    def _size(Value: object) -> int:
+        if isinstance(Value, str):
+            return len(Value.encode('utf-8'))
+        if isinstance(Value, (bytes, bytearray)):
+            return len(Value)
+        return 0
+    NumCols = len(Rows[0])
+    Rep = []
+    for J in range(NumCols):
+        Best = Rows[0][J]
+        BestSize = _size(Best)
+        for R in Rows[1:]:
+            S = _size(R[J])
+            if S > BestSize:
+                Best, BestSize = R[J], S
+        Rep.append(Best)
+    return Rep
+
 def encode_dictionary_exec(Dictionary: dict) -> bytes:
     Type = Dictionary['query']['type']
     Auto = Dictionary['query']['auto']
@@ -860,13 +883,16 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
         else:
             Tokens = encode_tokens_rxd(Bind, b"")
     elif DefLen == 0:
-        Oac = encode_tokens_oac(Bind, b"")
         if BatchLen > 0:
-            # Array DML: OAC describes the columns once, then one RXD row per
-            # iteration.
+            # Array DML: OAC describes the columns once (sized to the widest
+            # value in each column across all rows so a later row can't exceed
+            # the declared buffer), then one RXD row per iteration.
+            AllRows = [Bind] + Batch
+            Oac = encode_tokens_oac(_oac_rep_row(AllRows), b"")
             Tokens = Oac + b"".join(
-                encode_tokens_rxd(R, b"") for R in [Bind] + Batch)
+                encode_tokens_rxd(R, b"") for R in AllRows)
         else:
+            Oac = encode_tokens_oac(Bind, b"")
             Tokens = encode_tokens_rxd(Bind, Oac)
     elif BindLen == QueryLen == 0:
         Tokens = encode_tokens_oac(Def, b"")
@@ -1236,7 +1262,9 @@ def encode_token_oac(Token: object) -> bytes:
             return encode_token_raw(TNS_TYPE_DATE, 7, 0, 0, 0)
         raise Exception("Unsupported Var OAC type", DT)
     if Token is None:
-        return encode_token_raw(TNS_TYPE_VARCHAR, 32767, 16, UTF8_CHARSET, 0)
+        # NULL value (0 bytes): a minimal VARCHAR OAC, again avoiding the
+        # 32767 LONG-reorder swap when a NULL bind precedes another bind.
+        return encode_token_raw(TNS_TYPE_VARCHAR, 1, 16, UTF8_CHARSET, 0)
     if isinstance(Token, BinaryFloat):
         return encode_token_raw(TNS_TYPE_BFLOAT, 4, 0, 0, 0)
     if isinstance(Token, BinaryDouble):
@@ -1253,11 +1281,20 @@ def encode_token_oac(Token: object) -> bytes:
     if isinstance(Token, IntervalYM):
         return encode_token_raw(TNS_TYPE_INTERVALYM, 5, 0, 0, 0)
     if isinstance(Token, str):
-        return encode_token_raw(TNS_TYPE_VARCHAR, 32767, 16, UTF8_CHARSET, 0)
+        # Size the OAC to the actual value, not a flat 32767: a VARCHAR bind
+        # declared larger than the 4000-byte VARCHAR2 limit is treated by the
+        # server as a streamed LONG and reordered after the following bind,
+        # which silently swaps a string bind with the next one. A value over
+        # 4000 bytes still gets the larger size (and the LONG handling) it
+        # needs for the ~7 KiB regular-path CLOB case.
+        return encode_token_raw(
+            TNS_TYPE_VARCHAR, max(len(Token.encode('utf-8')), 1), 16,
+            UTF8_CHARSET, 0)
     if isinstance(Token, (bytes, bytearray)):
         # Bind as RAW so arbitrary byte sequences (non-UTF8, control bytes,
-        # 0x80+) round-trip verbatim into RAW / BLOB columns.
-        return encode_token_raw(TNS_TYPE_RAW, 32767, 16, 0, 0)
+        # 0x80+) round-trip verbatim into RAW / BLOB columns. Size to the
+        # actual value (see the str case) to avoid the LONG-reorder swap.
+        return encode_token_raw(TNS_TYPE_RAW, max(len(Token), 1), 16, 0, 0)
     if isinstance(Token, cursor):
         return encode_token_raw(TNS_TYPE_REFCURSOR, 1, 0, UTF8_CHARSET, 0)
     if isinstance(Token, date):
