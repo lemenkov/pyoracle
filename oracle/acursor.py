@@ -126,6 +126,16 @@ class AsyncCursor:
         await self.execute(f"BEGIN {name}({Placeholders}); END;", Params)
         return [P.getvalue() if isinstance(P, Var) else P for P in Params]
 
+    async def callfunc(self, name: str, return_type, parameters=None):
+        """Call a stored function and return its value. See
+        `oracle.cursor.Cursor.callfunc`."""
+        self._check_open()
+        Ret = Var(return_type)
+        Params = list(parameters) if parameters else []
+        Args = ', '.join(f':{I + 2}' for I in range(len(Params)))
+        await self.execute(f"BEGIN :1 := {name}({Args}); END;", [Ret] + Params)
+        return Ret.getvalue()
+
     async def executemany(self, operation: str, seq_of_parameters) -> 'AsyncCursor':
         self._check_open()
         Total = 0

@@ -139,6 +139,20 @@ class Cursor:
         self.execute(f"BEGIN {name}({Placeholders}); END;", Params)
         return [P.getvalue() if isinstance(P, Var) else P for P in Params]
 
+    def callfunc(self, name: str, return_type, parameters=None):
+        """Call a stored function and return its value. `return_type` is a
+        Python type or `oracle` type constant (as for `var`); `parameters`
+        are the function's arguments (plain values for IN, `Var` for OUT /
+        IN OUT). PEP 249 / oracledb compatible.
+        """
+        self._check_open()
+        Ret = Var(return_type)
+        Params = list(parameters) if parameters else []
+        # :1 is the return value; arguments are :2, :3, ...
+        Args = ', '.join(f':{I + 2}' for I in range(len(Params)))
+        self.execute(f"BEGIN :1 := {name}({Args}); END;", [Ret] + Params)
+        return Ret.getvalue()
+
     def executemany(self, operation: str, seq_of_parameters) -> 'Cursor':
         self._check_open()
         Total = 0

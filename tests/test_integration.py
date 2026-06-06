@@ -1439,6 +1439,19 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                 await Cur.execute("BEGIN :y := 7 * 6; END;", [y])
                 self.assertEqual(y.getvalue(), 42)
 
+    async def test_async_callfunc(self):
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                await Cur.execute(
+                    "CREATE OR REPLACE FUNCTION PYORACLE_ASYNC_FUNC"
+                    "(p IN NUMBER) RETURN NUMBER AS BEGIN RETURN p * 2; END;")
+                try:
+                    self.assertEqual(
+                        await Cur.callfunc("PYORACLE_ASYNC_FUNC",
+                                           oracle.NUMBER, [21]), 42)
+                finally:
+                    await Cur.execute("DROP FUNCTION PYORACLE_ASYNC_FUNC")
+
 
 @unittest.skipUnless(
     _USER and os.environ.get("PYORACLE_TEST_BFILE_DIR"),
@@ -1754,6 +1767,27 @@ class CallprocIntegration(_IntegrationBase):
         y = self.cur.var(oracle.NUMBER)
         self.cur.execute("BEGIN :y := 7 * 6; END;", [y])
         self.assertEqual(y.getvalue(), 42)
+
+    def test_callfunc_number(self):
+        fn = f"{self.PROC}_F"
+        self.cur.execute(
+            f"CREATE OR REPLACE FUNCTION {fn}(p IN NUMBER) RETURN NUMBER AS "
+            "BEGIN RETURN p + 100; END;")
+        try:
+            self.assertEqual(self.cur.callfunc(fn, oracle.NUMBER, [5]), 105)
+            self.assertEqual(self.cur.callfunc(fn, int, [0]), 100)
+        finally:
+            self.cur.execute(f"DROP FUNCTION {fn}")
+
+    def test_callfunc_string(self):
+        fn = f"{self.PROC}_F"
+        self.cur.execute(
+            f"CREATE OR REPLACE FUNCTION {fn}(p IN NUMBER, q IN VARCHAR2) "
+            "RETURN VARCHAR2 AS BEGIN RETURN q || ':' || TO_CHAR(p * 2); END;")
+        try:
+            self.assertEqual(self.cur.callfunc(fn, str, [21, "x"]), "x:42")
+        finally:
+            self.cur.execute(f"DROP FUNCTION {fn}")
 
 
 if __name__ == "__main__":

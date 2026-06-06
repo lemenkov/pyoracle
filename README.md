@@ -48,7 +48,9 @@ What works so far:
   `var.setvalue(0, v)`; read results with `var.getvalue()`. `callproc`
   returns the argument list with OUT slots replaced by their values.
   OUT binds also work through `cur.execute` directly (pass a `Var`).
-  Available on both the sync and async cursors
+  Stored functions: `cur.callfunc(name, return_type, [args...])` returns
+  the function's value (`return_type` is a Python type or `oracle`
+  constant). Available on both the sync and async cursors
 - Python type coercion for fetched values: NUMBER → `int` / `Decimal`,
   VARCHAR2 / CHAR → `str` (charset-aware), DATE / TIMESTAMP / TIMESTAMP
   WITH TIME ZONE → `datetime.datetime`, BINARY_FLOAT / BINARY_DOUBLE →
