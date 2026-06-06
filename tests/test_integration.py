@@ -634,6 +634,25 @@ class BindIntegration(_IntegrationBase):
         self.cur.execute(f"SELECT v FROM {self.TABLE}")
         self.assertEqual(self.cur.fetchone(), (IntervalYM(3, 7),))
 
+    # ----- PL/SQL blocks with binds -----
+
+    def test_plsql_block_in_bind(self):
+        # An anonymous PL/SQL block carrying a bind variable must execute
+        # server-side (previously ORA-00600 [12259]). Prove the bound value
+        # reached the block by having it insert the value.
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (v NUMBER)")
+        self.cur.execute(
+            f"BEGIN INSERT INTO {self.TABLE} VALUES (:x); END;", [42])
+        self.cur.execute(f"SELECT v FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchone(), (42,))
+
+    def test_plsql_block_two_in_binds(self):
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (v NUMBER)")
+        self.cur.execute(
+            f"BEGIN INSERT INTO {self.TABLE} VALUES (:a + :b); END;", [3, 4])
+        self.cur.execute(f"SELECT v FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchone(), (7,))
+
     # ----- named binds -----
 
     def test_named_dict_binds(self):

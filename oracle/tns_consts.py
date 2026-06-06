@@ -106,6 +106,11 @@ DictionaryType = Enum('DictionaryType', 'auth close description dty exec fetch l
 TNS_LOB_OP_GET_LENGTH = 0x0001
 TNS_LOB_OP_READ = 0x0002
 
+# Bind directions in the TTI_IOV response (one per bind, in bind order).
+TNS_BIND_DIR_OUTPUT = 16
+TNS_BIND_DIR_INPUT = 32
+TNS_BIND_DIR_INPUT_OUTPUT = 48
+
 ISO_LATIN_1_CHARSET = 31
 UTF8_CHARSET = 871
 AL32UTF8_CHARSET = 873

@@ -14,7 +14,7 @@ from oracle.tns_consts import (
     TTI_DCB, TTI_DTY, TTI_FETCH, TTI_FOB, TTI_FUN, TTI_IOV, TTI_LOB,
     TTI_LOGOFF, TTI_OAC, TTI_OER, TTI_PFN, TTI_PRO, TTI_RPA, TTI_RXD,
     TTI_RXH, TTI_SESS, TTI_SPFP, TTI_STA, TTI_STRT, TTI_STOP, TTI_UDS,
-    TTI_WRN, TNS_LOB_OP_READ, TNS_TYPE_BDOUBLE, TNS_TYPE_BFILE,
+    TTI_WRN, TNS_BIND_DIR_INPUT, TNS_LOB_OP_READ, TNS_TYPE_BDOUBLE, TNS_TYPE_BFILE,
     TNS_TYPE_BFLOAT, TNS_TYPE_BLOB, TNS_TYPE_CLOB, TNS_TYPE_DATE,
     TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_LONG, TNS_TYPE_LONGRAW,
     TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_REFCURSOR, TNS_TYPE_RID,
@@ -210,17 +210,66 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
     return (Col, Rest)
 
 def decode_token_iov(Data: bytes, Acc: object) -> tuple:
-    # I/O vector for PL/SQL OUT parameters (section 6.5)
-    # Indicates direction of each bind variable
-    (Cursor, RowFormat, Rows) = Acc
-    Rest = Data[1:]  # skip token byte
-    (NumBinds, Rest) = decode_ub4(Rest)
-    Directions = []
-    for _ in range(NumBinds):
-        Direction = Rest[0]
-        Rest = Rest[1:]
-        Directions.append(Direction)
+    # I/O vector for an anonymous PL/SQL block's binds (section 6.5). Layout
+    # cross-referenced with python-oracledb's _process_io_vector and verified
+    # against XE 11g captures.
+    #
+    #   1B   token (TTI_IOV)
+    #   ub1  flag                                   (skip)
+    #   ub2  num_requests  \  num_binds =
+    #   ub4  num_iters     /    num_iters*256 + num_requests
+    #   ub4  num iters this time                    (skip)
+    #   ub2  uac buffer length                      (skip)
+    #   ub2  fast-fetch bit vector length + bytes   (skip)
+    #   ub2  rowid length + bytes                   (skip)
+    #   per bind: ub1 direction (16=OUT, 32=IN, 48=IN OUT)
+    #
+    # When any bind is OUT / IN OUT the server then sends the returned values
+    # as a TTI_RXD row: each value is a DALC blob followed by a 1-byte
+    # indicator. We keep the raw value bytes here (decoding needs the bind's
+    # type, which only the cursor knows) and surface them through the Rows
+    # accumulator as an {'out_*': ...} record the cursor maps back onto its
+    # bind variables.
+    (Cursor, RowFormat, Rows) = Acc[:3]
+    (Directions, OutValues, Rest) = _read_iov(Data)
+    OutPositions = [I for I, D in enumerate(Directions)
+                    if D != TNS_BIND_DIR_INPUT]
+    if OutPositions:
+        Rows = Rows + [{'out_positions': OutPositions,
+                        'out_values': OutValues,
+                        'directions': Directions}]
     return decode_packet(Rest, (Cursor, RowFormat, Rows))
+
+def _read_iov(Data: bytes) -> tuple[list[int], list[bytes], bytes]:
+    # Parse a TTI_IOV body starting at the token byte. Returns the per-bind
+    # direction codes, the raw OUT/IN-OUT value bytes (in OUT-bind order), and
+    # the unconsumed tail (the RPA / OER that follow). See decode_token_iov.
+    Rest = Data[1:]                              # consume IOV token
+    Rest = Rest[1:]                              # skip flag (ub1)
+    (NumRequests, Rest) = decode_ub4(Rest)
+    (NumIters, Rest) = decode_ub4(Rest)
+    NumBinds = NumIters * 256 + NumRequests
+    (_, Rest) = decode_ub4(Rest)                 # num iters this time
+    (_, Rest) = decode_ub4(Rest)                 # uac buffer length
+    (BvLen, Rest) = decode_ub4(Rest)             # fast-fetch bit vector
+    if BvLen > 0:
+        Rest = Rest[BvLen:]
+    (RidLen, Rest) = decode_ub4(Rest)            # rowid
+    if RidLen > 0:
+        Rest = Rest[RidLen:]
+    Directions = [Rest[I] for I in range(NumBinds)]
+    Rest = Rest[NumBinds:]
+    HasOut = any(D != TNS_BIND_DIR_INPUT for D in Directions)
+    OutValues = []
+    if HasOut and Rest and Rest[0] == TTI_RXD:
+        Rest = Rest[1:]                          # consume RXD token
+        for D in Directions:
+            if D == TNS_BIND_DIR_INPUT:
+                continue
+            (Val, Rest) = decode_dalc(Rest)
+            Rest = Rest[1:]                      # per-value indicator byte
+            OutValues.append(b"" if Val == [] else bytes(Val))
+    return (Directions, OutValues, Rest)
 
 def decode_token_lob(Data: bytes, Acc: object) -> tuple:
     # LOB data - FIXME: full LOB handling not yet implemented

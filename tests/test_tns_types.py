@@ -14,7 +14,7 @@ import unittest
 
 from oracle.datatypes import BinaryDouble, BinaryFloat, IntervalYM
 from oracle.tns import (
-    _read_long_column, _read_rowid_column, encode_token_binary_double,
+    _read_iov, _read_long_column, _read_rowid_column, encode_token_binary_double,
     encode_token_binary_float, encode_token_interval_ds,
     encode_token_interval_ym, encode_token_oac, encode_token_rxd,
 )
@@ -214,6 +214,43 @@ class TestLong(unittest.TestCase):
         Out = decode_value({'data_type': TNS_TYPE_LONGRAW}, b"\xde\xad")
         self.assertEqual(Out, b"\xde\xad")
         self.assertIsInstance(Out, bytes)
+
+
+class TestIov(unittest.TestCase):
+    # TTI_IOV bodies captured from XE 11g. Common header is
+    #   0b 05 01 <numreq> 00 01 01 00 00 00  then per-bind direction byte(s),
+    # then (if any OUT bind) 07 (RXD) + per-OUT-value [DALC][indicator].
+    # A trailing 0x08 (RPA) stands in for the tokens that follow.
+
+    def test_in_only(self):
+        # one IN bind (direction 32) -> no values, no RXD.
+        wire = bytes([0x0b, 0x05, 0x01, 0x01, 0x00, 0x01, 0x01,
+                      0x00, 0x00, 0x00, 0x20, 0x08])
+        directions, out_values, rest = _read_iov(wire)
+        self.assertEqual(directions, [32])
+        self.assertEqual(out_values, [])
+        self.assertEqual(rest, b"\x08")
+
+    def test_single_out(self):
+        # one OUT bind (16) returning NUMBER 99 (c1 64).
+        wire = bytes([0x0b, 0x05, 0x01, 0x01, 0x00, 0x01, 0x01,
+                      0x00, 0x00, 0x00, 0x10,
+                      0x07, 0x02, 0xc1, 0x64, 0x00, 0x08])
+        directions, out_values, rest = _read_iov(wire)
+        self.assertEqual(directions, [16])
+        self.assertEqual(out_values, [b"\xc1\x64"])
+        self.assertEqual(rest, b"\x08")
+
+    def test_out_and_inout(self):
+        # OUT NUMBER 10 (c1 0b) + IN OUT VARCHAR "hi!".
+        wire = bytes([0x0b, 0x05, 0x01, 0x02, 0x00, 0x01, 0x01,
+                      0x00, 0x00, 0x00, 0x10, 0x30,
+                      0x07, 0x02, 0xc1, 0x0b, 0x00,
+                      0x03, 0x68, 0x69, 0x21, 0x00, 0x08])
+        directions, out_values, rest = _read_iov(wire)
+        self.assertEqual(directions, [16, 48])
+        self.assertEqual(out_values, [b"\xc1\x0b", b"hi!"])
+        self.assertEqual(rest, b"\x08")
 
 
 class TestBindDispatch(unittest.TestCase):

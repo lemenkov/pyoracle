@@ -275,7 +275,16 @@ class OracleConnect:
             Bind = []
         if Def is None:
             Def = []
-        Type = 'select' if Query.strip().upper().startswith('SELECT') else 'change'
+        Head = Query.strip().upper()
+        if Head.startswith('SELECT'):
+            Type = 'select'
+        elif Head.startswith('BEGIN') or Head.startswith('DECLARE'):
+            # Anonymous PL/SQL block: uses the dedicated 'block' exec option
+            # set (set_opts), not the DML 'change' path — otherwise the server
+            # rejects a block carrying binds with ORA-00600 [12259].
+            Type = 'block'
+        else:
+            Type = 'change'
         Auto = 1 if self.autocommit else 0
         # Cursor cache lookup: if we've executed this SQL before and the
         # server returned a non-zero cursor id, reuse that handle and
