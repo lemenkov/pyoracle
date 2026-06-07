@@ -22,6 +22,7 @@ from oracle.tns_consts import (
     UTF8_CHARSET,
 )
 import logging
+import math
 import os
 import socket
 import struct
@@ -1254,7 +1255,7 @@ def encode_token_rxd(Token: object) -> bytes:
         # NUMBER can't represent inf / nan; route the non-finite values to a
         # native BINARY_DOUBLE so they round-trip instead of blowing up the
         # base-100 encoder. Finite floats keep the historical NUMBER binding.
-        if Token != Token or Token in (float("inf"), float("-inf")):
+        if not math.isfinite(Token):
             Bytes = encode_token_binary_double(Token)
             return bytes([len(Bytes)]) + Bytes
         Bytes = encode_token_num(Token)
@@ -1325,10 +1326,9 @@ def encode_token_oac(Token: object) -> bytes:
         return encode_token_raw(TNS_TYPE_BFLOAT, 4, 0, 0, 0)
     if isinstance(Token, BinaryDouble):
         return encode_token_raw(TNS_TYPE_BDOUBLE, 8, 0, 0, 0)
-    if isinstance(Token, float) and (
-        Token != Token or Token in (float("inf"), float("-inf"))
-    ):
-        # Non-finite floats bind as native BINARY_DOUBLE (see encode_token_rxd).
+    if isinstance(Token, float) and not math.isfinite(Token):
+        # Non-finite floats (inf / nan) bind as native BINARY_DOUBLE — NUMBER
+        # can't represent them (see encode_token_rxd).
         return encode_token_raw(TNS_TYPE_BDOUBLE, 8, 0, 0, 0)
     if isinstance(Token, (int, float, complex, Decimal)):
         return encode_token_raw(TNS_TYPE_NUMBER, 22, 0, 0, 0)
