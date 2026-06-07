@@ -1044,7 +1044,7 @@ def encode_dictionary_login(Dictionary: dict) -> bytes:
     return PacketVersion + LowestCompatVersion + GSO + SDU + TDU + ProtocolCharacteristics + MaxUnackPackets + Endiannes + DataLength + CDO + MaxConnDataRecv + ANO + Padding + Data
 
 def encode_dictionary_pig(Dictionary: dict) -> bytes:
-    Request = Dictionary['req'] # FIXME should it be sb4-encoded?
+    Request = Dictionary['req']        # single function-code byte (ping works)
     Tseq = Dictionary['seq']
     CursorsLen = encode_sb4(len(Dictionary['cursor']))
     Cursors = reduce( lambda x,y: x+y, [ encode_sb4(C) for C in Dictionary['cursor']])
