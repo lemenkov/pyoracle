@@ -1212,7 +1212,6 @@ def decode_kv(Data: bytes, Num: int, Acc: list) -> tuple[list, bytes]:
             elif R[0] == 254:
                 return decode_chr(R)
             else:
-                # FIXME a there are any other options?
                 return decode_chr(R)
     (Key, R0) = decode_to_bin(Data)
     (Val, R1) = decode_to_bin(R0)
