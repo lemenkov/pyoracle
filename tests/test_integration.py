@@ -718,6 +718,17 @@ class BindIntegration(_IntegrationBase):
         self.cur.execute(f"SELECT v FROM {self.TABLE}")
         self.assertEqual(self.cur.fetchone(), (42,))
 
+    def test_plsql_block_mixed_binds(self):
+        # Issue #13: a VARCHAR + NUMBER bind in an UPDATE inside a PL/SQL block
+        # used to raise ORA-00600 [12259]. Must run and update the row.
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER, v VARCHAR2(100))")
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (1, NULL)")
+        self.cur.execute(
+            f"BEGIN UPDATE {self.TABLE} SET v = :a WHERE id = :b; END;",
+            {"a": "hi", "b": 1})
+        self.cur.execute(f"SELECT v FROM {self.TABLE} WHERE id = 1")
+        self.assertEqual(self.cur.fetchone(), ("hi",))
+
     def test_plsql_block_two_in_binds(self):
         self.cur.execute(f"CREATE TABLE {self.TABLE} (v NUMBER)")
         self.cur.execute(
