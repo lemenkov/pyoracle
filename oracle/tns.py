@@ -1159,11 +1159,15 @@ def encode_sb4(Val: int) -> bytes:
             raise Exception("Can't encode value", Val)
 
 def decode_dalc(Bytes: bytes) -> tuple[bytes | list, bytes]:
-    if Bytes[0] == 0:
+    # Data with Attached Length Code (PROTOCOL.md §12.2). 0x00 = empty,
+    # 0xFF = null marker (no data follows), 0xFE = chunked, otherwise the
+    # length byte is followed by that many data bytes. Both empty and null
+    # are reported as [] here; callers that need the distinction look at the
+    # enclosing bytes_with_length count.
+    if Bytes[0] == 0 or Bytes[0] == 255:
         return ([], Bytes[1:])
     elif Bytes[0] == 254:
         return decode_chr(Bytes)
-    # FIXME ub4-prefixed chr
     else:
         Length = Bytes[0]
         return (Bytes[1:Length+1], Bytes[Length+1:])

@@ -66,6 +66,20 @@ class TestDecodeUb4(unittest.TestCase):
             self.assertEqual(decode_ub4(encode_sb4(value)), (value, b""))
 
 
+class TestDecodeDalc(unittest.TestCase):
+    # PROTOCOL.md §12.2 Data with Attached Length Code.
+
+    def test_empty(self):
+        self.assertEqual(decode_dalc(b"\x00tail"), ([], b"tail"))
+
+    def test_null_marker(self):
+        # 0xFF null marker carries no data; reported like empty.
+        self.assertEqual(decode_dalc(b"\xfftail"), ([], b"tail"))
+
+    def test_direct_length(self):
+        self.assertEqual(decode_dalc(b"\x03abctail"), (b"abc", b"tail"))
+
+
 class TestBinaryFloat(unittest.TestCase):
 
     def test_encode_positive(self):
