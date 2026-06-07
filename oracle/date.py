@@ -13,6 +13,5 @@ class date(datetime.datetime):
     def set_timestamptz(self, Offset: int) -> 'date':
         self.set_timestamp()
         self.timestamptz = Offset
-        # FIXME
-        # datetime is immutable so we have to return a new one for now
+        # datetime is immutable, so shift into UTC by returning a new instance.
         return self - datetime.timedelta(seconds=Offset)
