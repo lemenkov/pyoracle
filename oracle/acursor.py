@@ -64,6 +64,12 @@ class AsyncCursor:
     def rowfactory(self, value) -> None:
         self._rowfactory = value
 
+    @property
+    def lastrowid(self):
+        """ROWID of the last row an INSERT / UPDATE / DELETE touched. See
+        `oracle.cursor.Cursor.lastrowid`."""
+        return self._lastrowid
+
     async def close(self) -> None:
         self._closed = True
         self._description = None
@@ -84,6 +90,7 @@ class AsyncCursor:
             RetFormat = Result[3]
             Rows = Result[4]
             Message = Result[5] if len(Result) > 5 else None
+            LastRowid = Result[6] if len(Result) > 6 else None
         except (TypeError, IndexError, ValueError) as exc:
             raise DatabaseError(f"unexpected wire response: {Result!r}") from exc
 
@@ -106,6 +113,8 @@ class AsyncCursor:
                 ColMeta = RetFormat[1]
 
         if ColMeta:
+            # SELECT result set: clear lastrowid (see sync Cursor._run).
+            self._lastrowid = None
             self._description = [_column_description(C) for C in ColMeta]
             # Async LOB auto-resolve: same shape as sync `_resolve_lobs`
             # but each `LOB.aread()` is awaited individually. CLOB → str,
@@ -123,6 +132,7 @@ class AsyncCursor:
             self._rows = ResolvedRows
             self._rowcount = len(self._rows)
         else:
+            self._lastrowid = LastRowid
             self._description = None
             self._rows = []
             self._rowcount = ServerRowCount if isinstance(ServerRowCount, int) else -1

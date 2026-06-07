@@ -72,6 +72,13 @@ class Cursor:
     def rowfactory(self, value) -> None:
         self._rowfactory = value
 
+    @property
+    def lastrowid(self):
+        """ROWID (string) of the last row an INSERT / UPDATE / DELETE touched,
+        or None when the last statement produced no rowid (SELECT, DDL, or a
+        multi-row/zero-row change). PEP 249 optional attribute."""
+        return self._lastrowid
+
     def close(self) -> None:
         self._closed = True
         self._description = None
@@ -97,6 +104,7 @@ class Cursor:
             RetFormat = Result[3]
             Rows = Result[4]
             Message = Result[5] if len(Result) > 5 else None
+            LastRowid = Result[6] if len(Result) > 6 else None
         except (TypeError, IndexError, ValueError) as exc:
             raise DatabaseError(f"unexpected wire response: {Result!r}") from exc
 
@@ -120,6 +128,10 @@ class Cursor:
                 ColMeta = RetFormat[1]
 
         if ColMeta:
+            # A result set (SELECT): no "last modified row", so lastrowid is
+            # cleared even though the server echoes the last fetched row's rowid
+            # in the OER.
+            self._lastrowid = None
             self._description = [_column_description(C) for C in ColMeta]
             self._rows = [_resolve_lobs(self._connection, row)
                           for row in (Rows or [])]
@@ -129,7 +141,9 @@ class Cursor:
             self._rowcount = len(self._rows)
         else:
             # DDL / DML / non-result-set statement. OER carries the affected
-            # row count in its success-iters field; surface it.
+            # row count in its success-iters field; surface it, along with the
+            # touched-row rowid (None for DDL / zero-row changes).
+            self._lastrowid = LastRowid
             self._description = None
             self._rows = []
             self._rowcount = ServerRowCount if isinstance(ServerRowCount, int) else -1

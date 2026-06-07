@@ -137,8 +137,39 @@ class TestTnsCommandDecoders(unittest.TestCase):
              1,             # cursor id
              (0, None),     # rowcount, row_format
              [],            # rows
-             "ORA-00942: table or view does not exist"),
+             "ORA-00942: table or view does not exist",
+             None),         # lastrowid (rowid bytes all zero -> no row)
         )
+
+    def test_tns_decode_token_oer_rowid(self):
+        # Same OER frame as _04 but with a real (non-zero) rowid in the
+        # rowid slot, so the decoder must render it as the trailing lastrowid.
+        from oracle.tns import encode_sb4
+        from oracle.types import rowid_to_string
+        Obj, File, Block, Slot = 4, 2, 300, 7
+        RowidBytes = (encode_sb4(Obj) + encode_sb4(File) + b"\x00"
+                      + encode_sb4(Block) + encode_sb4(Slot))
+        Data = bytes([
+            0x04,
+            0x01, 0x05,
+            0x01, 0x04,
+            0x00,
+            0x02, 0x03, 0xae,
+            0x00, 0x00,
+            0x01, 0x01,
+            0x01, 0x0b,
+            0x0c, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ]) + RowidBytes + bytes([
+            0x00,
+            0x00, 0x07,
+            0x00,
+            0x00,
+            0x00,
+            0x00, 0x00, 0x00,
+            0x28,
+        ]) + b"ORA-00942: table or view does not exist\n"
+        Result = decode_token_oer(Data, (None, None, []))
+        self.assertEqual(Result[6], rowid_to_string(Obj, File, Block, Slot))
 
     def test_tns_decode_token_rpa_00(self):
         Data = bytes([1,3,1,12,12,65,85,84,72,95,83,69,83,83,75,69,89,1,96,

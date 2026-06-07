@@ -70,6 +70,45 @@ class TestRowFactory(unittest.TestCase):
         self.assertEqual(list(cur), [10, 20, 30])
 
 
+class _StubConn:
+    # Minimal stand-in for OracleConnect: _run only needs .sock (for
+    # _check_open) and .execute returning a wire-shaped result tuple.
+    sock = object()
+
+    def __init__(self, result):
+        self._result = result
+
+    def execute(self, operation, Bind=None, Batch=None):
+        return self._result
+
+
+class TestLastRowid(unittest.TestCase):
+    # Wire result tuple shape: (call_status, ora_code, cursor_id,
+    # (rowcount, col_meta), rows, message, lastrowid)
+
+    def test_dml_sets_rowid(self):
+        dml = (0, 0, 1, (1, None), [], None, "AAAB12AAEAAAAGPAAA")
+        cur = Cursor(_StubConn(dml))
+        cur.execute("INSERT INTO t VALUES (1)")
+        self.assertEqual(cur.lastrowid, "AAAB12AAEAAAAGPAAA")
+
+    def test_select_clears_rowid(self):
+        cur = Cursor(_StubConn((0, 0, 1, (1, None), [], None, "AAAB12AAEAAAAGPAAA")))
+        cur.execute("INSERT INTO t VALUES (1)")
+        self.assertIsNotNone(cur.lastrowid)
+        # A subsequent SELECT (result set) must clear it.
+        cur._connection = _StubConn(
+            (0, 0, 1, (0, [{"column_name": "ID"}]), [[1]], None, None))
+        cur.execute("SELECT id FROM t")
+        self.assertIsNone(cur.lastrowid)
+
+    def test_ddl_no_rowid(self):
+        ddl = (0, 0, 1, (0, None), [], None, None)
+        cur = Cursor(_StubConn(ddl))
+        cur.execute("CREATE TABLE t (id NUMBER)")
+        self.assertIsNone(cur.lastrowid)
+
+
 class TestVersion(unittest.TestCase):
 
     def test_none_before_auth(self):

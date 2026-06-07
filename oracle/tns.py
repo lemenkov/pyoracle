@@ -354,12 +354,14 @@ def decode_token_oer(Data: bytes, Acc: tuple) -> tuple:
                                                      #   sql_type, fatal,
                                                      #   flags, user_cursor_opts,
                                                      #   upi_param, warn_flags
-    # rowid: ub4 rba, ub2 part_id, ub1 (reserved), ub4 block, ub2 slot
-    (_, Rest) = decode_ub4(Rest)                     # rowid.rba
-    (_, Rest) = decode_ub4(Rest)                     # rowid.partition_id
+    # rowid of the (last) row the statement touched — same physical-rowid
+    # layout as a ROWID column (see _read_rowid_column): data object number,
+    # relative file number, an unused byte, block number, slot number.
+    (RowidObj, Rest) = decode_ub4(Rest)              # data object number
+    (RowidFile, Rest) = decode_ub4(Rest)             # relative file number
     Rest = Rest[1:]                                  # rowid reserved byte
-    (_, Rest) = decode_ub4(Rest)                     # rowid.block_num
-    (_, Rest) = decode_ub4(Rest)                     # rowid.slot_num
+    (RowidBlock, Rest) = decode_ub4(Rest)            # block number
+    (RowidSlot, Rest) = decode_ub4(Rest)             # slot number
     (_, Rest) = decode_ub4(Rest)                     # os error
     Rest = Rest[2:]                                  # statement #, call #
     (_, Rest) = decode_ub4(Rest)                     # padding (ub2)
@@ -405,8 +407,14 @@ def decode_token_oer(Data: bytes, Acc: tuple) -> tuple:
                 Message = bytes(Bytes).decode('utf-8', errors='replace').rstrip()
             except (TypeError, AttributeError):
                 Message = None
+    # Render the touched-row rowid (block 0 is the file header — never a data
+    # row — so treat it as "no rowid", e.g. SELECT / DDL).
+    Rowid = None
+    if RowidBlock:
+        from oracle.types import rowid_to_string
+        Rowid = rowid_to_string(RowidObj, RowidFile, RowidBlock, RowidSlot)
     RetFormat = (RowCount, RowFormat)
-    return (CallStatus, ErrCode, CursorId, RetFormat, Rows, Message)
+    return (CallStatus, ErrCode, CursorId, RetFormat, Rows, Message, Rowid)
 
 def decode_token_oac(Data: bytes, Acc: object) -> tuple[int, int, int, int, bytes]:
     (DataType, Flg, Pre) = struct.unpack(">BBB", Data[:3])
