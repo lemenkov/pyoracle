@@ -1537,6 +1537,37 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                 await Cur.execute("BEGIN :y := 7 * 6; END;", [y])
                 self.assertEqual(y.getvalue(), 42)
 
+    async def test_async_out_extended_types(self):
+        # OUT binds for the extended scalar types (issue #17), async path.
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                await Cur.execute(
+                    "CREATE OR REPLACE PROCEDURE PYORACLE_ASYNC_OUTX"
+                    "(o_ts OUT TIMESTAMP, o_bd OUT BINARY_DOUBLE, "
+                    " o_ids OUT INTERVAL DAY TO SECOND, "
+                    " o_iym OUT INTERVAL YEAR TO MONTH) AS BEGIN "
+                    "o_ts := TIMESTAMP '2026-06-07 13:14:15.5'; "
+                    "o_bd := 2.25; "
+                    "o_ids := INTERVAL '1 02:03:04.5' DAY TO SECOND; "
+                    "o_iym := INTERVAL '3-7' YEAR TO MONTH; END;")
+                try:
+                    ts = Cur.var(oracle.DB_TYPE_TIMESTAMP)
+                    bd = Cur.var(oracle.DB_TYPE_BINARY_DOUBLE)
+                    ids = Cur.var(oracle.DB_TYPE_INTERVAL_DS)
+                    iym = Cur.var(oracle.DB_TYPE_INTERVAL_YM)
+                    await Cur.callproc("PYORACLE_ASYNC_OUTX", [ts, bd, ids, iym])
+                    self.assertEqual(
+                        ts.getvalue(),
+                        datetime.datetime(2026, 6, 7, 13, 14, 15, 500000))
+                    self.assertEqual(bd.getvalue(), 2.25)
+                    self.assertEqual(
+                        ids.getvalue(),
+                        datetime.timedelta(days=1, hours=2, minutes=3,
+                                           seconds=4, milliseconds=500))
+                    self.assertEqual(iym.getvalue(), oracle.IntervalYM(3, 7))
+                finally:
+                    await Cur.execute("DROP PROCEDURE PYORACLE_ASYNC_OUTX")
+
     async def test_async_executemany(self):
         async with await oracle.connect_async(**self._kwargs()) as Conn:
             async with Conn.cursor() as Cur:
@@ -1928,6 +1959,66 @@ class CallprocIntegration(_IntegrationBase):
             "RETURN VARCHAR2 AS BEGIN RETURN q || ':' || TO_CHAR(p * 2); END;")
         try:
             self.assertEqual(self.cur.callfunc(fn, str, [21, "x"]), "x:42")
+        finally:
+            self.cur.execute(f"DROP FUNCTION {fn}")
+
+    # ----- OUT binds for the extended scalar types (issue #17) -----
+
+    def test_callproc_out_timestamp(self):
+        self._make("(p OUT TIMESTAMP) AS BEGIN "
+                   "p := TIMESTAMP '2026-06-07 13:14:15.5'; END;")
+        v = self.cur.var(oracle.DB_TYPE_TIMESTAMP)
+        self.cur.callproc(self.PROC, [v])
+        self.assertEqual(v.getvalue(),
+                         datetime.datetime(2026, 6, 7, 13, 14, 15, 500000))
+
+    def test_callproc_out_timestamp_tz(self):
+        self._make("(p OUT TIMESTAMP WITH TIME ZONE) AS BEGIN "
+                   "p := TIMESTAMP '2026-06-07 13:14:15.5 +02:00'; END;")
+        v = self.cur.var(oracle.DB_TYPE_TIMESTAMP_TZ)
+        self.cur.callproc(self.PROC, [v])
+        got = v.getvalue()
+        self.assertEqual(got.utcoffset(), datetime.timedelta(hours=2))
+        self.assertEqual(got.replace(tzinfo=None),
+                         datetime.datetime(2026, 6, 7, 13, 14, 15, 500000))
+
+    def test_callproc_out_binary_float(self):
+        self._make("(p OUT BINARY_FLOAT) AS BEGIN p := 1.5; END;")
+        v = self.cur.var(oracle.DB_TYPE_BINARY_FLOAT)
+        self.cur.callproc(self.PROC, [v])
+        self.assertEqual(v.getvalue(), 1.5)
+
+    def test_callproc_out_binary_double(self):
+        self._make("(p OUT BINARY_DOUBLE) AS BEGIN p := 2.25; END;")
+        v = self.cur.var(oracle.DB_TYPE_BINARY_DOUBLE)
+        self.cur.callproc(self.PROC, [v])
+        self.assertEqual(v.getvalue(), 2.25)
+
+    def test_callproc_out_interval_ds(self):
+        self._make("(p OUT INTERVAL DAY TO SECOND) AS BEGIN "
+                   "p := INTERVAL '1 02:03:04.5' DAY TO SECOND; END;")
+        v = self.cur.var(oracle.DB_TYPE_INTERVAL_DS)
+        self.cur.callproc(self.PROC, [v])
+        self.assertEqual(
+            v.getvalue(),
+            datetime.timedelta(days=1, hours=2, minutes=3, seconds=4,
+                               milliseconds=500))
+
+    def test_callproc_out_interval_ym(self):
+        self._make("(p OUT INTERVAL YEAR TO MONTH) AS BEGIN "
+                   "p := INTERVAL '3-7' YEAR TO MONTH; END;")
+        v = self.cur.var(oracle.DB_TYPE_INTERVAL_YM)
+        self.cur.callproc(self.PROC, [v])
+        self.assertEqual(v.getvalue(), oracle.IntervalYM(3, 7))
+
+    def test_callfunc_binary_double(self):
+        fn = f"{self.PROC}_F"
+        self.cur.execute(
+            f"CREATE OR REPLACE FUNCTION {fn} RETURN BINARY_DOUBLE AS "
+            "BEGIN RETURN 9.875; END;")
+        try:
+            self.assertEqual(
+                self.cur.callfunc(fn, oracle.DB_TYPE_BINARY_DOUBLE), 9.875)
         finally:
             self.cur.execute(f"DROP FUNCTION {fn}")
 

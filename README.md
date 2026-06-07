@@ -50,7 +50,10 @@ What works so far:
 - Stored procedures and OUT / IN OUT binds: `cur.callproc(name,
   [in_val, out_var, ...])` where an OUT / IN OUT argument is a
   `cur.var(type)` (type is a Python type or an `oracle` constant like
-  `oracle.NUMBER` / `oracle.STRING`). Seed an IN OUT value with
+  `oracle.NUMBER` / `oracle.STRING` / `oracle.DB_TYPE_TIMESTAMP` /
+  `oracle.DB_TYPE_TIMESTAMP_TZ` / `oracle.DB_TYPE_BINARY_FLOAT` /
+  `oracle.DB_TYPE_BINARY_DOUBLE` / `oracle.DB_TYPE_INTERVAL_DS` /
+  `oracle.DB_TYPE_INTERVAL_YM`). Seed an IN OUT value with
   `var.setvalue(0, v)`; read results with `var.getvalue()`. `callproc`
   returns the argument list with OUT slots replaced by their values.
   OUT binds also work through `cur.execute` directly (pass a `Var`).

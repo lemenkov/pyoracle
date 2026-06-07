@@ -12,7 +12,11 @@ import datetime
 import math
 import unittest
 
-from oracle.datatypes import BinaryDouble, BinaryFloat, IntervalYM
+from oracle.datatypes import (
+    DB_TYPE_BINARY_DOUBLE, DB_TYPE_BINARY_FLOAT, DB_TYPE_INTERVAL_DS,
+    DB_TYPE_INTERVAL_YM, DB_TYPE_TIMESTAMP, DB_TYPE_TIMESTAMP_TZ,
+    BinaryDouble, BinaryFloat, IntervalYM, Var,
+)
 from oracle.tns import (
     _read_iov, _read_long_column, _read_rowid_column, _read_urowid_column,
     decode_dalc, decode_ub4, encode_sb4, exec_oac_signature,
@@ -64,6 +68,42 @@ class TestDecodeUb4(unittest.TestCase):
     def test_roundtrip_with_encode_sb4(self):
         for value in (0, 1, 127, 255, 256, 65535, 65536, 16777215, 4294967295):
             self.assertEqual(decode_ub4(encode_sb4(value)), (value, b""))
+
+
+class TestVarOacTypes(unittest.TestCase):
+    # A Var(<type const>) OUT bind must declare the same OAC (type + buffer
+    # size) the server would expect for a value of that type (issue #17).
+
+    def test_timestamp(self):
+        self.assertEqual(
+            encode_token_oac(Var(DB_TYPE_TIMESTAMP)),
+            encode_token_oac(datetime.datetime(2026, 6, 7, 1, 2, 3, 500000)))
+
+    def test_timestamp_tz(self):
+        tz = datetime.datetime(2026, 6, 7, 1, 2, 3,
+                               tzinfo=datetime.timezone.utc)
+        self.assertEqual(encode_token_oac(Var(DB_TYPE_TIMESTAMP_TZ)),
+                         encode_token_oac(tz))
+
+    def test_binary_float(self):
+        self.assertEqual(encode_token_oac(Var(DB_TYPE_BINARY_FLOAT)),
+                         encode_token_oac(BinaryFloat(1.0)))
+
+    def test_binary_double(self):
+        self.assertEqual(encode_token_oac(Var(DB_TYPE_BINARY_DOUBLE)),
+                         encode_token_oac(BinaryDouble(1.0)))
+
+    def test_interval_ds(self):
+        self.assertEqual(encode_token_oac(Var(DB_TYPE_INTERVAL_DS)),
+                         encode_token_oac(datetime.timedelta(days=1)))
+
+    def test_interval_ym(self):
+        self.assertEqual(encode_token_oac(Var(DB_TYPE_INTERVAL_YM)),
+                         encode_token_oac(IntervalYM(1, 2)))
+
+    def test_python_type_mappings_resolve(self):
+        self.assertEqual(Var(datetime.timedelta).dbtype, DB_TYPE_INTERVAL_DS)
+        self.assertEqual(Var(IntervalYM).dbtype, DB_TYPE_INTERVAL_YM)
 
 
 class TestExecOacSignature(unittest.TestCase):

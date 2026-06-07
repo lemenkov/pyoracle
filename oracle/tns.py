@@ -1365,6 +1365,18 @@ def encode_token_oac(Token: object) -> bytes:
             return encode_token_raw(TNS_TYPE_RAW, Token.size, 16, 0, 0)
         if DT == TNS_TYPE_DATE:
             return encode_token_raw(TNS_TYPE_DATE, 7, 0, 0, 0)
+        if DT == TNS_TYPE_TIMESTAMP:
+            return encode_token_raw(TNS_TYPE_TIMESTAMP, 11, 0, 0, 0)
+        if DT == TNS_TYPE_TIMESTAMPTZ:
+            return encode_token_raw(TNS_TYPE_TIMESTAMPTZ, 13, 0, 0, 0)
+        if DT == TNS_TYPE_BFLOAT:
+            return encode_token_raw(TNS_TYPE_BFLOAT, 4, 0, 0, 0)
+        if DT == TNS_TYPE_BDOUBLE:
+            return encode_token_raw(TNS_TYPE_BDOUBLE, 8, 0, 0, 0)
+        if DT == TNS_TYPE_INTERVALDS:
+            return encode_token_raw(TNS_TYPE_INTERVALDS, 11, 0, 0, 0)
+        if DT == TNS_TYPE_INTERVALYM:
+            return encode_token_raw(TNS_TYPE_INTERVALYM, 5, 0, 0, 0)
         if DT == TNS_TYPE_REFCURSOR:
             return encode_token_raw(TNS_TYPE_REFCURSOR, 1, 0, UTF8_CHARSET, 0)
         raise Exception("Unsupported Var OAC type", DT)

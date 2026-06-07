@@ -10,8 +10,9 @@ import datetime
 from decimal import Decimal
 
 from oracle.tns_consts import (
-    TNS_TYPE_DATE, TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_REFCURSOR,
-    TNS_TYPE_VARCHAR,
+    TNS_TYPE_BDOUBLE, TNS_TYPE_BFLOAT, TNS_TYPE_DATE, TNS_TYPE_INTERVALDS,
+    TNS_TYPE_INTERVALYM, TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_REFCURSOR,
+    TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_VARCHAR,
 )
 
 
@@ -30,16 +31,25 @@ class _DbType:
 
 
 # oracledb-compatible type-constant aliases for cursor.var() / OUT binds.
+# The default sizes are the fixed wire widths the server reserves for each
+# scalar OUT value (matching the value-sized OAC in tns.encode_token_oac).
 DB_TYPE_NUMBER = NUMBER = _DbType("DB_TYPE_NUMBER", TNS_TYPE_NUMBER, 22)
 DB_TYPE_VARCHAR = STRING = _DbType("DB_TYPE_VARCHAR", TNS_TYPE_VARCHAR, 32767)
 DB_TYPE_RAW = _DbType("DB_TYPE_RAW", TNS_TYPE_RAW, 32767)
 DB_TYPE_DATE = _DbType("DB_TYPE_DATE", TNS_TYPE_DATE, 7)
 DB_TYPE_CURSOR = CURSOR = _DbType("DB_TYPE_CURSOR", TNS_TYPE_REFCURSOR, 1)
+DB_TYPE_TIMESTAMP = _DbType("DB_TYPE_TIMESTAMP", TNS_TYPE_TIMESTAMP, 11)
+DB_TYPE_TIMESTAMP_TZ = _DbType("DB_TYPE_TIMESTAMP_TZ", TNS_TYPE_TIMESTAMPTZ, 13)
+DB_TYPE_BINARY_FLOAT = _DbType("DB_TYPE_BINARY_FLOAT", TNS_TYPE_BFLOAT, 4)
+DB_TYPE_BINARY_DOUBLE = _DbType("DB_TYPE_BINARY_DOUBLE", TNS_TYPE_BDOUBLE, 8)
+DB_TYPE_INTERVAL_DS = _DbType("DB_TYPE_INTERVAL_DS", TNS_TYPE_INTERVALDS, 11)
+DB_TYPE_INTERVAL_YM = _DbType("DB_TYPE_INTERVAL_YM", TNS_TYPE_INTERVALYM, 5)
 
 _PYTYPE_TO_DBTYPE = {
     int: NUMBER, float: NUMBER, Decimal: NUMBER,
     str: STRING, bytes: DB_TYPE_RAW, bytearray: DB_TYPE_RAW,
     datetime.date: DB_TYPE_DATE, datetime.datetime: DB_TYPE_DATE,
+    datetime.timedelta: DB_TYPE_INTERVAL_DS,
 }
 
 
@@ -137,3 +147,8 @@ class IntervalYM:
 
     def __repr__(self) -> str:
         return f"IntervalYM(years={self.years}, months={self.months})"
+
+
+# IntervalYM is defined above, so register its Python-type mapping now that the
+# class exists (lets `cursor.var(oracle.IntervalYM)` resolve).
+_PYTYPE_TO_DBTYPE[IntervalYM] = DB_TYPE_INTERVAL_YM
