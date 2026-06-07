@@ -26,6 +26,12 @@ What works so far:
   `Cursor.execute / fetchone / fetchmany / fetchall / description /
   rowcount`, iteration protocol, context managers, PEP 249 exception
   hierarchy
+- DB-API conveniences: `Connection.stmtcachesize` (read/write statement-
+  cache size), `Connection.version` (server release string, e.g.
+  `"11.2.0.2.0"`), `Cursor.rowfactory` (callable applied to each fetched
+  row, invoked with the column values as positional arguments), and
+  `Cursor.lastrowid` (ROWID of the last row an INSERT / UPDATE / DELETE
+  touched). Sync and async
 - Bind variables: `cur.execute(sql, [v1, v2])` (positional) or
   `cur.execute(sql, {"name": v})` (named, `:name` placeholders, case-
   insensitive); accepted bind types are `int`, `float`, `Decimal`,
