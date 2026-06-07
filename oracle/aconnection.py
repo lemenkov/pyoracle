@@ -88,6 +88,19 @@ class AsyncOracleConnect:
         self._cursor_cache: dict[tuple[str, bytes], int] = {}
         self._cursor_cache_max = 32
 
+    @property
+    def stmtcachesize(self) -> int:
+        """Number of server-side cursors kept in the statement cache. See
+        `OracleConnect.stmtcachesize`."""
+        return self._cursor_cache_max
+
+    @stmtcachesize.setter
+    def stmtcachesize(self, value: int) -> None:
+        self._cursor_cache_max = max(0, int(value))
+        while len(self._cursor_cache) > self._cursor_cache_max:
+            Oldest = next(iter(self._cursor_cache))
+            self._cursor_cache.pop(Oldest, None)
+
     # ----- bookkeeping shared with the sync class -----
     # These are copy-pasted from connection.py rather than imported via a
     # mixin because the sync class also has them and any future divergence

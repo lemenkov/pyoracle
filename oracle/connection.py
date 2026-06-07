@@ -84,6 +84,20 @@ class OracleConnect:
         self._cursor_cache: dict[tuple[str, bytes], int] = {}
         self._cursor_cache_max = 32
 
+    @property
+    def stmtcachesize(self) -> int:
+        """Number of server-side cursors kept in the statement cache (PEP 249
+        extension / oracledb-compatible). Setting it smaller evicts the oldest
+        entries immediately; 0 disables caching."""
+        return self._cursor_cache_max
+
+    @stmtcachesize.setter
+    def stmtcachesize(self, value: int) -> None:
+        self._cursor_cache_max = max(0, int(value))
+        while len(self._cursor_cache) > self._cursor_cache_max:
+            Oldest = next(iter(self._cursor_cache))
+            self._cursor_cache.pop(Oldest, None)
+
     def _next_seq(self) -> int:
         seq = self.seq
         self.seq = self.seq % MAX_SEQ_NUM + 1
