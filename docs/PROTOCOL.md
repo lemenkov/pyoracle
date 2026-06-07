@@ -295,6 +295,14 @@ If successful, the server returns TTI_RPA with:
 
 The client validates by decrypting `AUTH_SVR_RESPONSE` with the connection key and checking for the presence of `"SERVER_TO_CLIENT"` in the plaintext.
 
+`AUTH_VERSION_NO` is a decimal string of a single packed integer holding
+the server's release. Decode it as `major` (bits 24-31), `minor`
+(20-23), `update` (12-19), `patch` (8-11), `port-specific update`
+(0-7) — e.g. `186647040` = `0x0B200200` = `11.2.0.2.0`, matching
+`product_component_version` on XE. pyoracle exposes the dotted form as
+`Connection.version` and masks the major release out for its protocol
+version gate.
+
 ## 5. SQL Execution
 
 ### 5.1 Execute (TTI_FUN/TTI_ALL8)
@@ -572,7 +580,7 @@ TTI_OER |
   error_position (sb2) |
   sql_type, fatal, flags, user_cursor_options, upi_param,
     warn_flags (6 x ub1) |
-  rowid (ub4 rba + ub2 part_id + ub1 + ub4 block_num + ub2 slot) |
+  rowid (ub4 data_object + ub2 rel_file + ub1 + ub4 block + ub2 slot) |
   os_error (ub4, skipped) |
   statement_number (ub1, skipped) | call_number (ub1, skipped) |
   padding (ub2, skipped) |
@@ -593,6 +601,16 @@ it cannot serve as the rowcount the caller wants. 12c+ moved the
 affected count to a separate ub8 field at the end of the OER (after
 two additional `info.num` / `info.rowcount` extensions); pyoracle
 doesn't parse that variant yet.
+
+**Rowid → `lastrowid`.** The `rowid` field carries the rowid of the row
+the statement touched, in the same physical-rowid layout as a ROWID
+column (`§14`): data object number, relative file number, an unused
+byte, block number, slot number. pyoracle renders it via the same
+base-64 encoder and surfaces it as `Cursor.lastrowid` for
+INSERT / UPDATE / DELETE. For a SELECT the server fills it with the last
+fetched row's rowid, which is not a "last modified row", so the driver
+clears `lastrowid` on result-set statements; a zero block number (DDL /
+no row) means no rowid.
 
 **Common error codes**:
 - `0`: Success.
@@ -862,7 +880,8 @@ multi-chunk value, and a LONG that is not the last column).
 
 ### 12.1 Variable-Length Integer (SB4/SB2)
 
-A compact encoding for 32-bit integers:
+A compact encoding for 32-bit integers: a length byte followed by that
+many big-endian magnitude bytes.
 
 | Value         | Encoding                         |
 |---------------|----------------------------------|
@@ -871,7 +890,12 @@ A compact encoding for 32-bit integers:
 | 0..65535      | `0x02, <hi>, <lo>`               |
 | 0..16777215   | `0x03, <b2>, <b1>, <b0>`        |
 | 0..4294967295 | `0x04, <b3>, <b2>, <b1>, <b0>`  |
-| Negative      | `0x80|flag, <magnitude>`         |
+| Negative      | `(0x80 | len), <len big-endian magnitude bytes>` |
+
+For a negative value the high bit of the length byte is set and the low
+7 bits give the magnitude byte count, so the magnitude can span several
+bytes — e.g. NUMBER scale `-127` arrives as `0x81 0x7f` and `-256` as
+`0x82 0x01 0x00`.
 
 ### 12.2 DALC (Data with Attached Length Code)
 
