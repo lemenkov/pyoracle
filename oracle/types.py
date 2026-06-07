@@ -195,6 +195,16 @@ def rowid_to_string(Obj: int, File: int, Block: int, Slot: int) -> str:
             + _rowid_b64(Block, 6) + _rowid_b64(Slot, 3))
 
 
+def urowid_to_string(Value: bytes) -> str:
+    # A logical/universal ROWID (e.g. an index-organized table's rowid) renders
+    # as "*" + base64 of the rowid bytes minus their leading 1-byte type tag,
+    # e.g. b"\x02\x04\x01\x00\x19\x83\x02\xc1\x02\xfe" -> "*BAEAGYMCwQL+".
+    # base64 uses the standard alphabet; Oracle's printable form carries no
+    # padding.
+    import base64
+    return '*' + base64.b64encode(Value[1:]).decode('ascii').rstrip('=')
+
+
 def decode_string(Data: bytes, Charset: int = AL32UTF8_CHARSET) -> str | None:
     if not Data:
         return None

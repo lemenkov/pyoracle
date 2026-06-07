@@ -774,6 +774,15 @@ rowid: base-64 (`A-Z a-z 0-9 + /`) with fixed field widths 6+3+6+3 over
 object / file / block / slot. Example: object 44681, file 4, block 8591,
 slot 0 → `AAAK6JAAEAAACGPAAA` (matches `ROWIDTOCHAR`).
 
+A **UROWID** (universal / logical rowid, TNS type 208 — e.g. the rowid of an
+index-organized table) uses the same RXD framing as a LOB column: `ub4
+num_bytes`, a 1-byte length echo, then `num_bytes` raw rowid bytes. The first
+byte is a type tag; the printable form is `"*"` + standard base-64 of the
+remaining bytes (no `=` padding). Example: value
+`02 04 01 00 19 83 02 c1 02 fe` → `*BAEAGYMCwQL+` (the trailing `c1 02` is the
+table's NUMBER primary key, since an IOT rowid is logical). NULL when
+`num_bytes` is 0.
+
 ### 11.9 LOB Locators (CLOB, NCLOB, BLOB, BFILE)
 
 LOBs are *not* sent inline with row data. What appears in RXD for a

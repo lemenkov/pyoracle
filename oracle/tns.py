@@ -18,7 +18,8 @@ from oracle.tns_consts import (
     TNS_TYPE_BFLOAT, TNS_TYPE_BLOB, TNS_TYPE_CLOB, TNS_TYPE_DATE,
     TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_LONG, TNS_TYPE_LONGRAW,
     TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_REFCURSOR, TNS_TYPE_RID,
-    TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_VARCHAR, TTI_LOBOPS,
+    TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_UROWID, TNS_TYPE_VARCHAR,
+    TTI_LOBOPS,
     UTF8_CHARSET,
 )
 import logging
@@ -484,6 +485,7 @@ def decode_token_uds(Data: bytes, Acc: object) -> tuple:
 
 _LOB_DATA_TYPES = frozenset((TNS_TYPE_CLOB, TNS_TYPE_BLOB, TNS_TYPE_BFILE))
 _ROWID_DATA_TYPES = frozenset((TNS_TYPE_RID,))
+_UROWID_DATA_TYPES = frozenset((TNS_TYPE_UROWID,))
 _LONG_DATA_TYPES = frozenset((TNS_TYPE_LONG, TNS_TYPE_LONGRAW))
 
 def decode_token_rxd(Data: bytes, Acc: object) -> tuple:
@@ -519,6 +521,10 @@ def decode_token_rxd(Data: bytes, Acc: object) -> tuple:
                 continue
             if DataType in _ROWID_DATA_TYPES:
                 (Val, Rest) = _read_rowid_column(Rest)
+                Row.append(Val)
+                continue
+            if DataType in _UROWID_DATA_TYPES:
+                (Val, Rest) = _read_urowid_column(Rest)
                 Row.append(Val)
                 continue
             if DataType in _LONG_DATA_TYPES:
@@ -579,6 +585,23 @@ def _read_rowid_column(Rest: bytes) -> tuple[str | None, bytes]:
     (Block, Rest) = decode_ub4(Rest)
     (Slot, Rest) = decode_ub4(Rest)
     return (rowid_to_string(Obj, File, Block, Slot), Rest)
+
+def _read_urowid_column(Rest: bytes) -> tuple[str | None, bytes]:
+    # UROWID (universal/logical rowid, TNS type 208 -- e.g. an index-organized
+    # table's rowid). Same RXD framing as a LOB column: ub4 num_bytes, a 1-byte
+    # length echo, then num_bytes raw rowid bytes (a leading type tag + the
+    # rowid body). Rendered as the "*"-prefixed base64 form. Verified against a
+    # live XE IOT row vs the SELECT ROWID text.
+    from oracle.types import urowid_to_string
+    if not Rest:
+        return (None, Rest)
+    (NumBytes, Rest) = decode_ub4(Rest)
+    if NumBytes <= 0:
+        return (None, Rest)
+    Rest = Rest[1:]                              # 1-byte length echo
+    Value = bytes(Rest[:NumBytes])
+    Rest = Rest[NumBytes:]
+    return (urowid_to_string(Value), Rest)
 
 def _read_long_column(Rest: bytes) -> tuple[bytes | None, bytes]:
     # LONG / LONG RAW in RXD: a value followed by two trailing ub4 indicators

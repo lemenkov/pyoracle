@@ -14,16 +14,17 @@ import unittest
 
 from oracle.datatypes import BinaryDouble, BinaryFloat, IntervalYM
 from oracle.tns import (
-    _read_iov, _read_long_column, _read_rowid_column, encode_token_binary_double,
-    encode_token_binary_float, encode_token_interval_ds,
-    encode_token_interval_ym, encode_token_oac, encode_token_rxd,
+    _read_iov, _read_long_column, _read_rowid_column, _read_urowid_column,
+    encode_token_binary_double, encode_token_binary_float,
+    encode_token_interval_ds, encode_token_interval_ym, encode_token_oac,
+    encode_token_rxd,
 )
 from oracle.tns_consts import (
     TNS_TYPE_BDOUBLE, TNS_TYPE_BFLOAT, TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM,
 )
 from oracle.types import (
     decode_binary_double, decode_binary_float, decode_interval_ds,
-    decode_interval_ym, decode_value, rowid_to_string,
+    decode_interval_ym, decode_value, rowid_to_string, urowid_to_string,
 )
 
 
@@ -173,6 +174,30 @@ class TestRowid(unittest.TestCase):
         Value, Rest = _read_rowid_column(b"\x00\x04rest")
         self.assertIsNone(Value)
         self.assertEqual(Rest, b"\x04rest")
+
+
+class TestUrowid(unittest.TestCase):
+    # Bytes captured from a live XE index-organized table row whose SELECT
+    # ROWID was "*BAEAGYMCwQL+" (type tag 0x02 + 9 rowid bytes carrying the
+    # NUMBER primary key c1 02).
+
+    def test_urowid_to_string(self):
+        self.assertEqual(
+            urowid_to_string(bytes.fromhex("02040100198302c102fe")),
+            "*BAEAGYMCwQL+")
+
+    def test_read_urowid_column(self):
+        # ub4 num_bytes (0x0a) + 1-byte echo (0x0a) + 10 value bytes, then a
+        # trailing NUMBER that must be left for the next column.
+        Wire = bytes.fromhex("010a0a02040100198302c102fe") + bytes.fromhex("02c102")
+        Value, Rest = _read_urowid_column(Wire)
+        self.assertEqual(Value, "*BAEAGYMCwQL+")
+        self.assertEqual(Rest, bytes.fromhex("02c102"))
+
+    def test_read_urowid_null(self):
+        Value, Rest = _read_urowid_column(b"\x00\x05rest!")
+        self.assertIsNone(Value)
+        self.assertEqual(Rest, b"\x05rest!")
 
 
 class TestLong(unittest.TestCase):

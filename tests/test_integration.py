@@ -295,6 +295,21 @@ class TypesIntegration(_IntegrationBase):
         self.cur.execute(f"SELECT id FROM {self.TABLE} WHERE ROWID = :r", [rid])
         self.assertEqual(self.cur.fetchone(), (42,))
 
+    def test_urowid_index_organized_table(self):
+        # An index-organized table's ROWID is a UROWID (type 208): a
+        # "*"-prefixed base64 string, and usable as a bind.
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} "
+            f"(id NUMBER PRIMARY KEY, v VARCHAR2(20)) ORGANIZATION INDEX")
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (1, 'a')")
+        self.cur.execute(f"SELECT ROWID, id FROM {self.TABLE}")
+        rid, idv = self.cur.fetchone()
+        self.assertIsInstance(rid, str)
+        self.assertTrue(rid.startswith("*"))
+        self.assertEqual(idv, 1)
+        self.cur.execute(f"SELECT id FROM {self.TABLE} WHERE ROWID = :r", [rid])
+        self.assertEqual(self.cur.fetchone(), (1,))
+
     # ----- LONG / LONG RAW -----
 
     def test_long(self):
