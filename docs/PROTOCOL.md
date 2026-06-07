@@ -339,11 +339,17 @@ Common option combinations:
 `[Options, FetchCount, 0, 0, 0, 0, 0, Type, 0, 0, 0, 0, 0]`
 - Type: `1` for SELECT, `0` for DML/PL/SQL.
 
-**Cursor reuse** *(not yet implemented)*: The protocol supports reusing
-a previously-parsed cursor ID instead of resending the SQL text, which
-avoids server-side re-parse overhead. pyoracle currently sends
-`cursor = 0` on every execute (parse-every-time). A cursor cache is
-on the roadmap.
+**Cursor reuse**: The protocol allows reusing a previously-parsed cursor ID
+instead of resending the SQL text, skipping the server-side re-parse. pyoracle
+caches the cursor id the server returns (per connection, LRU, DML only) and on
+a repeat execute of the same SQL sends that id with an empty query string; the
+OAC descriptors are then omitted (the server already knows the column types
+from the first parse) and only the `TTI_RXD` bind values are sent.
+
+**Anonymous PL/SQL blocks** (`BEGIN`/`DECLARE` …) must use the PL/SQL option
+set (`0x0421` / `0x0429`), not the DML `change` set — sending a block with
+binds through the DML path is rejected with `ORA-00600 [12259]`. The returned
+OUT/IN OUT values come back in a `TTI_IOV` token (§6.5).
 
 ### 5.2 Fetch (TTI_FUN/TTI_FETCH)
 
@@ -387,6 +393,17 @@ OID(0) | Version(0) | CharsetID(SB4) | CharsetForm(UB1) | MXLC(SB4)
 
 **CharsetForm**: `1` for database charset, `2` for national charset (AL16UTF16).
 
+**MaxDataLength and the LONG-reorder trap**: `MaxDataLength` must reflect the
+value's real size, **not** a flat maximum. A VARCHAR/RAW bind whose
+`MaxDataLength` exceeds the 4000-byte VARCHAR2 limit is treated by the server
+as a streamed LONG and processed *after* the following bind — which silently
+reorders binds relative to their placeholders (so e.g. `SET name=:1 WHERE
+id=:2` binds the string to `id`). pyoracle therefore sizes a VARCHAR/RAW OAC to
+the actual value's byte length (NULL → 1); values genuinely over 4000 bytes
+keep their true size and the intended LONG handling (the multi-KiB CLOB/BLOB
+regular-path bind). For array DML the single OAC is sized to the widest value
+in each column across all rows.
+
 ### 5.4 Bind Data (TTI_RXD)
 
 Bind values are encoded inline following OAC descriptors:
@@ -394,17 +411,27 @@ Bind values are encoded inline following OAC descriptors:
 | Python Type             | Wire Encoding                                          |
 |-------------------------|--------------------------------------------------------|
 | `int`, `bool`           | Oracle NUMBER format (length-prefixed mantissa bytes)  |
-| `float`, `complex`      | Oracle NUMBER format                                   |
+| `float`, `complex`      | Oracle NUMBER format (non-finite `inf`/`nan` auto-route to BINARY_DOUBLE) |
 | `decimal.Decimal`       | Oracle NUMBER (integer-valued decimals via int path, fractional via float) |
+| `oracle.BinaryFloat`    | 4-byte order-preserving IEEE-754 (§11.7)               |
+| `oracle.BinaryDouble`   | 8-byte order-preserving IEEE-754 (§11.7)               |
 | `str`                   | Length-prefixed UTF-8 character data (chunked if > 64 bytes) |
-| `bytes` / `bytearray`   | Length-prefixed AL16UTF16 character data               |
+| `bytes` / `bytearray`   | Length-prefixed RAW (verbatim bytes)                   |
 | `datetime.date`         | 7-byte Oracle DATE (century, year, month, day, h, m, s) |
 | `datetime.datetime`     | 7-byte DATE if microsecond == 0; otherwise 11-byte TIMESTAMP (+ 4-byte BE nanoseconds) |
 | `datetime.datetime` w/ `tzinfo` | 13-byte TIMESTAMP WITH TIME ZONE (UTC wall clock + offset bias bytes) |
+| `datetime.timedelta`    | 11-byte INTERVAL DAY TO SECOND (§11.6)                 |
+| `oracle.IntervalYM`     | 5-byte INTERVAL YEAR TO MONTH (§11.5)                  |
 | `None`                  | Single `0x00` byte                                     |
-| `oracle.cursor.cursor`  | `0x01, 0x00` (REFCURSOR placeholder)                   |
+| `oracle.Var` (OUT/IN OUT) | the seeded value, or `0x00` (NULL) for a pure OUT; OAC driven by the Var's declared type |
+| `oracle.cursor.cursor` / `Var(oracle.CURSOR)` | `0x01, 0x00` (REF CURSOR placeholder); value returned in the IOV (§6.5) |
 
 **Chunked encoding** (for data > 64 bytes): `0xFE` header, then repeated `<length><data>` chunks of up to 64 bytes each, terminated by `0x00`.
+
+**Array DML** (`executemany`): the OAC descriptors are sent once (sized to the
+widest value in each column across all rows), the All8 iteration count is the
+number of rows, and each row's values follow as its own `TTI_RXD` token after
+the OAC block.
 
 ## 6. Response Processing
 
@@ -488,9 +515,40 @@ field version.
 
 ### 6.5 I/O Vector (TTI_IOV)
 
-For PL/SQL blocks with OUT parameters, TTI_IOV indicates the direction of each bind variable:
-- `16` or `48`: OUT parameter (value returned by the server).
-- Other values: IN parameter (value not returned).
+When an executed anonymous PL/SQL block carries bind variables, the server
+replies with a `TTI_IOV` token that lists each bind's direction and is
+immediately followed (when any bind is OUT / IN OUT) by the returned values.
+Layout reverse-engineered from XE 11g and cross-referenced with
+python-oracledb's `_process_io_vector`:
+
+```
+ub1   token (TTI_IOV = 11)
+ub1   flag                                   (skip)
+ub2   num_requests   \  num_binds =
+ub4   num_iters      /    num_iters * 256 + num_requests
+ub4   num iters this time                    (skip)
+ub2   uac buffer length                      (skip)
+ub2   fast-fetch bit-vector length + bytes   (skip)
+ub2   rowid length + bytes                   (skip)
+per bind:
+  ub1 direction                              # 16 OUT, 32 IN, 48 IN OUT
+```
+
+**Direction codes** (`TNS_BIND_DIR_*`): `16` = OUT, `32` = IN, `48` = IN OUT.
+
+If any bind is OUT / IN OUT, a `TTI_RXD` (`0x07`) token follows, then one
+value per OUT / IN OUT bind **in bind order** (IN binds contribute nothing):
+
+- **Scalar** OUT value: a DALC blob (decoded by the bind's declared type) plus
+  a trailing 1-byte indicator (`0x00` = present).
+  e.g. NUMBER `10` → `02 c1 0b 00`, VARCHAR `"hi!"` → `03 68 69 21 00`.
+- **REF CURSOR** OUT value: a 1-byte length, then an inline describe of the
+  cursor's result set (the same per-column metadata as a `TTI_DCB`, §6.4),
+  then the nested cursor id (`ub2`) and a 1-byte indicator. The client then
+  drains that cursor id with `TTI_FETCH` (§5.2). See python-oracledb's
+  `_create_cursor_from_describe`.
+
+After the values come the usual `TTI_RPA` and `TTI_OER` tokens.
 
 ### 6.6 Return Parameter (TTI_RPA)
 
@@ -680,19 +738,41 @@ original offset.
 
 ### 11.5 INTERVAL YEAR TO MONTH
 
-5 bytes: `Year(4 bytes, big-endian) | Month(1 byte)`. Both offset by 2147483648 and 60 respectively.
+5 bytes: `Year(4 bytes, big-endian) | Month(1 byte)`, biased by `2**31` and `60`
+respectively. Both fields share the interval's sign. Maps to
+`oracle.IntervalYM(years, months)`.
+Example: `3-7` → `80 00 00 03 43` (years `0x80000003 − 2**31 = 3`, months
+`0x43 − 60 = 7`); `-1-2` → `7f ff ff ff 3a`.
 
 ### 11.6 INTERVAL DAY TO SECOND
 
-11 bytes: `Day(4) | Hour(1) | Minute(1) | Second(1) | FracSec(4)`. Day offset by 2147483648; H/M/S offset by 60; FracSec offset by 2147483648.
+11 bytes: `Day(4) | Hour(1) | Minute(1) | Second(1) | FracSec(4, BE
+nanoseconds)`. Day biased by `2**31`; H/M/S biased by `60`; FracSec biased by
+`2**31`. All fields share the interval's sign. Maps to `datetime.timedelta`.
+Example: `5 04:03:02.123456` → `80 00 00 05 40 3f 3e 87 5b ca 00`.
 
 ### 11.7 BINARY_FLOAT / BINARY_DOUBLE
 
-IEEE 754 float/double with sign bit manipulation: negative values are bitwise-inverted; positive values have the sign bit masked off.
+4-byte (float) / 8-byte (double) IEEE-754 in Oracle's **order-preserving** form
+so the raw bytes sort the same as the numbers:
+
+- **Encode**: if the value is positive, set the high (sign) bit; if negative,
+  invert every bit.
+- **Decode**: if the high bit is set, the value was positive — clear it; else
+  the value was negative — invert every bit. Then read as IEEE-754.
+
+Example: `1.5` (IEEE `3fc00000`) → `bfc00000`; `-2.25` (IEEE `c0100000`) →
+`3fefffff`. `inf` / `nan` / `-0.0` round-trip; binding them requires the native
+binary types (NUMBER cannot represent them).
 
 ### 11.8 ROWID
 
-Encoded as four components: Object ID (UB4), Partition ID (UB2), Block Number (UB4), Slot Number (UB2). Rendered as an 18-character base-64 string (A-Z, a-z, 0-9, +, /) with fixed field widths 6+3+6+3.
+A REF/physical rowid (TNS type 11) is read from RXD as: a 1-byte present
+indicator (0 / 0xff = NULL), then Object ID (UB4), File# (UB2), an unused UB1,
+Block Number (UB4), Slot Number (UB2). Rendered as the 18-character extended
+rowid: base-64 (`A-Z a-z 0-9 + /`) with fixed field widths 6+3+6+3 over
+object / file / block / slot. Example: object 44681, file 4, block 8591,
+slot 0 → `AAAK6JAAEAAACGPAAA` (matches `ROWIDTOCHAR`).
 
 ### 11.9 LOB Locators (CLOB, NCLOB, BLOB, BFILE)
 
@@ -750,6 +830,24 @@ EMPTY_CLOB() / EMPTY_BLOB() short-circuit without a round-trip.
 The same path handles both inline-content LOBs and out-of-line LOBs
 uniformly (the server packs content inline or fetches it from storage
 as needed — that detail is opaque to the client).
+
+### 11.10 LONG / LONG RAW
+
+A LONG (TNS type 8) or LONG RAW (type 24) column in RXD is a chunked value
+followed by **two trailing `ub4` indicators** (the actual / return lengths,
+`0` / `0` for an ordinary value):
+
+```
+0x00            NULL, no body
+0xfe            chunked: repeated [ub1 length][bytes] until a zero-length chunk
+else            ub1 length + that many bytes
+ub4 ub4         two trailing indicators (skip)
+```
+
+Large values are split into many ≤253-byte chunks (XE uses 64-byte chunks),
+not one big chunk. LONG decodes to `str` (charset-aware), LONG RAW to `bytes`,
+NULL to `None`. Confirmed against XE 11g (NULL, single-chunk, a 700-byte
+multi-chunk value, and a LONG that is not the last column).
 
 ## 12. Wire Encoding Primitives
 
@@ -898,10 +996,12 @@ in `oracle/tns.py`, response handling in
   layout is complex enough that we don't try to parse it, and we
   don't need anything out of it.
 
-Out-of-line LOB *writes* (large LOB binds on INSERT / UPDATE) still
-go through the regular VARCHAR2 / RAW bind path and hit Oracle's
-4 KiB literal cap (`ORA-01461`); a client-side `TTI_LOBOPS` WRITE
-implementation would lift that.
+LOB *writes* (LOB binds on INSERT / UPDATE) go through the regular
+VARCHAR2 / RAW bind path, which the value-sized OAC (§5.3) carries up to
+roughly one SDU (~7 KiB on the default 8 KiB SDU) into CLOB / BLOB columns.
+Larger payloads span multiple TNS packets in a layout the server rejects
+(`ORA-12592`); a client-side `TTI_LOBOPS` WRITE (allocate a temp LOB, stream
+into it, bind the locator) would lift that ceiling.
 
 ## 15. TNS Marker Protocol
 
