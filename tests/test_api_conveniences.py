@@ -39,5 +39,16 @@ class TestStmtCacheSize(unittest.TestCase):
         self.assertEqual(conn.stmtcachesize, 0)
 
 
+class TestVersion(unittest.TestCase):
+
+    def test_none_before_auth(self):
+        self.assertIsNone(OracleConnect().version)
+
+    def test_decodes_xe_11g(self):
+        conn = OracleConnect()
+        conn.server_version = 0x0b200200   # 186647040, as XE 11.2.0.2.0 sends
+        self.assertEqual(conn.version, "11.2.0.2.0")
+
+
 if __name__ == "__main__":
     unittest.main()

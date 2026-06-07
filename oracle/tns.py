@@ -430,7 +430,10 @@ def decode_token_rpa(Data: bytes, Acc: object) -> tuple:
     Resp = dict(KVs).get(b'AUTH_SVR_RESPONSE')
     if Resp:
         Value = dict(KVs).get(b'AUTH_VERSION_NO')
-        Ver =  0 if Value is None else int(Value) >> 24
+        # Keep the full packed version number; the connection decodes the major
+        # release (>> 24) for its protocol gate and the full dotted string for
+        # the `version` property.
+        Ver = 0 if Value is None else int(Value)
         SessId = dict(KVs).get(b'AUTH_SESSION_ID')
         return (TTI_AUTH, Resp, Ver, SessId)
     else:
@@ -922,7 +925,7 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
     Type = Dictionary['query']['type']
     Auto = Dictionary['query']['auto']
     Fetch = Dictionary['query']['fetch']
-    ServerVersion = b"" if Dictionary['query']['server_version'] == 10 else bytes([0,0,0,0,0])
+    ServerVersion = b"" if (Dictionary['query']['server_version'] >> 24) == 10 else bytes([0,0,0,0,0])
     Cursor = Dictionary['query']['cursor']
     Query = Dictionary['query']['query'].encode('utf-8')
     QueryLen = len(Query)

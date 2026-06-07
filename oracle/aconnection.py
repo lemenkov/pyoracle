@@ -32,6 +32,7 @@ from oracle.tns import decode_token_rpa
 from oracle.tns import encode_dictionary
 from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
+from oracle.connection import _format_version
 from oracle.tns_consts import (
     CONN_STATE_AUTHENTICATED, CONN_STATE_AUTH_NEGOTIATE,
     CONN_STATE_CONNECTED, CONN_STATE_DISCONNECTED,
@@ -100,6 +101,12 @@ class AsyncOracleConnect:
         while len(self._cursor_cache) > self._cursor_cache_max:
             Oldest = next(iter(self._cursor_cache))
             self._cursor_cache.pop(Oldest, None)
+
+    @property
+    def version(self) -> str | None:
+        """Server version as a dotted release string. See
+        `OracleConnect.version`."""
+        return _format_version(self.server_version)
 
     # ----- bookkeeping shared with the sync class -----
     # These are copy-pasted from connection.py rather than imported via a

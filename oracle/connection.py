@@ -48,6 +48,17 @@ END;
 """
 
 
+def _format_version(Packed: int) -> str | None:
+    # Oracle packs the release into a single integer: major (8 bits),
+    # minor (4), update (8), patch (4), port-specific update (8). Verified
+    # against product_component_version on XE 11.2.0.2.0 (0x0b200200).
+    if not Packed:
+        return None
+    return "%d.%d.%d.%d.%d" % (
+        (Packed >> 24) & 0xFF, (Packed >> 20) & 0x0F, (Packed >> 12) & 0xFF,
+        (Packed >> 8) & 0x0F, Packed & 0xFF)
+
+
 class OracleConnect:
     def __init__(self, host: str = "localhost", port: int = 1521, user: str = "", password: str = "", sid: str = "", service_name: str = "", ssl: object = None, socket_options: object = None, timeout: int = 15000, autocommit: bool = True, fetch: int = 15, role: int = 0, prelim: int = 0, sdu: int = 8192, charset: str = "utf-8", app_name: str = "pyoracle"):
         self.host = host
@@ -97,6 +108,13 @@ class OracleConnect:
         while len(self._cursor_cache) > self._cursor_cache_max:
             Oldest = next(iter(self._cursor_cache))
             self._cursor_cache.pop(Oldest, None)
+
+    @property
+    def version(self) -> str | None:
+        """Server version as a dotted release string (e.g. '11.2.0.2.0'), or
+        None before authentication. Decoded from the packed AUTH_VERSION_NO the
+        server returns at logon; oracledb-compatible."""
+        return _format_version(self.server_version)
 
     def _next_seq(self) -> int:
         seq = self.seq

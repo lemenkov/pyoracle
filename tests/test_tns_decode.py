@@ -234,7 +234,9 @@ class TestTnsCommandDecoders(unittest.TestCase):
                        53,54,54,65,68,56,55,67,52,49,68,69,0,0,4,1,1,1,3,0,0,0,
                        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,0,0])
         Resp = b"660791387066EA55E70C3FDCD901B76DE29BA53FE0BDB744828AB6273824DAC5226C3D2818F4E5051259566AD87C41DE"
-        Ver = 11
+        # Full packed AUTH_VERSION_NO (0x0b200200 = 11.2.0.2.0); the connection
+        # masks the major release out of this for its protocol gate.
+        Ver = 186647040
         SessId = b"160"
         self.assertEqual(decode_token_rpa(Data, None), (TTI_AUTH, Resp, Ver, SessId))
 
