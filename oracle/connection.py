@@ -12,7 +12,7 @@ from oracle.tns_consts import (
     CONN_STATE_CONNECTED, CONN_STATE_DISCONNECTED, DictionaryType,
     MAX_SEQ_NUM, TNS_ACCEPT, TNS_CONNECT, TNS_DATA, TNS_MARKER,
     TNS_REDIRECT, TNS_REFUSE, TNS_RESEND, TTI_AUTH, TTI_DTY, TTI_PRO,
-    TTI_RPA, TTI_SESS, TTI_WRN,
+    TTI_OER, TTI_RPA, TTI_SESS, TTI_WRN,
 )
 import logging
 import socket
@@ -247,6 +247,22 @@ class OracleConnect:
                             return self._handle_rpa(Packet[1:])
                         case p if p == TTI_WRN:
                             logger.debug("handle_login: recv WRN %s", Packet[1:])
+                        case p if p == TTI_OER:
+                            # The server reports an auth-time failure (bad
+                            # password, rejected password change, ...) as an OER
+                            # token, sometimes preceded by a break marker.
+                            # Decode it and raise rather than looping forever on
+                            # an empty socket.
+                            logger.debug("handle_login: recv OER")
+                            from oracle.tns import decode_token_oer
+                            from oracle.exceptions import DatabaseError, from_ora_code
+                            Result = decode_token_oer(Packet, (None, None, []))
+                            ErrCode = Result[1]
+                            Message = Result[5] if len(Result) > 5 else None
+                            if ErrCode and ErrCode not in (0, 1403):
+                                raise from_ora_code(ErrCode)(
+                                    Message or f"ORA-{ErrCode:05d}", code=ErrCode)
+                            raise DatabaseError("authentication failed")
                         case _:
                             logger.debug("handle_login: unknown token %s", Packet[0])
                     continue
