@@ -32,6 +32,12 @@ What works so far:
   row, invoked with the column values as positional arguments), and
   `Cursor.lastrowid` (ROWID of the last row an INSERT / UPDATE / DELETE
   touched). Sync and async
+- Scrollable result sets: `Cursor.scroll(value, mode)` with `mode` in
+  `relative` / `absolute` / `first` / `last` repositions the cursor
+  anywhere in the result set (the next `fetchone()` returns the row at the
+  new position; out-of-range raises `IndexError`). The whole result set is
+  buffered on execute, so the scroll is a local reposition rather than a
+  server round trip. Sync and async
 - Bind variables: `cur.execute(sql, [v1, v2])` (positional) or
   `cur.execute(sql, {"name": v})` (named, `:name` placeholders, case-
   insensitive); accepted bind types are `int`, `float`, `Decimal`,

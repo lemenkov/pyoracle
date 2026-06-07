@@ -1079,6 +1079,24 @@ class FetchFlowIntegration(_IntegrationBase):
         self.cur.execute(f"SELECT id FROM {self.TABLE}")
         self.assertEqual(self.cur.fetchall(), [])
 
+    def test_scroll_over_buffered_result(self):
+        # Cursor.scroll (issue #19) over a result set that spans several
+        # server fetches — the whole set is buffered, so scroll repositions
+        # locally in any direction.
+        self._populate(20)
+        self.conn.fetch = 6
+        self.cur.execute(f"SELECT id, name FROM {self.TABLE} ORDER BY id")
+        self.cur.scroll(mode="last")
+        self.assertEqual(self.cur.fetchone(), (20, "row20"))
+        self.cur.scroll(10, mode="absolute")
+        self.assertEqual(self.cur.fetchone(), (10, "row10"))
+        self.cur.scroll(-5, mode="relative")            # from row 10 -> row 5
+        self.assertEqual(self.cur.fetchone(), (5, "row5"))
+        self.cur.scroll(mode="first")
+        self.assertEqual(self.cur.fetchone(), (1, "row1"))
+        with self.assertRaises(IndexError):
+            self.cur.scroll(999, mode="absolute")
+
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class LOBIntegration(_IntegrationBase):
@@ -1567,6 +1585,28 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(iym.getvalue(), oracle.IntervalYM(3, 7))
                 finally:
                     await Cur.execute("DROP PROCEDURE PYORACLE_ASYNC_OUTX")
+
+    async def test_async_scroll(self):
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                await Cur.execute("CREATE TABLE PYORACLE_ASYNC_SCROLL (id NUMBER)")
+                try:
+                    await Cur.executemany(
+                        "INSERT INTO PYORACLE_ASYNC_SCROLL VALUES (:1)",
+                        [(i,) for i in range(1, 11)])
+                    Conn.fetch = 4
+                    await Cur.execute(
+                        "SELECT id FROM PYORACLE_ASYNC_SCROLL ORDER BY id")
+                    await Cur.scroll(mode="last")
+                    self.assertEqual(await Cur.fetchone(), (10,))
+                    await Cur.scroll(3, mode="absolute")
+                    self.assertEqual(await Cur.fetchone(), (3,))
+                    await Cur.scroll(mode="first")
+                    self.assertEqual(await Cur.fetchone(), (1,))
+                    with self.assertRaises(IndexError):
+                        await Cur.scroll(-1, mode="relative")
+                finally:
+                    await Cur.execute("DROP TABLE PYORACLE_ASYNC_SCROLL")
 
     async def test_async_executemany(self):
         async with await oracle.connect_async(**self._kwargs()) as Conn:

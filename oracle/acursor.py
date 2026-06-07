@@ -11,7 +11,7 @@ from oracle.cursor import (
 )
 from oracle.datatypes import Var
 from oracle.exceptions import (
-    DatabaseError, InterfaceError, from_ora_code,
+    DatabaseError, InterfaceError, ProgrammingError, from_ora_code,
 )
 
 
@@ -228,6 +228,29 @@ class AsyncCursor:
                 break
             Out.append(Row)
         return Out
+
+    async def scroll(self, value: int = 0, mode: str = "relative") -> None:
+        """Scroll the result-set cursor to a new position. See
+        `oracle.cursor.Cursor.scroll`. The reposition is local (the whole
+        result set is buffered on execute), so this awaits nothing on the wire
+        but stays `async def` for API symmetry."""
+        self._check_open()
+        if self._description is None:
+            raise InterfaceError("no result set; call execute() with a SELECT first")
+        Count = len(self._rows)
+        if mode == "relative":
+            Target = self._row_index + value
+        elif mode == "absolute":
+            Target = value
+        elif mode == "first":
+            Target = 1
+        elif mode == "last":
+            Target = Count
+        else:
+            raise ProgrammingError(f"invalid scroll mode: {mode!r}")
+        if Target < 1 or Target > Count:
+            raise IndexError("scroll operation would leave the result set")
+        self._row_index = Target - 1
 
     def setinputsizes(self, sizes) -> None:
         pass

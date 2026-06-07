@@ -233,6 +233,39 @@ class Cursor:
             Out.append(Row)
         return Out
 
+    def scroll(self, value: int = 0, mode: str = "relative") -> None:
+        """Scroll the result-set cursor to a new position (PEP 249 / oracledb
+        semantics). `mode` is one of:
+
+        - ``"relative"`` (default): move ``value`` rows from the current
+          position (``value`` may be negative).
+        - ``"absolute"``: move to the 1-based row number ``value``.
+        - ``"first"`` / ``"last"``: move to the first / last row.
+
+        After the call the next ``fetchone()`` returns the row at the new
+        position. ``IndexError`` is raised if the target falls outside the
+        result set. pyoracle buffers the whole result set on execute, so any
+        SELECT cursor is scrollable (the scroll is a local reposition, not a
+        server round trip).
+        """
+        self._check_open()
+        if self._description is None:
+            raise InterfaceError("no result set; call execute() with a SELECT first")
+        Count = len(self._rows)
+        if mode == "relative":
+            Target = self._row_index + value
+        elif mode == "absolute":
+            Target = value
+        elif mode == "first":
+            Target = 1
+        elif mode == "last":
+            Target = Count
+        else:
+            raise ProgrammingError(f"invalid scroll mode: {mode!r}")
+        if Target < 1 or Target > Count:
+            raise IndexError("scroll operation would leave the result set")
+        self._row_index = Target - 1
+
     def setinputsizes(self, sizes) -> None:
         # PEP 249 allows this to be a no-op when sizing isn't required.
         pass
