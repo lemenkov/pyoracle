@@ -162,6 +162,7 @@ class AsyncOracleConnect:
             Opts = dict(self.ssl)
             Opts.pop("server_hostname", None)  # not for asyncio kwarg
             Ctx = _ssl.create_default_context(cafile=Opts.pop("ca_certs", None))
+            Ctx.minimum_version = _ssl.TLSVersion.TLSv1_2
             if "check_hostname" in Opts:
                 Ctx.check_hostname = bool(Opts.pop("check_hostname"))
             if "verify_mode" in Opts:

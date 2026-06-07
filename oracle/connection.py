@@ -155,6 +155,7 @@ class OracleConnect:
             Opts = dict(self.ssl)
             Server = Opts.pop("server_hostname", Server)
             Ctx = _ssl.create_default_context(cafile=Opts.pop("ca_certs", None))
+            Ctx.minimum_version = _ssl.TLSVersion.TLSv1_2
             if "check_hostname" in Opts:
                 Ctx.check_hostname = bool(Opts.pop("check_hostname"))
             if "verify_mode" in Opts:
@@ -167,6 +168,7 @@ class OracleConnect:
                 raise ValueError(f"unknown ssl options: {sorted(Opts)}")
         else:
             Ctx = _ssl.create_default_context()
+            Ctx.minimum_version = _ssl.TLSVersion.TLSv1_2
         return Ctx.wrap_socket(RawSock, server_hostname=Server)
 
     def handle_login(self) -> int | None:
