@@ -1129,24 +1129,18 @@ def set_opts_all8(Opts: int, Fetch: int, Type: int) -> list[int]:
     return [Opts,Fetch,0,0,0,0,0,Type,0,0,0,0,0]
 
 def decode_ub4(Bytes: bytes) -> tuple[int, bytes]:
-    match Bytes[0]:
-        case 0:
-            return (0, Bytes[1:])
-        case 1:
-            return (Bytes[1], Bytes[2:])
-        case 2:
-            (Ret, ) = struct.Struct('>H').unpack(Bytes[1:3])
-            return (Ret, Bytes[3:])
-        case 3:
-            (Ret, ) = struct.Struct('>I').unpack(bytes([0]) + Bytes[1:4])
-            return (Ret, Bytes[4:])
-        case 4:
-            (Ret, ) = struct.Struct('>I').unpack(Bytes[1:5])
-            return (Ret, Bytes[5:])
-        case _:
-            # FIXME so how we suppose to know that this is a signed negative num?
-            return (-Bytes[1], Bytes[2:])
-#       raise Exception("Can't decode ub4", Bytes)
+    # Variable-length integer (PROTOCOL.md §12.1): a length byte, then that many
+    # big-endian magnitude bytes. The high bit of the length byte flags a
+    # negative value and the low 7 bits give the magnitude byte count, so a
+    # negative can span several bytes (e.g. NUMBER scale -127 arrives as
+    # 0x81 0x7f, and -256 as 0x82 0x01 0x00).
+    Length = Bytes[0]
+    if Length & 0x80:
+        Length &= 0x7f
+        return (-int.from_bytes(Bytes[1:Length + 1], 'big'), Bytes[Length + 1:])
+    if Length > 4:
+        raise ValueError(f"decode_ub4: invalid length byte {Length}")
+    return (int.from_bytes(Bytes[1:Length + 1], 'big'), Bytes[Length + 1:])
 
 def encode_sb4(Val: int) -> bytes:
     Bytes = struct.Struct('>I').pack(Val)

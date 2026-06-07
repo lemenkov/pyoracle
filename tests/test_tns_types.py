@@ -15,6 +15,7 @@ import unittest
 from oracle.datatypes import BinaryDouble, BinaryFloat, IntervalYM
 from oracle.tns import (
     _read_iov, _read_long_column, _read_rowid_column, _read_urowid_column,
+    decode_dalc, decode_ub4, encode_sb4,
     encode_token_binary_double, encode_token_binary_float,
     encode_token_interval_ds, encode_token_interval_ym, encode_token_oac,
     encode_token_rxd,
@@ -26,6 +27,43 @@ from oracle.types import (
     decode_binary_double, decode_binary_float, decode_interval_ds,
     decode_interval_ym, decode_value, rowid_to_string, urowid_to_string,
 )
+
+
+class TestDecodeUb4(unittest.TestCase):
+    # PROTOCOL.md §12.1 variable-length integer.
+
+    def test_zero(self):
+        self.assertEqual(decode_ub4(b"\x00rest"), (0, b"rest"))
+
+    def test_one_byte(self):
+        self.assertEqual(decode_ub4(b"\x01\x7f"), (127, b""))
+
+    def test_two_bytes(self):
+        self.assertEqual(decode_ub4(b"\x02\x01\x00"), (256, b""))
+
+    def test_three_bytes(self):
+        self.assertEqual(decode_ub4(b"\x03\x01\x00\x00"), (65536, b""))
+
+    def test_four_bytes(self):
+        self.assertEqual(decode_ub4(b"\x04\xff\xff\xff\xff"), (4294967295, b""))
+
+    def test_consumes_only_its_own_bytes(self):
+        self.assertEqual(decode_ub4(b"\x02\x01\x00tail"), (256, b"tail"))
+
+    def test_negative_single_byte(self):
+        # NUMBER scale -127 arrives as 0x81 0x7f.
+        self.assertEqual(decode_ub4(b"\x81\x7f"), (-127, b""))
+
+    def test_negative_multibyte(self):
+        # -256 needs two magnitude bytes: 0x82 0x01 0x00.
+        self.assertEqual(decode_ub4(b"\x82\x01\x00"), (-256, b""))
+
+    def test_negative_consumes_only_its_own_bytes(self):
+        self.assertEqual(decode_ub4(b"\x82\x01\x00tail"), (-256, b"tail"))
+
+    def test_roundtrip_with_encode_sb4(self):
+        for value in (0, 1, 127, 255, 256, 65535, 65536, 16777215, 4294967295):
+            self.assertEqual(decode_ub4(encode_sb4(value)), (value, b""))
 
 
 class TestBinaryFloat(unittest.TestCase):
