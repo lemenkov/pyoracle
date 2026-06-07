@@ -12,7 +12,8 @@ from hashlib import sha512
 from secrets import token_bytes
 import sys
 
-# FIXME how to test it?
+# O3LOGON (DES) is the pre-11g authenticator. XE 11g negotiates O5LOGON, so
+# this path stays untested against our testbed; kept for older servers.
 def o3logon(Sess: bytes, KeySess: bytes, Password: bytes) -> tuple[bytes, bytes, bytes]:
     IVec = bytes(8)
 
