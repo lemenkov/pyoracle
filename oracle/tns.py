@@ -1240,8 +1240,8 @@ def encode_tokens_rxd(Tokens: list, Binary: bytes) -> bytes:
     return Binary + Out
 
 def encode_tokens_oac(Tokens: list, Binary: bytes) -> bytes:
-    # TODO do we really skip TTI_OAC here?
-    #Out = bytes([TTI_OAC])
+    # OAC descriptors are emitted bare here (no leading TTI_OAC token byte) —
+    # that's what the server expects inside the ALL8 bind section.
     Out = b""
     for Token in Tokens:
         Out += encode_token_oac(Token)
