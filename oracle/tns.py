@@ -315,8 +315,11 @@ def _read_refcursor_out(Rest: bytes) -> tuple[dict, bytes]:
              'row_format': Columns}, Rest)
 
 def decode_token_lob(Data: bytes, Acc: object) -> tuple:
-    # LOB data - FIXME: full LOB handling not yet implemented
-    logger.debug("decode_token_lob: not fully implemented")
+    # Defensive no-op for a TTI_LOB token seen in the general decode path. Real
+    # LOB content is read by the dedicated _read_lob_response loop (see
+    # lob_read), which walks TTI_LOB / RPA / OER itself — it doesn't route
+    # through here.
+    logger.debug("decode_token_lob: ignored (handled in _read_lob_response)")
     return (True, Acc)
 
 def decode_token_net(Data: bytes, Acc: object) -> None:
