@@ -33,6 +33,8 @@ class AsyncCursor:
         self._row_index: int = 0
         self._rowcount: int = -1
         self._closed: bool = False
+        self._lastrowid = None
+        self._rowfactory = None
 
     def _check_open(self) -> None:
         if self._closed:
@@ -51,6 +53,16 @@ class AsyncCursor:
     @property
     def connection(self):
         return self._connection
+
+    @property
+    def rowfactory(self):
+        """Optional callable applied to each fetched row. See
+        `oracle.cursor.Cursor.rowfactory`."""
+        return self._rowfactory
+
+    @rowfactory.setter
+    def rowfactory(self, value) -> None:
+        self._rowfactory = value
 
     async def close(self) -> None:
         self._closed = True
@@ -183,6 +195,8 @@ class AsyncCursor:
             return None
         Row = self._rows[self._row_index]
         self._row_index += 1
+        if self._rowfactory is not None:
+            return self._rowfactory(*Row)
         return tuple(Row)
 
     async def fetchmany(self, size: int | None = None) -> list[tuple]:

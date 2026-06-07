@@ -40,6 +40,7 @@ class Cursor:
         self._rowcount: int = -1
         self._closed: bool = False
         self._lastrowid = None
+        self._rowfactory = None
 
     def _check_open(self) -> None:
         if self._closed:
@@ -58,6 +59,18 @@ class Cursor:
     @property
     def connection(self):
         return self._connection
+
+    @property
+    def rowfactory(self):
+        """Optional callable applied to each fetched row. It is called with the
+        row's column values as positional arguments (oracledb semantics), e.g.
+        `cur.rowfactory = lambda *a: dict(zip([c[0] for c in cur.description], a))`.
+        None (the default) yields plain tuples."""
+        return self._rowfactory
+
+    @rowfactory.setter
+    def rowfactory(self, value) -> None:
+        self._rowfactory = value
 
     def close(self) -> None:
         self._closed = True
@@ -182,6 +195,8 @@ class Cursor:
             return None
         Row = self._rows[self._row_index]
         self._row_index += 1
+        if self._rowfactory is not None:
+            return self._rowfactory(*Row)
         return tuple(Row)
 
     def fetchmany(self, size: int | None = None) -> list[tuple]:

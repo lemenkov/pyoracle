@@ -5,10 +5,21 @@
 stmtcachesize, version, rowfactory, lastrowid. These exercise the
 client-side logic without a live server."""
 
+import types
 import unittest
 
 from oracle.connection import OracleConnect
 from oracle.cursor import Cursor
+
+
+def _stub_cursor(rows, description=None):
+    # A Cursor whose _check_open() passes without a live socket, pre-loaded
+    # with already-fetched rows.
+    cur = Cursor(types.SimpleNamespace(sock=object()))
+    cur._rows = rows
+    cur._description = description or [("X", None, None, None, None, None, True)]
+    cur._row_index = 0
+    return cur
 
 
 class TestStmtCacheSize(unittest.TestCase):
@@ -37,6 +48,26 @@ class TestStmtCacheSize(unittest.TestCase):
         conn = OracleConnect()
         conn.stmtcachesize = -5
         self.assertEqual(conn.stmtcachesize, 0)
+
+
+class TestRowFactory(unittest.TestCase):
+
+    def test_default_is_tuple(self):
+        cur = _stub_cursor([[1, "a"]])
+        self.assertEqual(cur.fetchone(), (1, "a"))
+
+    def test_called_with_positional_columns(self):
+        cur = _stub_cursor([[1, "a"], [2, "b"]],
+                           description=[("ID", None, None, None, None, None, True),
+                                        ("NAME", None, None, None, None, None, True)])
+        cur.rowfactory = lambda i, n: {"id": i, "name": n}
+        self.assertEqual(cur.fetchall(),
+                         [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}])
+
+    def test_applies_through_iteration(self):
+        cur = _stub_cursor([[1], [2], [3]])
+        cur.rowfactory = lambda x: x * 10
+        self.assertEqual(list(cur), [10, 20, 30])
 
 
 class TestVersion(unittest.TestCase):
