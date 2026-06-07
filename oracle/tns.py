@@ -1118,7 +1118,8 @@ def set_opts(Type: str, Flag: int, Id: int, Len: int, Param: int) -> tuple[int, 
     else:
         raise Exception("Can't set opts", (Type, Flag, Id, Len, Param))
 
-    # FIXME should it be Flag ^ 32 ^ P0 ^ P1 ?
+    # Opt = (Flag ^ 32 ^ P0) | P1  (^ binds tighter than |); verified across
+    # SELECT / DML / PL/SQL-block / array-DML execs.
     return (Flag ^ 32 ^ P0 | P1, P2, P3, All8)
 
 def set_opts_all8(Opts: int, Fetch: int, Type: int) -> list[int]:
