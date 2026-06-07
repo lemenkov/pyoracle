@@ -216,6 +216,29 @@ class TestLong(unittest.TestCase):
         self.assertIsInstance(Out, bytes)
 
 
+class TestPasswordRedaction(unittest.TestCase):
+    # The bind/handshake dicts carry the password so the encoders can use it;
+    # it must never reach a debug log in clear text (CodeQL
+    # py/clear-text-logging-sensitive-data).
+
+    def test_redacted_masks_password(self):
+        from oracle.tns import _redacted
+        out = _redacted({'env': {'user': 'u', 'password': 'secret'}})
+        self.assertEqual(out['env']['password'], '***')
+        self.assertEqual(out['env']['user'], 'u')
+
+    def test_description_debug_log_omits_password(self):
+        from oracle.tns import encode_dictionary_description
+        d = {'env': {'user': 'scott', 'password': 'tiger', 'host': 'h',
+                     'port': 1521, 'sid': '', 'service_name': 'XE',
+                     'app_name': 'pyoracle', 'ssl': None}, 'seq': 1}
+        with self.assertLogs('oracle.tns', level='DEBUG') as cm:
+            encode_dictionary_description(d)
+        joined = '\n'.join(cm.output)
+        self.assertNotIn('tiger', joined)
+        self.assertIn('***', joined)
+
+
 class TestRefCursor(unittest.TestCase):
     # A TTI_IOV captured from XE 11g for BEGIN pyo_refcur(:1); END; where the
     # proc opens a cursor over SELECT 1 a, 'x' b ... (one OUT REF CURSOR bind).

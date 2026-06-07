@@ -734,8 +734,19 @@ def encode_dictionary_close(Dictionary: dict) -> bytes:
     Tseq = Dictionary['seq']
     return bytes([TTI_FUN, TTI_LOGOFF, Tseq])
 
+def _redacted(Dictionary: dict) -> dict:
+    # Return a copy safe to log: the password (carried in the env dict so the
+    # encoders can use it) is masked so it never reaches a debug log in clear
+    # text.
+    Env = Dictionary.get('env')
+    if not isinstance(Env, dict) or 'password' not in Env:
+        return Dictionary
+    Safe = dict(Dictionary)
+    Safe['env'] = {**Env, 'password': '***'}
+    return Safe
+
 def encode_dictionary_description(Dictionary: dict) -> bytes:
-    logger.debug("encode_dictionary_description: %s", Dictionary)
+    logger.debug("encode_dictionary_description: %s", _redacted(Dictionary))
     Hostname = socket.gethostname().encode('utf-8')
     User = Dictionary['env']['user'].encode('utf-8')
     Host = Dictionary['env'].get('host', DEFAULT_HOST).encode('utf-8')
@@ -772,7 +783,7 @@ def encode_dictionary_dty(Dictionary: dict) -> bytes:
     # them from a static C table at link time. We hardcode them as bytes
     # literals here for the same reason: the table is the *protocol*
     # capability surface, not anything we want to reason about per call.
-    logger.debug("encode_dictionary_dty: %s", Dictionary)
+    logger.debug("encode_dictionary_dty: %s", _redacted(Dictionary))
     Charset = struct.pack("<H", CharsetDict.get(Dictionary['req'], UTF8_CHARSET))
 
     # Capability header. The first three bytes (38,6,1) look like a
