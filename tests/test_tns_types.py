@@ -15,7 +15,7 @@ import unittest
 from oracle.datatypes import BinaryDouble, BinaryFloat, IntervalYM
 from oracle.tns import (
     _read_iov, _read_long_column, _read_rowid_column, _read_urowid_column,
-    decode_dalc, decode_ub4, encode_sb4,
+    decode_dalc, decode_ub4, encode_sb4, exec_oac_signature,
     encode_token_binary_double, encode_token_binary_float,
     encode_token_interval_ds, encode_token_interval_ym, encode_token_oac,
     encode_token_rxd,
@@ -64,6 +64,43 @@ class TestDecodeUb4(unittest.TestCase):
     def test_roundtrip_with_encode_sb4(self):
         for value in (0, 1, 127, 255, 256, 65535, 65536, 16777215, 4294967295):
             self.assertEqual(decode_ub4(encode_sb4(value)), (value, b""))
+
+
+class TestExecOacSignature(unittest.TestCase):
+    # The DML cursor-cache key includes this signature so a cached cursor is
+    # only reused for binds matching the OAC it was parsed with. Two binds that
+    # would need a differently-sized OAC MUST produce different signatures, or
+    # the cached re-execute (which omits the OAC) overflows the frozen bind
+    # buffer and the server raises ORA-01461.
+
+    def test_empty_bind(self):
+        self.assertEqual(exec_oac_signature([], []), b"")
+
+    def test_same_length_strings_match(self):
+        self.assertEqual(exec_oac_signature([1, "abcd"], []),
+                         exec_oac_signature([2, "wxyz"], []))
+
+    def test_different_length_strings_differ(self):
+        # "row9" (4 bytes) vs "row10" (5 bytes) — the exact case that tripped
+        # ORA-01461 on a cached re-execute.
+        self.assertNotEqual(exec_oac_signature([9, "row9"], []),
+                            exec_oac_signature([10, "row10"], []))
+
+    def test_number_value_does_not_affect_signature(self):
+        # NUMBER is fixed-width, so a bigger integer keeps the same signature.
+        self.assertEqual(exec_oac_signature([1], []),
+                         exec_oac_signature([999999999], []))
+
+    def test_str_vs_bytes_differ(self):
+        self.assertNotEqual(exec_oac_signature(["abc"], []),
+                            exec_oac_signature([b"abc"], []))
+
+    def test_batch_uses_widest_row(self):
+        # Array DML sizes the single OAC to the widest value across all rows,
+        # so a batch whose widest string grows gets a different signature.
+        narrow = exec_oac_signature([1, "a"], [[2, "bb"]])
+        wide = exec_oac_signature([1, "a"], [[2, "bbbbb"]])
+        self.assertNotEqual(narrow, wide)
 
 
 class TestDecodeDalc(unittest.TestCase):

@@ -6,6 +6,7 @@ from oracle.tns import assemble_packet
 from oracle.tns import decode_token_rpa
 from oracle.tns import encode_dictionary
 from oracle.tns import encode_packet
+from oracle.tns import exec_oac_signature
 from oracle.tns_consts import (
     CONN_STATE_AUTH_NEGOTIATE, CONN_STATE_AUTHENTICATED,
     CONN_STATE_CONNECTED, CONN_STATE_DISCONNECTED, DictionaryType,
@@ -73,11 +74,14 @@ class OracleConnect:
         self.server_version = 0
         self.session_id = None
         self.cursors: dict[int, int] = {}
-        # Cursor cache: SQL text → server-side cursor handle. Lets repeat
-        # `execute()` of the same SQL skip the parse step on the server.
-        # Capped to keep memory predictable; LRU eviction via insertion
-        # order (Python's regular dict).
-        self._cursor_cache: dict[str, int] = {}
+        # Cursor cache: (SQL text, bind OAC signature) → server-side cursor
+        # handle. Lets repeat `execute()` of the same SQL skip the parse step
+        # on the server. The bind signature is part of the key because a cached
+        # re-execute does not re-send the OAC, so the cursor may only be reused
+        # for binds matching the size/type it was parsed with (see
+        # exec_oac_signature). Capped to keep memory predictable; LRU eviction
+        # via insertion order (Python's regular dict).
+        self._cursor_cache: dict[tuple[str, bytes], int] = {}
         self._cursor_cache_max = 32
 
     def _next_seq(self) -> int:
@@ -299,8 +303,10 @@ class OracleConnect:
         # a fresh DCB), and that's a wider change. `Def` (output
         # definitions) varying also breaks the cache contract.
         CachedCursor = 0
+        CacheKey = None
         if Type == 'change' and not Def:
-            CachedCursor = self._cursor_cache.get(Query, 0)
+            CacheKey = (Query, exec_oac_signature(Bind, Batch))
+            CachedCursor = self._cursor_cache.get(CacheKey, 0)
         SendQuery = "" if CachedCursor else Query
         QueryDict = {
             'type': Type,
@@ -323,7 +329,7 @@ class OracleConnect:
             # If reusing a cached cursor blew up, drop it from the cache
             # so the next attempt re-parses from scratch.
             if CachedCursor:
-                self._cursor_cache.pop(Query, None)
+                self._cursor_cache.pop(CacheKey, None)
             raise
         # Stash the cursor id the server returned so the next execute of
         # the same SQL can skip parsing. Same scoping as the lookup:
@@ -335,8 +341,8 @@ class OracleConnect:
             CursorId = Result[2]
             # LRU bump: move the entry to the end on hit; evict the oldest
             # entry when the cache fills up.
-            self._cursor_cache.pop(Query, None)
-            self._cursor_cache[Query] = CursorId
+            self._cursor_cache.pop(CacheKey, None)
+            self._cursor_cache[CacheKey] = CursorId
             while len(self._cursor_cache) > self._cursor_cache_max:
                 Oldest = next(iter(self._cursor_cache))
                 self._cursor_cache.pop(Oldest, None)

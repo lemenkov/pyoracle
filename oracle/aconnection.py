@@ -31,6 +31,7 @@ from oracle.tns import decode_packet
 from oracle.tns import decode_token_rpa
 from oracle.tns import encode_dictionary
 from oracle.tns import encode_packet
+from oracle.tns import exec_oac_signature
 from oracle.tns_consts import (
     CONN_STATE_AUTHENTICATED, CONN_STATE_AUTH_NEGOTIATE,
     CONN_STATE_CONNECTED, CONN_STATE_DISCONNECTED,
@@ -82,7 +83,9 @@ class AsyncOracleConnect:
         self.session_id = None
         self.cursors: dict[int, int] = {}
         # Cursor cache — same shape as the sync `OracleConnect`. DML only.
-        self._cursor_cache: dict[str, int] = {}
+        # Keyed on (SQL, bind OAC signature); see OracleConnect for why the
+        # bind signature has to be part of the key.
+        self._cursor_cache: dict[tuple[str, bytes], int] = {}
         self._cursor_cache_max = 32
 
     # ----- bookkeeping shared with the sync class -----
@@ -337,8 +340,10 @@ class AsyncOracleConnect:
         else:
             Type = 'change'
         CachedCursor = 0
+        CacheKey = None
         if Type == 'change' and not Def:
-            CachedCursor = self._cursor_cache.get(Query, 0)
+            CacheKey = (Query, exec_oac_signature(Bind, Batch))
+            CachedCursor = self._cursor_cache.get(CacheKey, 0)
         SendQuery = "" if CachedCursor else Query
         QueryDict = {
             'type': Type,
@@ -359,15 +364,15 @@ class AsyncOracleConnect:
             Result = await self._handle_response((None, None, [], Bind))
         except Exception:
             if CachedCursor:
-                self._cursor_cache.pop(Query, None)
+                self._cursor_cache.pop(CacheKey, None)
             raise
         if (Type == 'change' and not Def
                 and isinstance(Result, tuple) and len(Result) >= 3
                 and isinstance(Result[2], int) and Result[2] > 0
                 and Result[1] in (0, 1403)):
             CursorId = Result[2]
-            self._cursor_cache.pop(Query, None)
-            self._cursor_cache[Query] = CursorId
+            self._cursor_cache.pop(CacheKey, None)
+            self._cursor_cache[CacheKey] = CursorId
             while len(self._cursor_cache) > self._cursor_cache_max:
                 Oldest = next(iter(self._cursor_cache))
                 self._cursor_cache.pop(Oldest, None)

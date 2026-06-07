@@ -1247,6 +1247,21 @@ def encode_tokens_oac(Tokens: list, Binary: bytes) -> bytes:
         Out += encode_token_oac(Token)
     return Binary + Out
 
+def exec_oac_signature(Bind: list, Batch: list) -> bytes:
+    # The exact OAC bytes a fresh parse would send for these binds. Used as
+    # part of the DML cursor-cache key: a cached cursor re-execute skips
+    # re-sending the OAC, so the server keeps the bind buffer sizes (and types)
+    # from the original parse. Reusing it for binds whose OAC differs — most
+    # commonly a longer string than the first call sized for — overflows that
+    # frozen buffer and the server rejects the value as a streamed LONG
+    # (ORA-01461). Keying the cache on this signature turns such a call into a
+    # cache miss, forcing a re-parse with a correctly-sized OAC.
+    if not Bind:
+        return b""
+    if Batch:
+        return encode_tokens_oac(_oac_rep_row([Bind] + Batch), b"")
+    return encode_tokens_oac(Bind, b"")
+
 def encode_token_rxd(Token: object) -> bytes:
     if isinstance(Token, Var):
         # OUT / IN OUT bind: send the current value (NULL for an unseeded pure
