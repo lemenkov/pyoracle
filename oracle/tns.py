@@ -783,7 +783,11 @@ def _redacted(Dictionary: dict) -> dict:
     if not isinstance(Env, dict) or 'password' not in Env:
         return Dictionary
     Safe = dict(Dictionary)
-    Safe['env'] = {**Env, 'password': '***'}
+    # Build the masked env without ever copying the secret values: replace
+    # them with '***' in the comprehension rather than spreading Env (which
+    # would route the real password through the dict and into the log).
+    _SECRET = ('password', 'new_password')
+    Safe['env'] = {k: ('***' if k in _SECRET else v) for k, v in Env.items()}
     return Safe
 
 def encode_dictionary_description(Dictionary: dict) -> bytes:
