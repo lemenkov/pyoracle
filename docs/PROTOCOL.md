@@ -214,12 +214,58 @@ TTI_PRO | 6 | 5 | 4 | 3 | 2 | 1 | 0 | "python" | 0
 
 ### 4.2 Data Type Negotiation (TTI_DTY)
 
-Client sends a TTI_DTY message containing:
-- Client character set ID (UB2, little-endian).
-- Client national character set ID (UB2, little-endian). pyoracle today
-  sends the same charset for both; a future revision may differentiate
-  the national charset for CJK environments.
-- A capability bitmap listing supported Oracle data types and their representations.
+TTI_DTY (message type `2`, `TNS_MSG_TYPE_DATA_TYPES`) advertises the client's
+capabilities and the wire representation it wants for each Oracle data type:
+
+```
+msgtype=2 | charset_in (UB2 LE) | charset_out (UB2 LE) | flag (UB1) |
+  ccap_len (UB1) | compile_caps[ccap_len] |
+  rcap_len  (UB1) | runtime_caps[rcap_len] |
+  datatype table | 0
+```
+
+- **charset_in / charset_out**: NLS and national-charset ids. pyoracle today
+  sends the same charset for both; a future revision may differentiate the
+  national charset for CJK environments.
+- **compile_caps / runtime_caps**: two length-prefixed byte arrays. Each index
+  is a named feature slot (`TNS_CCAP_*` / `TNS_RCAP_*`). The most important is
+  the **field version** at compile-cap index 7 (`TNS_CCAP_FIELD_VERSION`): it
+  selects the auth-verifier scheme and the version-gated wire formats the rest
+  of the session uses. pyoracle sends `6` (11.2); python-oracledb sends e.g.
+  `16` (21.1) against a 21c server.
+- **datatype table**: per-type `(type, conv, repr, flags)` entries. pyoracle
+  uses the 11g 1-byte-per-field form (4 bytes/entry, terminated by `0 0`); 12c+
+  uses a 2-byte-per-field form (`UB2`×4, terminated by `UB2 0`).
+
+Selected capability indices (reverse-engineered from python-oracledb's
+`constants.pxi`/`data_types.pyx` and verified against live 11g and 21c
+captures), with the values pyoracle's 11.2 vector vs python-oracledb's 21.1
+vector send:
+
+| idx | name | 11.2 | 21.1 | notes |
+|----:|------|-----:|-----:|-------|
+| 0 | SQL_VERSION | 6 | 6 | `SQL_VERSION_MAX` |
+| 4 | LOGON_TYPES | 0x6a | 0xea | 21.1 adds `O8LOGON_LONG_IDENTIFIER` |
+| 5 | FEATURE_BACKPORT | 1 | 0x18 | |
+| 7 | **FIELD_VERSION** | **6** | **16** | the version gate |
+| 23 | LOB | 0x4f | 0xcf | 21.1 adds `LOB_12C` |
+| 27 | UB2_DTY | 0 | 1 | 2-byte data-type ids |
+| 34 | CLIENT_FN | 6 | 12 | `CLIENT_FN_MAX` |
+| 37 | TTC3 | 1 | 0xb8 | |
+| 39 | SESS_SIGNATURE_VERSION | — | 8 | new 12c+ slot |
+| 52 | VECTOR_FEATURES | — | 3 | new (23ai vectors) |
+
+The compile array grew from 38 bytes (`TNS_CCAP_MAX` 11g) to 53 (12c+); the
+runtime array from 7 to 11, with runtime index 6 (`TNS_RCAP_TTC`) gaining
+`ZERO_COPY | 32K` (`0x05`). pyoracle models both arrays as `{index: value}`
+maps keyed on the field version in `oracle/tns.py` (`capability_arrays`).
+
+> **12c+ blocker (issue #27).** Advertising a 12c+ field version is necessary
+> for 21c login but not sufficient: it changes how the server frames every
+> subsequent message (DTY table form, OER layout, datatype encodings), so it
+> must land together with the matching version-gated decoders. The 256-bit
+> O5LOGON crypto is already solved (§4.5); the capability layout is now fully
+> mapped (this section); the remaining work is the version-gated formats.
 
 ### 4.3 Session Setup (TTI_FUN/TTI_SESS)
 

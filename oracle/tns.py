@@ -804,47 +804,180 @@ def encode_dictionary_description(Dictionary: dict) -> bytes:
     Proto = b"TCP" if SslOpts is None else b"TCPS"
     return b"(DESCRIPTION=(CONNECT_DATA=(" + Sn + b")(CID=(PROGRAM=" + AppName + b")(HOST=" + Hostname + b")(USER=" + User + b")))(ADDRESS=(PROTOCOL=" + Proto + b")(HOST=" + Host + b")(PORT=" + Port + b")))"
 
+# ---------------------------------------------------------------------------
+# TTC capability vectors (carried in the TTI_DTY / DATA_TYPES message)
+# ---------------------------------------------------------------------------
+# The handshake advertises two length-prefixed capability arrays: compile-time
+# (TNS_CCAP_*) and runtime (TNS_RCAP_*). Each is just a byte array where a
+# given index is a named feature slot. Index meanings and the field-version
+# values below were reverse-engineered from python-oracledb (constants.pxi /
+# data_types.pyx) and verified against live 11g and 21c captures (issue #27,
+# docs/PROTOCOL.md §4.2). We model them as {index: value} so the vector reads
+# as a feature list instead of an opaque blob, and so a single field-version
+# knob can switch pyoracle between the 11g-era and 12c+-era wire contracts.
+
+# Compile-time capability indices (into the compile_caps array):
+CCAP_SQL_VERSION = 0
+CCAP_LOGON_TYPES = 4
+CCAP_FEATURE_BACKPORT = 5
+CCAP_FIELD_VERSION = 7          # gates the auth verifier + version-gated formats
+CCAP_SERVER_DEFINE_CONV = 8
+CCAP_DEQUEUE_WITH_SELECTOR = 9
+CCAP_TTC1 = 15
+CCAP_OCI1 = 16
+CCAP_TDS_VERSION = 17
+CCAP_RPC_VERSION = 18
+CCAP_RPC_SIG = 19
+CCAP_DBF_VERSION = 21
+CCAP_LOB = 23
+CCAP_TTC2 = 26
+CCAP_UB2_DTY = 27              # 2-byte data-type ids (12c+)
+CCAP_OCI2 = 31
+CCAP_CLIENT_FN = 34
+CCAP_OCI3 = 35
+CCAP_TTC3 = 37
+CCAP_SESS_SIGNATURE_VERSION = 39
+CCAP_TTC4 = 40
+CCAP_LOB2 = 42
+CCAP_TTC5 = 44
+CCAP_FEATURE_BACKPORT2 = 45
+CCAP_VECTOR_FEATURES = 52
+
+# TNS_CCAP_FIELD_VERSION_* values (the byte written at CCAP_FIELD_VERSION):
+FIELD_VERSION_11_2 = 6
+FIELD_VERSION_12_1 = 7
+FIELD_VERSION_12_2 = 8
+FIELD_VERSION_19_1 = 12
+FIELD_VERSION_21_1 = 16
+FIELD_VERSION_23_1 = 17
+
+# Runtime capability indices + the flag bits we set:
+RCAP_COMPAT = 0
+RCAP_TTC = 6
+RCAP_COMPAT_81 = 2
+RCAP_TTC_ZERO_COPY = 0x01
+RCAP_TTC_32K = 0x04
+
+# Per-field-version capability vectors as {index: byte}; unset indices are 0.
+# 11.2 reproduces pyoracle's historical 11g vector byte-for-byte (asserted by
+# tests/test_tns_encode.py); 21.1 matches python-oracledb 4.0.1 against 21c.
+_COMPILE_CAPS = {
+    FIELD_VERSION_11_2: (38, {
+        CCAP_SQL_VERSION: 6,            # TNS_CCAP_SQL_VERSION_MAX
+        CCAP_LOGON_TYPES: 0x6a,         # O7LOGON | O5LOGON | O5LOGON_NP | 0x40
+        CCAP_FEATURE_BACKPORT: 1,
+        CCAP_FIELD_VERSION: FIELD_VERSION_11_2,
+        CCAP_SERVER_DEFINE_CONV: 1,
+        CCAP_DEQUEUE_WITH_SELECTOR: 1,
+        CCAP_TTC1: 0x29,
+        CCAP_OCI1: 0x90,
+        CCAP_TDS_VERSION: 3,            # TNS_CCAP_TDS_VERSION_MAX
+        CCAP_RPC_VERSION: 7,            # TNS_CCAP_RPC_VERSION_MAX
+        CCAP_RPC_SIG: 3,               # TNS_CCAP_RPC_SIG_VALUE
+        CCAP_DBF_VERSION: 1,           # TNS_CCAP_DBF_VERSION_MAX
+        CCAP_LOB: 0x4f,
+        CCAP_TTC2: 4,
+        CCAP_OCI2: 12,
+        CCAP_CLIENT_FN: 6,
+        CCAP_TTC3: 1,
+        # Slots oracledb leaves 0 but pyoracle's original 11g reference client
+        # set; not in oracledb's named map. Kept verbatim for byte-parity.
+        1: 1, 6: 1, 10: 1, 11: 1, 12: 1, 13: 1, 24: 1, 25: 0x37, 36: 1,
+    }),
+    FIELD_VERSION_21_1: (53, {
+        CCAP_SQL_VERSION: 6,
+        CCAP_LOGON_TYPES: 0xea,         # adds O8LOGON_LONG_IDENTIFIER (0x80)
+        CCAP_FEATURE_BACKPORT: 0x18,
+        CCAP_FIELD_VERSION: FIELD_VERSION_21_1,
+        CCAP_SERVER_DEFINE_CONV: 1,
+        CCAP_DEQUEUE_WITH_SELECTOR: 1,
+        CCAP_TTC1: 0x29,
+        CCAP_OCI1: 0x90,
+        CCAP_TDS_VERSION: 3,
+        CCAP_RPC_VERSION: 7,
+        CCAP_RPC_SIG: 3,
+        CCAP_DBF_VERSION: 1,
+        CCAP_LOB: 0xcf,                 # adds LOB_12C (0x80)
+        CCAP_TTC2: 4,
+        CCAP_UB2_DTY: 1,
+        CCAP_OCI2: 0x10,
+        CCAP_CLIENT_FN: 12,             # TNS_CCAP_CLIENT_FN_MAX
+        CCAP_OCI3: 0x20,               # OCI3_OCSSYNC
+        CCAP_TTC3: 0xb8,
+        CCAP_SESS_SIGNATURE_VERSION: 8,
+        CCAP_TTC4: 0x44,
+        CCAP_LOB2: 5,
+        CCAP_TTC5: 0x3e,
+        CCAP_FEATURE_BACKPORT2: 2,
+        CCAP_VECTOR_FEATURES: 3,
+    }),
+}
+_RUNTIME_CAPS = {
+    FIELD_VERSION_11_2: (7, {
+        RCAP_COMPAT: RCAP_COMPAT_81,
+    }),
+    FIELD_VERSION_21_1: (11, {
+        RCAP_COMPAT: RCAP_COMPAT_81,
+        RCAP_TTC: RCAP_TTC_ZERO_COPY | RCAP_TTC_32K,
+    }),
+}
+
+
+def _render_caps(spec: tuple[int, dict]) -> bytes:
+    """Render a (length, {index: value}) capability spec to its byte array."""
+    length, values = spec
+    caps = bytearray(length)
+    for index, value in values.items():
+        caps[index] = value
+    return bytes(caps)
+
+
+def capability_arrays(field_version: int = FIELD_VERSION_11_2) -> tuple[bytes, bytes]:
+    """Return (compile_caps, runtime_caps) for a target TTC field version.
+
+    Defaults to 11.2, which is byte-identical to what pyoracle has always sent.
+    Higher versions are staged for 12c+ support (issue #27) and not wired into
+    the handshake yet — advertising one also requires the matching version-gated
+    DATA_TYPES table / OER / datatype decoding."""
+    if field_version not in _COMPILE_CAPS:
+        raise ValueError(f"unsupported TTC field version: {field_version}")
+    return _render_caps(_COMPILE_CAPS[field_version]), _render_caps(_RUNTIME_CAPS[field_version])
+
+
 def encode_dictionary_dty(Dictionary: dict) -> bytes:
     # TTI_DTY (Data Type Negotiation). Sent during the TTC handshake right
     # after TTI_PRO. Tells the server which native Oracle data types this
     # client understands and what wire representation it wants for each.
     #
-    # On-wire structure:
+    # On-wire structure (msgtype 2 = TNS_MSG_TYPE_DATA_TYPES):
     #
-    #   TTI_DTY              1 byte   message token
+    #   TTI_DTY              1 byte   message token (== 2)
     #   charset_in           2 bytes  LE, NLS_LANGUAGE charset id (DB)
     #   charset_out          2 bytes  LE, NLS_NCHAR    charset id (client)
-    #   flag                 1 byte   capability flag (1 = standard)
-    #   capability header   39 bytes  `CapabilityHeader` — version + flags
-    #   table count + pad    8 bytes  `TableHeader` — count of entries that follow
+    #   flag                 1 byte   encoding flag (1 = standard)
+    #   compile caps     1+N bytes  length byte + TNS_CCAP_* array
+    #   runtime caps     1+M bytes  length byte + TNS_RCAP_* array
     #   identity table     980 bytes  `IdentityMap` — default "type N → repr N"
     #                                 for type ids 1..245 (245 × 4 bytes)
     #   override table     ~92 bytes  `TypeOverrides` — explicit non-identity
     #                                 mappings, terminated by `0 0`
     #
-    # The full message is the same on every connection — none of it varies
-    # with the user's query workload. python-oracledb hard-codes the same
-    # bytes (with version-dependent tweaks); the OCI thick client builds
-    # them from a static C table at link time. We hardcode them as bytes
-    # literals here for the same reason: the table is the *protocol*
-    # capability surface, not anything we want to reason about per call.
+    # The capability arrays are built from named feature slots (see
+    # `capability_arrays` above) and keyed on a target TTC field version; the
+    # default (11.2) reproduces what pyoracle has always sent. The datatype
+    # tables below don't vary with the user's query workload — python-oracledb
+    # hard-codes the equivalent, and the OCI thick client builds it from a
+    # static C table at link time; we emit it as a constant for the same reason.
+    # (Note: 12c+ uses a 2-byte-per-field datatype table — staged for issue #27.)
     logger.debug("encode_dictionary_dty: %s", _redacted(Dictionary))
     Charset = struct.pack("<H", CharsetDict.get(Dictionary['req'], UTF8_CHARSET))
 
-    # Capability header. The first three bytes (38,6,1) look like a
-    # version triple; the rest are flag bytes whose meaning we haven't
-    # reverse-engineered. Conservative defaults that match what every
-    # Oracle 11g-compatible client sends.
-    CapabilityHeader = bytes([
-        38, 6, 1, 0, 0, 106, 1, 1, 6, 1, 1, 1, 1, 1, 1, 0,
-        41, 144, 3, 7, 3, 0, 1, 0, 79, 1, 55, 4, 0, 0, 0, 0,
-        12, 0, 0, 6, 0, 1, 1,
-    ])
-
-    # Count prefix for the identity table that follows. `7, 2, ...` looks
-    # like (group_count=7, sub_count=2, ...) but again unverified — the
-    # values are constant on the wire.
-    TableHeader = bytes([7, 2, 0, 0, 0, 0, 0, 0])
+    # Compile-time + runtime capability arrays, each emitted as a length byte
+    # followed by the array (write_bytes_with_length in oracledb terms).
+    FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
+    CompileCaps, RuntimeCaps = capability_arrays(FieldVersion)
+    CapabilityHeader = bytes([len(CompileCaps)]) + CompileCaps
+    TableHeader = bytes([len(RuntimeCaps)]) + RuntimeCaps
 
     # Identity map: for type id N in 1..245, emit (N, N, 1, 0) — "I know
     # type N and want it on the wire as type N with format flag 1". This

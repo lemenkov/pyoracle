@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 from functools import reduce
+from oracle.tns import capability_arrays
 from oracle.tns import encode_dictionary
 from oracle.tns import encode_dictionary_auth
 from oracle.tns import encode_dictionary_close
@@ -158,6 +159,33 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
         ])
         Charset = bytes([103,3])
         self.assertEqual(encode_dictionary_dty(Dict), bytes([2]) + Charset + Charset + bytes([1]) + Wtf0 + Wtf1 + Wtf2 + Wtf3)
+
+    def test_capability_arrays_11_2(self):
+        # The default (11.2) capability vectors must stay byte-identical to the
+        # historical pyoracle 11g handshake (this is what test_tns_dty_* pin).
+        from oracle.tns import FIELD_VERSION_11_2
+        cc, rc = capability_arrays()
+        self.assertEqual(cc, bytes([
+            6,1,0,0,106,1,1,6,1,1,1,1,1,1,0,41,144,3,7,3,0,1,0,79,1,55,4,0,0,0,0,
+            12,0,0,6,0,1,1]))
+        self.assertEqual(rc, bytes([2,0,0,0,0,0,0]))
+        self.assertEqual(capability_arrays(FIELD_VERSION_11_2), (cc, rc))
+
+    def test_capability_arrays_21_1(self):
+        # The 21.1 vectors must match python-oracledb 4.0.1 captured against
+        # Oracle 21c XE (issue #27 Phase 0 reference bytes).
+        from oracle.tns import FIELD_VERSION_21_1
+        cc, rc = capability_arrays(FIELD_VERSION_21_1)
+        self.assertEqual(cc.hex(),
+            "06000000ea180010010100000000002990030703000100cf00"
+            "0004010000001000000c2000b80008440005003e0200000000000003")
+        self.assertEqual(rc.hex(), "0200000000000500000000")
+        # field version lands at the documented slot
+        self.assertEqual(cc[7], FIELD_VERSION_21_1)
+
+    def test_capability_arrays_unsupported(self):
+        with self.assertRaises(ValueError):
+            capability_arrays(99)
 
     @patch('os.getpid')
     @patch('socket.gethostname')
