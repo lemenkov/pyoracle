@@ -187,6 +187,30 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
         with self.assertRaises(ValueError):
             capability_arrays(99)
 
+    def test_dty_table_12c(self):
+        # The 12c+ datatype table must stay byte-identical to python-oracledb
+        # 4.0.1's DATA_TYPES table captured against 21c (sha256 of the rendered
+        # bytes), with 321 uniform UB2x4 entries and a UB2 0 terminator.
+        import hashlib, struct
+        from oracle.tns import _datatype_table_12c
+        Table = _datatype_table_12c()
+        self.assertEqual(len(Table), 2570)
+        self.assertEqual((len(Table) - 2) // 8, 321)
+        self.assertEqual(Table[-2:], bytes([0, 0]))
+        self.assertEqual(struct.unpack(">HHHH", Table[8:16])[:3], (2, 2, 10))  # NUMBER
+        self.assertEqual(
+            hashlib.sha256(Table).hexdigest(),
+            "11c8d115ab493105252bbf8927f7d4b62dc864b358bfa0cf700af1b7d76aa492")
+
+    def test_dty_12c_message_shape(self):
+        # field_version 21.1 selects the 2-byte table and encoding flag 3
+        # (oracledb's MULTI_BYTE|CONV_LENGTH); 11.2 keeps flag 1.
+        from oracle.tns import FIELD_VERSION_21_1
+        Dict = {'type': DictionaryType.dty, 'req': 'utf-8'}
+        self.assertEqual(encode_dictionary_dty(Dict)[5], 1)
+        Dict21 = dict(Dict, field_version=FIELD_VERSION_21_1)
+        self.assertEqual(encode_dictionary_dty(Dict21)[5], 3)
+
     @patch('os.getpid')
     @patch('socket.gethostname')
     def test_tns_sess_0(self, mock_gethostname, mock_getpid):

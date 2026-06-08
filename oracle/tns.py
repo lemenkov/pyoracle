@@ -977,6 +977,62 @@ def capability_arrays(field_version: int = FIELD_VERSION_11_2) -> tuple[bytes, b
     return _render_caps(_COMPILE_CAPS[field_version]), _render_caps(_RUNTIME_CAPS[field_version])
 
 
+# 12c+ datatype table. Where the 11g table (built inline in encode_dictionary_dty
+# below) uses 1-byte-per-field entries with a short (type, 0) form for unknown
+# types, the 12c+ table is a flat list of uniform 4-field entries, each field a
+# UB2 (type, conv, repr, 0), terminated by a UB2 0. conv defaults to type and
+# repr to 1 (universal) unless overridden in _DTY_12C_OVERRIDES (repr 10 =
+# Oracle-native, e.g. NUMBER / DATE). The type list + overrides regenerate
+# python-oracledb 4.0.1's DATA_TYPES table byte-for-byte (verified against a 21c
+# capture); the gate is the UB2_DTY capability, i.e. field version >= 12.1.
+_DTY_12C_TYPES = [
+    1, 2, 8, 12, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 10, 11, 40,
+    41, 117, 120, 290, 291, 292, 293, 294, 298, 299, 300, 301, 302, 303,
+    304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 315, 316, 317,
+    318, 319, 320, 321, 322, 323, 327, 328, 329, 331, 333, 334, 335,
+    336, 337, 338, 339, 340, 341, 342, 343, 344, 345, 346, 348, 349,
+    354, 355, 359, 363, 380, 381, 382, 383, 384, 385, 386, 387, 388,
+    389, 390, 391, 393, 394, 395, 396, 397, 398, 399, 400, 401, 404,
+    405, 406, 407, 413, 414, 415, 416, 417, 418, 419, 420, 421, 422,
+    423, 424, 425, 426, 427, 429, 430, 431, 432, 433, 449, 450, 454,
+    455, 456, 457, 458, 459, 460, 461, 462, 463, 466, 467, 468, 469,
+    470, 471, 472, 473, 474, 475, 476, 477, 478, 479, 480, 481, 482,
+    483, 484, 485, 486, 490, 491, 492, 493, 494, 495, 496, 498, 499,
+    500, 501, 502, 509, 510, 513, 514, 516, 517, 518, 519, 520, 521,
+    522, 523, 524, 525, 526, 527, 528, 529, 530, 531, 532, 533, 534,
+    535, 536, 537, 538, 539, 540, 541, 542, 543, 560, 565, 572, 573,
+    574, 575, 576, 578, 563, 564, 579, 580, 581, 582, 583, 584, 585, 3,
+    4, 5, 6, 7, 9, 15, 39, 68, 91, 94, 95, 96, 97, 100, 101, 102, 104,
+    106, 108, 109, 110, 111, 112, 113, 114, 115, 116, 119, 198, 146,
+    152, 153, 154, 155, 156, 172, 178, 179, 180, 181, 182, 183, 184,
+    185, 186, 187, 188, 189, 190, 195, 196, 197, 208, 231, 232, 233,
+    241, 252, 590, 591, 592, 613, 614, 615, 616, 611, 612, 593, 594,
+    595, 596, 597, 598, 599, 600, 601, 602, 603, 604, 605, 622, 623,
+    624, 625, 626, 627, 628, 629, 630, 631, 632, 637, 638, 636, 639,
+    663, 640, 652, 646, 647, 127, 660, 661, 665, 669, 670,
+]
+_DTY_12C_OVERRIDES = {
+    2: (2, 10), 12: (12, 10), 27: (27, 10), 3: (2, 10), 4: (2, 10),
+    5: (1, 1), 6: (2, 10), 7: (2, 10), 9: (1, 1), 15: (1, 1), 68: (2, 10),
+    91: (2, 10), 94: (1, 1), 95: (23, 1), 97: (96, 1), 104: (11, 1),
+    108: (109, 1), 110: (111, 1), 116: (102, 1), 152: (2, 10),
+    153: (2, 10), 154: (2, 10), 155: (1, 1), 156: (12, 10), 172: (2, 10),
+    184: (12, 10), 195: (112, 1), 196: (113, 1), 197: (114, 1),
+    232: (231, 1), 241: (109, 1),
+}
+
+
+def _datatype_table_12c() -> bytes:
+    """Render the 12c+ datatype table: uniform UB2 (type, conv, repr, 0)
+    entries terminated by a UB2 0."""
+    Out = bytearray()
+    for Type in _DTY_12C_TYPES:
+        Conv, Rep = _DTY_12C_OVERRIDES.get(Type, (Type, 1))
+        Out += struct.pack(">HHHH", Type, Conv, Rep, 0)
+    Out += struct.pack(">H", 0)
+    return bytes(Out)
+
+
 def encode_dictionary_dty(Dictionary: dict) -> bytes:
     # TTI_DTY (Data Type Negotiation). Sent during the TTC handshake right
     # after TTI_PRO. Tells the server which native Oracle data types this
@@ -998,10 +1054,10 @@ def encode_dictionary_dty(Dictionary: dict) -> bytes:
     # The capability arrays are built from named feature slots (see
     # `capability_arrays` above) and keyed on a target TTC field version; the
     # default (11.2) reproduces what pyoracle has always sent. The datatype
-    # tables below don't vary with the user's query workload — python-oracledb
+    # tables don't vary with the user's query workload — python-oracledb
     # hard-codes the equivalent, and the OCI thick client builds it from a
     # static C table at link time; we emit it as a constant for the same reason.
-    # (Note: 12c+ uses a 2-byte-per-field datatype table — staged for issue #27.)
+    # The table form is version-gated below: 11g 1-byte vs 12c+ 2-byte.
     logger.debug("encode_dictionary_dty: %s", _redacted(Dictionary))
     Charset = struct.pack("<H", CharsetDict.get(Dictionary['req'], UTF8_CHARSET))
 
@@ -1075,9 +1131,18 @@ def encode_dictionary_dty(Dictionary: dict) -> bytes:
         209, 0, 3, 0,
         0,  # terminator
     ])
+    # Datatype table: 12c+ (UB2_DTY) uses the uniform 2-byte-per-field table;
+    # 11g uses the 1-byte form built above. The encoding flag follows suit
+    # (oracledb sends 3 = MULTI_BYTE|CONV_LENGTH for 12c+, pyoracle 1 for 11g).
+    if FieldVersion >= FIELD_VERSION_12_1:
+        DataTypeTable = _datatype_table_12c()
+        Flag = 3
+    else:
+        DataTypeTable = IdentityMap + TypeOverrides
+        Flag = 1
     # Same charset for IN (server-side) and OUT (client-side) negotiation.
-    return (bytes([TTI_DTY]) + Charset + Charset + bytes([1])
-            + CapabilityHeader + TableHeader + IdentityMap + TypeOverrides)
+    return (bytes([TTI_DTY]) + Charset + Charset + bytes([Flag])
+            + CapabilityHeader + TableHeader + DataTypeTable)
 
 def _oac_rep_row(Rows: list) -> list:
     # For array DML, pick a representative value per column for the single OAC:
