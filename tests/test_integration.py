@@ -72,7 +72,7 @@ class _IntegrationBase(unittest.TestCase):
     TABLE = "PYORACLE_TEST"
 
     def setUp(self):
-        Last = None
+        Last: Exception = RuntimeError("setUp: connection retries exhausted")
         for _ in range(5):
             try:
                 self.conn = _connect()
