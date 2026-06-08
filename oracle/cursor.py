@@ -99,7 +99,6 @@ class Cursor:
         # decoders returned a 5-tuple; tolerate either shape so a stale build
         # doesn't crash here.
         try:
-            CallStatus = Result[0]
             OraCode = Result[1]
             RetFormat = Result[3]
             Rows = Result[4]

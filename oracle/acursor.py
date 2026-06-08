@@ -85,7 +85,6 @@ class AsyncCursor:
                    Batch: list | None = None) -> 'AsyncCursor':
         Result = await self._connection.execute(operation, Bind=Bind, Batch=Batch)
         try:
-            CallStatus = Result[0]
             OraCode = Result[1]
             RetFormat = Result[3]
             Rows = Result[4]
