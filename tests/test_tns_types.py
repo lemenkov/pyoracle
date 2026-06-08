@@ -28,9 +28,37 @@ from oracle.tns_consts import (
     TNS_TYPE_BDOUBLE, TNS_TYPE_BFLOAT, TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM,
 )
 from oracle.types import (
-    decode_binary_double, decode_binary_float, decode_interval_ds,
+    decode_binary_double, decode_binary_float, decode_date, decode_interval_ds,
     decode_interval_ym, decode_value, rowid_to_string, urowid_to_string,
 )
+
+
+class TestNamedRegionTSTZ(unittest.TestCase):
+    # TIMESTAMP WITH TIME ZONE carrying a named region id (top bit of byte 11)
+    # resolves via zoneinfo so the offset is DST-correct for the instant
+    # (issue #20). Wire bytes captured from XE 11g FROM_TZ(ts, region).
+
+    def test_us_eastern_winter_is_est(self):
+        # 2024-01-15 12:00 US/Eastern -> stored 17:00 UTC, -05:00 (EST).
+        Data = bytes([120, 124, 1, 15, 18, 1, 1, 0, 0, 0, 0, 137, 144])
+        Dt = decode_date(Data)
+        self.assertEqual(Dt.utcoffset(), datetime.timedelta(hours=-5))
+        self.assertEqual(Dt.replace(tzinfo=None),
+                         datetime.datetime(2024, 1, 15, 12, 0, 0))
+
+    def test_asia_tokyo(self):
+        # 2024-01-15 12:00 Asia/Tokyo -> 03:00 UTC, +09:00 (no DST).
+        Data = bytes([120, 124, 1, 15, 4, 1, 1, 0, 0, 0, 0, 132, 44])
+        Dt = decode_date(Data)
+        self.assertEqual(Dt.utcoffset(), datetime.timedelta(hours=9))
+        self.assertEqual(Dt.replace(tzinfo=None),
+                         datetime.datetime(2024, 1, 15, 12, 0, 0))
+
+    def test_unknown_region_falls_back_to_naive(self):
+        # An unmapped region id must not crash — fall back to naive UTC.
+        Data = bytes([120, 124, 1, 15, 18, 1, 1, 0, 0, 0, 0, 0xFF, 0xFC])
+        Dt = decode_date(Data)
+        self.assertIsNone(Dt.tzinfo)
 
 
 class TestDecodeUb4(unittest.TestCase):

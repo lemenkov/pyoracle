@@ -19,6 +19,10 @@ authors = [
 
 dependencies = [
     "pycryptodome",
+    # Supplies the IANA tz database for `zoneinfo` so named-region TIMESTAMP
+    # WITH TIME ZONE values resolve where the OS ships no system zoneinfo
+    # (e.g. Windows, slim containers). A no-op where system tzdata exists.
+    "tzdata",
 ]
 
 [project.urls]

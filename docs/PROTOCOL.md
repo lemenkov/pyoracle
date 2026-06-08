@@ -742,10 +742,15 @@ Timezone encoding has two forms:
 - **Offset-based**: `Hour + 20`, `Minute + 60` (when bit 0x80 of the
   first byte is clear). pyoracle handles this form.
 - **Named zone (region ID)**: when bit 0x80 of the first byte is set,
-  the remaining bits encode an Oracle timezone region ID that maps to
-  an IANA timezone name via Oracle's built-in zone table. pyoracle
-  does not currently ship that table; it surfaces such timestamps as
-  naive `datetime.datetime` (no `tzinfo`) rather than guessing.
+  the two TZ bytes carry an Oracle timezone region id instead of an
+  offset: `region_id = ((byte0 & 0x7f) << 6) + (byte1 >> 2)`. pyoracle
+  maps the id to an IANA zone name (`oracle/_tzregions.py`, a stable
+  id→name table generated from the server's `V$TIMEZONE_NAMES`) and then
+  asks the standard-library `zoneinfo` module for the offset **at that
+  instant** — so DST is applied correctly and offsets track the live IANA
+  tz database rather than any table frozen into an Oracle release. An id
+  not present in the table (a few obsolete Oracle aliases) falls back to a
+  naive `datetime.datetime`.
 
 When decoding, pyoracle treats the wall-clock bytes as UTC and then
 shifts to the tagged offset, so the resulting Python `datetime` both

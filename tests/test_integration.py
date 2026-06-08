@@ -227,6 +227,26 @@ class TypesIntegration(_IntegrationBase):
         )
         self.assertEqual(v.utcoffset(), datetime.timedelta(hours=14))
 
+    def test_timestamp_with_named_region_winter(self):
+        # Named region (issue #20): offset resolved via zoneinfo, so January is
+        # standard time (EST, -05:00).
+        v = self._round_trip(
+            "TIMESTAMP WITH TIME ZONE",
+            "FROM_TZ(TIMESTAMP '2024-01-15 12:00:00', 'US/Eastern')",
+        )
+        self.assertEqual(v.utcoffset(), datetime.timedelta(hours=-5))
+        self.assertEqual(v.replace(tzinfo=None),
+                         datetime.datetime(2024, 1, 15, 12, 0, 0))
+
+    def test_timestamp_with_named_region_dst(self):
+        # Same region in July is daylight time (EDT, -04:00) — proof the offset
+        # comes from the live IANA database, not a fixed per-region value.
+        v = self._round_trip(
+            "TIMESTAMP WITH TIME ZONE",
+            "FROM_TZ(TIMESTAMP '2024-07-15 12:00:00', 'US/Eastern')",
+        )
+        self.assertEqual(v.utcoffset(), datetime.timedelta(hours=-4))
+
     # ----- BINARY_FLOAT / BINARY_DOUBLE -----
 
     def test_binary_float(self):

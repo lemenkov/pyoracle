@@ -9,8 +9,10 @@
 
 import datetime
 import struct
+import zoneinfo
 from decimal import Decimal
 
+from oracle._tzregions import TZ_REGIONS
 from oracle.datatypes import IntervalYM
 from oracle.tns_consts import (
     AL16UTF16_CHARSET, AL32UTF8_CHARSET, ISO_LATIN_1_CHARSET, UTF8_CHARSET,
@@ -21,10 +23,30 @@ from oracle.tns_consts import (
 )
 
 # Oracle stores a TZ offset as (hour + 20, minute + 60); a top bit set on the
-# hour byte means "named region ID" which we don't resolve.
+# hour byte means the two TZ bytes carry a named-region id instead of an offset.
 _TZ_HOUR_OFFSET = 20
 _TZ_MINUTE_OFFSET = 60
 _TZ_REGION_ID_FLAG = 0x80
+
+
+def _tz_region_id(HourByte: int, MinuteByte: int) -> int:
+    # Named-region id packed across the two TZ bytes (see PROTOCOL.md §11.8 /
+    # the named-region note): 7 low bits of the hour byte are the high bits, the
+    # top 6 bits of the minute byte are the low bits.
+    return ((HourByte & 0x7F) << 6) + (MinuteByte >> 2)
+
+
+def _region_tzinfo(RegionId: int) -> datetime.tzinfo | None:
+    # Resolve an Oracle region id to a zoneinfo zone (offset/DST come from the
+    # current IANA tz database, never a frozen Oracle table). Unknown ids or a
+    # missing tz database yield None, and the caller falls back to naive UTC.
+    Name = TZ_REGIONS.get(RegionId)
+    if Name is None:
+        return None
+    try:
+        return zoneinfo.ZoneInfo(Name)
+    except (zoneinfo.ZoneInfoNotFoundError, ValueError, OSError):
+        return None
 
 _CHARSET_PYTHON_NAME = {
     ISO_LATIN_1_CHARSET: 'iso-8859-1',
@@ -116,12 +138,14 @@ def decode_date(Data: bytes) -> datetime.datetime | None:
     # result both compares equal and prints with the original local time.
     Tz = None
     if len(Data) >= 13 and Data[11] != 0 and Data[12] != 0:
-        if not (Data[11] & _TZ_REGION_ID_FLAG):
+        if Data[11] & _TZ_REGION_ID_FLAG:
+            # Named region id: resolve to an IANA zone and let zoneinfo supply
+            # the (DST-aware) offset for this instant. Unknown id -> naive UTC.
+            Tz = _region_tzinfo(_tz_region_id(Data[11], Data[12]))
+        else:
             TzHours = Data[11] - _TZ_HOUR_OFFSET
             TzMinutes = Data[12] - _TZ_MINUTE_OFFSET
             Tz = datetime.timezone(datetime.timedelta(hours=TzHours, minutes=TzMinutes))
-        # Named region IDs (top bit of byte 11) would need the Oracle timezone
-        # tables; fall through with Tz=None and surface as naive.
 
     if Tz is None:
         return datetime.datetime(Year, Month, Day, Hour, Minute, Second, Microsecond)

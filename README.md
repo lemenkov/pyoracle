@@ -75,7 +75,9 @@ What works so far:
   first row. Sync and async
 - Python type coercion for fetched values: NUMBER → `int` / `Decimal`,
   VARCHAR2 / CHAR → `str` (charset-aware), DATE / TIMESTAMP / TIMESTAMP
-  WITH TIME ZONE → `datetime.datetime`, BINARY_FLOAT / BINARY_DOUBLE →
+  WITH TIME ZONE → `datetime.datetime` (a named-region zone, e.g.
+  `US/Eastern`, resolves to the correct DST-aware offset via the stdlib
+  `zoneinfo`, not a frozen Oracle offset table), BINARY_FLOAT / BINARY_DOUBLE →
   `float`, INTERVAL DAY TO SECOND → `datetime.timedelta`, INTERVAL YEAR
   TO MONTH → `oracle.IntervalYM`, ROWID → `str` (the 18-char extended
   rowid, usable directly in a `WHERE ROWID = :r` bind), UROWID → `str`
