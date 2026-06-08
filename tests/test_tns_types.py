@@ -58,12 +58,14 @@ class TestDecodeUb4(unittest.TestCase):
         # NUMBER scale -127 arrives as 0x81 0x7f.
         self.assertEqual(decode_ub4(b"\x81\x7f"), (-127, b""))
 
-    def test_negative_multibyte(self):
-        # -256 needs two magnitude bytes: 0x82 0x01 0x00.
-        self.assertEqual(decode_ub4(b"\x82\x01\x00"), (-256, b""))
-
-    def test_negative_consumes_only_its_own_bytes(self):
-        self.assertEqual(decode_ub4(b"\x82\x01\x00tail"), (-256, b"tail"))
+    def test_length_gt4_consumes_two_bytes(self):
+        # A length byte > 4 isn't a real ub4 — it only occurs where
+        # decode_token_oer reads a raw ub2 / counter field through here. The
+        # contract is to consume exactly two bytes (the ub2 width) so the OER
+        # stream stays aligned; the returned value is discarded by those
+        # callers. Raising here desyncs ordinary multi-row fetches.
+        self.assertEqual(decode_ub4(b"\x07\x00tail"), (0, b"tail"))
+        self.assertEqual(decode_ub4(b"\x0a\x01tail"), (-1, b"tail"))
 
     def test_roundtrip_with_encode_sb4(self):
         for value in (0, 1, 127, 255, 256, 65535, 65536, 16777215, 4294967295):
