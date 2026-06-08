@@ -1363,7 +1363,6 @@ class PoolIntegration(unittest.TestCase):
             Pool.close()
 
 
-_BFILE_TEST_DIR = "PYORACLE_BFILE_TEST_DIR"
 _BFILE_TEST_FILE = "pyoracle_bfile_test.txt"
 _BFILE_TEST_CONTENT = b"hello bfile from disk"
 
