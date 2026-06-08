@@ -447,6 +447,39 @@ def decode_token_rpa(Data: bytes, Acc: object) -> tuple:
     else:
         return (TTI_SESS, SessKey, Salt, DerivedSalt)
 
+def decode_token_pro(Data: bytes) -> dict:
+    """Decode a TTI_PRO (protocol negotiation) server response.
+
+    Returns the server's TTC protocol version byte, banner, and the two
+    length-prefixed capability arrays (compile-time TNS_CCAP_* and runtime
+    TNS_RCAP_*). `Data` starts at the message-type byte (== TTI_PRO). The
+    field version the server advertises is `compile_caps[CCAP_FIELD_VERSION]`;
+    the connection negotiates the effective version as min(client, server).
+    Layout mirrors python-oracledb's protocol.pyx (docs/PROTOCOL.md §4.1)."""
+    Off = 1                                    # skip the message-type byte
+    ServerVersion = Data[Off]
+    Off += 2                                   # version byte + a trailing zero
+    End = Data.index(0, Off)                   # NUL-terminated banner
+    Banner = Data[Off:End]
+    Off = End + 1
+    Off += 2                                   # charset_id (ub2 LE)
+    Off += 1                                   # server flags
+    NumElem = int.from_bytes(Data[Off:Off + 2], "little")
+    Off += 2 + NumElem * 5                     # skip the charset-element array
+    FdoLen = int.from_bytes(Data[Off:Off + 2], "big")
+    Off += 2 + FdoLen                          # skip the FDO blob
+    CcLen = Data[Off]; Off += 1
+    CompileCaps = Data[Off:Off + CcLen]; Off += CcLen
+    RcLen = Data[Off]; Off += 1
+    RuntimeCaps = Data[Off:Off + RcLen]
+    return {
+        'server_version': ServerVersion,
+        'banner': Banner,
+        'compile_caps': CompileCaps,
+        'runtime_caps': RuntimeCaps,
+    }
+
+
 _KNOWN_TTI_TOKENS = frozenset((TTI_OER, TTI_RXH, TTI_RXD, TTI_RPA, TTI_STA,
                                TTI_IOV, TTI_UDS, TTI_OAC, TTI_LOB, TTI_WRN,
                                TTI_DCB, TTI_FOB, TTI_BVC))

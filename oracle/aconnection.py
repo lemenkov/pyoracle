@@ -28,10 +28,12 @@ from oracle.crypto import validate
 from oracle.exceptions import InterfaceError
 from oracle.tns import assemble_packet
 from oracle.tns import decode_packet
+from oracle.tns import decode_token_pro
 from oracle.tns import decode_token_rpa
 from oracle.tns import encode_dictionary
 from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
+from oracle.tns import CCAP_FIELD_VERSION, FIELD_VERSION_11_2
 from oracle.connection import _format_version
 from oracle.tns_consts import (
     CONN_STATE_AUTHENTICATED, CONN_STATE_AUTH_NEGOTIATE,
@@ -82,6 +84,8 @@ class AsyncOracleConnect:
         self.conn_key = None
         self.server_version = 0
         self.session_id = None
+        # Negotiated TTC field version; see OracleConnect for the full note.
+        self.field_version = FIELD_VERSION_11_2
         self.cursors: dict[int, int] = {}
         # Cursor cache — same shape as the sync `OracleConnect`. DML only.
         # Keyed on (SQL, bind OAC signature); see OracleConnect for why the
@@ -145,6 +149,7 @@ class AsyncOracleConnect:
             'type': Type,
             'req': self.charset,
             'seq': self._next_seq(),
+            'field_version': self.field_version,
         }
         d.update(extra)
         return d
@@ -256,6 +261,7 @@ class AsyncOracleConnect:
                 case t if t == TNS_DATA:
                     match Packet[0]:
                         case p if p == TTI_PRO:
+                            self._negotiate_capabilities(Packet)
                             Data = encode_dictionary(self._make_dict(DictionaryType.dty))
                             await self.send(TNS_DATA, Data)
                         case p if p == TTI_DTY:
@@ -285,6 +291,21 @@ class AsyncOracleConnect:
                 case _:
                     logger.debug("handle_login (async): unexpected %s", Type)
                     return 1
+
+    def _negotiate_capabilities(self, Packet: bytes) -> None:
+        # Parse the server's PRO response and lower the field version to the
+        # server's if older — min(client, server). See OracleConnect for the
+        # full rationale. Best-effort: keep the default on any parse error.
+        try:
+            Pro = decode_token_pro(Packet)
+            Caps = Pro['compile_caps']
+            if len(Caps) > CCAP_FIELD_VERSION:
+                self.field_version = min(self.field_version, Caps[CCAP_FIELD_VERSION])
+            logger.debug("handle_login: PRO server_version=%s banner=%r "
+                         "field_version=%s", Pro['server_version'],
+                         Pro['banner'], self.field_version)
+        except Exception:
+            logger.debug("handle_login: could not parse PRO caps", exc_info=True)
 
     async def _handle_rpa(self, Data: bytes) -> int | None:
         from oracle.tns_consts import TTI_AUTH

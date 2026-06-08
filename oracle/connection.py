@@ -3,10 +3,12 @@
 
 from oracle.crypto import validate
 from oracle.tns import assemble_packet
+from oracle.tns import decode_token_pro
 from oracle.tns import decode_token_rpa
 from oracle.tns import encode_dictionary
 from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
+from oracle.tns import CCAP_FIELD_VERSION, FIELD_VERSION_11_2
 from oracle.tns_consts import (
     CONN_STATE_AUTH_NEGOTIATE, CONN_STATE_AUTHENTICATED,
     CONN_STATE_CONNECTED, CONN_STATE_DISCONNECTED, DictionaryType,
@@ -84,6 +86,11 @@ class OracleConnect:
         self.conn_key = None
         self.server_version = 0
         self.session_id = None
+        # Negotiated TTC field version. Starts at the highest version pyoracle
+        # advertises (11.2 today) and is lowered to the server's during the
+        # PRO handshake — min(client, server), see handle_login. Decoders use
+        # this to pick version-gated wire formats (issue #27).
+        self.field_version = FIELD_VERSION_11_2
         self.cursors: dict[int, int] = {}
         # Cursor cache: (SQL text, bind OAC signature) → server-side cursor
         # handle. Lets repeat `execute()` of the same SQL skip the parse step
@@ -145,6 +152,7 @@ class OracleConnect:
             'type': Type,
             'req': self.charset,
             'seq': self._next_seq(),
+            'field_version': self.field_version,
         }
         d.update(extra)
         return d
@@ -236,6 +244,7 @@ class OracleConnect:
                     match Packet[0]:
                         case p if p == TTI_PRO:
                             logger.debug("handle_login: recv PRO")
+                            self._negotiate_capabilities(Packet)
                             Data = encode_dictionary(self._make_dict(DictionaryType.dty))
                             self.send(TNS_DATA, Data)
                         case p if p == TTI_DTY:
@@ -288,6 +297,25 @@ class OracleConnect:
                 case _:
                     logger.debug("handle_login: unexpected %s", Type)
                     return 1
+
+    def _negotiate_capabilities(self, Packet: bytes) -> None:
+        # Parse the server's PRO response and lower our field version to the
+        # server's if it is older — the effective version is min(client,
+        # server), the same rule python-oracledb applies. Sent next in our DTY
+        # so both sides agree. Best-effort: a parse failure must not break a
+        # handshake that works today, so we keep the default on any error.
+        try:
+            Pro = decode_token_pro(Packet)
+            Caps = Pro['compile_caps']
+            if len(Caps) > CCAP_FIELD_VERSION:
+                ServerFv = Caps[CCAP_FIELD_VERSION]
+                self.field_version = min(self.field_version, ServerFv)
+            logger.debug("handle_login: PRO server_version=%s banner=%r "
+                         "field_version=%s", Pro['server_version'],
+                         Pro['banner'], self.field_version)
+        except Exception:
+            # Unknown PRO layout — keep the default field version (11.2).
+            logger.debug("handle_login: could not parse PRO caps", exc_info=True)
 
     def _handle_rpa(self, Data: bytes) -> int | None:
         Result = decode_token_rpa(Data, None)

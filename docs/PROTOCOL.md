@@ -212,6 +212,22 @@ TTI_PRO | 6 | 5 | 4 | 3 | 2 | 1 | 0 | "python" | 0
 - `6, 5, 4, 3, 2, 1, 0`: Protocol version vector (descending preference).
 - `"python"`: Client driver name (null-terminated).
 
+The server replies with a TTI_PRO message carrying its own capabilities — this
+is where the client learns the server's TTC field version and negotiates the
+effective one (`min(client, server)`). Layout (`decode_token_pro`):
+```
+TTI_PRO | server_version (UB1) | 0 |
+  banner (NUL-terminated) | charset_id (UB2 LE) | server_flags (UB1) |
+  num_elem (UB2 LE) | num_elem × 5 bytes (charset element array) |
+  fdo_length (UB2 BE) | fdo[fdo_length] |
+  compile_caps (UB1 len + bytes) | runtime_caps (UB1 len + bytes)
+```
+The server's field version is `compile_caps[7]` (`CCAP_FIELD_VERSION`, §4.2).
+pyoracle stores the negotiated minimum as `connection.field_version` and sends
+it back in its own DTY; against 11g both sides are `6` (11.2). `server_version`
+is the TTC protocol byte (`6` = 8.1+), distinct from the product release that
+arrives later in the auth result (`AUTH_VERSION_NO`).
+
 ### 4.2 Data Type Negotiation (TTI_DTY)
 
 TTI_DTY (message type `2`, `TNS_MSG_TYPE_DATA_TYPES`) advertises the client's

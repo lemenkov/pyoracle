@@ -10,6 +10,7 @@ from oracle.tns import decode_token_lob
 from oracle.tns import decode_token_net
 from oracle.tns import decode_token_oer
 from oracle.tns import decode_token_oac
+from oracle.tns import decode_token_pro
 from oracle.tns import decode_token_rpa
 from oracle.tns import decode_token_uds
 from oracle.tns import decode_token_rxd
@@ -47,6 +48,41 @@ class TestTnsCommandDecoders(unittest.TestCase):
 
     def test_decode_packet_sta(self):
         self.assertEqual(decode_packet(bytes([9,1,1,1,8]), [1, {'foo':'bar'}]), (True, [1, {'foo':'bar'}]))
+
+    def test_decode_token_pro_11g(self):
+        # Authentic 11g PRO response (same bytes as test_tns_assemble_02, minus
+        # the 8-byte TNS header and 2-byte data flags). field_version 6 = 11.2.
+        Body = bytes([1,6,0,120,56,54,95,54,52,47,76,105,110,117,120,32,50,46,52,46,
+            120,120,0,105,3,1,10,0,102,3,64,3,1,64,3,102,3,1,102,3,72,3,1,72,3,102,
+            3,1,102,3,82,3,1,82,3,102,3,1,102,3,97,3,1,97,3,102,3,1,102,3,31,3,8,31,
+            3,102,3,1,0,100,0,0,0,96,1,36,15,5,11,12,3,12,12,5,4,5,13,6,9,7,8,5,5,5,
+            5,5,15,5,5,5,5,5,10,5,5,5,5,5,4,5,6,7,8,8,35,71,35,71,8,17,35,8,17,65,176,
+            71,0,131,3,105,7,208,3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+            0,0,0,0,0,0,0,0,0,0,0,0,39,6,1,1,1,15,1,1,6,1,1,1,1,1,1,1,127,255,3,10,3,
+            3,1,0,127,1,127,255,1,6,1,1,63,1,3,6,0,1,3,2,7,2,1,0,1,24,0,3])
+        Pro = decode_token_pro(Body)
+        self.assertEqual(Pro['server_version'], 6)
+        self.assertEqual(Pro['banner'], b'x86_64/Linux 2.4.xx')
+        self.assertEqual(len(Pro['compile_caps']), 39)
+        self.assertEqual(Pro['compile_caps'][7], 6)   # CCAP_FIELD_VERSION = 11.2
+        self.assertEqual(len(Pro['runtime_caps']), 7)
+
+    def test_decode_token_pro_21c(self):
+        # Authentic 21c PRO response body (captured via tools/capture_proxy.py).
+        # field_version 16 = 21.1; the server's compile array is 45 bytes.
+        Body = bytes.fromhex(
+            "0106007838365f36342f4c696e757820322e342e7878006903010a006603400301"
+            "400366030166034803014803660301660352030152036603016603610301610366"
+            "030166031f03081f0366030100640000006001240f050b0c030c0c0504050d0609"
+            "070805050505050f05050505050a050505050504050607080823472347081123081"
+            "141b0470083036907d0030000000000000000000000000000000000000000000000"
+            "00000000000000000000000000002d060101016f0101100101010101010"
+            "17fff031003030101ff01ffff010b0101ff01060ce6017f050f7f0d0300010702010"
+            "00118007f")
+        Pro = decode_token_pro(Body)
+        self.assertEqual(Pro['server_version'], 6)
+        self.assertEqual(Pro['compile_caps'][7], 16)  # CCAP_FIELD_VERSION = 21.1
+        self.assertEqual(len(Pro['compile_caps']), 45)
 
     def test_tns_decode_token_oac_00(self):
         self.assertEqual(decode_token_oac(bytes([2,3,0,0,1,22,0,0,0,0,0,1,0]), None), (2,22,0,0, b""))
