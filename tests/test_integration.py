@@ -21,7 +21,6 @@ import unittest
 from decimal import Decimal
 
 import oracle
-from oracle import BinaryDouble, BinaryFloat, IntervalYM
 
 # Resolve the TLS proxy fixture without depending on the `tests` package
 # layout (works under both `python -m unittest tests.test_integration` and
@@ -287,13 +286,13 @@ class TypesIntegration(_IntegrationBase):
     def test_interval_ym(self):
         v = self._round_trip("INTERVAL YEAR(4) TO MONTH",
                              "INTERVAL '3-7' YEAR TO MONTH")
-        self.assertEqual(v, IntervalYM(3, 7))
-        self.assertIsInstance(v, IntervalYM)
+        self.assertEqual(v, oracle.IntervalYM(3, 7))
+        self.assertIsInstance(v, oracle.IntervalYM)
 
     def test_interval_ym_negative(self):
         v = self._round_trip("INTERVAL YEAR(4) TO MONTH",
                              "INTERVAL '-1-2' YEAR TO MONTH")
-        self.assertEqual(v, IntervalYM(-1, -2))
+        self.assertEqual(v, oracle.IntervalYM(-1, -2))
 
     # ----- ROWID -----
 
@@ -674,14 +673,14 @@ class BindIntegration(_IntegrationBase):
     def test_binary_float_bind(self):
         self.cur.execute(f"CREATE TABLE {self.TABLE} (v BINARY_FLOAT)")
         self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (:1)",
-                         [BinaryFloat(-2.25)])
+                         [oracle.BinaryFloat(-2.25)])
         self.cur.execute(f"SELECT v FROM {self.TABLE}")
         self.assertEqual(self.cur.fetchone(), (-2.25,))
 
     def test_binary_double_bind(self):
         self.cur.execute(f"CREATE TABLE {self.TABLE} (v BINARY_DOUBLE)")
         self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (:1)",
-                         [BinaryDouble(1234.5678)])
+                         [oracle.BinaryDouble(1234.5678)])
         self.cur.execute(f"SELECT v FROM {self.TABLE}")
         self.assertEqual(self.cur.fetchone(), (1234.5678,))
 
@@ -708,9 +707,9 @@ class BindIntegration(_IntegrationBase):
         self.cur.execute(
             f"CREATE TABLE {self.TABLE} (v INTERVAL YEAR(4) TO MONTH)")
         self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (:1)",
-                         [IntervalYM(3, 7)])
+                         [oracle.IntervalYM(3, 7)])
         self.cur.execute(f"SELECT v FROM {self.TABLE}")
-        self.assertEqual(self.cur.fetchone(), (IntervalYM(3, 7),))
+        self.assertEqual(self.cur.fetchone(), (oracle.IntervalYM(3, 7),))
 
     # ----- bind ordering (str before number) -----
 
