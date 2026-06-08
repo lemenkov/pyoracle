@@ -86,11 +86,21 @@ def scenario_fragment(conn):
     print(f"fragment -> fetched {len(rows)} rows")
 
 
+def scenario_handshake(conn):
+    # Minimal exchange: the connect already drove the full TTC capability
+    # negotiation (TTI_PRO / TTI_DTY) and O5LOGON auth, which is what we want
+    # to capture for 12c+ support (issue #27). One tiny query confirms the
+    # session is usable without adding noise to the proxy log.
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM dual")
+    print("handshake ->", cur.fetchall())
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("scenario",
                     choices=["lobwrite", "changepassword", "batcherrors",
-                             "fragment"])
+                             "fragment", "handshake"])
     ap.add_argument("--dsn", required=True,
                     help="host:port/service through the proxy, "
                          "e.g. localhost:1599/FREEPDB1")
@@ -109,6 +119,8 @@ def main() -> None:
             scenario_batcherrors(conn)
         elif args.scenario == "fragment":
             scenario_fragment(conn)
+        elif args.scenario == "handshake":
+            scenario_handshake(conn)
     finally:
         conn.close()
 
