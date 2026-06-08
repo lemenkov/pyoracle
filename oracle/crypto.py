@@ -63,8 +63,13 @@ def o5logon0(Sess: bytes, KeySess: bytes, DerivedSalt: bytes | None, DerivedKey:
 
     CliSess = pad2(token_bytes(40), 8) if SrvSess[40:] == pad2(b"", 8) else token_bytes(len(SrvSess))
 
+    # The 256-bit (12c+ AES) scheme PKCS#7-pads the client session key and the
+    # speedy key with a full extra 16-byte block before encryption, and the
+    # server validates that padding (omitting it gives ORA-01017). The combined
+    # key still uses the UNPADDED CliSess. The 192-bit (11g) path keeps its
+    # existing 0x08-padded CliSess and sends no speedy key, so it is unaffected.
     cipher = AES.new(KeySess, AES.MODE_CBC, IVec)
-    AuthSess = cipher.encrypt(CliSess)
+    AuthSess = cipher.encrypt(pad2(CliSess, 16) if Bits == 256 else CliSess)
 
     CatKey = cat_key(SrvSess, CliSess, DerivedSalt, Bits)
 
@@ -77,7 +82,7 @@ def o5logon0(Sess: bytes, KeySess: bytes, DerivedSalt: bytes | None, DerivedKey:
     SpeedyKeyInd = 0
     if DerivedKey is not None:
         cipher = AES.new(ConnKey, AES.MODE_CBC, IVec)
-        SpeedyKey = cipher.encrypt(DerivedKey)
+        SpeedyKey = cipher.encrypt(pad2(DerivedKey, 16))
         SpeedyKeyInd = 1
 
     return (AuthPass, AuthSess, SpeedyKey, SpeedyKeyInd, ConnKey)
@@ -147,6 +152,9 @@ def conn_key(Data: bytes, DerivedSalt: bytes | None, Bits: int) -> bytes:
         else:
             raise Exception("unsupported key size", 192)
     elif Bits == 256:
-        return pbkdf2_hmac('sha512', hexlify(Data), DerivedSalt, 3)
+        # AES-256 needs a 32-byte key; pbkdf2_hmac('sha512', ...) defaults to the
+        # full 64-byte digest, so request 32 explicitly. (SDER iteration count
+        # is 3, matching the server's AUTH_PBKDF2_SDER_COUNT.)
+        return pbkdf2_hmac('sha512', hexlify(Data), DerivedSalt, 3, dklen=32)
     else:
         raise Exception("unsupported key size", Bits)

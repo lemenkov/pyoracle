@@ -760,7 +760,10 @@ def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
 
     AuthPass = encode_kv(b"AUTH_PASSWORD", AuthPass.hex().upper().encode('utf-8'))
 
-    PBKDF2 = encode_kv(b"AUTH_PBKDF2_SPEEDY_KEY", SpeedyKey) if SpeedyKeyInd != 0 else b""
+    # AUTH_PBKDF2_SPEEDY_KEY is hex-encoded like AUTH_PASSWORD / AUTH_SESSKEY
+    # (the server expects the hex string, not the raw bytes — sending raw gives
+    # ORA-03146 "invalid buffer length for TTC field"). 256-bit scheme only.
+    PBKDF2 = encode_kv(b"AUTH_PBKDF2_SPEEDY_KEY", SpeedyKey.hex().upper().encode('utf-8')) if SpeedyKeyInd != 0 else b""
 
     AuthSess = encode_kv(b"AUTH_SESSKEY", AuthSess.hex().upper().encode('utf-8'), 1)
 
