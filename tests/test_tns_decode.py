@@ -49,6 +49,32 @@ class TestTnsCommandDecoders(unittest.TestCase):
     def test_decode_packet_sta(self):
         self.assertEqual(decode_packet(bytes([9,1,1,1,8]), [1, {'foo':'bar'}]), (True, [1, {'foo':'bar'}]))
 
+    def test_decode_select_response_21c(self):
+        # Full 'SELECT 1 FROM dual' response captured from Oracle 21c (DCB +
+        # RXH + RXD + RPA + OER), decoded with the 21.1 field version. Exercises
+        # the 12c per-column DCB format (sb1 scale, oaccolid) and confirms the
+        # row decodes to 1. With the default 11g field version this same buffer
+        # would mis-parse, so it guards the version-gated decode path.
+        import contextvars
+        from oracle.tns import decode_packet, FIELD_VERSION_21_1
+        Resp = bytes.fromhex(
+            "101735ebcd3cc510be7fdf53b18448bb2dda787e0608123633010201015c0200"
+            "00810102000000000000000001010101013100000000010707787e0608123633"
+            "00021fe80102010200062201010001020000000702c10208010603284b3a0001"
+            "02000000000000040101011b010102057b00000102010e0300000000000000000"
+            "0000000030001010000000002057b0101010300194f52412d30313430333a206e"
+            "6f206461746120666f756e640a")
+        # Run in a copied context so the field-version ContextVar set by
+        # decode_packet does not leak into other tests (production resets it per
+        # response). Mirrors how each connection decodes in its own context.
+        Result = contextvars.copy_context().run(
+            decode_packet, Resp, (None, None, []), FIELD_VERSION_21_1)
+        Rows = Result[4]
+        RowFormat = Result[3][1]
+        self.assertEqual(Rows, [[1]])
+        self.assertEqual(RowFormat[0]['data_type'], 2)   # NUMBER
+        self.assertEqual(RowFormat[0]['column_name'], b'1')
+
     def test_decode_token_pro_11g(self):
         # Authentic 11g PRO response (same bytes as test_tns_assemble_02, minus
         # the 8-byte TNS header and 2-byte data flags). field_version 6 = 11.2.

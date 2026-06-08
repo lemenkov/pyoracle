@@ -678,7 +678,7 @@ class OracleConnect:
             (Type, Packet) = Received
             match Type:
                 case t if t == TNS_DATA:
-                    return decode_packet(Packet, Acc)
+                    return decode_packet(Packet, Acc, self.field_version)
                 case t if t == TNS_MARKER:
                     logger.debug("response: marker")
                     self.send(TNS_MARKER, b"\x01\x00\x02")

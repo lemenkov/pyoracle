@@ -22,6 +22,7 @@ from oracle.tns_consts import (
     TTI_LOBOPS,
     UTF8_CHARSET,
 )
+import contextvars
 import logging
 import math
 import os
@@ -29,6 +30,15 @@ import socket
 import struct
 
 logger = logging.getLogger(__name__)
+
+# The TTC field version negotiated for the connection whose response we are
+# currently decoding. Set by `decode_packet` at the top of each response and
+# read by the version-gated token decoders (e.g. the 12c+ DCB column format).
+# A ContextVar (not a parameter threaded through every decoder, nor a plain
+# global) so concurrent async connections / sync threads each see their own
+# value. Default 6 == FIELD_VERSION_11_2 (defined later); decoders only diverge
+# from the 11g layout when this is >= a 12c+ field version.
+_DECODE_FIELD_VERSION = contextvars.ContextVar("decode_field_version", default=6)
 
 def assemble_packet(Data: bytes, Length: int) -> tuple[bool, int | None, bytes | None, bytes | None]:
     (PacketSize, PacketFlags, Type, Flags, Zero) = struct.unpack(">HhBBh", Data[:8])
@@ -58,7 +68,12 @@ def assemble_packet(Data: bytes, Length: int) -> tuple[bool, int | None, bytes |
     else:
         raise Exception("Cannot decode packet", Data, Length)
 
-def decode_packet(Data: bytes, Acc: object) -> object:
+def decode_packet(Data: bytes, Acc: object, FieldVersion: int | None = None) -> object:
+    # FieldVersion is passed only by the top-level caller (the connection's
+    # response handler); recursive token decoders omit it and inherit the value
+    # via the ContextVar set here.
+    if FieldVersion is not None:
+        _DECODE_FIELD_VERSION.set(FieldVersion)
     Token = Data[0]
     logger.debug("Token %s", Token)
     match Token:
@@ -187,16 +202,23 @@ def decode_token_dcb(Data: bytes, Acc: object) -> tuple:
     return decode_packet(Rest, (Cursor, Columns, Rows))
 
 def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
-    # Per-column metadata, 11g layout. Where 12c+ uses sb1 for precision/scale,
-    # 11g uses sb1 precision but sb4-style variable encoding for scale (so
-    # NUMBER's -127 default arrives as 0x81 0x7f).
+    # Per-column metadata. 12c+ (field version >= 12.2) differs from 11g in two
+    # ways (oracledb base.pyx _process_metadata): scale is a raw signed byte
+    # (sb1), and an extra ub4 `oaccolid` follows max_size. 11g keeps an
+    # sb4-style variable scale (so NUMBER's -127 default arrives as 0x81 0x7f)
+    # and has no oaccolid. precision is sb1 in both.
+    Is12c = _DECODE_FIELD_VERSION.get() >= 8     # FIELD_VERSION_12_2
     DataType = Rest[0]
     Precision = Rest[2]   # sb1
     Rest = Rest[3:]
-    (DataScale, Rest) = decode_ub4(Rest)
+    if Is12c:
+        DataScale = Rest[0] - 256 if Rest[0] > 127 else Rest[0]   # sb1
+        Rest = Rest[1:]
+    else:
+        (DataScale, Rest) = decode_ub4(Rest)
     (BufferSize, Rest) = decode_ub4(Rest)
     (_, Rest) = decode_ub4(Rest)              # max_array_elems
-    (_, Rest) = decode_ub4(Rest)              # cont_flags
+    (_, Rest) = decode_ub4(Rest)              # cont_flags (ub8 on 12c; small)
     (OidLen, Rest) = decode_ub4(Rest)
     if OidLen > 0:
         Rest = _skip_chunked_bytes(Rest)
@@ -205,6 +227,8 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
     Csfrm = Rest[0]                           # noqa: F841
     Rest = Rest[1:]
     (MaxSize, Rest) = decode_ub4(Rest)
+    if Is12c:
+        (_, Rest) = decode_ub4(Rest)          # oaccolid (12.2+)
     NullOk = Rest[0]
     Rest = Rest[2:]                           # skip nulls_allowed-byte AND v7 name length
     (ColName, Rest) = _read_str_with_length(Rest)
@@ -1490,6 +1514,19 @@ def decode_dalc(Bytes: bytes) -> tuple[bytes | list, bytes]:
 
 def decode_chr(Bytes: bytes) -> tuple[bytes, bytes]:
     if Bytes[0] == 254:
+        # LONG (chunked) value. 12c+ prefixes each chunk with a ub4 length and
+        # ends with a zero-length chunk (same framing as _skip_chunked_bytes);
+        # 11g uses a single length byte per chunk. The decode field version is
+        # set by decode_packet for the current response.
+        if _DECODE_FIELD_VERSION.get() >= 8:        # FIELD_VERSION_12_2
+            Rest = Bytes[1:]
+            Out = b""
+            while True:
+                (ChunkLen, Rest) = decode_ub4(Rest)
+                if ChunkLen == 0:
+                    return (Out, Rest)
+                Out += Rest[:ChunkLen]
+                Rest = Rest[ChunkLen:]
         j = 1
         i = Bytes[j]
         Out = b""

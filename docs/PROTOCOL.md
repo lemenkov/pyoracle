@@ -603,11 +603,21 @@ type_name (str_with_length, skipped) |
 column_position (ub2, skipped) | uds_flags (ub4, skipped)
 ```
 
-12c+ uses `sb1` for scale rather than the variable-length sb4 of 11g
-and inserts an additional `oaccolid` ub4 after `max_size`. The 11g
-layout is what pyoracle currently parses; supporting newer formats
-would need a capability-version gate keyed on the negotiated TTC
-field version.
+12c+ (field version >= 12.2) differs from 11g in the per-column block:
+scale is `sb1` (a raw signed byte) rather than 11g's variable-length
+sb4, and an extra `oaccolid` ub4 follows `max_size`. pyoracle decodes
+both, gated on the negotiated TTC field version (§4.2): the response
+handler passes `connection.field_version` into `decode_packet`, which
+publishes it (via a `ContextVar`) to the token decoders for the duration
+of that response.
+
+**Chunked (LONG) values.** A value whose length byte is `254` is sent in
+chunks. On 11g each chunk is a single length byte followed by that many
+data bytes, terminated by a zero byte. 12c+ prefixes each chunk with a
+`ub4` length and ends with a zero-length chunk (the same framing as every
+other `bytes_with_length` field). `decode_chr` picks the form by field
+version; without this a multi-chunk value (e.g. a 300-char string) walks
+off the end of the buffer.
 
 ### 6.5 I/O Vector (TTI_IOV)
 
