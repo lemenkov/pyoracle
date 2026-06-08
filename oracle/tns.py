@@ -134,6 +134,19 @@ def _skip_bytes_with_length(Data: bytes) -> bytes:
         Rest = _skip_chunked_bytes(Rest)
     return Rest
 
+def _bytes_with_length(Data: bytes) -> bytes:
+    # Inverse of `_skip_chunked_bytes` (oracledb write_bytes_with_length): a
+    # 1-byte length + data for short values (< 254), or the 254 LONG marker
+    # followed by ub4-prefixed chunks terminated by a zero-length chunk.
+    if len(Data) < 254:
+        return bytes([len(Data)]) + Data
+    Out = bytearray([254])
+    for I in range(0, len(Data), 0x40):
+        Chunk = Data[I:I + 0x40]
+        Out += encode_sb4(len(Chunk)) + Chunk
+    Out += encode_sb4(0)
+    return bytes(Out)
+
 def _read_str_with_length(Data: bytes) -> tuple[bytes, bytes]:
     (NumBytes, Rest) = decode_ub4(Data)
     if NumBytes > 0:
@@ -887,6 +900,7 @@ CCAP_VECTOR_FEATURES = 52
 FIELD_VERSION_11_2 = 6
 FIELD_VERSION_12_1 = 7
 FIELD_VERSION_12_2 = 8
+FIELD_VERSION_12_2_EXT1 = 9
 FIELD_VERSION_19_1 = 12
 FIELD_VERSION_21_1 = 16
 FIELD_VERSION_23_1 = 17
@@ -1234,9 +1248,27 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
     else:
         raise Exception("Unhandled tokens combination", Bind, Batch, Def, Query)
 
-    return bytes([TTI_FUN, TTI_ALL8, Tseq]) + encode_sb4(Opt) + encode_sb4(Cursor) + bytes([QueryFlag]) + encode_sb4(QueryLen) + bytes([All8Flag]) + \
+    Head = bytes([TTI_FUN, TTI_ALL8, Tseq]) + encode_sb4(Opt) + encode_sb4(Cursor) + bytes([QueryFlag]) + encode_sb4(QueryLen) + bytes([All8Flag]) + \
             encode_sb4(All8Len) + bytes([0,0]) + encode_sb4(LMax) + encode_sb4(Fetch) + encode_sb4(Max) + bytes([BindFlag]) + encode_sb4(BindLen) + \
-            bytes([0,0,0,0,0]) + bytes([DefFlag]) + encode_sb4(DefLen) + bytes([0, 0, 1]) + ServerVersion + Query + All8s + Tokens
+            bytes([0,0,0,0,0]) + bytes([DefFlag]) + encode_sb4(DefLen)
+
+    FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
+    if FieldVersion >= FIELD_VERSION_12_2:
+        # 12c+ OALL8 carries extra al8 fields after the 11g header: the DML
+        # row-count block, then (12.2+) the SQL-signature / SQL-id pointers and
+        # (12.2_EXT1+) the chunk-id pointers — all zero/null for us. The SQL is
+        # length-prefixed (write_bytes_with_length). Without these the server
+        # reads the SQL/al8i4 array from the wrong offset and returns ORA-03120
+        # (two-task conversion routine: integer overflow). See oracledb
+        # execute.pyx _write_execute_message.
+        Middle = bytes([0, 0, 1]) + bytes([0, 0, 0, 0, 0])   # reg_lsb .. reg_msb
+        Middle += bytes([0, 0, 0])                            # al8pidmlrc block
+        Middle += bytes([0, 0, 0, 0, 0])                      # 12.2 al8sqlsig / SQL id
+        if FieldVersion >= FIELD_VERSION_12_2_EXT1:
+            Middle += bytes([0, 0])                           # 12.2_EXT1 chunk ids
+        return Head + Middle + _bytes_with_length(Query) + All8s + Tokens
+
+    return Head + bytes([0, 0, 1]) + ServerVersion + Query + All8s + Tokens
 
 def encode_dictionary_fetch(Dictionary: dict) -> bytes:
     Tseq = Dictionary['seq']
