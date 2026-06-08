@@ -277,19 +277,22 @@ The client computes the authentication response:
 **Password encryption**: `AUTH_PASSWORD = AES-CBC(ConnKey, IV=0)` of `pad1(PASSWORD)`, where
 `pad1` is a 16-byte prefix block + `PASSWORD` + PKCS#7 padding. Sent hex-encoded (uppercase).
 
-**256-bit field padding & encoding (verified against python-oracledb / 21c):**
-- `AUTH_SESSKEY` (client) and `AUTH_PBKDF2_SPEEDY_KEY` are **PKCS#7-padded with a full extra
-  16-byte block** (`0x10`×16 when the plaintext is already block-aligned) before AES-CBC
-  encryption — the server validates this padding (omitting it → `ORA-01017`). The connection
-  key in step 4 still uses the **unpadded** `CliSess`.
-- `AUTH_PBKDF2_SPEEDY_KEY` plaintext = `random(16) || Data(64) || PKCS#7 pad(16)`, encrypted
-  with `ConnKey`. It lets the server recover `Data` (and thus verify the password) without the
-  plaintext. It must be **hex-encoded** like the other values — sending raw bytes →
-  `ORA-03146` ("invalid buffer length for TTC field").
+**256-bit field encoding (verified against python-oracledb / 21c on the wire):**
+- `AUTH_SESSKEY` (client, 32 bytes), `AUTH_PASSWORD` (32 bytes) and `AUTH_PBKDF2_SPEEDY_KEY`
+  (80 bytes) are encrypted block-aligned and sent **as-is, NOT given an extra PKCS#7 block**
+  (the client session key is the raw 32-byte `CliSess`; the speedy key is `random(16) ||
+  Data(64)`). All three values are **hex-encoded** (uppercase) on the wire — sending the
+  speedy key as raw bytes gives `ORA-03146` ("invalid buffer length for TTC field").
+- `AUTH_PBKDF2_SPEEDY_KEY` carries `Data` so the server can recover it (and verify the
+  password) without the plaintext.
 
-> **12c+ login status:** the 256-bit *crypto* above is implemented and verified byte-identical
-> to python-oracledb, but full 12c+ login is not complete — the `TTI_AUTH` message needs a
-> larger key/value set than 11g (e.g. `AUTH_CONNECT_STRING`), still being reverse-engineered.
+> **12c+ login status (UNSOLVED):** the 256-bit crypto above is implemented and verified
+> byte-identical to python-oracledb — every derived value matches and the `TTI_AUTH` message
+> is byte-structurally identical to oracledb's (same logon mode, key/value set, KV flags, and
+> field encodings). Yet 21c still returns `ORA-01017`. The remaining difference is **not** in
+> the auth message; the leading suspect is the capability negotiation (oracledb's DTY exchange
+> is far larger than pyoracle's), which may gate the server's acceptance of the 12c verifier.
+> Still under investigation.
 
 The auth response message:
 ```

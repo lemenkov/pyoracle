@@ -63,13 +63,8 @@ def o5logon0(Sess: bytes, KeySess: bytes, DerivedSalt: bytes | None, DerivedKey:
 
     CliSess = pad2(token_bytes(40), 8) if SrvSess[40:] == pad2(b"", 8) else token_bytes(len(SrvSess))
 
-    # The 256-bit (12c+ AES) scheme PKCS#7-pads the client session key and the
-    # speedy key with a full extra 16-byte block before encryption, and the
-    # server validates that padding (omitting it gives ORA-01017). The combined
-    # key still uses the UNPADDED CliSess. The 192-bit (11g) path keeps its
-    # existing 0x08-padded CliSess and sends no speedy key, so it is unaffected.
     cipher = AES.new(KeySess, AES.MODE_CBC, IVec)
-    AuthSess = cipher.encrypt(pad2(CliSess, 16) if Bits == 256 else CliSess)
+    AuthSess = cipher.encrypt(CliSess)
 
     CatKey = cat_key(SrvSess, CliSess, DerivedSalt, Bits)
 
@@ -82,7 +77,7 @@ def o5logon0(Sess: bytes, KeySess: bytes, DerivedSalt: bytes | None, DerivedKey:
     SpeedyKeyInd = 0
     if DerivedKey is not None:
         cipher = AES.new(ConnKey, AES.MODE_CBC, IVec)
-        SpeedyKey = cipher.encrypt(pad2(DerivedKey, 16))
+        SpeedyKey = cipher.encrypt(DerivedKey)
         SpeedyKeyInd = 1
 
     return (AuthPass, AuthSess, SpeedyKey, SpeedyKeyInd, ConnKey)
