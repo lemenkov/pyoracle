@@ -576,6 +576,8 @@ class AsyncOracleConnect:
             Data = encode_dictionary(self._make_dict(DictionaryType.close))
             await self.send(TNS_DATA, Data)
         except Exception:
+            # Best-effort logoff: if the server already hung up we still
+            # want to tear down the local socket below.
             pass
         await self.disconnect()
 
@@ -585,11 +587,15 @@ class AsyncOracleConnect:
                 if self._writer.can_write_eof():
                     self._writer.write_eof()
             except (OSError, AttributeError):
+                # The transport may not support EOF or may already be
+                # closed; proceed straight to close() either way.
                 pass
             try:
                 self._writer.close()
                 await self._writer.wait_closed()
             except OSError:
+                # The socket may already be torn down by the peer; the
+                # writer is being discarded regardless.
                 pass
             self._writer = None
             self._reader = None

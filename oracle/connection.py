@@ -718,6 +718,8 @@ class OracleConnect:
             try:
                 self.sock.shutdown(socket.SHUT_WR)
             except OSError:
+                # The peer may have already closed its side; we still
+                # close() the local socket immediately below.
                 pass
             self.sock.close()
             self.sock = None

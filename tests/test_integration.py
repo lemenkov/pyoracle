@@ -86,6 +86,8 @@ class _IntegrationBase(unittest.TestCase):
                 try:
                     self.conn.close()
                 except Exception:
+                    # Best-effort: we are retrying with a fresh connection;
+                    # a failed close on the stale one does not matter.
                     pass
                 import time
                 time.sleep(0.05)
@@ -1351,6 +1353,8 @@ class PoolIntegration(unittest.TestCase):
             try:
                 Conn.sock.close()
             except Exception:
+                # Best-effort: deliberately sabotaging the socket for the
+                # test; any close error here is irrelevant.
                 pass
             # Next acquire must succeed (with a fresh connection,
             # ping caught the dead one).
@@ -1835,6 +1839,8 @@ class AsyncPoolIntegration(unittest.IsolatedAsyncioTestCase):
                 Conn._writer.close()
                 await Conn._writer.wait_closed()
             except Exception:
+                # Best-effort: deliberately sabotaging the writer for the
+                # test; any close error here is irrelevant.
                 pass
             async with Pool.acquire() as Conn2:
                 Cur = Conn2.cursor()

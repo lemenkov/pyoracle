@@ -134,6 +134,8 @@ class AsyncPool:
                 try:
                     await conn.close()
                 except Exception:
+                    # Best-effort: the pool is closing, so there is nothing
+                    # to recover if this connection fails to close cleanly.
                     pass
                 return
             self._free.append(_AsyncPoolEntry(conn))
@@ -151,6 +153,8 @@ class AsyncPool:
                 try:
                     await Entry.conn.close()
                 except Exception:
+                    # Best-effort: keep draining the rest even if one
+                    # connection refuses to close.
                     pass
             self._available.notify_all()
 
@@ -231,6 +235,8 @@ class AsyncPool:
                 try:
                     await Cur.close()
                 except Exception:
+                    # Best-effort: the ping already has its result; a failed
+                    # cursor close must not mask it.
                     pass
             return True
         except Exception:
@@ -240,6 +246,8 @@ class AsyncPool:
         try:
             await conn.close()
         except Exception:
+            # The connection is already known to be dead; closing it is
+            # purely best-effort cleanup.
             pass
 
 

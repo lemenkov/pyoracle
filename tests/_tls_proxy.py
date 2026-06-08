@@ -56,6 +56,7 @@ class TLSProxy:
             try:
                 self._sock.close()
             except OSError:
+                # Best-effort: the listening socket may already be closed.
                 pass
         if self._thread is not None:
             self._thread.join(timeout=2)
@@ -80,6 +81,7 @@ class TLSProxy:
             try:
                 plain_client.close()
             except OSError:
+                # Best-effort: the handshake already failed; just drop it.
                 pass
             return
         try:
@@ -89,6 +91,7 @@ class TLSProxy:
             try:
                 tls_client.close()
             except OSError:
+                # Best-effort: backend connect failed; drop the client.
                 pass
             return
         # Pump in both directions. Either side closing tears the pair down.
@@ -110,16 +113,20 @@ class TLSProxy:
                     break
                 dst.sendall(buf)
         except (ssl.SSLError, OSError):
+            # Either side closing tears the pair down; the finally block
+            # below cleans up both sockets.
             pass
         finally:
             for s in (src, dst):
                 try:
                     s.shutdown(socket.SHUT_RDWR)
                 except OSError:
+                    # Best-effort: the socket may already be half-closed.
                     pass
                 try:
                     s.close()
                 except OSError:
+                    # Best-effort: nothing to do if it is already closed.
                     pass
 
     def __enter__(self) -> "TLSProxy":
