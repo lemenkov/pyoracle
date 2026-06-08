@@ -800,7 +800,14 @@ def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
 
     AuthSess = encode_kv(b"AUTH_SESSKEY", AuthSess.hex().upper().encode('utf-8'), 1)
 
-    Data = bytes([TTI_FUN, TTI_AUTH, Tseq, 1]) + encode_sb4(len(User)) + LogonMode + bytes([1]) + encode_sb4(2 + SpeedyKeyInd) + bytes([1, 1]) + User + AuthPass + PBKDF2 + AuthSess
+    # 12c+ length-prefixes the username (write_bytes_with_length), same as the
+    # OSESSKEY phase; 11g sends it raw (read via the UserLen field). Sending the
+    # raw form to 21c makes it read the first username byte as a length and
+    # desync — surfaces as ORA-03120 (two-task conversion: integer overflow).
+    FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
+    UserField = bytes([len(User)]) + User if FieldVersion >= FIELD_VERSION_12_1 else User
+
+    Data = bytes([TTI_FUN, TTI_AUTH, Tseq, 1]) + encode_sb4(len(User)) + LogonMode + bytes([1]) + encode_sb4(2 + SpeedyKeyInd) + bytes([1, 1]) + UserField + AuthPass + PBKDF2 + AuthSess
 
     return (Data, ConnKey)
 
@@ -1316,6 +1323,19 @@ def encode_dictionary_sess(Dictionary: dict) -> bytes:
     Prelim = Dictionary['env'].get('prelim', 0)
     LogonMode = encode_sb4( (Role * 32) | (Prelim * 128) | 1 )
     AppName = encode_kv(b"AUTH_PROGRAM_NM", Dictionary['env'].get('app_name', "pyoracle").encode('utf-8'))
+
+    FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
+    if FieldVersion >= FIELD_VERSION_12_1:
+        # 12c+ OSESSKEY (python-oracledb auth.pyx _write_message phase one):
+        # the username is length-prefixed (write_bytes_with_length) and the
+        # pair count is 5, leading with AUTH_TERMINAL. 11g instead reads the
+        # username by the earlier UserLen field and sends 4 pairs; sending the
+        # 12c shape to 11g (or vice-versa) desyncs the server's parse.
+        Terminal = encode_kv(b"AUTH_TERMINAL", b"unknown")
+        UserField = bytes([len(User)]) + User
+        return (bytes([TTI_FUN, TTI_SESS, Tseq, 1]) + UserLen + LogonMode
+                + bytes([1]) + encode_sb4(5) + bytes([1, 1]) + UserField
+                + Terminal + AppName + Hostname + Pid + SID)
 
     return bytes([TTI_FUN, TTI_SESS, Tseq, 1]) + UserLen + LogonMode + bytes([1]) + encode_sb4(4) + bytes([1, 1]) + User + AppName + Hostname + Pid + SID
 

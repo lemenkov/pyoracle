@@ -149,7 +149,10 @@ def conn_key(Data: bytes, DerivedSalt: bytes | None, Bits: int) -> bytes:
     elif Bits == 256:
         # AES-256 needs a 32-byte key; pbkdf2_hmac('sha512', ...) defaults to the
         # full 64-byte digest, so request 32 explicitly. (SDER iteration count
-        # is 3, matching the server's AUTH_PBKDF2_SDER_COUNT.)
-        return pbkdf2_hmac('sha512', hexlify(Data), DerivedSalt, 3, dklen=32)
+        # is 3, matching the server's AUTH_PBKDF2_SDER_COUNT.) The PBKDF2
+        # password must be the UPPERCASE hex of the key material — oracledb uses
+        # temp_key.hex().upper(); lowercase hex yields a different ConnKey and
+        # the server rejects AUTH_PASSWORD with ORA-01017.
+        return pbkdf2_hmac('sha512', hexlify(Data).upper(), DerivedSalt, 3, dklen=32)
     else:
         raise Exception("unsupported key size", Bits)

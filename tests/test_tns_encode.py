@@ -187,6 +187,27 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
         with self.assertRaises(ValueError):
             capability_arrays(99)
 
+    @patch('os.getpid')
+    @patch('socket.gethostname')
+    def test_tns_sess_12c(self, mock_gethostname, mock_getpid):
+        # 12c+ OSESSKEY: 5 key/value pairs led by AUTH_TERMINAL, and the
+        # username is length-prefixed (3, "pyo") rather than raw.
+        from oracle.tns import FIELD_VERSION_21_1
+        mock_getpid.return_value = 18967
+        mock_gethostname.return_value = "ExampleHost"
+        Env = {'host': "localhost", 'port': 1521, 'user': "pyo",
+               'password': "p", 'sid': "XE", 'app_name': "oratest"}
+        Dict = {'type': DictionaryType.sess, 'env': Env, 'seq': 3,
+                'field_version': FIELD_VERSION_21_1}
+        Ret = bytes([3,118,3,1,1,3,1,1,1,1,5,1,1,3,112,121,111,
+            1,13,13,65,85,84,72,95,84,69,82,77,73,78,65,76,1,7,7,117,110,107,
+            110,111,119,110,0,1,15,15,65,85,84,72,95,80,82,79,71,82,65,77,95,
+            78,77,1,7,7,111,114,97,116,101,115,116,0,1,12,12,65,85,84,72,95,77,
+            65,67,72,73,78,69,1,11,11,69,120,97,109,112,108,101,72,111,115,116,
+            0,1,8,8,65,85,84,72,95,80,73,68,1,5,5,49,56,57,54,55,0,1,8,8,65,85,
+            84,72,95,83,73,68,1,3,3,112,121,111,0])
+        self.assertEqual(encode_dictionary(Dict), Ret)
+
     def test_dty_table_12c(self):
         # The 12c+ datatype table must stay byte-identical to python-oracledb
         # 4.0.1's DATA_TYPES table captured against 21c (sha256 of the rendered

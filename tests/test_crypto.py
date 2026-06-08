@@ -81,6 +81,22 @@ class TestCryptoPrivateMethods(unittest.TestCase):
         Bits = 192
         self.assertEqual(conn_key(CatKey, DerivedSalt, Bits), ConnKey)
 
+    def test_conn_key_256(self):
+        # 256-bit (12c+) ConnKey: PBKDF2-SHA512 over the UPPERCASE hex of the
+        # key material (oracledb's temp_key.hex().upper()). Lowercase hex yields
+        # a different key and the server rejects AUTH_PASSWORD with ORA-01017.
+        from binascii import hexlify
+        from hashlib import pbkdf2_hmac
+        CatKey = bytes(range(64))
+        DerivedSalt = bytes.fromhex("0011223344556677")
+        self.assertEqual(
+            conn_key(CatKey, DerivedSalt, 256).hex(),
+            "961a28757a2c261d8b24cbfcc5921a49358abf5582076010c26b197b5f7f3304")
+        # must differ from the (wrong) lowercase derivation
+        self.assertNotEqual(
+            conn_key(CatKey, DerivedSalt, 256),
+            pbkdf2_hmac('sha512', hexlify(CatKey), DerivedSalt, 3, dklen=32))
+
     def test_norm1(self):
         self.assertEqual(norm(bytes("hello", 'UTF-8')),bytes([0,72,0,69,0,76,0,76,0,79,0,0,0,0,0,0]))
 
