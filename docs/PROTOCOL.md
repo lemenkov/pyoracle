@@ -257,16 +257,39 @@ The client computes the authentication response:
 **Key derivation** depends on the variant:
 
 - **128-bit (O5LOGON)**: DES-CBC encryption of normalized `USER+PASSWORD`, producing a 16-byte session key.
-- **192-bit**: SHA-1 hash of `PASSWORD + unhex(SALT)`, zero-padded to 24 bytes.
-- **256-bit**: PBKDF2-HMAC-SHA512 (4096 iterations, 64-byte output) of `PASSWORD` with salt `unhex(AUTH_VFR_DATA) || "AUTH_PBKDF2_SPEEDY_KEY"`, then SHA-512 hashed with the salt.
+- **192-bit** (11g XE): SHA-1 hash of `PASSWORD + unhex(SALT)`, zero-padded to 24 bytes (the
+  AES-192 `KeySess`).
+- **256-bit** (12c+, e.g. 21c XE): `Data = PBKDF2-HMAC-SHA512(PASSWORD, salt =
+  unhex(AUTH_VFR_DATA) || "AUTH_PBKDF2_SPEEDY_KEY", iterations = AUTH_PBKDF2_VGEN_COUNT
+  (4096), dklen = 64)`, then `KeySess = SHA-512(Data || unhex(AUTH_VFR_DATA))[:32]` (the
+  AES-256 key). `Data` is also carried to the server in `AUTH_PBKDF2_SPEEDY_KEY` (below).
 
 **Session key exchange**:
-1. Decrypt `AUTH_SESSKEY` using the derived key with AES-CBC (IV = 0).
-2. Generate a random client session key of the same size.
-3. Encrypt the client session key and send it as `AUTH_SESSKEY`.
-4. Derive the connection key from XOR/concatenation of server and client session keys, optionally through PBKDF2 for 256-bit variant.
+1. Decrypt `AUTH_SESSKEY` (server's) with `KeySess` using AES-CBC (IV = 0) → `SrvSess`.
+2. Generate a random client session key `CliSess` of the same size.
+3. Encrypt `CliSess` with `KeySess` and send it as `AUTH_SESSKEY`.
+4. Derive the connection key `ConnKey` from the server and client session keys:
+   - 128-bit: MD5 over XOR/concatenation; 192-bit: MD5-based, 24 bytes.
+   - **256-bit**: `ConnKey = PBKDF2-HMAC-SHA512(hexlify(CliSess || SrvSess), salt =
+     unhex(AUTH_PBKDF2_CSK_SALT), iterations = AUTH_PBKDF2_SDER_COUNT (3), dklen = 32)`.
+     Note the order — **client session key first**, and the *unpadded* keys are concatenated.
 
-**Password encryption**: The password is PKCS-padded (16-byte blocks with a 16-byte prefix pad) and encrypted with the connection key using AES-CBC (IV = 0).
+**Password encryption**: `AUTH_PASSWORD = AES-CBC(ConnKey, IV=0)` of `pad1(PASSWORD)`, where
+`pad1` is a 16-byte prefix block + `PASSWORD` + PKCS#7 padding. Sent hex-encoded (uppercase).
+
+**256-bit field padding & encoding (verified against python-oracledb / 21c):**
+- `AUTH_SESSKEY` (client) and `AUTH_PBKDF2_SPEEDY_KEY` are **PKCS#7-padded with a full extra
+  16-byte block** (`0x10`×16 when the plaintext is already block-aligned) before AES-CBC
+  encryption — the server validates this padding (omitting it → `ORA-01017`). The connection
+  key in step 4 still uses the **unpadded** `CliSess`.
+- `AUTH_PBKDF2_SPEEDY_KEY` plaintext = `random(16) || Data(64) || PKCS#7 pad(16)`, encrypted
+  with `ConnKey`. It lets the server recover `Data` (and thus verify the password) without the
+  plaintext. It must be **hex-encoded** like the other values — sending raw bytes →
+  `ORA-03146` ("invalid buffer length for TTC field").
+
+> **12c+ login status:** the 256-bit *crypto* above is implemented and verified byte-identical
+> to python-oracledb, but full 12c+ login is not complete — the `TTI_AUTH` message needs a
+> larger key/value set than 11g (e.g. `AUTH_CONNECT_STRING`), still being reverse-engineered.
 
 The auth response message:
 ```
