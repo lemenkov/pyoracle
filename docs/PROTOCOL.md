@@ -724,6 +724,13 @@ follows the batch-error-messages count carrying the human-readable
 embed a copy of Oracle's error-message catalogue in the driver
 (`CONTRIBUTING.md` calls this out explicitly).
 
+On 11g that DALC comes right after the batch-error arrays. 12c+ inserts
+the extended-precision error number (`ub4`) and rowcount (`ub8`) before
+it, and 20.1+ adds a `ub4` SQL type and `ub4` server checksum. `decode_
+token_oer` skips these by field version (§4.2); without it the message
+DALC is mis-aligned and decodes to garbage even though the early
+`ora_error_code` (and thus the exception class) is still correct.
+
 ### 6.8 Status (TTI_STA)
 
 Indicates successful completion of a transaction operation (COMMIT, ROLLBACK, PING).

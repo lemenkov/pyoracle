@@ -430,9 +430,17 @@ def decode_token_oer(Data: bytes, Acc: tuple) -> tuple:
             (_, Rest) = decode_ub4(Rest)             # chunk length
             Rest = _skip_bytes_with_length(Rest)     # message bytes
             Rest = Rest[2:]                          # end marker
-    # On 11g the trailing message DALC comes right here. 12c+ has two more
-    # extended-precision fields (ub4 error num + ub8 rowcount) ahead of it,
-    # which would need a capability-version gate we don't surface yet.
+    # On 11g the trailing message DALC comes right here. 12c+ inserts the
+    # extended-precision error number (ub4) and rowcount (ub8) ahead of it, and
+    # 20.1+ adds a ub4 sql type + ub4 server checksum (oracledb
+    # _process_error_info). Skip them so the message DALC stays aligned.
+    FieldVersion = _DECODE_FIELD_VERSION.get()
+    if FieldVersion >= 7:                             # FIELD_VERSION_12_1
+        (_, Rest) = decode_ub4(Rest)                  # extended error number
+        (_, Rest) = decode_ub4(Rest)                  # extended rowcount (ub8)
+        if FieldVersion >= 14:                        # FIELD_VERSION_20_1
+            (_, Rest) = decode_ub4(Rest)              # sql type
+            (_, Rest) = decode_ub4(Rest)              # server checksum
     Message = None
     if ErrCode != 0 and Rest:
         try:

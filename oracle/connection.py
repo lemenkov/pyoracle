@@ -263,9 +263,12 @@ class OracleConnect:
                             # Decode it and raise rather than looping forever on
                             # an empty socket.
                             logger.debug("handle_login: recv OER")
-                            from oracle.tns import decode_token_oer
+                            from oracle.tns import decode_packet
                             from oracle.exceptions import DatabaseError, from_ora_code
-                            Result = decode_token_oer(Packet, (None, None, []))
+                            # Via decode_packet so the negotiated field version
+                            # is published for the (version-gated) OER decode.
+                            Result = decode_packet(Packet, (None, None, []),
+                                                   self.field_version)
                             ErrCode = Result[1]
                             Message = Result[5] if len(Result) > 5 else None
                             if ErrCode and ErrCode not in (0, 1403):
