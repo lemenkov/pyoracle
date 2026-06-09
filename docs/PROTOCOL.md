@@ -247,8 +247,13 @@ msgtype=2 | charset_in (UB2 LE) | charset_out (UB2 LE) | flag (UB1) |
   is a named feature slot (`TNS_CCAP_*` / `TNS_RCAP_*`). The most important is
   the **field version** at compile-cap index 7 (`TNS_CCAP_FIELD_VERSION`): it
   selects the auth-verifier scheme and the version-gated wire formats the rest
-  of the session uses. pyoracle sends `6` (11.2); python-oracledb sends e.g.
-  `16` (21.1) against a 21c server.
+  of the session uses. pyoracle advertises `16` (21.1) by default and the
+  server negotiates it down to its own max (`min(client, server)`), so an 11g
+  server settles on `6` (11.2) and pyoracle then emits the 11g vectors/formats;
+  pass `field_version=FIELD_VERSION_11_2` to force the legacy vector. The
+  capability *contents* are stable across 12c+ releases, so for any negotiated
+  12c+ version pyoracle renders the 21.1 base vector with that version byte
+  patched in (`capability_arrays`).
 - **datatype table**: per-type `(type, conv, repr, flags)` entries. pyoracle
   uses the 11g 1-byte-per-field form (4 bytes/entry, terminated by `0 0`); 12c+
   uses a 2-byte-per-field form (`UB2`×4, terminated by `UB2 0`).

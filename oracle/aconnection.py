@@ -33,7 +33,7 @@ from oracle.tns import decode_token_rpa
 from oracle.tns import encode_dictionary
 from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
-from oracle.tns import CCAP_FIELD_VERSION, FIELD_VERSION_11_2
+from oracle.tns import CCAP_FIELD_VERSION, FIELD_VERSION_11_2, FIELD_VERSION_21_1
 from oracle.connection import _format_version
 from oracle.tns_consts import (
     CONN_STATE_AUTHENTICATED, CONN_STATE_AUTH_NEGOTIATE,
@@ -59,7 +59,7 @@ class AsyncOracleConnect:
                  autocommit: bool = True, fetch: int = 15, role: int = 0,
                  prelim: int = 0, sdu: int = 8192, charset: str = "utf-8",
                  app_name: str = "pyoracle",
-                 field_version: int = FIELD_VERSION_11_2):
+                 field_version: int = FIELD_VERSION_21_1):
         self.host = host
         self.port = port
         self.user = user

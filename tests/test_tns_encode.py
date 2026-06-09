@@ -183,9 +183,19 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
         # field version lands at the documented slot
         self.assertEqual(cc[7], FIELD_VERSION_21_1)
 
-    def test_capability_arrays_unsupported(self):
+    def test_capability_arrays_intermediate(self):
+        # An intermediate 12c+ version (e.g. 19.1 = 12) renders the 21.1 base
+        # vector with the field-version byte patched in, so the client can
+        # negotiate down to any 12c+ server.
+        from oracle.tns import FIELD_VERSION_19_1, FIELD_VERSION_21_1
+        cc19, _ = capability_arrays(FIELD_VERSION_19_1)
+        cc21, _ = capability_arrays(FIELD_VERSION_21_1)
+        self.assertEqual(cc19[7], FIELD_VERSION_19_1)
+        self.assertEqual(len(cc19), len(cc21))            # same 53-byte base
+        self.assertEqual(cc19[:7], cc21[:7])
+        self.assertEqual(cc19[8:], cc21[8:])              # only byte 7 differs
         with self.assertRaises(ValueError):
-            capability_arrays(99)
+            capability_arrays(999)
 
     @patch('os.getpid')
     @patch('socket.gethostname')

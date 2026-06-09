@@ -1037,13 +1037,19 @@ def _render_caps(spec: tuple[int, dict]) -> bytes:
 def capability_arrays(field_version: int = FIELD_VERSION_11_2) -> tuple[bytes, bytes]:
     """Return (compile_caps, runtime_caps) for a target TTC field version.
 
-    Defaults to 11.2, which is byte-identical to what pyoracle has always sent.
-    Higher versions are staged for 12c+ support (issue #27) and not wired into
-    the handshake yet — advertising one also requires the matching version-gated
-    DATA_TYPES table / OER / datatype decoding."""
-    if field_version not in _COMPILE_CAPS:
-        raise ValueError(f"unsupported TTC field version: {field_version}")
-    return _render_caps(_COMPILE_CAPS[field_version]), _render_caps(_RUNTIME_CAPS[field_version])
+    Two base vectors are modelled: the 11.2 vector for pre-12c field versions
+    (byte-identical to what pyoracle has always sent) and the 21.1 vector for
+    12c+. The capability *contents* are stable across 12c+ releases — only the
+    field-version byte differs — so for any negotiated 12c+ version we render
+    the 21.1 base and patch in that version. This lets the client advertise the
+    highest version and operate against any server it negotiates down to
+    (12.1 / 12.2 / 18c / 19c / 21c …)."""
+    if not 0 <= field_version <= 0xFF:
+        raise ValueError(f"field version out of range: {field_version}")
+    Base = FIELD_VERSION_21_1 if field_version >= FIELD_VERSION_12_1 else FIELD_VERSION_11_2
+    Compile = bytearray(_render_caps(_COMPILE_CAPS[Base]))
+    Compile[CCAP_FIELD_VERSION] = field_version
+    return bytes(Compile), _render_caps(_RUNTIME_CAPS[Base])
 
 
 # 12c+ datatype table. Where the 11g table (built inline in encode_dictionary_dty
