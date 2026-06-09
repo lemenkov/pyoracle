@@ -48,9 +48,10 @@ What works so far:
   `oracle.BinaryFloat(x)` / `oracle.BinaryDouble(x)` to send a native
   32/64-bit IEEE-754 binary float (the only way to bind `inf` / `nan`,
   which a non-finite plain `float` also auto-routes to BINARY_DOUBLE).
-  `str` and `bytes` binds reach up to ~7 KiB on the default 8 KiB SDU,
-  suitable for most CLOB / BLOB inserts; see "still in progress" for
-  the larger case
+  `str` and `bytes` binds round-trip into CLOB / BLOB columns at any
+  size: a value larger than the regular ~32 KiB ceiling is streamed to
+  the server across multiple TNS packets (tested byte-for-byte to
+  hundreds of KiB on both 11g and 12c+)
 - Anonymous PL/SQL blocks with bind variables: `cur.execute("BEGIN
   ... :x ...; END;", [val])` runs the block server-side
 - Stored procedures and OUT / IN OUT binds: `cur.callproc(name,
@@ -127,19 +128,6 @@ What works so far:
   `acquire/release/idle health-check` semantics as the sync `Pool`.
   Shares the protocol code with the sync APIs; the duplication is
   just the I/O layer
-
-What is still in progress:
-
-- Very large LOB binds (more than one SDU's worth in a single bind).
-  CLOB / BLOB inserts up to ~7 KiB on the default 8 KiB SDU work
-  through the regular RAW / VARCHAR2 bind path today; past that the
-  request would span multiple TNS packets and the current packet-
-  fragmentation code doesn't produce a layout the server accepts
-  (`ORA-12592 TNS:bad packet`). The proper fix is a `TTI_LOBOPS`
-  WRITE path (allocate a temp LOB, stream content into it, bind the
-  locator) — that bypasses the SDU ceiling. Until then, content past
-  ~7 KiB needs to be loaded server-side via `DBMS_LOB` / SQL
-  literals.
 
 ## Requirements
 

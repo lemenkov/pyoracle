@@ -1301,6 +1301,58 @@ class LOBIntegration(_IntegrationBase):
         (Got,) = self.cur.fetchone()
         self.assertEqual(Got, Payload)
 
+    # --- Very large LOB binds (#14) -------------------------------------
+    #
+    # A bind larger than the 32767-byte regular ceiling is streamed to the
+    # server as a chunked LONG value and lands in the CLOB / BLOB column. The
+    # request itself spans many TNS packets, so this also leans on the request
+    # fragmentation fix (#8). These exercise the issue's acceptance sizes
+    # (50 KiB and 500 KiB) for both LOB types, byte-for-byte, on 11g and 12c+.
+
+    def test_clob_bind_50kib(self):
+        self._setup()
+        Text = "0123456789abcdef" * (50 * 1024 // 16)   # 51200 chars
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE}(id, c) VALUES (1, :c)", {"c": Text}
+        )
+        self.cur.execute(f"SELECT c FROM {self.TABLE}")
+        (Got,) = self.cur.fetchone()
+        self.assertEqual(len(Got), len(Text))
+        self.assertEqual(Got, Text)
+
+    def test_clob_bind_500kib(self):
+        self._setup()
+        Text = "0123456789abcdef" * (500 * 1024 // 16)  # 512000 chars
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE}(id, c) VALUES (1, :c)", {"c": Text}
+        )
+        self.cur.execute(f"SELECT c FROM {self.TABLE}")
+        (Got,) = self.cur.fetchone()
+        self.assertEqual(len(Got), len(Text))
+        self.assertEqual(Got, Text)
+
+    def test_blob_bind_50kib(self):
+        self._setup()
+        Payload = bytes(range(256)) * 200    # 51200 bytes, every byte value
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE}(id, b) VALUES (1, :b)", {"b": Payload}
+        )
+        self.cur.execute(f"SELECT b FROM {self.TABLE}")
+        (Got,) = self.cur.fetchone()
+        self.assertEqual(len(Got), len(Payload))
+        self.assertEqual(Got, Payload)
+
+    def test_blob_bind_500kib(self):
+        self._setup()
+        Payload = bytes(range(256)) * 2000   # 512000 bytes, every byte value
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE}(id, b) VALUES (1, :b)", {"b": Payload}
+        )
+        self.cur.execute(f"SELECT b FROM {self.TABLE}")
+        (Got,) = self.cur.fetchone()
+        self.assertEqual(len(Got), len(Payload))
+        self.assertEqual(Got, Payload)
+
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class PoolIntegration(unittest.TestCase):
