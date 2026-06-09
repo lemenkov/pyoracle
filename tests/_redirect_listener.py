@@ -57,8 +57,10 @@ class RedirectListener:
         try:
             conn.recv(8192)                       # read + discard the CONNECT
             conn.sendall(self._redirect_packet())
-        except OSError:
-            pass
+        except OSError as exc:
+            # Test fixture: client disconnects/races during teardown are
+            # expected sometimes; keep behavior best-effort but not silent.
+            print(f"RedirectListener socket error: {exc}")
         finally:
             conn.close()
 
