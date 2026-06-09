@@ -1139,7 +1139,7 @@ def encode_dictionary_dty(Dictionary: dict) -> bytes:
     # static C table at link time; we emit it as a constant for the same reason.
     # The table form is version-gated below: 11g 1-byte vs 12c+ 2-byte.
     logger.debug("encode_dictionary_dty: %s", _redacted(Dictionary))
-    Charset = struct.pack("<H", CharsetDict.get(Dictionary['req'], UTF8_CHARSET))
+    Charset = struct.pack("<H", CharsetDict.get(Dictionary['req'], AL32UTF8_CHARSET))
 
     # Compile-time + runtime capability arrays, each emitted as a length byte
     # followed by the array (write_bytes_with_length in oracledb terms).
@@ -1745,7 +1745,7 @@ def encode_token_oac(Token: object) -> bytes:
             return encode_token_raw(TNS_TYPE_NUMBER, 22, 0, 0, 0)
         if DT == TNS_TYPE_VARCHAR:
             return encode_token_raw(TNS_TYPE_VARCHAR, Token.size, 16,
-                                    UTF8_CHARSET, 0)
+                                    AL32UTF8_CHARSET, 0)
         if DT == TNS_TYPE_RAW:
             return encode_token_raw(TNS_TYPE_RAW, Token.size, 16, 0, 0)
         if DT == TNS_TYPE_DATE:
@@ -1768,7 +1768,7 @@ def encode_token_oac(Token: object) -> bytes:
     if Token is None:
         # NULL value (0 bytes): a minimal VARCHAR OAC, again avoiding the
         # 32767 LONG-reorder swap when a NULL bind precedes another bind.
-        return encode_token_raw(TNS_TYPE_VARCHAR, 1, 16, UTF8_CHARSET, 0)
+        return encode_token_raw(TNS_TYPE_VARCHAR, 1, 16, AL32UTF8_CHARSET, 0)
     if isinstance(Token, BinaryFloat):
         return encode_token_raw(TNS_TYPE_BFLOAT, 4, 0, 0, 0)
     if isinstance(Token, BinaryDouble):
@@ -1792,7 +1792,7 @@ def encode_token_oac(Token: object) -> bytes:
         # needs for the ~7 KiB regular-path CLOB case.
         return encode_token_raw(
             TNS_TYPE_VARCHAR, max(len(Token.encode('utf-8')), 1), 16,
-            UTF8_CHARSET, 0)
+            AL32UTF8_CHARSET, 0)
     if isinstance(Token, (bytes, bytearray)):
         # Bind as RAW so arbitrary byte sequences (non-UTF8, control bytes,
         # 0x80+) round-trip verbatim into RAW / BLOB columns. Size to the
