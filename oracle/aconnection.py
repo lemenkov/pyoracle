@@ -34,7 +34,7 @@ from oracle.tns import encode_dictionary
 from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
 from oracle.tns import CCAP_FIELD_VERSION, FIELD_VERSION_11_2, FIELD_VERSION_21_1
-from oracle.connection import _format_version
+from oracle.connection import _format_version, _MAX_REDIRECTS
 from oracle.tns_consts import (
     CONN_STATE_AUTHENTICATED, CONN_STATE_AUTH_NEGOTIATE,
     CONN_STATE_CONNECTED, CONN_STATE_DISCONNECTED,
@@ -157,9 +157,9 @@ class AsyncOracleConnect:
 
     # ----- I/O primitives -----
 
-    async def connect(self) -> bool:
-        """Open the TCP (optionally TLS) connection and run the
-        TNS / TTC / O5LOGON handshake."""
+    async def _open_transport(self) -> None:
+        # Open the TCP (optionally TLS) socket to the current host/port and send
+        # the initial CONNECT. Shared by connect() and the TNS_REDIRECT handler.
         SslArg = self._ssl_kwarg()
         # Force IPv4 to match the sync path. asyncio.open_connection
         # otherwise defers to getaddrinfo's default ordering, which
@@ -176,6 +176,12 @@ class AsyncOracleConnect:
         )
         Data = encode_dictionary(self._make_dict(DictionaryType.login))
         await self.send(TNS_CONNECT, Data)
+
+    async def connect(self) -> bool:
+        """Open the TCP (optionally TLS) connection and run the
+        TNS / TTC / O5LOGON handshake."""
+        self._redirects = 0
+        await self._open_transport()
         await self.handle_login()
         return True
 
@@ -289,7 +295,19 @@ class AsyncOracleConnect:
                     await self.send(TNS_MARKER, b"\x01\x00\x02")
                     continue
                 case t if t == TNS_REDIRECT:
-                    return 1
+                    from oracle.tns import parse_redirect_address
+                    (NewHost, NewPort) = parse_redirect_address(Packet)
+                    if NewHost is None:
+                        return 1
+                    self._redirects = getattr(self, "_redirects", 0) + 1
+                    if self._redirects > _MAX_REDIRECTS:
+                        from oracle.exceptions import OperationalError
+                        raise OperationalError(
+                            f"too many TNS redirects (> {_MAX_REDIRECTS})")
+                    self.host, self.port = NewHost, NewPort
+                    await self.disconnect()
+                    await self._open_transport()
+                    continue
                 case t if t == TNS_REFUSE:
                     await self.disconnect()
                     return 1

@@ -4,6 +4,7 @@
 from oracle.tns import assemble_packet
 from oracle.tns import decode_packet
 from oracle.tns import decode_ub4
+from oracle.tns import parse_redirect_address
 from oracle.tns import decode_token_bvc
 from oracle.tns import decode_token_dcb
 from oracle.tns import decode_token_iov
@@ -59,6 +60,37 @@ class TestDecodeUb4(unittest.TestCase):
         # aligned; the value is discarded by the caller.
         self._check([0x07, 0x00], 0, 2)
         self._check([0x0c, 0x34], -0x34, 2)
+
+
+class TestParseRedirectAddress(unittest.TestCase):
+    """Parse the HOST/PORT out of a TNS_REDIRECT descriptor (#23)."""
+
+    def test_bare_address(self):
+        body = b"(ADDRESS=(PROTOCOL=TCP)(HOST=10.0.0.5)(PORT=1522))"
+        self.assertEqual(parse_redirect_address(body), ("10.0.0.5", 1522))
+
+    def test_full_description(self):
+        body = (b"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db.example.com)"
+                b"(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=ORCL)))")
+        self.assertEqual(parse_redirect_address(body),
+                         ("db.example.com", 1521))
+
+    def test_prefers_address_host_over_cid_host(self):
+        # The descriptor can also carry the original CONNECT_DATA whose CID has
+        # the *client* HOST; the ADDRESS host is the reconnect target. Here the
+        # CID/HOST appears first textually, so a naive first-match would be
+        # wrong — the parser must scope to the ADDRESS block.
+        body = (b"(DESCRIPTION=(CONNECT_DATA=(SERVICE_NAME=ORCL)"
+                b"(CID=(PROGRAM=app)(HOST=client-box)(USER=scott)))"
+                b"(ADDRESS=(PROTOCOL=TCP)(HOST=server-box)(PORT=1530)))")
+        self.assertEqual(parse_redirect_address(body), ("server-box", 1530))
+
+    def test_case_insensitive_and_whitespace(self):
+        body = b"(address=(protocol=tcp)(Host = 192.168.1.9)(Port = 1599))"
+        self.assertEqual(parse_redirect_address(body), ("192.168.1.9", 1599))
+
+    def test_unparseable_returns_none(self):
+        self.assertEqual(parse_redirect_address(b"garbage"), (None, None))
 
 
 class TestTnsCommandDecoders(unittest.TestCase):

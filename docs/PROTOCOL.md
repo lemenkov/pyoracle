@@ -115,7 +115,19 @@ If the server refuses the connection, it sends TNS_REFUSE with a 4-byte header (
 
 ### 2.4 TNS_REDIRECT (Server -> Client)
 
-The server may redirect the client to a different address. The redirect body contains a connect descriptor with the new `HOST` and `PORT`. The client parses the new address and reconnects.
+The server may redirect the client to a different address — common with
+shared-server (the listener hands off to a dispatcher), RAC, and listeners
+that register services dynamically. The redirect body (everything after the
+8-byte header, often after a 2-byte data-length) is an ASCII connect
+descriptor carrying the new address, e.g.
+`(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=...)(PORT=...))...)`. It may also
+echo the original `CONNECT_DATA` (whose `CID` holds the *client* host) after a
+NUL, so the parser scopes to the `ADDRESS` block for the reconnect target.
+
+pyoracle follows the redirect: it pulls `HOST`/`PORT` out of the `ADDRESS`,
+closes the socket, reconnects to that address, and re-sends `TNS_CONNECT` to
+restart the handshake there. Redirects are capped (5) so a looping listener
+fails fast rather than spinning. Sync and async (`§handle_login`).
 
 ### 2.5 TNS_RESEND (Server -> Client)
 
