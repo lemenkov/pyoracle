@@ -58,7 +58,8 @@ class AsyncOracleConnect:
                  socket_options: object = None, timeout: int = 15000,
                  autocommit: bool = True, fetch: int = 15, role: int = 0,
                  prelim: int = 0, sdu: int = 8192, charset: str = "utf-8",
-                 app_name: str = "pyoracle"):
+                 app_name: str = "pyoracle",
+                 field_version: int = FIELD_VERSION_11_2):
         self.host = host
         self.port = port
         self.user = user
@@ -85,7 +86,7 @@ class AsyncOracleConnect:
         self.server_version = 0
         self.session_id = None
         # Negotiated TTC field version; see OracleConnect for the full note.
-        self.field_version = FIELD_VERSION_11_2
+        self.field_version = field_version
         self.cursors: dict[int, int] = {}
         # Cursor cache — same shape as the sync `OracleConnect`. DML only.
         # Keyed on (SQL, bind OAC signature); see OracleConnect for why the

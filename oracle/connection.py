@@ -62,7 +62,7 @@ def _format_version(Packed: int) -> str | None:
 
 
 class OracleConnect:
-    def __init__(self, host: str = "localhost", port: int = 1521, user: str = "", password: str = "", sid: str = "", service_name: str = "", ssl: object = None, socket_options: object = None, timeout: int = 15000, autocommit: bool = True, fetch: int = 15, role: int = 0, prelim: int = 0, sdu: int = 8192, charset: str = "utf-8", app_name: str = "pyoracle"):
+    def __init__(self, host: str = "localhost", port: int = 1521, user: str = "", password: str = "", sid: str = "", service_name: str = "", ssl: object = None, socket_options: object = None, timeout: int = 15000, autocommit: bool = True, fetch: int = 15, role: int = 0, prelim: int = 0, sdu: int = 8192, charset: str = "utf-8", app_name: str = "pyoracle", field_version: int = FIELD_VERSION_11_2):
         self.host = host
         self.port = port
         self.user = user
@@ -86,11 +86,12 @@ class OracleConnect:
         self.conn_key = None
         self.server_version = 0
         self.session_id = None
-        # Negotiated TTC field version. Starts at the highest version pyoracle
-        # advertises (11.2 today) and is lowered to the server's during the
-        # PRO handshake — min(client, server), see handle_login. Decoders use
-        # this to pick version-gated wire formats (issue #27).
-        self.field_version = FIELD_VERSION_11_2
+        # Negotiated TTC field version. Starts at the client's advertised max
+        # (the field_version arg; 11.2 by default) and is lowered to the
+        # server's during the PRO handshake — min(client, server), see
+        # handle_login. Decoders use this to pick version-gated wire formats
+        # (issue #27). Pass field_version=FIELD_VERSION_21_1 to speak 12c+.
+        self.field_version = field_version
         self.cursors: dict[int, int] = {}
         # Cursor cache: (SQL text, bind OAC signature) → server-side cursor
         # handle. Lets repeat `execute()` of the same SQL skip the parse step

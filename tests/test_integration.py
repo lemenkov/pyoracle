@@ -35,6 +35,11 @@ _PASSWORD = os.environ.get('PYORACLE_TEST_PASSWORD', '')
 _HOST = os.environ.get('PYORACLE_TEST_HOST', 'localhost')
 _PORT = int(os.environ.get('PYORACLE_TEST_PORT', '1521'))
 _SERVICE = os.environ.get('PYORACLE_TEST_SERVICE', 'XE')
+# Advertise a 12c+ TTC field version (e.g. 16 = 21.1) to run the suite against
+# a 12c+ server; unset/0 keeps the 11g default. Lets the same suite cover both
+# testbeds (issue #27).
+_FIELD_VERSION = int(os.environ.get('PYORACLE_TEST_FIELD_VERSION', '0'))
+_FV_KW = {'field_version': _FIELD_VERSION} if _FIELD_VERSION else {}
 
 _SKIP_REASON = (
     "integration tests require a real DB connection; "
@@ -53,6 +58,7 @@ def _connect():
         user=_USER, password=_PASSWORD,
         service_name=_SERVICE,
         autocommit=True,
+        **_FV_KW,
     )
 
 
@@ -1284,6 +1290,7 @@ class PoolIntegration(unittest.TestCase):
             user=_USER, password=_PASSWORD,
             service_name=_SERVICE,
             autocommit=True,
+            **_FV_KW,
             **extra,
         )
 
@@ -1381,6 +1388,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
             user=_USER, password=_PASSWORD,
             service_name=_SERVICE,
             autocommit=True,
+            **_FV_KW,
         )
 
     async def test_connect_and_simple_query(self):
@@ -1697,6 +1705,7 @@ class BFILEIntegration(unittest.TestCase):
             password=os.environ["PYORACLE_TEST_PASSWORD"],
             service_name=os.environ.get("PYORACLE_TEST_SERVICE", "XE"),
             autocommit=True,
+            **_FV_KW,
         )
         self.cur = self.conn.cursor()
         self.dir = os.environ["PYORACLE_TEST_BFILE_DIR"]
@@ -1749,6 +1758,7 @@ class AsyncBFILEIntegration(unittest.IsolatedAsyncioTestCase):
             user=_USER, password=_PASSWORD,
             service_name=_SERVICE,
             autocommit=True,
+            **_FV_KW,
         ) as Conn:
             async with Conn.cursor() as Cur:
                 await Cur.execute(
@@ -1770,6 +1780,7 @@ class AsyncPoolIntegration(unittest.IsolatedAsyncioTestCase):
             user=_USER, password=_PASSWORD,
             service_name=_SERVICE,
             autocommit=True,
+            **_FV_KW,
             **extra,
         )
 
@@ -1929,7 +1940,7 @@ class SSLIntegration(unittest.TestCase):
         # default code path.
         with oracle.connect(host=_HOST, port=_PORT, user=_USER,
                             password=_PASSWORD, service_name=_SERVICE,
-                            autocommit=True) as conn:
+                            autocommit=True, **_FV_KW) as conn:
             cur = conn.cursor()
             cur.execute("SELECT 1 FROM dual")
             self.assertEqual(cur.fetchone(), (1,))
