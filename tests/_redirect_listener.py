@@ -69,6 +69,8 @@ class RedirectListener:
             try:
                 self._sock.close()
             except OSError:
+                # Best-effort teardown for test fixture: ignore close-time
+                # socket errors (e.g., already closed/racing shutdown).
                 pass
             self._sock = None
         if self._thread is not None:
