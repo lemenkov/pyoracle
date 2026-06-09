@@ -1168,12 +1168,24 @@ in `oracle/tns.py`, response handling in
   layout is complex enough that we don't try to parse it, and we
   don't need anything out of it.
 
-LOB *writes* (LOB binds on INSERT / UPDATE) go through the regular
-VARCHAR2 / RAW bind path, which the value-sized OAC (§5.3) carries up to
-roughly one SDU (~7 KiB on the default 8 KiB SDU) into CLOB / BLOB columns.
-Larger payloads span multiple TNS packets in a layout the server rejects
-(`ORA-12592`); a client-side `TTI_LOBOPS` WRITE (allocate a temp LOB, stream
-into it, bind the locator) would lift that ceiling.
+LOB *writes* (LOB binds on INSERT / UPDATE) do **not** need a
+`TTI_LOBOPS` WRITE round-trip. They go through the regular VARCHAR2 / RAW
+bind path: a value larger than 4000 bytes is sent as a streamed LONG
+(the OAC max-size is set to the value's length, §5.3), and the server
+writes that streamed value straight into the CLOB / BLOB column. Once a
+bind exceeds the SDU the request simply fragments across TNS packets
+(§1.4, data flags `0x0020` on non-final fragments — the fragmentation fix
+in #8). This round-trips CLOB and BLOB binds byte-for-byte at arbitrary
+size; the integration suite covers 50 KiB and 500 KiB of both on 11g and
+12c+.
+
+A client-side temp-LOB path (`CREATE_TEMP` → `WRITE` → bind the locator →
+`FREE_TEMP`, opcodes in §14.2) is therefore unnecessary for binds and is
+not implemented. For the record, the request shapes were reverse-engineered
+against a 21c capture and verified there, but Oracle XE 11g rejects the
+`CREATE_TEMP` request outright (immediate FIN, no error packet) and no thin
+client speaks that opcode to 11g, so there is no reference to finish it
+against — and the streamed-LONG path above makes it moot.
 
 ## 15. TNS Marker Protocol
 
