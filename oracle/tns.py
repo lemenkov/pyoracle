@@ -1238,7 +1238,8 @@ def _oac_rep_row(Rows: list) -> list:
 
 def encode_dictionary_exec(Dictionary: dict) -> bytes:
     # Publish the field version for the bind-OAC encoder (encode_token_raw).
-    _ENCODE_FIELD_VERSION.set(Dictionary.get('field_version', FIELD_VERSION_11_2))
+    FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
+    _ENCODE_FIELD_VERSION.set(FieldVersion)
     Type = Dictionary['query']['type']
     Auto = Dictionary['query']['auto']
     Fetch = Dictionary['query']['fetch']
@@ -1302,7 +1303,6 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
             encode_sb4(All8Len) + bytes([0,0]) + encode_sb4(LMax) + encode_sb4(Fetch) + encode_sb4(Max) + bytes([BindFlag]) + encode_sb4(BindLen) + \
             bytes([0,0,0,0,0]) + bytes([DefFlag]) + encode_sb4(DefLen)
 
-    FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
     if FieldVersion >= FIELD_VERSION_12_2:
         # 12c+ OALL8 carries extra al8 fields after the 11g header: the DML
         # row-count block, then (12.2+) the SQL-signature / SQL-id pointers and

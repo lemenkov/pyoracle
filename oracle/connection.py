@@ -8,7 +8,7 @@ from oracle.tns import decode_token_rpa
 from oracle.tns import encode_dictionary
 from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
-from oracle.tns import CCAP_FIELD_VERSION, FIELD_VERSION_11_2
+from oracle.tns import CCAP_FIELD_VERSION, FIELD_VERSION_11_2, FIELD_VERSION_12_1
 from oracle.tns_consts import (
     CONN_STATE_AUTH_NEGOTIATE, CONN_STATE_AUTHENTICATED,
     CONN_STATE_CONNECTED, CONN_STATE_DISCONNECTED, DictionaryType,
@@ -384,7 +384,13 @@ class OracleConnect:
         # definitions) varying also breaks the cache contract.
         CachedCursor = 0
         CacheKey = None
-        if Type == 'change' and not Def:
+        # The cursor cache reuses a server cursor handle and skips re-sending
+        # the SQL/OAC. That 11g optimization doesn't translate to 12c+: a
+        # cached re-execute there fails (ORA-01009 / ORA-03115) because the
+        # server expects the binds (and OAC) declared every execute. Disable
+        # the cache on 12c+ — each execute re-parses, which is correct, just
+        # without the handle-reuse speedup.
+        if Type == 'change' and not Def and self.field_version < FIELD_VERSION_12_1:
             CacheKey = (Query, exec_oac_signature(Bind, Batch))
             CachedCursor = self._cursor_cache.get(CacheKey, 0)
         SendQuery = "" if CachedCursor else Query

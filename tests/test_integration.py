@@ -997,24 +997,30 @@ class CursorCacheIntegration(_IntegrationBase):
     """Verify the cursor cache hands out a non-zero handle on the first
     DML execute and reuses it (with a smaller wire request) on repeats."""
 
+    def _cached_handle(self, sql):
+        # The cursor cache is keyed on (SQL text, bind-OAC signature), not the
+        # bare SQL, so look up by the SQL component of the tuple keys.
+        handles = [v for k, v in self.conn._cursor_cache.items() if k[0] == sql]
+        return handles[0] if handles else None
+
     def test_repeated_dml_reuses_cursor(self):
+        if _FIELD_VERSION >= 7:   # FIELD_VERSION_12_1: cache disabled on 12c+
+            self.skipTest("cursor cache is disabled on 12c+ (re-parse each execute)")
         self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER, v VARCHAR2(10))")
         Sql = f"INSERT INTO {self.TABLE} VALUES (:id, :v)"
         # First execute: parses + caches.
         self.cur.execute(Sql, {"id": 1, "v": "a"})
-        self.assertIn(Sql, self.conn._cursor_cache)
-        FirstCursor = self.conn._cursor_cache[Sql]
+        FirstCursor = self._cached_handle(Sql)
+        self.assertIsNotNone(FirstCursor)
         self.assertGreater(FirstCursor, 0)
-        # Second execute of identical SQL: same cached handle.
+        # Second execute of identical SQL (same bind shape): same cached handle.
         self.cur.execute(Sql, {"id": 2, "v": "b"})
-        self.assertEqual(self.conn._cursor_cache[Sql], FirstCursor)
+        self.assertEqual(self._cached_handle(Sql), FirstCursor)
         # Different SQL → different cache entry.
         Sql2 = f"UPDATE {self.TABLE} SET v = :v WHERE id = 1"
         self.cur.execute(Sql2, {"v": "z"})
-        self.assertIn(Sql2, self.conn._cursor_cache)
-        self.assertNotEqual(
-            self.conn._cursor_cache[Sql], self.conn._cursor_cache[Sql2]
-        )
+        self.assertIsNotNone(self._cached_handle(Sql2))
+        self.assertNotEqual(self._cached_handle(Sql), self._cached_handle(Sql2))
         # And the rows are what we expect.
         self.cur.execute(f"SELECT id, v FROM {self.TABLE} ORDER BY id")
         self.assertEqual(self.cur.fetchall(), [(1, "z"), (2, "b")])
@@ -1035,6 +1041,8 @@ class CursorCacheIntegration(_IntegrationBase):
         self.assertNotIn(Sql, self.conn._cursor_cache)
 
     def test_cache_evicts_oldest_when_full(self):
+        if _FIELD_VERSION >= 7:   # FIELD_VERSION_12_1: cache disabled on 12c+
+            self.skipTest("cursor cache is disabled on 12c+ (re-parse each execute)")
         # Drive past `_cursor_cache_max` distinct DML statements and
         # confirm the cache stays bounded and keeps the most recent.
         self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
@@ -1050,8 +1058,9 @@ class CursorCacheIntegration(_IntegrationBase):
         # earliest ones must have been evicted.
         Latest = f"INSERT INTO {self.TABLE} /*{Max + 4}*/ VALUES ({Max + 4})"
         Earliest = f"INSERT INTO {self.TABLE} /*0*/ VALUES (0)"
-        self.assertIn(Latest, self.conn._cursor_cache)
-        self.assertNotIn(Earliest, self.conn._cursor_cache)
+        CachedSql = {k[0] for k in self.conn._cursor_cache}
+        self.assertIn(Latest, CachedSql)
+        self.assertNotIn(Earliest, CachedSql)
 
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
