@@ -3,6 +3,7 @@
 
 from oracle.tns import assemble_packet
 from oracle.tns import decode_packet
+from oracle.tns import decode_ub4
 from oracle.tns import decode_token_bvc
 from oracle.tns import decode_token_dcb
 from oracle.tns import decode_token_iov
@@ -20,6 +21,45 @@ from oracle.tns_consts import (
     AL32UTF8_CHARSET, TNS_ACCEPT, TNS_DATA, TNS_RESEND, TTI_AUTH, TTI_SESS,
 )
 import unittest
+
+class TestDecodeUb4(unittest.TestCase):
+    """Variable-length integer decode, incl. multi-byte negatives (#24)."""
+
+    def _check(self, raw, value, consumed):
+        # Append a sentinel so we also assert exactly `consumed` bytes were taken.
+        got, rest = decode_ub4(bytes(raw) + b"\x5a\xa5")
+        self.assertEqual(got, value)
+        self.assertEqual(rest, bytes(raw)[consumed:] + b"\x5a\xa5")
+        self.assertEqual(len(bytes(raw) + b"\x5a\xa5") - len(rest), consumed)
+
+    def test_zero(self):
+        self._check([0], 0, 1)
+
+    def test_positive_widths(self):
+        self._check([1, 0x2a], 42, 2)
+        self._check([2, 0x01, 0x00], 256, 3)
+        self._check([3, 0x12, 0x34, 0x56], 0x123456, 4)
+        self._check([4, 0xff, 0xff, 0xff, 0xff], 0xffffffff, 5)
+
+    def test_negative_width_1(self):
+        # The common forms: -1 and NUMBER scale -127.
+        self._check([0x81, 0x01], -1, 2)
+        self._check([0x81, 0x7f], -127, 2)
+
+    def test_negative_multibyte(self):
+        # The latent bug #24 fixed: negatives wider than one byte.
+        self._check([0x82, 0x01, 0x00], -256, 3)
+        self._check([0x83, 0x01, 0x00, 0x00], -65536, 4)
+        self._check([0x84, 0xff, 0xff, 0xff, 0xff], -0xffffffff, 5)
+
+    def test_raw_ub2_field_consumes_two_bytes(self):
+        # A length byte 5..0x7f is not a real var-int — it is the raw ub2 /
+        # counter field decode_token_oer reads through here. Historic lenient
+        # behaviour (consume 2 bytes) must be preserved so the OER stream stays
+        # aligned; the value is discarded by the caller.
+        self._check([0x07, 0x00], 0, 2)
+        self._check([0x0c, 0x34], -0x34, 2)
+
 
 class TestTnsCommandDecoders(unittest.TestCase):
 
