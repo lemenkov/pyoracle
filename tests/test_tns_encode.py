@@ -208,6 +208,32 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
             84,72,95,83,73,68,1,3,3,112,121,111,0])
         self.assertEqual(encode_dictionary(Dict), Ret)
 
+    def test_bind_oac_12c(self):
+        # The 12c+ bind OAC (encode_token_raw) follows oracledb's
+        # _write_column_metadata: flag byte 1, ub8 cont-flag, OID/version, the
+        # bind charset as a ub2 (AL32UTF8 for char), csfrm, LOB-prefetch length,
+        # and a trailing oaccolid. 11g uses a different, shorter layout. Run in
+        # a copied context so the encode field-version ContextVar doesn't leak.
+        import contextvars
+        from oracle.tns import (encode_token_raw, _ENCODE_FIELD_VERSION,
+                                FIELD_VERSION_21_1, FIELD_VERSION_11_2)
+        from oracle.tns_consts import TNS_TYPE_NUMBER, TNS_TYPE_VARCHAR
+        UTF8 = 871
+        def gen(fv, *a):
+            ctx = contextvars.copy_context()
+            def run():
+                _ENCODE_FIELD_VERSION.set(fv)
+                return encode_token_raw(*a)
+            return ctx.run(run)
+        # 11g unchanged
+        self.assertEqual(gen(FIELD_VERSION_11_2, TNS_TYPE_NUMBER, 22, 0, 0, 0).hex(),
+                         "02030000011600000000000100")
+        # 12c NUMBER and VARCHAR layouts
+        self.assertEqual(gen(FIELD_VERSION_21_1, TNS_TYPE_NUMBER, 22, 0, 0, 0).hex(),
+                         "0201000001160000000000000000")
+        self.assertEqual(gen(FIELD_VERSION_21_1, TNS_TYPE_VARCHAR, 20, 16, UTF8, 0).hex(),
+                         "01010000011400000000020369010000")
+
     def test_dty_table_12c(self):
         # The 12c+ datatype table must stay byte-identical to python-oracledb
         # 4.0.1's DATA_TYPES table captured against 21c (sha256 of the rendered

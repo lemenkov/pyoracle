@@ -489,6 +489,18 @@ OID(0) | Version(0) | CharsetID(SB4) | CharsetForm(UB1) | MXLC(SB4)
 
 **CharsetForm**: `1` for database charset, `2` for national charset (AL16UTF16).
 
+The layout above is the 11g form. 12c+ (field version >= 12.2,
+`encode_token_raw`) uses oracledb's `_write_column_metadata` layout instead:
+a fixed flag byte (`TNS_BIND_USE_INDICATORS = 1`), `ContFlags` as a `ub8`, an
+`OID`/`Version`, the bind charset as a `ub2` (AL32UTF8 = 873 for char binds,
+0 otherwise), the `CharsetForm` byte, a LOB-prefetch length, and a trailing
+`oaccolid` `ub4`. Sending the 11g OAC to a 12c server is rejected with
+`ORA-03115` (unsupported network datatype). The bind *value* (TTI_RXD) is the
+same in both, except long values use the version-gated `bytes_with_length`
+chunking described in §6.4 (`encode_chr`): 11g chunks anything over 64 bytes
+with single-byte lengths, 12c+ sends a single length below 254 and `ub4`
+chunks above it (sending the 11g chunking to 12c gives `ORA-03120`).
+
 **MaxDataLength and the LONG-reorder trap**: `MaxDataLength` must reflect the
 value's real size, **not** a flat maximum. A VARCHAR/RAW bind whose
 `MaxDataLength` exceeds the 4000-byte VARCHAR2 limit is treated by the server

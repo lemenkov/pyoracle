@@ -9,7 +9,7 @@ from oracle.cursor import cursor
 from oracle.datatypes import BinaryDouble, BinaryFloat, IntervalYM, Var
 from oracle.date import date
 from oracle.tns_consts import (
-    AL16UTF16_CHARSET, CharsetDict, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_SID,
+    AL16UTF16_CHARSET, AL32UTF8_CHARSET, CharsetDict, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_SID,
     DictionaryType, TNS_DATA, TNS_REDIRECT, TTI_ALL8, TTI_AUTH, TTI_BVC,
     TTI_DCB, TTI_DTY, TTI_FETCH, TTI_FOB, TTI_FUN, TTI_IOV, TTI_LOB,
     TTI_LOGOFF, TTI_OAC, TTI_OER, TTI_PFN, TTI_PRO, TTI_RPA, TTI_RXD,
@@ -39,6 +39,12 @@ logger = logging.getLogger(__name__)
 # value. Default 6 == FIELD_VERSION_11_2 (defined later); decoders only diverge
 # from the 11g layout when this is >= a 12c+ field version.
 _DECODE_FIELD_VERSION = contextvars.ContextVar("decode_field_version", default=6)
+
+# Same idea for the *encode* side: the field version of the message currently
+# being built, set by encode_dictionary_exec and read by encode_token_raw to
+# pick the 11g vs 12c+ bind-OAC layout. Separate from the decode var so the two
+# phases never interfere. Default 6 == FIELD_VERSION_11_2.
+_ENCODE_FIELD_VERSION = contextvars.ContextVar("encode_field_version", default=6)
 
 def assemble_packet(Data: bytes, Length: int) -> tuple[bool, int | None, bytes | None, bytes | None]:
     (PacketSize, PacketFlags, Type, Flags, Zero) = struct.unpack(">HhBBh", Data[:8])
@@ -1221,6 +1227,8 @@ def _oac_rep_row(Rows: list) -> list:
     return Rep
 
 def encode_dictionary_exec(Dictionary: dict) -> bytes:
+    # Publish the field version for the bind-OAC encoder (encode_token_raw).
+    _ENCODE_FIELD_VERSION.set(Dictionary.get('field_version', FIELD_VERSION_11_2))
     Type = Dictionary['query']['type']
     Auto = Dictionary['query']['auto']
     Fetch = Dictionary['query']['fetch']
@@ -1550,6 +1558,12 @@ def decode_chr(Bytes: bytes) -> tuple[bytes, bytes]:
 
 def encode_chr(String: str | bytes) -> bytes:
     Bytes = String.encode('utf-8') if isinstance(String, str) else String
+    if _ENCODE_FIELD_VERSION.get() >= 8:        # FIELD_VERSION_12_2
+        # 12c+ bind data follows write_bytes_with_length: a single length byte
+        # for values < 254, otherwise the 254 marker + ub4-prefixed chunks.
+        # 11g instead chunks anything over 64 bytes with single-byte lengths;
+        # sending that to a 12c server desyncs it (ORA-03120 integer overflow).
+        return _bytes_with_length(Bytes)
     Length = len(Bytes)
     if Length > 64:
         Out = b""
@@ -1886,6 +1900,28 @@ def encode_token_interval_ym(IV: IntervalYM) -> bytes:
 
 def encode_token_raw(DataType: int, Length: int, Flag: int, Charset: int, Max: int) -> bytes:
     FormOfUse = 2 if Charset == AL16UTF16_CHARSET else 1
+    if _ENCODE_FIELD_VERSION.get() >= 8:        # FIELD_VERSION_12_2
+        # 12c+ bind OAC (oracledb _write_column_metadata): a fixed flag byte
+        # (TNS_BIND_USE_INDICATORS = 1), a ub8 cont-flag, OID + version, the
+        # bind charset as a ub2 (AL32UTF8 / AL16UTF16, 0 for non-char), the
+        # csfrm byte, a LOB-prefetch length, and a trailing oaccolid ub4. The
+        # 11g layout below is shorter/differently shaped and a 12c server
+        # rejects it with ORA-03115 (unsupported network datatype).
+        if Charset == 0:
+            BindCharset, Csfrm = 0, 0
+        elif Charset == AL16UTF16_CHARSET:
+            BindCharset, Csfrm = AL16UTF16_CHARSET, 2
+        else:
+            BindCharset, Csfrm = AL32UTF8_CHARSET, 1
+        return (bytes([DataType, 1, 0, 0]) + encode_sb4(Length)
+                + encode_sb4(0)                # max number of array elements
+                + encode_sb4(0)                # cont flag (ub8)
+                + encode_sb4(0)                # OID
+                + encode_sb4(0)                # version
+                + encode_sb4(BindCharset)      # charset id (ub2)
+                + bytes([Csfrm])               # character set form
+                + encode_sb4(0)                # LOB prefetch length
+                + encode_sb4(0))               # oaccolid (12.2+)
     return bytes([DataType, 3, 0, 0]) + encode_sb4(Length) + bytes([0]) + encode_sb4(Flag) + bytes([0,0]) + encode_sb4(Charset) + bytes([FormOfUse]) + encode_sb4(Max)
 
 ##
