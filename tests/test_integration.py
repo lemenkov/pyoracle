@@ -67,19 +67,85 @@ def _connect():
     )
 
 
+# Number of times to replay a whole test that tripped ORA-01013, and the pause
+# between attempts. See `_IntegrationBase.run`.
+_THROTTLE_RETRIES = int(os.environ.get('PYORACLE_TEST_THROTTLE_RETRIES', '2'))
+_THROTTLE_RETRY_DELAY = float(os.environ.get('PYORACLE_TEST_THROTTLE_DELAY', '0.5'))
+
+
+class _CaptureResult(unittest.TestResult):
+    """Runs one test attempt and remembers its single outcome (with the
+    original exc_info) instead of reporting it. Lets `_IntegrationBase.run`
+    decide whether the attempt was a transient ORA-01013 throttle cancel worth
+    retrying, then forward the final outcome to the real result — without
+    double-running the test or losing the traceback."""
+
+    def __init__(self):
+        super().__init__()
+        self.outcome = ('success', None)
+
+    def addSuccess(self, test):
+        self.outcome = ('success', None)
+
+    def addError(self, test, err):
+        self.outcome = ('error', err)        # err = exc_info tuple
+
+    def addFailure(self, test, err):
+        self.outcome = ('failure', err)
+
+    def addSkip(self, test, reason):
+        self.outcome = ('skip', reason)
+
+    def is_throttle(self) -> bool:
+        kind, payload = self.outcome
+        if kind not in ('error', 'failure') or not payload:
+            return False
+        exc = payload[1]
+        return isinstance(exc, oracle.OperationalError) \
+            and getattr(exc, 'code', None) == 1013
+
+
 class _IntegrationBase(unittest.TestCase):
     """Per-test connection; fresh cursor + scratch table per test.
 
     Oracle XE's listener throttles rapid logins ("logon storm"
-    protection) and occasionally cancels the first statement on a
-    just-opened session with ORA-01013 ("user requested cancel of
-    current operation"). This is documented server behaviour, not a
-    driver bug — production code uses connection pools (`oracle.Pool`,
-    issue #6) and doesn't hit it. To keep the integration suite
-    deterministic, `setUp` retries the connect / initial-drop dance
-    a few times on ORA-01013.
+    protection) and cancels statements on a throttled session with
+    ORA-01013 ("user requested cancel of current operation"). This is
+    documented server behaviour, not a driver bug — production code uses
+    connection pools (`oracle.Pool`, issue #6) and doesn't hit it. The
+    suite defends in three layers: `_connect` paces logins
+    (PYORACLE_TEST_CONNECT_DELAY), `setUp` retries the connect / initial
+    drop, and `run` (below) replays a whole test that still tripped
+    ORA-01013 mid-body — each replay gets a fresh connection via setUp, so
+    it is safe and keeps CI from flaking on the throttle.
     """
     TABLE = "PYORACLE_TEST"
+
+    def run(self, result=None):
+        import time
+        for attempt in range(_THROTTLE_RETRIES + 1):
+            capture = _CaptureResult()
+            super().run(capture)
+            if attempt == _THROTTLE_RETRIES or not capture.is_throttle():
+                break
+            time.sleep(_THROTTLE_RETRY_DELAY)
+        # Forward the final attempt's outcome to the real result so reporting
+        # (counts, tracebacks, verbose output) is unaffected by the retry.
+        if result is not None:
+            kind, payload = capture.outcome
+            result.startTest(self)
+            try:
+                if kind == 'error':
+                    result.addError(self, payload)
+                elif kind == 'failure':
+                    result.addFailure(self, payload)
+                elif kind == 'skip':
+                    result.addSkip(self, payload)
+                else:
+                    result.addSuccess(self)
+            finally:
+                result.stopTest(self)
+        return result
 
     def setUp(self):
         Last: Exception = RuntimeError("setUp: connection retries exhausted")
