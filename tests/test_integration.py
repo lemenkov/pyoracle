@@ -1271,6 +1271,20 @@ class LOBIntegration(_IntegrationBase):
         (Got,) = self.cur.fetchone()
         self.assertEqual(Got, Text)
 
+    def test_clob_bind_spans_multiple_packets(self):
+        # A bind whose request exceeds the SDU (default 8 KiB) must be split
+        # across multiple TNS_DATA packets (non-final fragments carry data
+        # flags 0x0020). 20 KiB → ~3 fragments; kept under the 32767 regular-
+        # bind ceiling so it round-trips on both 11g and 12c+ (issue #8).
+        self._setup()
+        Text = "0123456789abcdef" * 1250        # 20000 chars, > 2x SDU
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE}(id, c) VALUES (1, :c)", {"c": Text}
+        )
+        self.cur.execute(f"SELECT c FROM {self.TABLE}")
+        (Got,) = self.cur.fetchone()
+        self.assertEqual(Got, Text)
+
     def test_blob_bind_round_trip_all_byte_values(self):
         # Two things at once: bytes binds used to be decoded as UTF-8 and
         # re-encoded as UTF-16BE — which corrupted anything outside ASCII

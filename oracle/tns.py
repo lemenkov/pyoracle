@@ -785,17 +785,22 @@ def decode_token_wrn(Data: bytes, Acc: object) -> tuple:
 def encode_packet(Type: int, Data: bytes, Length: int) -> tuple[bytes, bytes | None]:
     if Type == TNS_DATA:
         PacketSize = len(Data) + 10
-        BodySize = Length - 10
-        if (PacketSize > Length) and (BodySize < len(Data)):
-            PacketBody = Data[:BodySize]
-            Rest = Data[BodySize:]
-            return (struct.pack(">HhBBhBI", PacketSize, 0, Type, 0, 0, 0, 32) + PacketBody, Rest)
-        else:
-            # PacketSize is a uint16 on the wire — use `>H` so requests
-            # in the 32 KiB..64 KiB range (e.g. mid-size LOB inserts done
-            # via a single PL/SQL block with multiple chunk binds) don't
-            # overflow signed-short range and crash with `struct.error`.
-            return (struct.pack(">HhBBhh", PacketSize, 0, Type, 0, 0, 0) + Data, None)
+        if PacketSize > Length:
+            # Oversized request: split into SDU-sized DATA packets. Each
+            # fragment is an ordinary DATA packet — 8-byte header + 2-byte data
+            # flags + a (SDU - 10)-byte payload chunk — and the chunks
+            # concatenate back into the message on the server. Non-final
+            # fragments carry data flags 0x0020 (PROTOCOL.md §1.3); the final
+            # one (built by the branch below) uses 0x0000. `send()` loops until
+            # the rest is empty. (The old `>HhBBhBI` + trailing `0, 32` header
+            # mis-encoded that 0x20 flag as a 5-byte tail and drew ORA-12592 /
+            # ORA-01013 from the server — issue #8.)
+            BodySize = Length - 10
+            return (struct.pack(">HhBBhh", BodySize + 10, 0, Type, 0, 0, 0x0020)
+                    + Data[:BodySize], Data[BodySize:])
+        # PacketSize is a uint16 on the wire; fragmentation above keeps any
+        # single packet within the SDU, well inside uint16 range.
+        return (struct.pack(">HhBBhh", PacketSize, 0, Type, 0, 0, 0) + Data, None)
     else:
         PacketSize = len(Data) + 8
         return (struct.pack(">HhBBh", PacketSize, 0, Type, 0, 0) + Data, None)
