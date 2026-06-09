@@ -219,9 +219,18 @@ class AsyncOracleConnect:
         but awaiting the StreamReader instead of `sock.recv`."""
         while True:
             try:
-                NetworkData = await self._reader.read(self.sdu)
+                if self.timeout:
+                    NetworkData = await asyncio.wait_for(
+                        self._reader.read(self.sdu), self.timeout / 1000)
+                else:
+                    NetworkData = await self._reader.read(self.sdu)
             except asyncio.IncompleteReadError:
                 return False
+            except (asyncio.TimeoutError, TimeoutError) as exc:
+                from oracle.exceptions import OperationalError
+                raise OperationalError(
+                    f"network read timed out after {self.timeout} ms "
+                    f"(connection timeout)") from exc
             if not NetworkData:
                 return False
             Acc = Acc + NetworkData

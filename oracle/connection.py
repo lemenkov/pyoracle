@@ -8,6 +8,7 @@ from oracle.tns import decode_token_rpa
 from oracle.tns import encode_dictionary
 from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
+from oracle.exceptions import OperationalError
 from oracle.tns import CCAP_FIELD_VERSION, FIELD_VERSION_11_2, FIELD_VERSION_12_1, FIELD_VERSION_21_1
 from oracle.tns_consts import (
     CONN_STATE_AUTH_NEGOTIATE, CONN_STATE_AUTHENTICATED,
@@ -163,12 +164,26 @@ class OracleConnect:
     def state_to_dict(self, Type: DictionaryType) -> dict:
         return self._make_dict(Type)
 
+    def _apply_socket_timeout(self) -> None:
+        # Bound every blocking socket operation (connect / send / recv) by the
+        # connection `timeout` (milliseconds). Without this the param was dead
+        # and a server that went quiet — e.g. an XE session held by the
+        # logon-storm throttle — wedged `recv` forever. A timeout of 0 / None
+        # keeps the historical fully-blocking behaviour. The bound is per
+        # socket operation, not per query: healthy data keeps each recv short,
+        # so it only fires on a genuine stall.
+        if self.sock is not None:
+            self.sock.settimeout(self.timeout / 1000 if self.timeout else None)
+
     def connect(self) -> bool:
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._apply_socket_timeout()
         self.sock.connect((self.host, self.port))
         if self.ssl:
             try:
                 self.sock = self._wrap_socket_tls(self.sock)
+                # The TLS handshake produced a fresh socket object; re-arm it.
+                self._apply_socket_timeout()
             except BaseException:
                 # If the TLS wrap fails (bad config, cert verification, etc.)
                 # release the raw TCP socket before surfacing the error.
@@ -724,10 +739,18 @@ class OracleConnect:
         # RecursionError on the auth handshake).
         while Data is not None:
             (Packet, Rest) = encode_packet(Type, Data, self.sdu)
-            self.sock.send(Packet)
+            try:
+                self.sock.send(Packet)
+            except TimeoutError as exc:
+                raise self._timeout_error("write") from exc
             Data = Rest
         logger.debug("Send OK")
         return True
+
+    def _timeout_error(self, op: str) -> OperationalError:
+        return OperationalError(
+            f"network {op} timed out after {self.timeout} ms "
+            f"(connection timeout)")
 
     def recv(self, Acc: bytes, Data: bytes) -> tuple[int, bytes] | bool:
         # Iterative receive + reassemble. Was previously recursive — for a
@@ -735,7 +758,10 @@ class OracleConnect:
         # SDU-sized TCP segments) the recursion depth blew the default
         # Python limit during the auth handshake on some setups.
         while True:
-            NetworkData = self.sock.recv(self.sdu)
+            try:
+                NetworkData = self.sock.recv(self.sdu)
+            except TimeoutError as exc:
+                raise self._timeout_error("read") from exc
             if not NetworkData:
                 # Peer closed the connection.
                 return False
