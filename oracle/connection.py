@@ -579,13 +579,28 @@ class OracleConnect:
                     if Length == 0:
                         continue
                     if Length == 0xFE:
-                        while Pos < len(Packet):
-                            ChunkLen = Packet[Pos]
-                            Pos += 1
-                            if ChunkLen == 0:
-                                break
-                            Buffer += Packet[Pos:Pos + ChunkLen]
-                            Pos += ChunkLen
+                        # Chunked content. 12c+ prefixes each chunk with a ub4
+                        # length (terminated by a zero-length chunk); 11g uses a
+                        # single length byte per chunk.
+                        if self.field_version >= 8:        # FIELD_VERSION_12_2
+                            while Pos < len(Packet):
+                                NLen = Packet[Pos]
+                                Pos += 1
+                                if NLen == 0:
+                                    break
+                                ChunkLen = int.from_bytes(
+                                    Packet[Pos:Pos + NLen], "big")
+                                Pos += NLen
+                                Buffer += Packet[Pos:Pos + ChunkLen]
+                                Pos += ChunkLen
+                        else:
+                            while Pos < len(Packet):
+                                ChunkLen = Packet[Pos]
+                                Pos += 1
+                                if ChunkLen == 0:
+                                    break
+                                Buffer += Packet[Pos:Pos + ChunkLen]
+                                Pos += ChunkLen
                     else:
                         Buffer += Packet[Pos:Pos + Length]
                         Pos += Length
@@ -595,13 +610,17 @@ class OracleConnect:
                     break
                 else:
                     # Likely TTI_RPA (0x08) carrying the updated locator and
-                    # actual amount read — we don't decode it. Scan forward
-                    # for OER's `04 01 XX 01` signature so we don't leave
-                    # unread bytes in the socket and block the next call.
+                    # actual amount read — we don't decode it. Scan forward for
+                    # the OER and stop. The OER opens with TTI_OER + call_status
+                    # (ub4 len 1, value 1) = `04 01 01`, then the end-to-end
+                    # seq# whose length byte (the original 11g signature's 4th
+                    # byte) varies per call — so match the stable `04 01 01`
+                    # prefix as well as the historical `04 01 XX 01` form.
                     Found = -1
                     for I in range(Pos, len(Packet) - 3):
                         if (Packet[I] == TTI_OER and Packet[I + 1] == 0x01
-                                and Packet[I + 3] == 0x01):
+                                and (Packet[I + 2] == 0x01
+                                     or Packet[I + 3] == 0x01)):
                             Found = I
                             break
                     if Found >= 0:

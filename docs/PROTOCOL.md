@@ -1129,6 +1129,16 @@ operations declared with `send_amount`, an `sb8` carrying the actual
 amount read/written. `IS_OPEN`, `FILE_EXISTS`, `FILE_ISOPEN` add a
 trailing `ub1` boolean flag.
 
+The `LOB_DATA` chunk is length-prefixed with the version-gated
+`bytes_with_length` form (§6.4): 11g uses single-byte chunk lengths,
+12c+ a `0xFE` marker with `ub4` chunk lengths and a zero terminator.
+`_read_lob_response` walks tokens until the trailing OER; that OER opens
+with `04 01 01` (TTI_OER + `call_status` ub4 = 1) and then a per-call
+end-to-end seq# whose length byte varies, so the stop scan keys on the
+`04 01 01` prefix rather than a fixed 4th byte. Without the `ub4`
+chunk-length handling on 12c the content desyncs and the reader blocks
+waiting for a packet that never comes (the LOB fetch hangs).
+
 ### 14.4 Implementation status
 
 pyoracle implements `TTI_LOBOPS` READ (`encode_dictionary_lobops`
