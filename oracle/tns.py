@@ -720,13 +720,23 @@ def _read_long_column(Rest: bytes) -> tuple[bytes | None, bytes]:
     elif Marker == 0xFE:
         Rest = Rest[1:]
         Chunks = b""
-        while Rest:
-            ChunkLen = Rest[0]
-            Rest = Rest[1:]
-            if ChunkLen == 0:
-                break
-            Chunks += bytes(Rest[:ChunkLen])
-            Rest = Rest[ChunkLen:]
+        if _DECODE_FIELD_VERSION.get() >= 8:        # FIELD_VERSION_12_2
+            # 12c+ prefixes each chunk with a ub4 length (zero-length terminator)
+            # rather than 11g's single length byte.
+            while Rest:
+                (ChunkLen, Rest) = decode_ub4(Rest)
+                if ChunkLen == 0:
+                    break
+                Chunks += bytes(Rest[:ChunkLen])
+                Rest = Rest[ChunkLen:]
+        else:
+            while Rest:
+                ChunkLen = Rest[0]
+                Rest = Rest[1:]
+                if ChunkLen == 0:
+                    break
+                Chunks += bytes(Rest[:ChunkLen])
+                Rest = Rest[ChunkLen:]
         Val = Chunks
     else:
         Val = bytes(Rest[1:1 + Marker])

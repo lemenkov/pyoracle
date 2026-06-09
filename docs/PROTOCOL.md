@@ -629,7 +629,9 @@ data bytes, terminated by a zero byte. 12c+ prefixes each chunk with a
 `ub4` length and ends with a zero-length chunk (the same framing as every
 other `bytes_with_length` field). `decode_chr` picks the form by field
 version; without this a multi-chunk value (e.g. a 300-char string) walks
-off the end of the buffer.
+off the end of the buffer. The same single-byte-vs-`ub4` chunk-length
+split applies to LONG / LONG RAW columns (`_read_long_column`, which on
+12c+ also sends the chunk after a `0xFE` marker with `ub4` lengths).
 
 ### 6.5 I/O Vector (TTI_IOV)
 
