@@ -26,6 +26,7 @@ import contextvars
 import logging
 import math
 import os
+import re
 import socket
 import struct
 
@@ -59,11 +60,15 @@ def assemble_packet(Data: bytes, Length: int) -> tuple[bool, int | None, bytes |
         else:
             return (False, None, None, None)
     elif Type == TNS_REDIRECT and Zero == 0:
-        (Result, Type, PacketBody, Rest) = decode_packet(Data[10:], Length)
-        if Result and Type == TNS_DATA and Rest == b"":
-            return (True, TNS_REDIRECT, PacketBody, b"")
-        else:
-            return (False, None, None, None)
+        # The server is handing us a new address to reconnect to (shared
+        # server / RAC / some listener configs). The body is the connect
+        # descriptor — ASCII, carrying an (ADDRESS=...(HOST=..)(PORT=..)).
+        # Return it raw (everything after the 8-byte header); handle_login
+        # parses the address out. A leading 2-byte data-length some servers
+        # insert is simply skipped over by the descriptor regex.
+        if PacketSize <= len(Data):
+            return (True, TNS_REDIRECT, Data[8:PacketSize], Data[PacketSize:])
+        return (False, None, None, None)
     elif Zero == 0:
         BodySize = PacketSize - 8
         Rest = Data[8:]
@@ -73,6 +78,27 @@ def assemble_packet(Data: bytes, Length: int) -> tuple[bool, int | None, bytes |
             return (False, None, None, None)
     else:
         raise Exception("Cannot decode packet", Data, Length)
+
+_REDIRECT_HOST_RE = re.compile(rb"\(HOST\s*=\s*([^)\s]+)\s*\)", re.IGNORECASE)
+_REDIRECT_PORT_RE = re.compile(rb"\(PORT\s*=\s*(\d+)\s*\)", re.IGNORECASE)
+
+
+def parse_redirect_address(Body: bytes) -> tuple[str | None, int | None]:
+    # Pull the (HOST=..)(PORT=..) out of a TNS_REDIRECT body's connect
+    # descriptor. The descriptor carries the server ADDRESS to reconnect to,
+    # and may also carry the original CONNECT_DATA (whose CID has the *client*
+    # HOST) after a NUL — so scope the search to the ADDRESS block, where the
+    # real target lives, and only fall back to a bare first match if there is
+    # no ADDRESS keyword.
+    Region = Body
+    Marker = re.search(rb"\(ADDRESS\b", Body, re.IGNORECASE)
+    if Marker:
+        Region = Body[Marker.start():]
+    Host = _REDIRECT_HOST_RE.search(Region)
+    Port = _REDIRECT_PORT_RE.search(Region)
+    if Host and Port:
+        return (Host.group(1).decode("ascii", "replace"), int(Port.group(1)))
+    return (None, None)
 
 def decode_packet(Data: bytes, Acc: object, FieldVersion: int | None = None) -> object:
     # FieldVersion is passed only by the top-level caller (the connection's

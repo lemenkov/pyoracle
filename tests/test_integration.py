@@ -28,6 +28,7 @@ import oracle
 import sys as _sys
 _sys.path.insert(0, os.path.dirname(__file__))
 from _tls_proxy import CERT_PATH, TLSProxy  # noqa: E402
+from _redirect_listener import RedirectListener  # noqa: E402
 
 
 _USER = os.environ.get('PYORACLE_TEST_USER')
@@ -1468,6 +1469,29 @@ class LOBIntegration(_IntegrationBase):
 
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
+class RedirectIntegration(unittest.TestCase):
+    """Follow a TNS_REDIRECT to reconnect to the address the server hands back
+    (#23). A RedirectListener stands in for a shared-server / RAC listener: it
+    answers the first CONNECT with a redirect to the real backend, and the
+    driver must reconnect there and complete the handshake."""
+
+    def test_sync_follows_redirect(self):
+        with RedirectListener(_HOST, _PORT) as listener:
+            conn = oracle.connect(
+                host=_HOST, port=listener.listen_port,
+                user=_USER, password=_PASSWORD, service_name=_SERVICE,
+                autocommit=True, **_FV_KW)
+            try:
+                # The connection ended up on the backend, not the listener.
+                self.assertEqual(conn.port, _PORT)
+                cur = conn.cursor()
+                cur.execute("SELECT 'redirected' FROM dual")
+                self.assertEqual(cur.fetchone(), ("redirected",))
+            finally:
+                conn.close()
+
+
+@unittest.skipUnless(_USER, _SKIP_REASON)
 class PoolIntegration(unittest.TestCase):
     """Verify the connection pool: pre-warm, acquire/release, capacity,
     and timeout behaviour."""
@@ -1588,6 +1612,21 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
             await Cur.close()
         finally:
             await Conn.close()
+
+    async def test_follows_redirect(self):
+        # Async mirror of RedirectIntegration: follow a TNS_REDIRECT to the
+        # backend the listener hands back (#23).
+        with RedirectListener(_HOST, _PORT) as listener:
+            Kw = self._kwargs()
+            Kw["port"] = listener.listen_port
+            Conn = await oracle.connect_async(**Kw)
+            try:
+                self.assertEqual(Conn.port, _PORT)
+                Cur = Conn.cursor()
+                await Cur.execute("SELECT 'redirected' FROM dual")
+                self.assertEqual(await Cur.fetchone(), ("redirected",))
+            finally:
+                await Conn.close()
 
     async def test_context_managers(self):
         async with await oracle.connect_async(**self._kwargs()) as Conn:

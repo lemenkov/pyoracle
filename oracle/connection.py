@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 # wire path without needing a BFILE-specific TTI_LOBOPS OPEN opcode.
 # Created lazily on first BFILE read; CREATE OR REPLACE so a stale
 # version from an earlier driver release gets overwritten.
+# Cap how many times we'll chase a TNS_REDIRECT during one login, so a
+# misconfigured listener that redirects in a loop fails fast instead of
+# spinning forever.
+_MAX_REDIRECTS = 5
+
 _BFILE_HELPER_NAME = "pyoracle_bfile_read"
 _BFILE_HELPER_SQL = """\
 CREATE OR REPLACE FUNCTION pyoracle_bfile_read (
@@ -175,7 +180,11 @@ class OracleConnect:
         if self.sock is not None:
             self.sock.settimeout(self.timeout / 1000 if self.timeout else None)
 
-    def connect(self) -> bool:
+    def _open_transport(self) -> None:
+        # Open the TCP (and optional TLS) socket to the current host/port and
+        # send the initial CONNECT. Shared by connect() and the TNS_REDIRECT
+        # handler, which re-points host/port and re-opens against the address
+        # the server handed back.
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._apply_socket_timeout()
         self.sock.connect((self.host, self.port))
@@ -193,10 +202,12 @@ class OracleConnect:
                     self.sock = None
                 raise
         Data = encode_dictionary(self._make_dict(DictionaryType.login))
-
         self.send(TNS_CONNECT, Data)
-        self.handle_login()
 
+    def connect(self) -> bool:
+        self._redirects = 0
+        self._open_transport()
+        self.handle_login()
         return True
 
     def _wrap_socket_tls(self, RawSock: socket.socket) -> socket.socket:
@@ -302,9 +313,24 @@ class OracleConnect:
                     self.send(TNS_MARKER, b"\x01\x00\x02")
                     continue
                 case t if t == TNS_REDIRECT:
-                    logger.debug("handle_login: redirect %s", Packet)
-                    # FIXME: parse redirect address and reconnect
-                    return 1
+                    from oracle.tns import parse_redirect_address
+                    (NewHost, NewPort) = parse_redirect_address(Packet)
+                    if NewHost is None:
+                        logger.debug("handle_login: unparseable redirect %r",
+                                     Packet)
+                        return 1
+                    self._redirects = getattr(self, "_redirects", 0) + 1
+                    if self._redirects > _MAX_REDIRECTS:
+                        raise OperationalError(
+                            f"too many TNS redirects (> {_MAX_REDIRECTS})")
+                    logger.debug("handle_login: redirect -> %s:%s",
+                                 NewHost, NewPort)
+                    # Reconnect to the address the server handed back and start
+                    # the handshake over against it.
+                    self.host, self.port = NewHost, NewPort
+                    self.disconnect()
+                    self._open_transport()
+                    continue
                 case t if t == TNS_REFUSE:
                     logger.debug("handle_login: refuse")
                     self.disconnect()
