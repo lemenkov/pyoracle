@@ -256,10 +256,34 @@ class TypesIntegration(_IntegrationBase):
         v = self._round_trip("VARCHAR2(40)", "'utf-8 ✓ 中文'")
         self.assertEqual(v, "utf-8 ✓ 中文")
 
+    def test_varchar_supplementary_plane(self):
+        # Characters above the BMP (emoji, U+1F600 etc.) are 4-byte UTF-8 /
+        # surrogate pairs in UTF-16. They round-trip only when the client
+        # advertises AL32UTF8 (real UTF-8); Oracle's legacy "UTF8" (CESU-8)
+        # 6-byte-encodes them and decode then yields replacement chars (#29).
+        v = self._round_trip("VARCHAR2(40)", "'hi 😀🎉 端 end'")
+        self.assertEqual(v, "hi 😀🎉 端 end")
+
     def test_char_preserves_padding(self):
         v = self._round_trip("CHAR(10)", "'x'")
         self.assertEqual(v, "x" + " " * 9)
         self.assertEqual(len(v), 10)
+
+    # ----- NCHAR / NVARCHAR (national character set) -----
+
+    def test_nvarchar_non_ascii(self):
+        v = self._round_trip("NVARCHAR2(40)", "N'national ünî 中'")
+        self.assertEqual(v, "national ünî 中")
+        self.assertIsInstance(v, str)
+
+    def test_nvarchar_supplementary_plane(self):
+        v = self._round_trip("NVARCHAR2(40)", "N'n 😀🎉 end'")
+        self.assertEqual(v, "n 😀🎉 end")
+
+    def test_nchar_preserves_padding(self):
+        v = self._round_trip("NCHAR(6)", "N'hï'")
+        self.assertEqual(v, "hï" + " " * 4)
+        self.assertEqual(len(v), 6)
 
     # ----- DATE / TIMESTAMP -----
 
@@ -678,6 +702,24 @@ class BindIntegration(_IntegrationBase):
         )
         self.cur.execute(f"SELECT id, name FROM {self.TABLE}")
         self.assertEqual(self.cur.fetchall(), [(8, "beta")])
+
+    def test_varchar_supplementary_bind(self):
+        # Binding a supplementary-plane string must encode real UTF-8 (the OAC
+        # advertises AL32UTF8); otherwise the emoji corrupts on the way in (#29).
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (v VARCHAR2(40))")
+        val = "go 😀 端 🎉 stop"
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (:1)", [val])
+        self.cur.execute(f"SELECT v FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchall(), [(val,)])
+
+    def test_nvarchar_bind(self):
+        # Bind into an NVARCHAR2 (national charset) column, including a
+        # supplementary-plane character.
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (v NVARCHAR2(40))")
+        val = "nat ünî 中 😀"
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (:1)", [val])
+        self.cur.execute(f"SELECT v FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchall(), [(val,)])
 
     def test_null_bind(self):
         self.cur.execute(

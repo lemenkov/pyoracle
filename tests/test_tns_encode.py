@@ -142,7 +142,10 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
                 110,111,1,0,116,102,1,0,118,0,119,0,121,0,122,0,123,0,136,0,146,146,1,0,147,0,
                 152,2,10,0,153,2,10,0,154,2,10,0,155,1,1,0,156,12,10,0,172,2,10,0,209,0,3,0,0
         ])
-        Charset = bytes([103,3])
+        # AL32UTF8 (873) little-endian — pyoracle advertises real UTF-8, not
+        # Oracle's legacy "UTF8" (871) which is CESU-8 and mangles supplementary
+        # characters (emoji etc.). See encode_dictionary_dty.
+        Charset = bytes([105,3])
         self.assertEqual(encode_dictionary(Dict), bytes([2]) + Charset + Charset + bytes([1]) + Wtf0 + Wtf1 + Wtf2 + Wtf3)
 
     def test_tns_dty_1(self):
@@ -157,7 +160,7 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
                 110,111,1,0,116,102,1,0,118,0,119,0,121,0,122,0,123,0,136,0,146,146,1,0,147,0,
                 152,2,10,0,153,2,10,0,154,2,10,0,155,1,1,0,156,12,10,0,172,2,10,0,209,0,3,0,0
         ])
-        Charset = bytes([103,3])
+        Charset = bytes([105,3])               # AL32UTF8 (873) LE; see test_tns_dty_0
         self.assertEqual(encode_dictionary_dty(Dict), bytes([2]) + Charset + Charset + bytes([1]) + Wtf0 + Wtf1 + Wtf2 + Wtf3)
 
     def test_capability_arrays_11_2(self):
@@ -561,14 +564,14 @@ class TestTnsBaseEncoders(unittest.TestCase):
         # NULL bind: a minimal VARCHAR OAC (max_size 1). Sizing it to the
         # actual value rather than 32767 avoids the LONG-reorder swap when a
         # NULL/str bind precedes another bind — see encode_token_oac.
-        self.assertEqual(encode_token_oac(None), bytes([1,3,0,0,1,1,0,1,16,0,0,2,3,103,1,0]))
+        self.assertEqual(encode_token_oac(None), bytes([1,3,0,0,1,1,0,1,16,0,0,2,3,105,1,0]))
 
     def test_encode_token_oac_str_sized_to_value(self):
         # A VARCHAR bind's OAC max_size tracks the value's byte length, not a
         # flat 32767 (which the server treats as a LONG and reorders, swapping
         # the bind with the next one). "ab" -> max_size 2.
         self.assertEqual(encode_token_oac("ab"),
-                         bytes([1,3,0,0,1,2,0,1,16,0,0,2,3,103,1,0]))
+                         bytes([1,3,0,0,1,2,0,1,16,0,0,2,3,105,1,0]))
 
     def test_encode_token_oac_str_large_keeps_long_size(self):
         # A value over the 4000-byte VARCHAR2 cap keeps its true (large)

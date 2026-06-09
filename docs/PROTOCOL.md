@@ -240,9 +240,16 @@ msgtype=2 | charset_in (UB2 LE) | charset_out (UB2 LE) | flag (UB1) |
   datatype table | 0
 ```
 
-- **charset_in / charset_out**: NLS and national-charset ids. pyoracle today
-  sends the same charset for both; a future revision may differentiate the
-  national charset for CJK environments.
+- **charset_in / charset_out**: NLS (database) and national charset ids.
+  pyoracle advertises **AL32UTF8 (873)** for both. This must be 873 (real
+  UTF-8), **not** Oracle's legacy "UTF8" (871) — 871 is CESU-8, which encodes
+  supplementary-plane characters (emoji, rare CJK, U+10000 and above) as a
+  six-byte surrogate pair instead of a four-byte sequence, and Python's `utf-8`
+  codec then decodes them to replacement characters. Advertising 873 for
+  `charset_out` makes the server convert national (AL16UTF16) `NCHAR` /
+  `NVARCHAR` / `NCLOB` data to AL32UTF8 on the wire — lossless, since both
+  cover all of Unicode — so the same UTF-8 decode path handles national columns
+  without a separate AL16UTF16 step. (#29)
 - **compile_caps / runtime_caps**: two length-prefixed byte arrays. Each index
   is a named feature slot (`TNS_CCAP_*` / `TNS_RCAP_*`). The most important is
   the **field version** at compile-cap index 7 (`TNS_CCAP_FIELD_VERSION`): it
@@ -1060,7 +1067,13 @@ The library supports a wide range of Oracle character sets, identified by Oracle
 | CL8MSWIN1251     | 171   | ZHS16GBK         | 852   |
 | UTF8             | 871   | ZHT16BIG5        | 865   |
 
-The default character set is AL32UTF8 (873). For CJK and AL16UTF16 character sets, the national character set is set to UTF-8 for proper conversion.
+pyoracle advertises and decodes **AL32UTF8 (873)** — real UTF-8 — for both the
+database and national charset (see §4.1). Note the trap: Oracle's `UTF8` (871)
+is **not** the same as AL32UTF8; it is CESU-8, which mis-encodes
+supplementary-plane characters. pyoracle never advertises 871. National-charset
+columns (`NCHAR` / `NVARCHAR2` / `NCLOB`, charset id 2000 / AL16UTF16, CharsetForm
+2) are converted by the server to AL32UTF8 on the wire and decode through the
+same UTF-8 path.
 
 ## 14. LOB Operations (TTI_LOBOPS)
 
