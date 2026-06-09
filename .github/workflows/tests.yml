@@ -22,3 +22,45 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install pycryptodome
       - run: python -m unittest -v tests.test_crypto tests.test_tns_decode tests.test_tns_encode
+
+  # Integration tests against a real Oracle server. Currently 11g only: the
+  # 21c leg is tracked in #28 — it is blocked on (a) a connection-reuse /
+  # response-resync gap in the driver that makes the memory-fragile 21c XE
+  # container OOM under the per-test-connection suite, and (b) pre-existing
+  # 12c+ test failures (#27 follow-ups). 11g runs the full suite as-is.
+  integration-11g:
+    name: Integration tests (Oracle XE 11g)
+    runs-on: ubuntu-latest
+    services:
+      oracle:
+        image: gvenzl/oracle-xe:11-slim
+        env:
+          ORACLE_PASSWORD: oracle
+          APP_USER: pyo
+          APP_USER_PASSWORD: pyo123
+        ports:
+          - 1521:1521
+        # The gvenzl image ships a healthcheck.sh; wait for the DB to finish
+        # its (slow) first-boot setup before the test step starts.
+        options: >-
+          --health-cmd healthcheck.sh
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+          --health-start-period 60s
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install .
+      - name: Run integration suite against 11g
+        env:
+          PYORACLE_TEST_USER: pyo
+          PYORACLE_TEST_PASSWORD: pyo123
+          PYORACLE_TEST_HOST: localhost
+          PYORACLE_TEST_PORT: "1521"
+          PYORACLE_TEST_SERVICE: XE
+          # Pace logins to stay under XE's logon-storm throttle (ORA-01013).
+          PYORACLE_TEST_CONNECT_DELAY: "0.25"
+        run: python -m unittest -v tests.test_integration

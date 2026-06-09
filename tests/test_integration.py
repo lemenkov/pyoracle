@@ -47,12 +47,17 @@ _SKIP_REASON = (
 )
 
 
+# Pause before each connection. Oracle XE's listener throttles rapid logins
+# ("logon storm" protection) and cancels early statements on the throttled
+# session with ORA-01013. The whole suite opens ~150 connections; on a busy or
+# freshly-booted XE (e.g. CI) the default 0.05 s isn't always enough, so the
+# delay is tunable via PYORACLE_TEST_CONNECT_DELAY (CI sets it higher).
+_CONNECT_DELAY = float(os.environ.get('PYORACLE_TEST_CONNECT_DELAY', '0.05'))
+
+
 def _connect():
-    # Oracle XE's listener throttles rapid logins. A short pause between
-    # connections keeps the suite below the throttle threshold; see
-    # `_IntegrationBase` docstring for the full story.
     import time
-    time.sleep(0.05)
+    time.sleep(_CONNECT_DELAY)
     return oracle.connect(
         host=_HOST, port=_PORT,
         user=_USER, password=_PASSWORD,
