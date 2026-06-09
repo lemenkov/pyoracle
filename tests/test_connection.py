@@ -38,6 +38,8 @@ class TestConnection(unittest.TestCase):
                 conn, _ = srv.accept()
                 accepted.append(conn)          # hold it open; never reply
             except OSError:
+                # Expected during teardown/races when the listening socket is
+                # closed while this daemon thread is blocked in accept().
                 pass
 
         threading.Thread(target=accept_and_hang, daemon=True).start()
