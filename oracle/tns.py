@@ -1013,19 +1013,25 @@ def encode_dictionary_close(Dictionary: dict) -> bytes:
     Tseq = Dictionary['seq']
     return bytes([TTI_FUN, TTI_LOGOFF, Tseq])
 
+_REDACT_ENV_SECRET = ('password', 'new_password')
+_REDACT_AUTH_SECRET = ('old_password', 'new_password', 'conn_key')
+
 def _redacted(Dictionary: dict) -> dict:
-    # Return a copy safe to log: the password (carried in the env dict so the
-    # encoders can use it) is masked so it never reaches a debug log in clear
-    # text.
-    Env = Dictionary.get('env')
-    if not isinstance(Env, dict) or 'password' not in Env:
-        return Dictionary
+    # Return a copy safe to log: every secret is masked so it never reaches a
+    # debug log in clear text. Secrets live in two places — the env dict (the
+    # connection password, carried so the encoders can use it) and the auth dict
+    # (the changepassword old/new passwords and the session key, #21). Mask both
+    # by building fresh sub-dicts with '***' substituted, rather than spreading
+    # the originals (which would route the real secrets into the logged copy).
     Safe = dict(Dictionary)
-    # Build the masked env without ever copying the secret values: replace
-    # them with '***' in the comprehension rather than spreading Env (which
-    # would route the real password through the dict and into the log).
-    _SECRET = ('password', 'new_password')
-    Safe['env'] = {k: ('***' if k in _SECRET else v) for k, v in Env.items()}
+    Env = Dictionary.get('env')
+    if isinstance(Env, dict):
+        Safe['env'] = {k: ('***' if k in _REDACT_ENV_SECRET else v)
+                       for k, v in Env.items()}
+    Auth = Dictionary.get('auth')
+    if isinstance(Auth, dict):
+        Safe['auth'] = {k: ('***' if k in _REDACT_AUTH_SECRET else v)
+                        for k, v in Auth.items()}
     return Safe
 
 def encode_dictionary_description(Dictionary: dict) -> bytes:

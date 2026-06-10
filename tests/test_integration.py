@@ -1603,8 +1603,7 @@ class ChangePasswordIntegration(unittest.TestCase):
 
     def test_changepassword_roundtrip(self):
         new = _PASSWORD + "_chg9"
-        conn = oracle.connect(**self._kwargs(_PASSWORD))
-        try:
+        with oracle.connect(**self._kwargs(_PASSWORD)) as conn:
             conn.changepassword(_PASSWORD, new)
             try:
                 # The session that changed the password stays usable.
@@ -1620,24 +1619,23 @@ class ChangePasswordIntegration(unittest.TestCase):
                 with self.assertRaises(oracle.DatabaseError):
                     oracle.connect(**self._kwargs(_PASSWORD)).close()
             finally:
+                # Restore the original password on the still-authenticated
+                # connection before the `with` closes it.
                 conn.changepassword(new, _PASSWORD)
-        finally:
-            conn.close()
         # The original password is restored for the rest of the suite.
-        oracle.connect(**self._kwargs(_PASSWORD)).close()
+        with oracle.connect(**self._kwargs(_PASSWORD)):
+            pass
 
     def test_changepassword_wrong_old_raises(self):
         # A wrong current password is rejected (ORA-28008) and changes nothing.
-        conn = oracle.connect(**self._kwargs(_PASSWORD))
-        try:
+        with oracle.connect(**self._kwargs(_PASSWORD)) as conn:
             with self.assertRaises(oracle.DatabaseError):
                 conn.changepassword("wrong_old_pw_xyz", "irrelevant9")
             cur = conn.cursor()
             cur.execute("SELECT 1 FROM dual")
             self.assertEqual(cur.fetchone(), (1,))
-        finally:
-            conn.close()
-        oracle.connect(**self._kwargs(_PASSWORD)).close()
+        with oracle.connect(**self._kwargs(_PASSWORD)):
+            pass
 
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
