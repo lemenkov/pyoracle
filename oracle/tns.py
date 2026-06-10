@@ -5,6 +5,7 @@ import datetime
 from decimal import Decimal
 from functools import reduce
 from oracle.crypto import o5logon
+from oracle.crypto import encrypt_password
 from oracle.cursor import cursor
 from oracle.datatypes import BinaryDouble, BinaryFloat, IntervalYM, Var
 from oracle.date import date
@@ -906,6 +907,8 @@ def encode_dictionary(Dictionary: dict) -> bytes | tuple[bytes, bytes]:
     match Dictionary['type']:
         case DictionaryType.auth:
             return encode_dictionary_auth(Dictionary)
+        case DictionaryType.chgpwd:
+            return encode_dictionary_chgpwd(Dictionary)
         case DictionaryType.close:
             return encode_dictionary_close(Dictionary)
         case DictionaryType.description:
@@ -973,6 +976,38 @@ def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
     Data = bytes([TTI_FUN, TTI_AUTH, Tseq, 1]) + encode_sb4(len(User)) + LogonMode + bytes([1]) + encode_sb4(2 + SpeedyKeyInd) + bytes([1, 1]) + UserField + AuthPass + PBKDF2 + AuthSess
 
     return (Data, ConnKey)
+
+def encode_dictionary_chgpwd(Dictionary: dict) -> bytes:
+    # Password change (#21). Sent on an already-authenticated session: a single
+    # TTI_AUTH call that reuses the session key from login (no fresh
+    # AUTH_SESSKEY), carrying the current and new passwords. Reverse-engineered
+    # from an oracledb-thin capture against 21c. Same shape as the login OAUTH
+    # (encode_dictionary_auth) but:
+    #   - logon mode 0x102 = WITH_PASSWORD(0x100) | CHANGE_PASSWORD(0x02), and
+    #     crucially WITHOUT the LOGON(0x01) bit the login carries;
+    #   - exactly two key/value pairs: AUTH_PASSWORD (current) and
+    #     AUTH_NEWPASSWORD (new), both AES-CBC-encrypted with the login ConnKey;
+    #   - no AUTH_SESSKEY / AUTH_PBKDF2_SPEEDY_KEY (the session already exists).
+    Tseq = Dictionary['seq']
+    User = Dictionary['env']['user'].encode('utf-8')
+    ConnKey = Dictionary['auth']['conn_key']
+    CurPass = Dictionary['auth']['old_password'].encode('utf-8')
+    NewPass = Dictionary['auth']['new_password'].encode('utf-8')
+
+    LogonMode = encode_sb4(0x102)
+    AuthPass = encode_kv(
+        b"AUTH_PASSWORD",
+        encrypt_password(ConnKey, CurPass).hex().upper().encode('utf-8'))
+    AuthNewPass = encode_kv(
+        b"AUTH_NEWPASSWORD",
+        encrypt_password(ConnKey, NewPass).hex().upper().encode('utf-8'))
+
+    FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
+    UserField = bytes([len(User)]) + User if FieldVersion >= FIELD_VERSION_12_1 else User
+
+    return bytes([TTI_FUN, TTI_AUTH, Tseq, 1]) + encode_sb4(len(User)) + \
+        LogonMode + bytes([1]) + encode_sb4(2) + bytes([1, 1]) + UserField + \
+        AuthPass + AuthNewPass
 
 def encode_dictionary_close(Dictionary: dict) -> bytes:
     Tseq = Dictionary['seq']

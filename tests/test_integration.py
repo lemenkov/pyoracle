@@ -1592,6 +1592,55 @@ class LOBIntegration(_IntegrationBase):
 
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
+class ChangePasswordIntegration(unittest.TestCase):
+    """Connection.changepassword over the wire (#21). Each test changes the
+    test user's password and always restores it (on the original, still-
+    authenticated connection) so the rest of the suite is unaffected."""
+
+    def _kwargs(self, password):
+        return dict(host=_HOST, port=_PORT, user=_USER, password=password,
+                    service_name=_SERVICE, autocommit=True, **_FV_KW)
+
+    def test_changepassword_roundtrip(self):
+        new = _PASSWORD + "_chg9"
+        conn = oracle.connect(**self._kwargs(_PASSWORD))
+        try:
+            conn.changepassword(_PASSWORD, new)
+            try:
+                # The session that changed the password stays usable.
+                cur = conn.cursor()
+                cur.execute("SELECT 1 FROM dual")
+                self.assertEqual(cur.fetchone(), (1,))
+                # The new password authenticates a fresh connection.
+                with oracle.connect(**self._kwargs(new)) as v:
+                    vc = v.cursor()
+                    vc.execute("SELECT 1 FROM dual")
+                    self.assertEqual(vc.fetchone(), (1,))
+                # The old password no longer works.
+                with self.assertRaises(oracle.DatabaseError):
+                    oracle.connect(**self._kwargs(_PASSWORD)).close()
+            finally:
+                conn.changepassword(new, _PASSWORD)
+        finally:
+            conn.close()
+        # The original password is restored for the rest of the suite.
+        oracle.connect(**self._kwargs(_PASSWORD)).close()
+
+    def test_changepassword_wrong_old_raises(self):
+        # A wrong current password is rejected (ORA-28008) and changes nothing.
+        conn = oracle.connect(**self._kwargs(_PASSWORD))
+        try:
+            with self.assertRaises(oracle.DatabaseError):
+                conn.changepassword("wrong_old_pw_xyz", "irrelevant9")
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM dual")
+            self.assertEqual(cur.fetchone(), (1,))
+        finally:
+            conn.close()
+        oracle.connect(**self._kwargs(_PASSWORD)).close()
+
+
+@unittest.skipUnless(_USER, _SKIP_REASON)
 class RedirectIntegration(unittest.TestCase):
     """Follow a TNS_REDIRECT to reconnect to the address the server hands back
     (#23). A RedirectListener stands in for a shared-server / RAC listener: it
@@ -1822,6 +1871,39 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
             # Ping completes cleanly on a freshly-authenticated session;
             # the test just verifies no exception escapes.
             await Conn.ping()
+
+    async def test_changepassword_roundtrip(self):
+        # Async mirror of ChangePasswordIntegration (#21): change the test
+        # user's password and always restore it on the original session.
+        new = _PASSWORD + "_achg9"
+        Kw = self._kwargs()
+        Conn = await oracle.connect_async(**dict(Kw, password=_PASSWORD))
+        try:
+            await Conn.changepassword(_PASSWORD, new)
+            try:
+                Cur = Conn.cursor()
+                await Cur.execute("SELECT 1 FROM dual")
+                self.assertEqual(await Cur.fetchone(), (1,))
+                V = await oracle.connect_async(**dict(Kw, password=new))
+                await V.close()
+                with self.assertRaises(oracle.DatabaseError):
+                    Bad = await oracle.connect_async(
+                        **dict(Kw, password=_PASSWORD))
+                    await Bad.close()
+            finally:
+                await Conn.changepassword(new, _PASSWORD)
+        finally:
+            await Conn.close()
+        Ok = await oracle.connect_async(**dict(Kw, password=_PASSWORD))
+        await Ok.close()
+
+    async def test_changepassword_wrong_old_raises(self):
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            with self.assertRaises(oracle.DatabaseError):
+                await Conn.changepassword("wrong_old_pw_xyz", "irrelevant9")
+            Cur = Conn.cursor()
+            await Cur.execute("SELECT 1 FROM dual")
+            self.assertEqual(await Cur.fetchone(), (1,))
 
     async def test_commit_persists_dml(self):
         # autocommit=False, then explicit commit. A second connection

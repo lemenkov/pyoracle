@@ -415,6 +415,40 @@ the server's release. Decode it as `major` (bits 24-31), `minor`
 `Connection.version` and masks the major release out for its protocol
 version gate.
 
+### 4.7 Password Change (TTI_FUN/TTI_AUTH on a live session)
+
+`Connection.changepassword(old, new)` (#21) reuses the **already-authenticated
+session** rather than re-running the handshake. After a normal login it sends a
+single `TTI_AUTH` (0x73) call whose layout is identical to the login OAUTH
+(§4.5) except:
+
+- **Logon mode `0x102`** = `WITH_PASSWORD` (0x100) | `CHANGE_PASSWORD` (0x02),
+  and notably *without* the `LOGON` (0x01) bit the login carries.
+- Exactly **two** key/value pairs and **no** `AUTH_SESSKEY` /
+  `AUTH_PBKDF2_SPEEDY_KEY` — the session key from login is reused:
+
+  | Key                | Value                                              |
+  |--------------------|----------------------------------------------------|
+  | `AUTH_PASSWORD`    | current password, AES-CBC(IV=0) under the ConnKey  |
+  | `AUTH_NEWPASSWORD` | new password, encrypted the same way               |
+
+Both values use the same encryption as the login `AUTH_PASSWORD`
+(`encrypt_password`): a fixed 16-byte block is prepended (the server discards
+it) so the first ciphertext block is shared — a fresh random prefix, as
+oracledb sends, is not required. Wire layout (mirrors `encode_dictionary_auth`):
+
+```
+TTI_FUN | TTI_AUTH | SeqNum | 1 | UserLen(SB4) | LogonMode=0x102(SB4) |
+  1 | KVCount=2(SB4) | 1 | 1 | UserField |
+  KV(AUTH_PASSWORD) | KV(AUTH_NEWPASSWORD)
+```
+
+The server replies with a `TTI_RPA` + `TTI_OER`: error code 0 on success (the
+session stays usable), `ORA-28008` for a wrong current password, or e.g.
+`ORA-28003` when a password-verify function rejects the new one. Verified on
+both 11g (128/192-bit O5LOGON) and 21c (256-bit). Reverse-engineered from an
+oracledb-thin capture through the logging proxy (`tools/capture_proxy.py`).
+
 ## 5. SQL Execution
 
 ### 5.1 Execute (TTI_FUN/TTI_ALL8)

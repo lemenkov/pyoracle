@@ -705,6 +705,36 @@ class OracleConnect:
         self.send(TNS_DATA, Data)
         self._handle_response()
 
+    def changepassword(self, old_password: str, new_password: str) -> None:
+        """Change the connected user's password (#21, oracledb-compatible).
+
+        Sends a single TTI_AUTH password-change call on the live session,
+        reusing the session key established at login (no re-handshake). On
+        success the connection stays usable and its stored password is updated
+        so a later reconnect / pool checkout uses the new one. A wrong
+        `old_password` raises ORA-01017; a rejected new password (policy /
+        verifier) raises e.g. ORA-28003.
+        """
+        from oracle.exceptions import InterfaceError, from_ora_code
+        if self.conn_state != CONN_STATE_AUTHENTICATED or self.conn_key is None:
+            raise InterfaceError(
+                "changepassword requires an authenticated connection")
+        Auth = {
+            'conn_key': self.conn_key,
+            'old_password': old_password,
+            'new_password': new_password,
+        }
+        Data = encode_dictionary(
+            self._make_dict(DictionaryType.chgpwd, auth=Auth))
+        self.send(TNS_DATA, Data)
+        Result = self._handle_response()
+        ErrCode = Result[1] if isinstance(Result, tuple) and len(Result) > 1 else 0
+        if ErrCode and ErrCode not in (0, 1403):
+            Message = Result[5] if len(Result) > 5 else None
+            raise from_ora_code(ErrCode)(
+                Message or f"ORA-{ErrCode:05d}", code=ErrCode)
+        self.password = new_password
+
     def close(self) -> None:
         # Best-effort orderly shutdown, then always disconnect so the OS socket
         # gets reclaimed even if the server-side handshake has gone sideways.

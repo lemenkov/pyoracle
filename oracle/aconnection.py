@@ -628,6 +628,31 @@ class AsyncOracleConnect:
         await self.send(TNS_DATA, Data)
         await self._handle_response()
 
+    async def changepassword(self, old_password: str,
+                             new_password: str) -> None:
+        """Change the connected user's password (#21). Async mirror of
+        `OracleConnect.changepassword` — same single TTI_AUTH password-change
+        call reusing the login session key, same error behaviour."""
+        from oracle.exceptions import from_ora_code
+        if self.conn_state != CONN_STATE_AUTHENTICATED or self.conn_key is None:
+            raise InterfaceError(
+                "changepassword requires an authenticated connection")
+        Auth = {
+            'conn_key': self.conn_key,
+            'old_password': old_password,
+            'new_password': new_password,
+        }
+        Data = encode_dictionary(
+            self._make_dict(DictionaryType.chgpwd, auth=Auth))
+        await self.send(TNS_DATA, Data)
+        Result = await self._handle_response()
+        ErrCode = Result[1] if isinstance(Result, tuple) and len(Result) > 1 else 0
+        if ErrCode and ErrCode not in (0, 1403):
+            Message = Result[5] if len(Result) > 5 else None
+            raise from_ora_code(ErrCode)(
+                Message or f"ORA-{ErrCode:05d}", code=ErrCode)
+        self.password = new_password
+
     # ----- teardown -----
 
     async def close(self) -> None:
