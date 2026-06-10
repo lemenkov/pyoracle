@@ -400,7 +400,7 @@ class OracleConnect:
             return 1
 
     def execute(self, Query: str, Bind: list | None = None, Def: list | None = None,
-                Batch: list | None = None) -> object:
+                Batch: list | None = None, BatchErrors: bool = False) -> object:
         if Bind is None:
             Bind = []
         if Def is None:
@@ -447,6 +447,7 @@ class OracleConnect:
             'bind': Bind,
             'batch': Batch,
             'def': Def,
+            'batcherrors': BatchErrors,
         }
         Data = encode_dictionary(self._make_dict(DictionaryType.exec, query=QueryDict))
         self.send(TNS_DATA, Data)

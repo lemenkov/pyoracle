@@ -14,7 +14,8 @@ from oracle.tns_consts import (
     TTI_DCB, TTI_DTY, TTI_FETCH, TTI_FOB, TTI_FUN, TTI_IOV, TTI_LOB,
     TTI_LOGOFF, TTI_OAC, TTI_OER, TTI_PFN, TTI_PRO, TTI_RPA, TTI_RXD,
     TTI_RXH, TTI_SESS, TTI_SPFP, TTI_STA, TTI_STRT, TTI_STOP, TTI_UDS,
-    TTI_WRN, TNS_BIND_DIR_INPUT, TNS_LOB_OP_READ, TNS_TYPE_BDOUBLE, TNS_TYPE_BFILE,
+    TTI_WRN, TNS_BIND_DIR_INPUT, TNS_EXEC_OPTION_BATCH_ERRORS,
+    TNS_LOB_OP_READ, TNS_TYPE_BDOUBLE, TNS_TYPE_BFILE,
     TNS_TYPE_BFLOAT, TNS_TYPE_BLOB, TNS_TYPE_CLOB, TNS_TYPE_DATE,
     TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_LONG, TNS_TYPE_LONGRAW,
     TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_REFCURSOR, TNS_TYPE_RID,
@@ -393,6 +394,21 @@ def decode_token_lob(Data: bytes, Acc: object) -> tuple:
 
 def decode_token_net(Data: bytes, Acc: object) -> None:
     pass
+def _read_batch_ub4_array(Rest: bytes) -> tuple[list, bytes]:
+    # An array-DML batch field (#18): a ub4 count, then a DALC blob packing
+    # that many ub4 values back-to-back. Returns the values and the remaining
+    # bytes. Used for the batch-error code and row-offset arrays.
+    (Count, Rest) = decode_ub4(Rest)
+    if Count <= 0:
+        return ([], Rest)
+    (Blob, Rest) = decode_dalc(Rest)
+    Buf = bytes(Blob) if not isinstance(Blob, list) else b""
+    Values = []
+    for _ in range(Count):
+        (Value, Buf) = decode_ub4(Buf)
+        Values.append(Value)
+    return (Values, Rest)
+
 def decode_token_oer(Data: bytes, Acc: tuple) -> tuple:
     # OER ("Oracle Error" return-status TTC token; emitted at the end of every
     # server response — success or failure). Unified layout: every field is
@@ -442,26 +458,36 @@ def decode_token_oer(Data: bytes, Acc: tuple) -> tuple:
                                                      #   the "current row
                                                      #   number" field above)
     Rest = _skip_bytes_with_length(Rest)             # oerrdd (logical rowid)
-    # Batch error codes / offsets / messages — three optional arrays. For
-    # plain (non-batch) statements all three counts are zero, so the loops
-    # never execute. Decoded for completeness.
-    (NumBatchErrCodes, Rest) = decode_ub4(Rest)
-    if NumBatchErrCodes > 0:
-        Rest = Rest[1:]                              # first_byte indicator
-        for _ in range(NumBatchErrCodes):
-            (_, Rest) = decode_ub4(Rest)
-    (NumBatchOffsets, Rest) = decode_ub4(Rest)
-    if NumBatchOffsets > 0:
-        Rest = Rest[1:]
-        for _ in range(NumBatchOffsets):
-            (_, Rest) = decode_ub4(Rest)
+    # Batch error code / offset / message arrays (array-DML `batcherrors`
+    # mode, #18). For plain statements all three counts are zero and the loops
+    # never run. When set, the three arrays line up by position: error i hit
+    # row `BatchOffsets[i]` with ORA-`BatchCodes[i]` and text `BatchMessages[i]`.
+    # Batch error code / offset / message arrays (array-DML `batcherrors`
+    # mode, #18). For plain statements all three counts are zero and the loops
+    # never run. Layout (reverse-engineered against a 21c capture): each of the
+    # code and offset arrays is `ub4 count | DALC blob`, where the blob packs
+    # the count ub4 values (the DALC is the 0xFE chunked form once it grows).
+    # The message array is `ub4 count | ub1 indicator | count × (ub4-prefixed
+    # string + 2-byte trailer)`. Error i hit row BatchOffsets[i] with
+    # ORA-BatchCodes[i] and text BatchMessages[i].
+    (BatchCodes, Rest) = _read_batch_ub4_array(Rest)
+    (BatchOffsets, Rest) = _read_batch_ub4_array(Rest)
+    BatchMessages: list = []
     (NumBatchMessages, Rest) = decode_ub4(Rest)
     if NumBatchMessages > 0:
-        Rest = Rest[1:]
+        Rest = Rest[1:]                              # indicator byte
         for _ in range(NumBatchMessages):
-            (_, Rest) = decode_ub4(Rest)             # chunk length
-            Rest = _skip_bytes_with_length(Rest)     # message bytes
-            Rest = Rest[2:]                          # end marker
+            (MsgBytes, Rest) = _read_str_with_length(Rest)
+            Rest = Rest[2:]                          # 2-byte trailer
+            BatchMessages.append(
+                bytes(MsgBytes).decode('utf-8', errors='replace').rstrip())
+    BatchErrors = [
+        {'offset': BatchOffsets[I] if I < len(BatchOffsets) else None,
+         'code': BatchCodes[I] if I < len(BatchCodes) else None,
+         'message': BatchMessages[I] if I < len(BatchMessages) else None}
+        for I in range(max(len(BatchOffsets), len(BatchCodes),
+                           len(BatchMessages)))
+    ]
     # On 11g the trailing message DALC comes right here. 12c+ inserts the
     # extended-precision error number (ub4) and rowcount (ub8) ahead of it, and
     # 20.1+ adds a ub4 sql type + ub4 server checksum (oracledb
@@ -491,7 +517,8 @@ def decode_token_oer(Data: bytes, Acc: tuple) -> tuple:
         from oracle.types import rowid_to_string
         Rowid = rowid_to_string(RowidObj, RowidFile, RowidBlock, RowidSlot)
     RetFormat = (RowCount, RowFormat)
-    return (CallStatus, ErrCode, CursorId, RetFormat, Rows, Message, Rowid)
+    return (CallStatus, ErrCode, CursorId, RetFormat, Rows, Message, Rowid,
+            BatchErrors)
 
 def decode_token_oac(Data: bytes, Acc: object) -> tuple[int, int, int, int, bytes]:
     (DataType, Flg, Pre) = struct.unpack(">BBB", Data[:3])
@@ -1309,6 +1336,14 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
         (Opt, LMax, Max, All8) = set_opts(Type, 0, 0, 0, Fetch)
     else:
         (Opt, LMax, Max, All8) = set_opts(Type, 0, 0, BatchLen, Auto)
+
+    # Array-DML batch-error mode: with this exec option set, a per-row error
+    # (e.g. a unique-constraint violation) no longer aborts the whole batch —
+    # the server applies the good rows and returns the failures as the OER's
+    # batch-error code/offset/message arrays (#18). Verified against an
+    # oracledb-thin capture: it ORs 0x80000 into the leading Opt word.
+    if Dictionary['query'].get('batcherrors'):
+        Opt |= TNS_EXEC_OPTION_BATCH_ERRORS
 
     All8Len = len(All8)
     All8Flag = 1 if All8Len > 0 else 0
