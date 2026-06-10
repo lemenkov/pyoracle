@@ -1599,19 +1599,16 @@ class RedirectIntegration(unittest.TestCase):
     driver must reconnect there and complete the handshake."""
 
     def test_sync_follows_redirect(self):
-        with RedirectListener(_HOST, _PORT) as listener:
-            conn = oracle.connect(
-                host=_HOST, port=listener.listen_port,
-                user=_USER, password=_PASSWORD, service_name=_SERVICE,
-                autocommit=True, **_FV_KW)
-            try:
-                # The connection ended up on the backend, not the listener.
-                self.assertEqual(conn.port, _PORT)
-                cur = conn.cursor()
-                cur.execute("SELECT 'redirected' FROM dual")
-                self.assertEqual(cur.fetchone(), ("redirected",))
-            finally:
-                conn.close()
+        with RedirectListener(_HOST, _PORT) as listener, \
+                oracle.connect(
+                    host=_HOST, port=listener.listen_port,
+                    user=_USER, password=_PASSWORD, service_name=_SERVICE,
+                    autocommit=True, **_FV_KW) as conn:
+            # The connection ended up on the backend, not the listener.
+            self.assertEqual(conn.port, _PORT)
+            cur = conn.cursor()
+            cur.execute("SELECT 'redirected' FROM dual")
+            self.assertEqual(cur.fetchone(), ("redirected",))
 
 
 @unittest.skipUnless(_USER, _SKIP_REASON)

@@ -10,6 +10,9 @@ from oracle.datatypes import BinaryDouble, BinaryFloat, IntervalYM, Var
 from oracle.date import date
 from oracle.tns_consts import (
     AL16UTF16_CHARSET, AL32UTF8_CHARSET, CharsetDict, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_SID,
+    FIELD_VERSION_11_2, FIELD_VERSION_12_1, FIELD_VERSION_12_2,
+    FIELD_VERSION_12_2_EXT1, FIELD_VERSION_19_1, FIELD_VERSION_21_1,
+    FIELD_VERSION_23_1,
     DictionaryType, TNS_DATA, TNS_REDIRECT, TTI_ALL8, TTI_AUTH, TTI_BVC,
     TTI_DCB, TTI_DTY, TTI_FETCH, TTI_FOB, TTI_FUN, TTI_IOV, TTI_LOB,
     TTI_LOGOFF, TTI_OAC, TTI_OER, TTI_PFN, TTI_PRO, TTI_RPA, TTI_RXD,
@@ -1043,14 +1046,11 @@ CCAP_TTC5 = 44
 CCAP_FEATURE_BACKPORT2 = 45
 CCAP_VECTOR_FEATURES = 52
 
-# TNS_CCAP_FIELD_VERSION_* values (the byte written at CCAP_FIELD_VERSION):
-FIELD_VERSION_11_2 = 6
-FIELD_VERSION_12_1 = 7
-FIELD_VERSION_12_2 = 8
-FIELD_VERSION_12_2_EXT1 = 9
-FIELD_VERSION_19_1 = 12
-FIELD_VERSION_21_1 = 16
-FIELD_VERSION_23_1 = 17
+# TNS_CCAP_FIELD_VERSION_* values (the byte written at CCAP_FIELD_VERSION) now
+# live in oracle.tns_consts and are imported at the top of this module — kept
+# importable as `from oracle.tns import FIELD_VERSION_*` for existing callers.
+# They moved to the leaf constants module so oracle.cursor can import the 12.1
+# threshold without an import cycle (oracle.tns imports oracle.cursor).
 
 # Runtime capability indices + the flag bits we set:
 RCAP_COMPAT = 0

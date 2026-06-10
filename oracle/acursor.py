@@ -14,6 +14,7 @@ from oracle.exceptions import (
     DatabaseError, InterfaceError, NotSupportedError, ProgrammingError,
     from_ora_code,
 )
+from oracle.tns_consts import FIELD_VERSION_12_1
 
 
 class AsyncCursor:
@@ -206,13 +207,10 @@ class AsyncCursor:
         # cursor's (#18): batch-error collection via getbatcherrors(), and
         # per-iteration row counts (12.1+ only) via getarraydmlrowcounts().
         self._check_open()
-        if arraydmlrowcounts:
-            # Local import: oracle.tns imports oracle.cursor (which acursor
-            # builds on), so a top-level import here would be circular.
-            from oracle.tns import FIELD_VERSION_12_1
-            if self._connection.field_version < FIELD_VERSION_12_1:
-                raise NotSupportedError(
-                    "arraydmlrowcounts requires an Oracle 12.1+ server")
+        if arraydmlrowcounts \
+                and self._connection.field_version < FIELD_VERSION_12_1:
+            raise NotSupportedError(
+                "arraydmlrowcounts requires an Oracle 12.1+ server")
         self._batcherrors = []
         self._arraydmlrowcounts = []
         Rows = [_resolve_parameters(operation, P) for P in seq_of_parameters]

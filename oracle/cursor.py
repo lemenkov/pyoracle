@@ -8,7 +8,7 @@ from oracle.exceptions import (
     DatabaseError, InterfaceError, NotSupportedError, ProgrammingError,
     from_ora_code,
 )
-from oracle.tns_consts import UTF8_CHARSET
+from oracle.tns_consts import FIELD_VERSION_12_1, UTF8_CHARSET
 
 
 # `:name` placeholder. Names are case-insensitive and follow normal SQL
@@ -215,13 +215,10 @@ class Cursor:
         # each iteration affected, retrievable via `getarraydmlrowcounts()`.
         # A 12c+ feature; raises on an 11g server (oracledb-compatible). #18.
         self._check_open()
-        if arraydmlrowcounts:
-            # Local import: oracle.tns imports oracle.cursor, so a top-level
-            # import here would be circular.
-            from oracle.tns import FIELD_VERSION_12_1
-            if self._connection.field_version < FIELD_VERSION_12_1:
-                raise NotSupportedError(
-                    "arraydmlrowcounts requires an Oracle 12.1+ server")
+        if arraydmlrowcounts \
+                and self._connection.field_version < FIELD_VERSION_12_1:
+            raise NotSupportedError(
+                "arraydmlrowcounts requires an Oracle 12.1+ server")
         self._batcherrors = []
         self._arraydmlrowcounts = []
         Rows = [_resolve_parameters(operation, P) for P in seq_of_parameters]

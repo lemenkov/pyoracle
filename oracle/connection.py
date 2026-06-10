@@ -10,7 +10,7 @@ from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
 from oracle.tns import set_decode_dml_rowcounts
 from oracle.exceptions import OperationalError
-from oracle.tns import CCAP_FIELD_VERSION, FIELD_VERSION_11_2, FIELD_VERSION_12_1, FIELD_VERSION_21_1
+from oracle.tns import CCAP_FIELD_VERSION, FIELD_VERSION_12_1, FIELD_VERSION_21_1
 from oracle.tns_consts import (
     CONN_STATE_AUTH_NEGOTIATE, CONN_STATE_AUTHENTICATED,
     CONN_STATE_CONNECTED, CONN_STATE_DISCONNECTED, DictionaryType,
