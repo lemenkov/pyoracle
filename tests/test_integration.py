@@ -2002,6 +2002,72 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                 finally:
                     await Cur.execute("DROP TABLE PYORACLE_ASYNC_EM")
 
+    async def test_async_executemany_batcherrors(self):
+        # Async mirror of test_executemany_batcherrors (#18): per-row constraint
+        # violations are collected, not raised, and the good rows still apply.
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                await Cur.execute("CREATE TABLE PYORACLE_ASYNC_BE "
+                                  "(id NUMBER PRIMARY KEY, v VARCHAR2(10))")
+                try:
+                    await Cur.executemany(
+                        "INSERT INTO PYORACLE_ASYNC_BE VALUES (:1, :2)",
+                        [(1, "a"), (2, "b"), (1, "dup"), (3, "c"), (2, "d2")],
+                        batcherrors=True)
+                    errs = Cur.getbatcherrors()
+                    self.assertEqual([(e.offset, e.code) for e in errs],
+                                     [(2, 1), (4, 1)])
+                    await Cur.execute(
+                        "SELECT id FROM PYORACLE_ASYNC_BE ORDER BY id")
+                    self.assertEqual([r[0] for r in await Cur.fetchall()],
+                                     [1, 2, 3])
+                finally:
+                    await Cur.execute("DROP TABLE PYORACLE_ASYNC_BE")
+
+    async def test_async_executemany_arraydmlrowcounts(self):
+        # Async mirror of test_executemany_arraydmlrowcounts_update (#18).
+        from oracle.tns import FIELD_VERSION_12_1
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            if Conn.field_version < FIELD_VERSION_12_1:
+                self.skipTest("arraydmlrowcounts needs a 12.1+ server")
+            async with Conn.cursor() as Cur:
+                await Cur.execute(
+                    "CREATE TABLE PYORACLE_ASYNC_ADR (g NUMBER, v NUMBER)")
+                try:
+                    await Cur.executemany(
+                        "INSERT INTO PYORACLE_ASYNC_ADR VALUES (:1, :2)",
+                        [(1, 1), (1, 2), (2, 3), (1, 4), (3, 5), (3, 6)])
+                    await Cur.executemany(
+                        "UPDATE PYORACLE_ASYNC_ADR SET v = v + 10 WHERE g = :1",
+                        [(1,), (2,), (3,), (9,)], arraydmlrowcounts=True)
+                    self.assertEqual(Cur.getarraydmlrowcounts(), [3, 1, 2, 0])
+                    # Combined with batcherrors a failed iteration counts 0.
+                    await Cur.executemany(
+                        "INSERT INTO PYORACLE_ASYNC_ADR VALUES (:1, :2)",
+                        [(7, 7), (7, 7)])
+                    await Cur.executemany(
+                        "INSERT INTO PYORACLE_ASYNC_ADR VALUES (:1, :2)",
+                        [(8, 8), (9, 9)], arraydmlrowcounts=True)
+                    self.assertEqual(Cur.getarraydmlrowcounts(), [1, 1])
+                finally:
+                    await Cur.execute("DROP TABLE PYORACLE_ASYNC_ADR")
+
+    async def test_async_arraydmlrowcounts_unsupported_on_11g(self):
+        # On an 11g server the async feature is rejected up front, same as sync.
+        from oracle.tns import FIELD_VERSION_12_1
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            if Conn.field_version >= FIELD_VERSION_12_1:
+                self.skipTest("server supports arraydmlrowcounts")
+            async with Conn.cursor() as Cur:
+                await Cur.execute("CREATE TABLE PYORACLE_ASYNC_NS (id NUMBER)")
+                try:
+                    with self.assertRaises(oracle.NotSupportedError):
+                        await Cur.executemany(
+                            "INSERT INTO PYORACLE_ASYNC_NS VALUES (:1)",
+                            [(1,), (2,)], arraydmlrowcounts=True)
+                finally:
+                    await Cur.execute("DROP TABLE PYORACLE_ASYNC_NS")
+
     async def test_async_callproc_refcursor(self):
         async with await oracle.connect_async(**self._kwargs()) as Conn:
             async with Conn.cursor() as Cur:

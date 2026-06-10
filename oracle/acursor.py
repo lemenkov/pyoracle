@@ -11,7 +11,8 @@ from oracle.cursor import (
 )
 from oracle.datatypes import Var
 from oracle.exceptions import (
-    DatabaseError, InterfaceError, ProgrammingError, from_ora_code,
+    DatabaseError, InterfaceError, NotSupportedError, ProgrammingError,
+    from_ora_code,
 )
 
 
@@ -82,8 +83,11 @@ class AsyncCursor:
         return await self._run(operation, Bind)
 
     async def _run(self, operation: str, Bind: list,
-                   Batch: list | None = None) -> 'AsyncCursor':
-        Result = await self._connection.execute(operation, Bind=Bind, Batch=Batch)
+                   Batch: list | None = None, BatchErrors: bool = False,
+                   ArrayDmlRowCounts: bool = False) -> 'AsyncCursor':
+        Result = await self._connection.execute(
+            operation, Bind=Bind, Batch=Batch, BatchErrors=BatchErrors,
+            ArrayDmlRowCounts=ArrayDmlRowCounts)
         try:
             OraCode = Result[1]
             RetFormat = Result[3]
@@ -93,7 +97,17 @@ class AsyncCursor:
         except (TypeError, IndexError, ValueError) as exc:
             raise DatabaseError(f"unexpected wire response: {Result!r}") from exc
 
-        if OraCode not in (0, 1403):
+        # Array-DML batch errors (#18): each entry is {offset, code, message}.
+        self._batcherrors = list(Result[7]) if len(Result) > 7 else []
+        # Array-DML per-iteration row counts (#18): list of ints, one per row.
+        self._arraydmlrowcounts = (
+            list(Result[8]) if len(Result) > 8 and Result[8] else [])
+
+        # ORA-24381 ("error(s) in array DML") is the non-fatal summary the
+        # server returns when batcherrors collected per-row failures — surface
+        # them through getbatcherrors() instead of raising (mirrors sync _run).
+        NonFatal = (0, 1403, 24381) if BatchErrors else (0, 1403)
+        if OraCode not in NonFatal:
             Detail = Message or f"ORA-{OraCode:05d}"
             raise from_ora_code(OraCode)(Detail, code=OraCode)
 
@@ -184,9 +198,23 @@ class AsyncCursor:
         await self.execute(f"BEGIN :1 := {name}({Args}); END;", [Ret] + Params)
         return Ret.getvalue()
 
-    async def executemany(self, operation: str, seq_of_parameters) -> 'AsyncCursor':
-        # Array DML in a single round trip; see Cursor.executemany.
+    async def executemany(self, operation: str, seq_of_parameters,
+                          batcherrors: bool = False,
+                          arraydmlrowcounts: bool = False) -> 'AsyncCursor':
+        # Array DML in a single round trip; see Cursor.executemany. The
+        # batcherrors / arraydmlrowcounts refinements behave exactly as the sync
+        # cursor's (#18): batch-error collection via getbatcherrors(), and
+        # per-iteration row counts (12.1+ only) via getarraydmlrowcounts().
         self._check_open()
+        if arraydmlrowcounts:
+            # Local import: oracle.tns imports oracle.cursor (which acursor
+            # builds on), so a top-level import here would be circular.
+            from oracle.tns import FIELD_VERSION_12_1
+            if self._connection.field_version < FIELD_VERSION_12_1:
+                raise NotSupportedError(
+                    "arraydmlrowcounts requires an Oracle 12.1+ server")
+        self._batcherrors = []
+        self._arraydmlrowcounts = []
         Rows = [_resolve_parameters(operation, P) for P in seq_of_parameters]
         if not Rows:
             self._description = None
@@ -194,7 +222,28 @@ class AsyncCursor:
             self._rowcount = 0
             self._row_index = 0
             return self
-        return await self._run(operation, Rows[0], Batch=Rows[1:])
+        return await self._run(operation, Rows[0], Batch=Rows[1:],
+                               BatchErrors=batcherrors,
+                               ArrayDmlRowCounts=arraydmlrowcounts)
+
+    def getbatcherrors(self) -> list:
+        """Errors collected by the most recent
+        ``executemany(batcherrors=True)``. See
+        `oracle.cursor.Cursor.getbatcherrors`."""
+        Out = []
+        for E in getattr(self, '_batcherrors', []):
+            Code = E.get('code')
+            Exc = from_ora_code(Code)(E.get('message') or f"ORA-{Code:05d}",
+                                      code=Code)
+            Exc.offset = E.get('offset')
+            Out.append(Exc)
+        return Out
+
+    def getarraydmlrowcounts(self) -> list:
+        """Per-iteration row counts from the most recent
+        ``executemany(arraydmlrowcounts=True)``. See
+        `oracle.cursor.Cursor.getarraydmlrowcounts`."""
+        return list(getattr(self, '_arraydmlrowcounts', []))
 
     async def fetchone(self) -> tuple | None:
         self._check_open()

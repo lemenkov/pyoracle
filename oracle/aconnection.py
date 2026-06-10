@@ -33,7 +33,8 @@ from oracle.tns import decode_token_rpa
 from oracle.tns import encode_dictionary
 from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
-from oracle.tns import CCAP_FIELD_VERSION, FIELD_VERSION_11_2, FIELD_VERSION_21_1
+from oracle.tns import set_decode_dml_rowcounts
+from oracle.tns import CCAP_FIELD_VERSION, FIELD_VERSION_11_2, FIELD_VERSION_12_1, FIELD_VERSION_21_1
 from oracle.connection import _format_version, _MAX_REDIRECTS
 from oracle.tns_consts import (
     CONN_STATE_AUTHENTICATED, CONN_STATE_AUTH_NEGOTIATE,
@@ -388,7 +389,9 @@ class AsyncOracleConnect:
     # ----- execute / fetch (kept minimal for the first cut) -----
 
     async def execute(self, Query: str, Bind: list | None = None,
-                      Def: list | None = None, Batch: list | None = None) -> object:
+                      Def: list | None = None, Batch: list | None = None,
+                      BatchErrors: bool = False,
+                      ArrayDmlRowCounts: bool = False) -> object:
         """Same shape as `OracleConnect.execute` but async.
 
         Cursor caching for DML works the same way as in the sync path —
@@ -410,7 +413,13 @@ class AsyncOracleConnect:
             Type = 'change'
         CachedCursor = 0
         CacheKey = None
-        if Type == 'change' and not Def:
+        # The cursor cache reuses a parsed handle and skips re-sending the
+        # SQL/OAC — an 11g optimization that doesn't translate to 12c+, where a
+        # cached re-execute fails (ORA-01009 / ORA-03115) because the server
+        # expects the binds/OAC declared every execute. Disable on 12c+ (mirrors
+        # the sync OracleConnect.execute guard).
+        if Type == 'change' and not Def \
+                and self.field_version < FIELD_VERSION_12_1:
             CacheKey = (Query, exec_oac_signature(Bind, Batch))
             CachedCursor = self._cursor_cache.get(CacheKey, 0)
         SendQuery = "" if CachedCursor else Query
@@ -424,9 +433,13 @@ class AsyncOracleConnect:
             'bind': Bind,
             'batch': Batch,
             'def': Def,
+            'batcherrors': BatchErrors,
+            'arraydmlrowcounts': ArrayDmlRowCounts,
         }
         Data = encode_dictionary(self._make_dict(DictionaryType.exec, query=QueryDict))
         await self.send(TNS_DATA, Data)
+        # Arm row-count extraction for this response only (#18).
+        set_decode_dml_rowcounts(ArrayDmlRowCounts)
         try:
             # Seed the decoder with the binds so the IOV decoder can tell a
             # REF CURSOR OUT bind from a scalar one.
