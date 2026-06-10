@@ -405,11 +405,23 @@ class TestPasswordRedaction(unittest.TestCase):
     # it must never reach a debug log in clear text (CodeQL
     # py/clear-text-logging-sensitive-data).
 
-    def test_redacted_masks_password(self):
+    def test_redacted_omits_password(self):
+        # Allow-list: the password key is never read, so it is absent from the
+        # safe copy; non-secret fields are kept.
         from oracle.tns import _redacted
-        out = _redacted({'env': {'user': 'u', 'password': 'secret'}})
-        self.assertEqual(out['env']['password'], '***')
+        out = _redacted({'env': {'user': 'u', 'password': 'secret', 'host': 'h'}})
+        self.assertNotIn('password', out['env'])
         self.assertEqual(out['env']['user'], 'u')
+        self.assertEqual(out['env']['host'], 'h')
+
+    def test_redacted_drops_auth_secrets(self):
+        # The changepassword auth dict (session key + old/new passwords) is
+        # dropped wholesale (#21).
+        from oracle.tns import _redacted
+        out = _redacted({'seq': 1, 'auth': {'conn_key': b'k',
+                                            'old_password': 'op',
+                                            'new_password': 'np'}})
+        self.assertEqual(out['auth'], '<redacted>')
 
     def test_description_debug_log_omits_password(self):
         from oracle.tns import encode_dictionary_description
@@ -420,7 +432,8 @@ class TestPasswordRedaction(unittest.TestCase):
             encode_dictionary_description(d)
         joined = '\n'.join(cm.output)
         self.assertNotIn('tiger', joined)
-        self.assertIn('***', joined)
+        # Non-secret fields are still logged for debuggability.
+        self.assertIn('scott', joined)
 
 
 class TestRefCursor(unittest.TestCase):

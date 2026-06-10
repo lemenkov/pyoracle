@@ -70,8 +70,7 @@ def o5logon0(Sess: bytes, KeySess: bytes, DerivedSalt: bytes | None, DerivedKey:
 
     ConnKey = conn_key(CatKey, DerivedSalt, Bits)
 
-    cipher = AES.new(ConnKey, AES.MODE_CBC, IVec)
-    AuthPass = cipher.encrypt(pad1(Password))
+    AuthPass = encrypt_password(ConnKey, Password)
 
     SpeedyKey = b""
     SpeedyKeyInd = 0
@@ -81,6 +80,15 @@ def o5logon0(Sess: bytes, KeySess: bytes, DerivedSalt: bytes | None, DerivedKey:
         SpeedyKeyInd = 1
 
     return (AuthPass, AuthSess, SpeedyKey, SpeedyKeyInd, ConnKey)
+
+def encrypt_password(ConnKey: bytes, Password: bytes) -> bytes:
+    # AES-CBC (IV = 0) of the padded password under the session ConnKey — the
+    # exact transform o5logon uses for AUTH_PASSWORD. Factored out so the
+    # changepassword flow can reuse it for AUTH_NEWPASSWORD with the session key
+    # established at login (#21). pad1 prepends a fixed 16-byte block the server
+    # discards, so a fresh random prefix (as oracledb sends) is not required.
+    cipher = AES.new(ConnKey, AES.MODE_CBC, bytes(16))
+    return cipher.encrypt(pad1(Password))
 
 def validate(Resp: bytes, Key: bytes) -> bool:
     IVec = bytes(16)

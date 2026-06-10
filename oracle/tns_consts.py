@@ -114,7 +114,7 @@ FIELD_VERSION_19_1 = 12
 FIELD_VERSION_21_1 = 16
 FIELD_VERSION_23_1 = 17
 
-DictionaryType = Enum('DictionaryType', 'auth close description dty exec fetch lobops login pig pro sess spfp start stop tran')
+DictionaryType = Enum('DictionaryType', 'auth chgpwd close description dty exec fetch lobops login pig pro sess spfp start stop tran')
 
 # OALL8 execute-option bit that turns on array-DML batch-error mode: a per-row
 # error is collected (in the OER batch-error arrays) instead of aborting the
