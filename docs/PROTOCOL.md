@@ -471,6 +471,30 @@ set (`0x0421` / `0x0429`), not the DML `change` set — sending a block with
 binds through the DML path is rejected with `ORA-00600 [12259]`. The returned
 OUT/IN OUT values come back in a `TTI_IOV` token (§6.5).
 
+**Array DML batch errors and row counts** (`executemany`, 12c+). Two optional
+modes layer onto an array-DML execute, each oracledb-compatible:
+
+- **`batcherrors`** — OR `0x80000` (`TNS_EXEC_OPTION_BATCH_ERRORS`) into the
+  leading Options word. A per-row error then no longer aborts the batch; the
+  good rows apply and the failures come back in the OER's batch-error
+  code/offset/message arrays (§6.7), summarised by a non-fatal `ORA-24381`.
+
+- **`arraydmlrowcounts`** — ask the server for the per-iteration affected-row
+  count. Two coordinated request-side changes (no Options bit):
+  1. `al8i4[9]` (the 10th All8 element, normally `0`) is set to `0xC000`.
+  2. The 12c+ `al8pidmlrc` block — the three zero bytes that follow the
+     register-id field in the post-11g OALL8 header — becomes
+     `01 | iteration_count(SB4) | 01` (e.g. four iterations → `01 01 04 01`).
+
+  Omitting either makes the server reject the execute as malformed
+  (`ORA-03137 [kpoal8Check-4]`). The counts come back in the response **RPA
+  region** (`TTI_RPA`, token 8) that precedes the trailing OER, as a
+  `count(UB4) | count × UB4` block sitting between the opaque RPA body and the
+  OER token. pyoracle extracts it in `decode_token_rpa_piggyback` (armed for
+  the execute via a context flag) and surfaces it through
+  `cursor.getarraydmlrowcounts()`. The two modes combine: a failed iteration
+  reports a row count of `0`.
+
 ### 5.2 Fetch (TTI_FUN/TTI_FETCH)
 
 For fetching additional rows from an open cursor:

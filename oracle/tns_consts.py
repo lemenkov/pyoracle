@@ -108,6 +108,14 @@ DictionaryType = Enum('DictionaryType', 'auth close description dty exec fetch l
 # batch. ORed into the leading Opt word (#18).
 TNS_EXEC_OPTION_BATCH_ERRORS = 0x80000
 
+# Value the 12c+ OALL8 al8i4 array carries at element index 9 when array-DML
+# row counts are requested (oracledb arraydmlrowcounts). oracledb always sends
+# 0x8000 there; with arraydmlrowcounts it sets 0xC000 (the extra 0x4000 bit).
+# pyoracle's baseline is 0, so the whole 0xC000 is written when requested — the
+# server's kpoal8Check rejects the al8pidmlrc pointer (below) as malformed
+# (ORA-03137) without it. Reverse-engineered from an oracledb-thin capture (#18).
+TNS_AL8I4_ARRAY_DML_ROWCOUNTS = 0xC000
+
 TNS_LOB_OP_GET_LENGTH = 0x0001
 TNS_LOB_OP_READ = 0x0002
 
