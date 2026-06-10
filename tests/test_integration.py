@@ -635,12 +635,17 @@ class CursorIntegration(_IntegrationBase):
 
     def test_executemany_single_round_trip(self):
         # The whole batch must go in one server round trip, not one per row.
+        # Count only TNS_DATA sends: under XE's logon-storm throttle the server
+        # can inject a break/marker mid-response, and the driver's marker ack is
+        # an extra (non-data) send that would otherwise make this flake.
+        from oracle.tns_consts import TNS_DATA
         self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
         import oracle.connection as _c
         orig = _c.OracleConnect.send
         sends = [0]
         _c.OracleConnect.send = lambda s, T, D: (
-            sends.__setitem__(0, sends[0] + 1), orig(s, T, D))[1]
+            sends.__setitem__(0, sends[0] + (1 if T == TNS_DATA else 0)),
+            orig(s, T, D))[1]
         try:
             self.cur.executemany(
                 f"INSERT INTO {self.TABLE} VALUES (:1)", [(i,) for i in range(50)])
