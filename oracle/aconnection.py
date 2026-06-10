@@ -578,13 +578,30 @@ class AsyncOracleConnect:
                     if Length == 0:
                         continue
                     if Length == 0xFE:
-                        while Pos < len(Packet):
-                            ChunkLen = Packet[Pos]
-                            Pos += 1
-                            if ChunkLen == 0:
-                                break
-                            Buffer += Packet[Pos:Pos + ChunkLen]
-                            Pos += ChunkLen
+                        # Chunked content. 12c+ prefixes each chunk with a ub4
+                        # length (terminated by a zero-length chunk); 11g uses a
+                        # single length byte per chunk. Without the 12c+ branch
+                        # the chunk lengths misparse and the LOB read desyncs,
+                        # hanging the next recv (mirrors the sync handler).
+                        if self.field_version >= 8:        # FIELD_VERSION_12_2
+                            while Pos < len(Packet):
+                                NLen = Packet[Pos]
+                                Pos += 1
+                                if NLen == 0:
+                                    break
+                                ChunkLen = int.from_bytes(
+                                    Packet[Pos:Pos + NLen], "big")
+                                Pos += NLen
+                                Buffer += Packet[Pos:Pos + ChunkLen]
+                                Pos += ChunkLen
+                        else:
+                            while Pos < len(Packet):
+                                ChunkLen = Packet[Pos]
+                                Pos += 1
+                                if ChunkLen == 0:
+                                    break
+                                Buffer += Packet[Pos:Pos + ChunkLen]
+                                Pos += ChunkLen
                     else:
                         Buffer += Packet[Pos:Pos + Length]
                         Pos += Length
@@ -592,10 +609,15 @@ class AsyncOracleConnect:
                     OerSeen = True
                     break
                 else:
+                    # Likely TTI_RPA carrying the updated locator/amount — skip
+                    # to the trailing OER. Match the stable `04 01 01` prefix as
+                    # well as the historical `04 01 XX 01` form (mirrors sync;
+                    # 12c+ uses the former, so missing it hangs the read).
                     Found = -1
                     for I in range(Pos, len(Packet) - 3):
                         if (Packet[I] == TTI_OER and Packet[I + 1] == 0x01
-                                and Packet[I + 3] == 0x01):
+                                and (Packet[I + 2] == 0x01
+                                     or Packet[I + 3] == 0x01)):
                             Found = I
                             break
                     if Found >= 0:
