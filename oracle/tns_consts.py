@@ -101,6 +101,19 @@ TTI_SPFP = 138
 TTI_KPFC = 139
 TTI_PING = 147
 
+# TNS_CCAP_FIELD_VERSION_* values (the byte written at CCAP_FIELD_VERSION). The
+# negotiated TTC field version gates the auth verifier and the version-specific
+# wire formats. Kept here in the leaf constants module (rather than oracle.tns)
+# so oracle.cursor can import the 12.1 threshold without forming an import cycle
+# — oracle.tns imports oracle.cursor.
+FIELD_VERSION_11_2 = 6
+FIELD_VERSION_12_1 = 7
+FIELD_VERSION_12_2 = 8
+FIELD_VERSION_12_2_EXT1 = 9
+FIELD_VERSION_19_1 = 12
+FIELD_VERSION_21_1 = 16
+FIELD_VERSION_23_1 = 17
+
 DictionaryType = Enum('DictionaryType', 'auth close description dty exec fetch lobops login pig pro sess spfp start stop tran')
 
 # OALL8 execute-option bit that turns on array-DML batch-error mode: a per-row
