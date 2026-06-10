@@ -1013,25 +1013,26 @@ def encode_dictionary_close(Dictionary: dict) -> bytes:
     Tseq = Dictionary['seq']
     return bytes([TTI_FUN, TTI_LOGOFF, Tseq])
 
-_REDACT_ENV_SECRET = ('password', 'new_password')
-_REDACT_AUTH_SECRET = ('old_password', 'new_password', 'conn_key')
+# Env keys safe to include in a debug log. Deliberately an allow-list, NOT a
+# deny-list: the connection `password` (and the changepassword `new_password`)
+# is simply never read, so no secret value can flow into the logged copy. The
+# whole `auth` sub-dict is dropped wholesale — it only ever holds secrets (the
+# session key, salts, and the changepassword old/new passwords, #21).
+_REDACT_ENV_SAFE = (
+    'host', 'port', 'user', 'sid', 'service_name', 'conn_state', 'timeout',
+    'autocommit', 'fetch', 'role', 'charset', 'prelim', 'app_name',
+)
 
 def _redacted(Dictionary: dict) -> dict:
-    # Return a copy safe to log: every secret is masked so it never reaches a
-    # debug log in clear text. Secrets live in two places — the env dict (the
-    # connection password, carried so the encoders can use it) and the auth dict
-    # (the changepassword old/new passwords and the session key, #21). Mask both
-    # by building fresh sub-dicts with '***' substituted, rather than spreading
-    # the originals (which would route the real secrets into the logged copy).
-    Safe = dict(Dictionary)
+    # Return a copy safe to log. Secrets live in the env dict (connection
+    # password) and the auth dict (changepassword passwords + session key);
+    # neither secret value is ever read here, so they cannot reach a log.
+    Safe = {k: v for k, v in Dictionary.items() if k not in ('env', 'auth')}
     Env = Dictionary.get('env')
     if isinstance(Env, dict):
-        Safe['env'] = {k: ('***' if k in _REDACT_ENV_SECRET else v)
-                       for k, v in Env.items()}
-    Auth = Dictionary.get('auth')
-    if isinstance(Auth, dict):
-        Safe['auth'] = {k: ('***' if k in _REDACT_AUTH_SECRET else v)
-                        for k, v in Auth.items()}
+        Safe['env'] = {k: Env[k] for k in _REDACT_ENV_SAFE if k in Env}
+    if 'auth' in Dictionary:
+        Safe['auth'] = '<redacted>'
     return Safe
 
 def encode_dictionary_description(Dictionary: dict) -> bytes:
