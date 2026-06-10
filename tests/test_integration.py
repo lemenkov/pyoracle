@@ -698,6 +698,61 @@ class CursorIntegration(_IntegrationBase):
             batcherrors=True)
         self.assertEqual(self.cur.getbatcherrors(), [])
 
+    # ----- executemany arraydmlrowcounts (12c+) -----
+
+    def _require_12c(self):
+        # arraydmlrowcounts is a 12.1+ server feature (it rides the 12c+ OALL8
+        # al8pidmlrc block); skip the positive tests on an 11g server.
+        from oracle.tns import FIELD_VERSION_12_1
+        if self.conn.field_version < FIELD_VERSION_12_1:
+            self.skipTest("arraydmlrowcounts needs a 12.1+ server")
+
+    def test_executemany_arraydmlrowcounts_update(self):
+        # Per-iteration affected-row counts: UPDATE g=1 hits 3 rows, g=2 hits 1,
+        # g=3 hits 2, g=9 hits none -> [3, 1, 2, 0]. Matches oracledb (#18).
+        self._require_12c()
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (g NUMBER, v NUMBER)")
+        self.cur.executemany(
+            f"INSERT INTO {self.TABLE} VALUES (:1, :2)",
+            [(1, 1), (1, 2), (2, 3), (1, 4), (3, 5), (3, 6)])
+        self.cur.executemany(
+            f"UPDATE {self.TABLE} SET v = v + 10 WHERE g = :1",
+            [(1,), (2,), (3,), (9,)], arraydmlrowcounts=True)
+        self.assertEqual(self.cur.getarraydmlrowcounts(), [3, 1, 2, 0])
+
+    def test_executemany_arraydmlrowcounts_insert(self):
+        # Each INSERT iteration affects exactly one row.
+        self._require_12c()
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
+        self.cur.executemany(
+            f"INSERT INTO {self.TABLE} VALUES (:1)", [(i,) for i in range(5)],
+            arraydmlrowcounts=True)
+        self.assertEqual(self.cur.getarraydmlrowcounts(), [1, 1, 1, 1, 1])
+
+    def test_arraydmlrowcounts_empty_without_request(self):
+        # Without arraydmlrowcounts the list stays empty, and a prior request's
+        # counts don't leak into a later plain executemany.
+        self._require_12c()
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
+        self.cur.executemany(
+            f"INSERT INTO {self.TABLE} VALUES (:1)", [(1,), (2,)],
+            arraydmlrowcounts=True)
+        self.assertEqual(self.cur.getarraydmlrowcounts(), [1, 1])
+        self.cur.executemany(
+            f"INSERT INTO {self.TABLE} VALUES (:1)", [(3,), (4,)])
+        self.assertEqual(self.cur.getarraydmlrowcounts(), [])
+
+    def test_arraydmlrowcounts_unsupported_on_11g(self):
+        # On an 11g server the feature is rejected up front (oracledb-compatible).
+        from oracle.tns import FIELD_VERSION_12_1
+        if self.conn.field_version >= FIELD_VERSION_12_1:
+            self.skipTest("server supports arraydmlrowcounts")
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
+        with self.assertRaises(oracle.NotSupportedError):
+            self.cur.executemany(
+                f"INSERT INTO {self.TABLE} VALUES (:1)", [(1,), (2,)],
+                arraydmlrowcounts=True)
+
     # ----- closed-state guards -----
 
     def test_fetch_without_execute_raises(self):

@@ -14,7 +14,8 @@ from oracle.tns_consts import (
     TTI_DCB, TTI_DTY, TTI_FETCH, TTI_FOB, TTI_FUN, TTI_IOV, TTI_LOB,
     TTI_LOGOFF, TTI_OAC, TTI_OER, TTI_PFN, TTI_PRO, TTI_RPA, TTI_RXD,
     TTI_RXH, TTI_SESS, TTI_SPFP, TTI_STA, TTI_STRT, TTI_STOP, TTI_UDS,
-    TTI_WRN, TNS_BIND_DIR_INPUT, TNS_EXEC_OPTION_BATCH_ERRORS,
+    TTI_WRN, TNS_BIND_DIR_INPUT, TNS_AL8I4_ARRAY_DML_ROWCOUNTS,
+    TNS_EXEC_OPTION_BATCH_ERRORS,
     TNS_LOB_OP_READ, TNS_TYPE_BDOUBLE, TNS_TYPE_BFILE,
     TNS_TYPE_BFLOAT, TNS_TYPE_BLOB, TNS_TYPE_CLOB, TNS_TYPE_DATE,
     TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_LONG, TNS_TYPE_LONGRAW,
@@ -47,6 +48,21 @@ _DECODE_FIELD_VERSION = contextvars.ContextVar("decode_field_version", default=6
 # pick the 11g vs 12c+ bind-OAC layout. Separate from the decode var so the two
 # phases never interfere. Default 6 == FIELD_VERSION_11_2.
 _ENCODE_FIELD_VERSION = contextvars.ContextVar("encode_field_version", default=6)
+
+# Set True for the duration of an execute that requested array-DML row counts
+# (oracledb arraydmlrowcounts, #18). It tells decode_token_rpa_piggyback to
+# expect the `ub4 count | count×ub4` row-count block the server appends to the
+# RPA region ahead of the trailing OER — absent the flag the RPA is just walked
+# and discarded as before. The connection sets it per execute.
+_DECODE_DML_ROWCOUNTS = contextvars.ContextVar("decode_dml_rowcounts", default=False)
+
+def set_decode_dml_rowcounts(Flag: bool) -> None:
+    """Arm/disarm row-count extraction for the next response decode (#18).
+
+    The connection calls this before reading an execute's response so
+    decode_token_rpa_piggyback knows whether to expect the array-DML row-count
+    block. Reset every execute so a stale flag never leaks into another call."""
+    _DECODE_DML_ROWCOUNTS.set(bool(Flag))
 
 def assemble_packet(Data: bytes, Length: int) -> tuple[bool, int | None, bytes | None, bytes | None]:
     (PacketSize, PacketFlags, Type, Flags, Zero) = struct.unpack(">HhBBh", Data[:8])
@@ -422,6 +438,9 @@ def decode_token_oer(Data: bytes, Acc: tuple) -> tuple:
     # that 12c+ adds are not present, so the message DALC comes directly
     # after the batch-error-messages count.
     (Cursor, RowFormat, Rows) = Acc[:3]
+    # Array-DML row counts threaded in by decode_token_rpa_piggyback (the RPA
+    # carrying them precedes this OER); None for a normal execute (#18).
+    RowCounts = Acc[4] if len(Acc) > 4 else None
     Rest = Data[1:]                                  # consume the OER token
     (CallStatus, Rest) = decode_ub4(Rest)
     (_, Rest) = decode_ub4(Rest)                     # end-to-end seq#
@@ -518,7 +537,7 @@ def decode_token_oer(Data: bytes, Acc: tuple) -> tuple:
         Rowid = rowid_to_string(RowidObj, RowidFile, RowidBlock, RowidSlot)
     RetFormat = (RowCount, RowFormat)
     return (CallStatus, ErrCode, CursorId, RetFormat, Rows, Message, Rowid,
-            BatchErrors)
+            BatchErrors, RowCounts)
 
 def decode_token_oac(Data: bytes, Acc: object) -> tuple[int, int, int, int, bytes]:
     (DataType, Flg, Pre) = struct.unpack(">BBB", Data[:3])
@@ -607,6 +626,26 @@ def decode_token_rpa_piggyback(Data: bytes, Acc: tuple) -> object:
             return (True, Acc)
     while Rest and Rest[0] == 0:
         Rest = Rest[1:]
+    # Array-DML row counts (#18): when the execute requested arraydmlrowcounts
+    # the server appends a `ub4 count | count×ub4` block here, between the RPA
+    # body and the trailing OER — the per-iteration affected-row counts. Without
+    # it the RPA always ends on a known TTI token (the OER), so a non-token byte
+    # at this point is the row-count block. Pull it out and stash it on Acc so
+    # decode_token_oer can fold it into the result; the surrounding RPA fields
+    # stay opaque as before.
+    if (_DECODE_DML_ROWCOUNTS.get() and Rest
+            and Rest[0] not in _KNOWN_TTI_TOKENS):
+        try:
+            (Count, R2) = decode_ub4(Rest)
+            Counts = []
+            for _ in range(Count):
+                (C, R2) = decode_ub4(R2)
+                Counts.append(C)
+        except IndexError:
+            pass
+        else:
+            Rest = R2
+            Acc = tuple(Acc) + (Counts,)
     if Rest:
         return decode_packet(Rest, Acc)
     return (True, Acc)
@@ -1345,6 +1384,20 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
     if Dictionary['query'].get('batcherrors'):
         Opt |= TNS_EXEC_OPTION_BATCH_ERRORS
 
+    # Array-DML row counts (oracledb arraydmlrowcounts, #18): ask the server to
+    # return a per-iteration affected-row count. This is a 12c+ feature (it
+    # rides in the 12c+ OALL8 al8pidmlrc block below) and only meaningful for an
+    # actual batch. Two coordinated request-side changes, both reverse-
+    # engineered from an oracledb-thin capture: (1) al8i4[9] = 0xC000 here, and
+    # (2) the al8pidmlrc pointer + iteration count in `Middle`. Omitting either
+    # makes the server reject the execute as malformed (ORA-03137 kpoal8Check).
+    ArrayDmlRowCounts = bool(
+        Dictionary['query'].get('arraydmlrowcounts')
+        and FieldVersion >= FIELD_VERSION_12_2 and BatchLen > 0)
+    if ArrayDmlRowCounts and len(All8) > 9:
+        All8 = list(All8)
+        All8[9] = TNS_AL8I4_ARRAY_DML_ROWCOUNTS
+
     All8Len = len(All8)
     All8Flag = 1 if All8Len > 0 else 0
     All8s = reduce( lambda x,y: x+y, [ encode_sb4(A) for A in All8])
@@ -1386,7 +1439,14 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
         # (two-task conversion routine: integer overflow). See oracledb
         # execute.pyx _write_execute_message.
         Middle = bytes([0, 0, 1]) + bytes([0, 0, 0, 0, 0])   # reg_lsb .. reg_msb
-        Middle += bytes([0, 0, 0])                            # al8pidmlrc block
+        if ArrayDmlRowCounts:
+            # al8pidmlrc = pointer(1) + ub4 iteration count + 1. The server
+            # returns that many per-iteration row counts in the response RPA
+            # region (#18). Matches oracledb byte-for-byte (e.g. 4 iters →
+            # 01 01 04 01).
+            Middle += bytes([1]) + encode_sb4(1 + BatchLen) + bytes([1])
+        else:
+            Middle += bytes([0, 0, 0])                        # al8pidmlrc block
         Middle += bytes([0, 0, 0, 0, 0])                      # 12.2 al8sqlsig / SQL id
         if FieldVersion >= FIELD_VERSION_12_2_EXT1:
             Middle += bytes([0, 0])                           # 12.2_EXT1 chunk ids

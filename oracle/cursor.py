@@ -91,9 +91,11 @@ class Cursor:
         return self._run(operation, Bind)
 
     def _run(self, operation: str, Bind: list, Batch: list | None = None,
-             BatchErrors: bool = False) -> 'Cursor':
+             BatchErrors: bool = False,
+             ArrayDmlRowCounts: bool = False) -> 'Cursor':
         Result = self._connection.execute(operation, Bind=Bind, Batch=Batch,
-                                          BatchErrors=BatchErrors)
+                                          BatchErrors=BatchErrors,
+                                          ArrayDmlRowCounts=ArrayDmlRowCounts)
         # Wire result tuple from decode_token_oer:
         #   (call_status, oracle_error_code, cursor_id, (rowcount, col_meta),
         #    rows, message_or_none, last_rowid, batch_errors)
@@ -110,6 +112,9 @@ class Cursor:
 
         # Array-DML batch errors (#18): each entry is {offset, code, message}.
         self._batcherrors = list(Result[7]) if len(Result) > 7 else []
+        # Array-DML per-iteration row counts (#18): list of ints, one per row.
+        self._arraydmlrowcounts = (
+            list(Result[8]) if len(Result) > 8 and Result[8] else [])
 
         # ORA-24381 ("error(s) in array DML") is the summary code the server
         # returns when batcherrors collected per-row failures — not a fatal
@@ -195,7 +200,8 @@ class Cursor:
         return Ret.getvalue()
 
     def executemany(self, operation: str, seq_of_parameters,
-                    batcherrors: bool = False) -> 'Cursor':
+                    batcherrors: bool = False,
+                    arraydmlrowcounts: bool = False) -> 'Cursor':
         # Array DML: bind every row's values and execute them in a single
         # server round trip (one parse, `len(rows)` iterations) rather than
         # one execute() per row. Column types are taken from the first row.
@@ -204,8 +210,20 @@ class Cursor:
         # violation) no longer aborts the batch: the good rows are applied and
         # the failures are collected, retrievable via `getbatcherrors()`
         # (oracledb-compatible). #18.
+        #
+        # With `arraydmlrowcounts=True` the server returns the number of rows
+        # each iteration affected, retrievable via `getarraydmlrowcounts()`.
+        # A 12c+ feature; raises on an 11g server (oracledb-compatible). #18.
         self._check_open()
+        if arraydmlrowcounts:
+            # Local import: oracle.tns imports oracle.cursor, so a top-level
+            # import here would be circular.
+            from oracle.tns import FIELD_VERSION_12_1
+            if self._connection.field_version < FIELD_VERSION_12_1:
+                raise NotSupportedError(
+                    "arraydmlrowcounts requires an Oracle 12.1+ server")
         self._batcherrors = []
+        self._arraydmlrowcounts = []
         Rows = [_resolve_parameters(operation, P) for P in seq_of_parameters]
         if not Rows:
             self._description = None
@@ -214,7 +232,8 @@ class Cursor:
             self._row_index = 0
             return self
         return self._run(operation, Rows[0], Batch=Rows[1:],
-                         BatchErrors=batcherrors)
+                         BatchErrors=batcherrors,
+                         ArrayDmlRowCounts=arraydmlrowcounts)
 
     def getbatcherrors(self) -> list:
         """Errors collected by the most recent ``executemany(batcherrors=True)``.
@@ -232,6 +251,17 @@ class Cursor:
             Exc.offset = E.get('offset')
             Out.append(Exc)
         return Out
+
+    def getarraydmlrowcounts(self) -> list:
+        """Per-iteration row counts from the most recent
+        ``executemany(arraydmlrowcounts=True)``.
+
+        Returns a list of ints, one per row in the batch, giving how many rows
+        that iteration affected (e.g. an UPDATE matching 3 rows yields 3).
+        Empty if the last statement didn't request row counts. Requires a 12.1+
+        server. oracledb-compatible.
+        """
+        return list(getattr(self, '_arraydmlrowcounts', []))
 
     def fetchone(self) -> tuple | None:
         self._check_open()

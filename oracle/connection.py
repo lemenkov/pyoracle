@@ -8,6 +8,7 @@ from oracle.tns import decode_token_rpa
 from oracle.tns import encode_dictionary
 from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
+from oracle.tns import set_decode_dml_rowcounts
 from oracle.exceptions import OperationalError
 from oracle.tns import CCAP_FIELD_VERSION, FIELD_VERSION_11_2, FIELD_VERSION_12_1, FIELD_VERSION_21_1
 from oracle.tns_consts import (
@@ -400,7 +401,8 @@ class OracleConnect:
             return 1
 
     def execute(self, Query: str, Bind: list | None = None, Def: list | None = None,
-                Batch: list | None = None, BatchErrors: bool = False) -> object:
+                Batch: list | None = None, BatchErrors: bool = False,
+                ArrayDmlRowCounts: bool = False) -> object:
         if Bind is None:
             Bind = []
         if Def is None:
@@ -448,9 +450,12 @@ class OracleConnect:
             'batch': Batch,
             'def': Def,
             'batcherrors': BatchErrors,
+            'arraydmlrowcounts': ArrayDmlRowCounts,
         }
         Data = encode_dictionary(self._make_dict(DictionaryType.exec, query=QueryDict))
         self.send(TNS_DATA, Data)
+        # Arm row-count extraction for this response only (#18).
+        set_decode_dml_rowcounts(ArrayDmlRowCounts)
         try:
             # Seed the decoder with the bind list so the IOV decoder can tell a
             # REF CURSOR OUT bind from a scalar one.

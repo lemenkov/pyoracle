@@ -138,7 +138,8 @@ class _StubConn:
     def __init__(self, result):
         self._result = result
 
-    def execute(self, operation, Bind=None, Batch=None, BatchErrors=False):
+    def execute(self, operation, Bind=None, Batch=None, BatchErrors=False,
+                ArrayDmlRowCounts=False):
         return self._result
 
 
