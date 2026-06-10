@@ -986,16 +986,21 @@ The TNS data type numbers (`§3.1`) for LOBs are:
 | NCLOB   | 112 + national charset form |
 
 pyoracle's row decoder reads the LOB column as `ub4 num_bytes |
-ub1 num_bytes_echo | num_bytes raw bytes` (total `num_bytes + 3`
-bytes of the LOB column). The `num_bytes` block is the locator
-metadata followed by the inline content section, and is exactly what
-the server expects back as the source pointer in a `TTI_LOBOPS` READ
-request (verified by diffing pyoracle's RXD locator against
-sqlplus's `TTI_LOBOPS` request bytes — they match byte-for-byte
-for the same row). NULL LOBs (single `0x00` byte) come back as
-Python `None`; non-NULL LOBs come back as `oracle.lob.LOB` objects
-that `Cursor.execute` automatically resolves to `str` (CLOB) or
-`bytes` (BLOB) via `LOB.read()`.
+DALC locator_block`. The locator block (the locator metadata plus any
+inline content section) is a **DALC** (`§12.2`): a single length-prefixed
+chunk while the block stays under 254 bytes, or the `0xFE` chunked form
+(length-prefixed sub-chunks terminated by a zero length) once it reaches
+254. The block crosses 254 bytes when the LOB's content is woven inline
+into the locator — for medium CLOBs, and for NCLOBs at half the character
+count because their inline content is UTF-16BE (two bytes per character).
+Decoding the block as a DALC (not as a 1-byte size echo + `num_bytes` raw
+bytes, which only matched the single-chunk case) is what makes those
+mid-size inline LOBs decode instead of spilling content bytes into the
+token stream (#37). The reassembled locator is exactly what the server
+expects back as the source pointer in a `TTI_LOBOPS` READ. NULL LOBs
+(single `0x00` byte) come back as Python `None`; non-NULL LOBs come back
+as `oracle.lob.LOB` objects that `Cursor.execute` automatically resolves
+to `str` (CLOB) or `bytes` (BLOB) via `LOB.read()`.
 
 Confirmed against XE 11g captures: `num_bytes` scales with content
 as `102 + 2 × utf16_chars` for CLOBs and `102 + content_bytes` for

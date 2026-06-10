@@ -663,32 +663,34 @@ def _read_lob_column(Rest: bytes) -> tuple[bytes | None, bytes]:
     # LOB column layout in RXD (Oracle 11g):
     #
     #   ub1 0x00              → NULL LOB; total column size = 1 byte.
-    #   ub4 num_bytes         → otherwise the leading variable-length integer
-    #                           gives the size of the locator block that
-    #                           follows.
-    #   ub1 size_repeat       → echoes num_bytes as a single byte (skipped).
-    #   num_bytes raw bytes   → the LOB locator + inline content section.
-    #                           This is exactly what the server expects back
-    #                           in TTI_LOBOPS — verified by diffing against
+    #   ub4 num_bytes         → otherwise the size of the locator block.
+    #   DALC locator block    → the LOB locator + any inline content section.
+    #                           This is exactly what the server expects back in
+    #                           TTI_LOBOPS — verified by diffing against
     #                           sqlplus's LOBOPS request locator bytes.
     #
-    # Total LOB column size = num_bytes + 3. Confirmed against captured XE
-    # 11g responses for NULL / EMPTY_CLOB / 'x' / 10-char and 23-char CLOBs.
+    # The locator block is a DALC (§12.2): a single length-prefixed chunk while
+    # the block stays under 254 bytes, or the 0xFE chunked form (length-prefixed
+    # sub-chunks terminated by a zero length) at 254 bytes and up. A block grows
+    # past 254 bytes once the LOB's content is woven inline into the locator —
+    # which happens for medium CLOBs, and for NCLOBs sooner because their inline
+    # content is UTF-16BE (two bytes per character). The old code assumed a
+    # 1-byte size echo followed by num_bytes raw bytes; that only matched the
+    # single-chunk case, so the chunked form was mis-read and the leftover
+    # content bytes were then fed to decode_packet as bogus tokens (#37).
     if not Rest:
         return (None, Rest)
     if Rest[0] == 0x00:
         return (None, Rest[1:])
     (NumBytes, Body) = decode_ub4(Rest)
-    if NumBytes <= 0 or len(Body) < NumBytes + 1:
+    if NumBytes <= 0 or not Body:
         # Defensive: malformed or unexpected layout. Surface what we have
         # rather than overrunning the buffer.
         return (bytes(Body), b"")
-    # Skip the 1-byte size echo (Body[0]) and take the next num_bytes bytes.
-    # That gives the locator format the server emitted *and* the format it
-    # expects on input for TTI_LOBOPS round-trips.
-    Locator = bytes(Body[1:1 + NumBytes])
-    Tail = Body[1 + NumBytes:]
-    return (Locator, Tail)
+    (Locator, Tail) = decode_dalc(Body)
+    if isinstance(Locator, list):       # 0x00 / 0xFF DALC → empty / null
+        return (None, Tail)
+    return (bytes(Locator), Tail)
 
 def _read_rowid_column(Rest: bytes) -> tuple[str | None, bytes]:
     # ROWID (TNS type 11) in RXD: a 1-byte present indicator (the size the

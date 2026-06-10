@@ -1467,6 +1467,42 @@ class LOBIntegration(_IntegrationBase):
         self.assertEqual(len(Got), len(Payload))
         self.assertEqual(Got, Payload)
 
+    def test_clob_inline_chunked_locator(self):
+        # A CLOB whose content is woven inline into the locator block can push
+        # that block past 254 bytes, where it switches to the 0xFE chunked DALC
+        # form. The row decoder must read the block as a DALC, not as a 1-byte
+        # size echo + raw bytes (#37). 400 chars lands in that band.
+        self._setup()
+        Text = "abcd" * 100
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE}(id, c) VALUES (1, :c)", {"c": Text}
+        )
+        self.cur.execute(f"SELECT c FROM {self.TABLE} WHERE id=1")
+        self.assertEqual(self.cur.fetchone()[0], Text)
+
+    def test_nclob_round_trip(self):
+        # NCLOB (national-charset LOB). Its inline content is UTF-16BE, so the
+        # locator block crosses the 254-byte chunked-DALC threshold at half the
+        # character count of a CLOB — the case #37 reported as broken on 11g.
+        # Cover small, the chunked band, and supplementary-plane content.
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} (id NUMBER, nc NCLOB)"
+        )
+        Cases = {
+            1: "national ünî 中",
+            2: "B" * 200,
+            3: "nclob ünî 中 😀🎉 " * 80,
+        }
+        for Id, Text in Cases.items():
+            self.cur.execute(
+                f"INSERT INTO {self.TABLE}(id, nc) VALUES (:i, :t)",
+                {"i": Id, "t": Text},
+            )
+        for Id, Text in Cases.items():
+            self.cur.execute(f"SELECT nc FROM {self.TABLE} WHERE id=:i",
+                             {"i": Id})
+            self.assertEqual(self.cur.fetchone()[0], Text)
+
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class RedirectIntegration(unittest.TestCase):
