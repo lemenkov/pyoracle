@@ -103,6 +103,11 @@ TTI_PING = 147
 
 DictionaryType = Enum('DictionaryType', 'auth close description dty exec fetch lobops login pig pro sess spfp start stop tran')
 
+# OALL8 execute-option bit that turns on array-DML batch-error mode: a per-row
+# error is collected (in the OER batch-error arrays) instead of aborting the
+# batch. ORed into the leading Opt word (#18).
+TNS_EXEC_OPTION_BATCH_ERRORS = 0x80000
+
 TNS_LOB_OP_GET_LENGTH = 0x0001
 TNS_LOB_OP_READ = 0x0002
 

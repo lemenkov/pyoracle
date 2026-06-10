@@ -666,6 +666,38 @@ class CursorIntegration(_IntegrationBase):
         self.cur.execute(f"SELECT COUNT(*) FROM {self.TABLE}")
         self.assertEqual(self.cur.fetchone(), (0,))
 
+    def test_executemany_batcherrors(self):
+        # With batcherrors=True a per-row constraint violation no longer aborts
+        # the batch: good rows are applied and the failures are collected via
+        # getbatcherrors() (#18).
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} (id NUMBER PRIMARY KEY, v VARCHAR2(10))")
+        rows = [(1, "a"), (2, "b"), (1, "dup"), (3, "c"), (2, "dup2")]
+        self.cur.executemany(
+            f"INSERT INTO {self.TABLE} VALUES (:1, :2)", rows, batcherrors=True)
+        errs = self.cur.getbatcherrors()
+        self.assertEqual([(e.offset, e.code) for e in errs], [(2, 1), (4, 1)])
+        self.assertIn("ORA-00001", str(errs[0]))
+        # The non-violating rows were committed.
+        self.cur.execute(f"SELECT id FROM {self.TABLE} ORDER BY id")
+        self.assertEqual([r[0] for r in self.cur.fetchall()], [1, 2, 3])
+
+    def test_executemany_without_batcherrors_raises(self):
+        # Default behaviour is unchanged: a constraint violation aborts and
+        # raises rather than being collected.
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} (id NUMBER PRIMARY KEY)")
+        with self.assertRaises(oracle.IntegrityError):
+            self.cur.executemany(
+                f"INSERT INTO {self.TABLE} VALUES (:1)", [(1,), (1,)])
+
+    def test_getbatcherrors_empty_when_no_errors(self):
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
+        self.cur.executemany(
+            f"INSERT INTO {self.TABLE} VALUES (:1)", [(1,), (2,)],
+            batcherrors=True)
+        self.assertEqual(self.cur.getbatcherrors(), [])
+
     # ----- closed-state guards -----
 
     def test_fetch_without_execute_raises(self):

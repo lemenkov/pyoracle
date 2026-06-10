@@ -272,7 +272,8 @@ class TestTnsCommandDecoders(unittest.TestCase):
              (0, None),     # rowcount, row_format
              [],            # rows
              "ORA-00942: table or view does not exist",
-             None),         # lastrowid (rowid bytes all zero -> no row)
+             None,          # lastrowid (rowid bytes all zero -> no row)
+             []),           # batch errors (none)
         )
 
     def test_tns_decode_token_oer_rowid(self):

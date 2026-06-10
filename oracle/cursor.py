@@ -90,14 +90,15 @@ class Cursor:
         Bind = _resolve_parameters(operation, parameters)
         return self._run(operation, Bind)
 
-    def _run(self, operation: str, Bind: list, Batch: list | None = None) -> 'Cursor':
-        Result = self._connection.execute(operation, Bind=Bind, Batch=Batch)
+    def _run(self, operation: str, Bind: list, Batch: list | None = None,
+             BatchErrors: bool = False) -> 'Cursor':
+        Result = self._connection.execute(operation, Bind=Bind, Batch=Batch,
+                                          BatchErrors=BatchErrors)
         # Wire result tuple from decode_token_oer:
         #   (call_status, oracle_error_code, cursor_id, (rowcount, col_meta),
-        #    rows, message_or_none)
-        # The trailing message slot is present for the new OER decoder. Earlier
-        # decoders returned a 5-tuple; tolerate either shape so a stale build
-        # doesn't crash here.
+        #    rows, message_or_none, last_rowid, batch_errors)
+        # The trailing slots were added incrementally; tolerate a shorter shape
+        # so a stale build doesn't crash here.
         try:
             OraCode = Result[1]
             RetFormat = Result[3]
@@ -107,7 +108,14 @@ class Cursor:
         except (TypeError, IndexError, ValueError) as exc:
             raise DatabaseError(f"unexpected wire response: {Result!r}") from exc
 
-        if OraCode not in (0, 1403):
+        # Array-DML batch errors (#18): each entry is {offset, code, message}.
+        self._batcherrors = list(Result[7]) if len(Result) > 7 else []
+
+        # ORA-24381 ("error(s) in array DML") is the summary code the server
+        # returns when batcherrors collected per-row failures — not a fatal
+        # error. Surface them through getbatcherrors() instead of raising.
+        NonFatal = (0, 1403, 24381) if BatchErrors else (0, 1403)
+        if OraCode not in NonFatal:
             Detail = Message or f"ORA-{OraCode:05d}"
             raise from_ora_code(OraCode)(Detail, code=OraCode)
 
@@ -186,11 +194,18 @@ class Cursor:
         self.execute(f"BEGIN :1 := {name}({Args}); END;", [Ret] + Params)
         return Ret.getvalue()
 
-    def executemany(self, operation: str, seq_of_parameters) -> 'Cursor':
+    def executemany(self, operation: str, seq_of_parameters,
+                    batcherrors: bool = False) -> 'Cursor':
         # Array DML: bind every row's values and execute them in a single
         # server round trip (one parse, `len(rows)` iterations) rather than
         # one execute() per row. Column types are taken from the first row.
+        #
+        # With `batcherrors=True` a per-row error (e.g. a unique-constraint
+        # violation) no longer aborts the batch: the good rows are applied and
+        # the failures are collected, retrievable via `getbatcherrors()`
+        # (oracledb-compatible). #18.
         self._check_open()
+        self._batcherrors = []
         Rows = [_resolve_parameters(operation, P) for P in seq_of_parameters]
         if not Rows:
             self._description = None
@@ -198,7 +213,25 @@ class Cursor:
             self._rowcount = 0
             self._row_index = 0
             return self
-        return self._run(operation, Rows[0], Batch=Rows[1:])
+        return self._run(operation, Rows[0], Batch=Rows[1:],
+                         BatchErrors=batcherrors)
+
+    def getbatcherrors(self) -> list:
+        """Errors collected by the most recent ``executemany(batcherrors=True)``.
+
+        Returns a list of ``DatabaseError`` objects, one per failed row, each
+        carrying ``.offset`` (the 0-based row index in the batch), ``.code``
+        (the ORA number) and the message. Empty if the last statement had no
+        batch errors. oracledb-compatible.
+        """
+        Out = []
+        for E in getattr(self, '_batcherrors', []):
+            Code = E.get('code')
+            Exc = from_ora_code(Code)(E.get('message') or f"ORA-{Code:05d}",
+                                      code=Code)
+            Exc.offset = E.get('offset')
+            Out.append(Exc)
+        return Out
 
     def fetchone(self) -> tuple | None:
         self._check_open()
