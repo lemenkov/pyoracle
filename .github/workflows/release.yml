@@ -32,7 +32,7 @@ jobs:
           python-version: '3.13'
 
       - name: Install build + runtime dependencies
-        run: pip install --upgrade pip build pycryptodome
+        run: pip install --upgrade pip build pycryptodome tzdata
 
       - name: Run offline test suite
         # Gate the release on the offline-safe tests. The DB-backed
@@ -42,6 +42,9 @@ jobs:
                 tests.test_crypto
                 tests.test_tns_decode
                 tests.test_tns_encode
+                tests.test_tns_types
+                tests.test_api_conveniences
+                tests.test_connection
 
       - name: Build sdist + wheel
         run: python -m build
