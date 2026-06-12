@@ -37,7 +37,14 @@ All communication is framed into TNS packets. Every packet begins with an 8- or 
 
 For **TNS_DATA** packets (type 6), an additional 2-byte field follows:
 
-- **Data Flags** (16 bits): `0x0000` for a final (or only) packet; `0x0020` when there are more data packets following (fragmented message).
+- **Data Flags** (16 bits): on the **client -> server** side, `0x0000` for a
+  final (or only) packet and `0x0020` when more data packets follow. The
+  **server -> client** side does *not* use this bit: every server data packet,
+  final or not, carries Data Flags `0x0000` (verified by probe against XE 11g —
+  26 consecutive fragments of a 50 KiB CLOB read were all `0x0000`). The server
+  instead signals "more fragments follow" by **filling the packet to its
+  maximum size** (see §1.3). Do not rely on `0x0020` to delimit an inbound
+  message.
 
 This makes TNS_DATA headers 10 bytes and all other packet headers 8 bytes.
 
@@ -62,9 +69,59 @@ This makes TNS_DATA headers 10 bytes and all other packet headers 8 bytes.
 
 Messages larger than the Session Data Unit (SDU) are split across multiple TNS_DATA packets. The SDU is negotiated during the connection phase (default: 8192 bytes). When a message is fragmented:
 
+**Client -> server** (requests we send):
+
 - All fragments except the last have Data Flags set to `0x0020`.
 - The last fragment has Data Flags set to `0x0000`.
-- The receiver reassembles the full message by concatenating fragment bodies.
+
+**Server -> client** (responses we receive):
+
+- The server does **not** flag fragments at all — Data Flags are `0x0000` on
+  every packet (see §1.1).
+- Continuation is signalled by **packet size**: a non-final fragment is filled
+  to the server's maximum packet size (observed as `SDU - 37` = 8155 bytes for
+  the default 8192 SDU; a second framing yields `SDU - 81`). A packet smaller
+  than that maximum is the final fragment.
+- The receiver reassembles by concatenating fragment bodies until it sees a
+  short (sub-maximum) packet. `assemble_packet()` / `recv()` in
+  `oracle/connection.py` implement exactly this size test.
+
+In principle the size test cannot distinguish a final fragment that happens to
+be *exactly* maximum-sized from a true continuation. In practice this has not
+been observed as the cause of any desync (the server appears to avoid emitting
+a maximally-sized final fragment), so the test holds for normal traffic.
+
+### 1.4 Break / attention markers (TNS_MARKER)
+
+A `TNS_MARKER` (type 12) is an out-of-band break/attention signal. The server
+emits one (often several in a row — a "marker storm") to **cancel the call in
+progress**, e.g. when XE's per-second new-connection throttle rejects a logon
+with `ORA-01013` ("user requested cancel of current operation").
+
+Semantics that matter for the receive path:
+
+- A marker **cancels in-flight data**: any bytes the server had already queued
+  before the break are stale and must be **discarded**, not reassembled. The
+  real response (the `ORA-01013` OER, etc.) arrives *after* the marker exchange.
+- `recv()` therefore returns a marker immediately and drops whatever else was
+  buffered in the same read; the caller (`_handle_response` / `_read_lob_response`)
+  replies with a reset marker (`\x01\x00\x02`) and reads again for the real
+  response. **Do not** "preserve" the post-marker bytes — that re-injects the
+  cancelled data and desyncs the stream (verified: doing so reds ~65 integration
+  tests on 11g).
+- pyoracle never *initiates* a break, so the client-side interrupt/reset
+  discard handshake does not arise here.
+
+> ⚠️ **Open: #45 desync.** Under full-suite load / connection churn a LOB read
+> can still occasionally land content in the wrong column (a CLOB read returns
+> empty and its bytes surface in the next BLOB column). The rapid-reconnect
+> reproduction instead trips XE's `ORA-01013` connection throttle (a marker
+> storm), and a *paced* standalone reproduction of the exact failing query is
+> clean over 490+ rounds — so the wrong-column desync has **not** yet been
+> isolated to a specific code path. Per the project's capture-first discipline,
+> the next step is a wire capture of a failing sequence (marker handling around
+> a LOB read is the prime suspect) before changing the framing code. Blocks safe
+> connection reuse and reliable 21c CI.
 
 ## 2. Connection Phase
 
