@@ -290,6 +290,15 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
     (_, Rest) = _read_str_with_length(Rest)   # type name
     (_, Rest) = decode_ub4(Rest)              # column position
     (_, Rest) = decode_ub4(Rest)              # uds flags
+    if _DECODE_FIELD_VERSION.get() >= 17:     # FIELD_VERSION_23_1
+        # 23c (field version 17) adds two trailing per-column metadata fields,
+        # related to SQL domains / column annotations. They are empty (each a
+        # ub4 0, i.e. `00 00` on the wire) for ordinary columns; consume them
+        # so the next column / the row format stays byte-aligned. Captured by
+        # diffing a `SELECT 1 FROM DUAL` describe on 21c vs 23ai. Columns that
+        # actually carry a domain or annotations are not yet reverse-engineered.
+        (_, Rest) = decode_ub4(Rest)          # 23c domain metadata (empty)
+        (_, Rest) = decode_ub4(Rest)          # 23c annotation metadata (empty)
     Col = {
         'column_name': ColName,
         'data_type': DataType,
