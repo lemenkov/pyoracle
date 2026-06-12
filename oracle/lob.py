@@ -21,7 +21,12 @@
 
 from oracle.tns_consts import (
     TNS_TYPE_BFILE, TNS_TYPE_BLOB, TNS_TYPE_CLOB, TNS_TYPE_JSON,
+    TNS_TYPE_VECTOR,
 )
+
+# Column types whose value is delivered as a LOB locator but decoded from the
+# fetched binary image into a Python object (not returned as a LOB).
+_DECODED_IMAGE_TYPES = (TNS_TYPE_JSON, TNS_TYPE_VECTOR)
 
 _LOCATOR_OVERHEAD = 102
 
@@ -107,8 +112,8 @@ class LOB:
 
     def read(self) -> str | bytes:
         # Sync read. See `aread` below for the async equivalent.
-        if self.data_type == TNS_TYPE_JSON:
-            return self._read_json(self._fetch_content())
+        if self.data_type in _DECODED_IMAGE_TYPES:
+            return self._decode_image(self._fetch_content())
         if len(self.raw) == _LOCATOR_OVERHEAD:
             return "" if self.is_character else b""
         if self._connection is None:
@@ -129,24 +134,27 @@ class LOB:
             raise InterfaceError("LOB has no connection to read from")
         return self._connection.lob_read(self.raw, self.data_type)
 
-    def _read_json(self, content: bytes) -> object:
-        # A native JSON column comes back as an OSON image; decode it to the
-        # corresponding Python value (#30). lob_read returns bytes for the
-        # non-CLOB JSON type, so `content` is the raw OSON.
-        from oracle.oson import decode_oson
-        return decode_oson(content)
+    def _decode_image(self, content: bytes) -> object:
+        # A native JSON (#30) or VECTOR (#55) column comes back as a binary
+        # image over the LOB locator path; decode it to a Python value.
+        # lob_read returns bytes for these non-CLOB types.
+        if self.data_type == TNS_TYPE_JSON:
+            from oracle.oson import decode_oson
+            return decode_oson(content)
+        from oracle.vector import decode_vector
+        return decode_vector(content)
 
     async def aread(self) -> str | bytes:
         """Async equivalent of `read()`. Use this when the LOB came
         out of an `AsyncCursor`; the `_connection` attached to it is
         an `AsyncOracleConnect` whose `lob_read` / `bfile_read` are
         coroutines."""
-        if self.data_type == TNS_TYPE_JSON:
+        if self.data_type in _DECODED_IMAGE_TYPES:
             if self._connection is None:
                 from oracle.exceptions import InterfaceError
                 raise InterfaceError("LOB has no connection to read from")
             content = await self._connection.lob_read(self.raw, self.data_type)
-            return self._read_json(content)
+            return self._decode_image(content)
         if len(self.raw) == _LOCATOR_OVERHEAD:
             return "" if self.is_character else b""
         if self._connection is None:
