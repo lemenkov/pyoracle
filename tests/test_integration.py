@@ -1621,6 +1621,15 @@ class BooleanIntegration(_IntegrationBase):
         self.assertEqual(rows, [(1, True), (2, False), (3, None)])
         self.assertIsInstance(rows[0][1], bool)
 
+    def test_boolean_bind(self):
+        # Bind a Python bool into a BOOLEAN column and read it back (#54).
+        self._setup_bool()
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (1, :b)", [True])
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (2, :b)", [False])
+        self.conn.commit()
+        self.cur.execute(f"SELECT id, flag FROM {self.TABLE} ORDER BY id")
+        self.assertEqual(self.cur.fetchall(), [(1, True), (2, False)])
+
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class JSONIntegration(_IntegrationBase):
