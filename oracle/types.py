@@ -16,7 +16,8 @@ from oracle._tzregions import TZ_REGIONS
 from oracle.datatypes import IntervalYM
 from oracle.tns_consts import (
     AL16UTF16_CHARSET, AL32UTF8_CHARSET, ISO_LATIN_1_CHARSET, UTF8_CHARSET,
-    TNS_TYPE_BDOUBLE, TNS_TYPE_BFLOAT, TNS_TYPE_CHAR, TNS_TYPE_DATE,
+    TNS_TYPE_BDOUBLE, TNS_TYPE_BFLOAT, TNS_TYPE_BOOLEAN, TNS_TYPE_CHAR,
+    TNS_TYPE_DATE,
     TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_LONG, TNS_TYPE_LONGRAW,
     TNS_TYPE_NUMBER, TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPLTZ,
     TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_VARCHAR,
@@ -261,4 +262,9 @@ def decode_value(Column: dict, Data: bytes | list) -> object:
         return decode_interval_ds(Data)
     if DataType == TNS_TYPE_INTERVALYM:
         return decode_interval_ym(Data)
+    if DataType == TNS_TYPE_BOOLEAN:
+        # Native SQL BOOLEAN (23ai, #54). NULL is already handled above; a
+        # present value's last byte is the truth value: TRUE arrives as
+        # `01 01`, FALSE as `00` (verified on 23ai vs python-oracledb).
+        return Data[-1] != 0
     return Data
