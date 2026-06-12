@@ -1632,6 +1632,48 @@ class BooleanIntegration(_IntegrationBase):
 
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
+class VectorIntegration(_IntegrationBase):
+    # Native VECTOR columns, 23ai+ (#55, TNS type 127). The server delivers the
+    # vector as a LOB locator; pyoracle reads the binary image over TTI_LOBOPS
+    # and decodes it to a list. Skipped on servers without the type.
+    def _setup_vec(self, coltype):
+        from oracle.exceptions import DatabaseError
+        try:
+            self.cur.execute(f"CREATE TABLE {self.TABLE} (v {coltype})")
+        except DatabaseError as exc:
+            # Pre-23ai: 21c rejects VECTOR with ORA-00902 (invalid datatype);
+            # 11g's parser doesn't know the `VECTOR(n, type)` syntax at all and
+            # raises ORA-00907 (missing right parenthesis). Skip on either.
+            if exc.code in (902, 907):
+                self.skipTest("native VECTOR type needs a 23ai+ server")
+            raise
+
+    def _roundtrip(self, coltype, literal):
+        self._setup_vec(coltype)
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES ('{literal}')")
+        self.conn.commit()
+        self.cur.execute(f"SELECT v FROM {self.TABLE}")
+        return self.cur.fetchone()[0]
+
+    def test_float32(self):
+        got = self._roundtrip("VECTOR(3, FLOAT32)", "[1.5, 2.5, 3.5]")
+        self.assertEqual(got, [1.5, 2.5, 3.5])
+
+    def test_float32_signed(self):
+        got = self._roundtrip("VECTOR(4, FLOAT32)", "[-1, 0, 2.25, -8]")
+        self.assertEqual(got, [-1.0, 0.0, 2.25, -8.0])
+
+    def test_float64(self):
+        got = self._roundtrip("VECTOR(3, FLOAT64)", "[1.5, 2.5, 3.5]")
+        self.assertEqual(got, [1.5, 2.5, 3.5])
+
+    def test_int8(self):
+        got = self._roundtrip("VECTOR(4, INT8)", "[1, -2, 3, -4]")
+        self.assertEqual(got, [1, -2, 3, -4])
+        self.assertTrue(all(isinstance(v, int) for v in got))
+
+
+@unittest.skipUnless(_USER, _SKIP_REASON)
 class JSONIntegration(_IntegrationBase):
     # Native JSON (OSON) columns, 21c+ (#30). The server delivers the JSON
     # value as a LOB locator; pyoracle reads the OSON image over TTI_LOBOPS and
