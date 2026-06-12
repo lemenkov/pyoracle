@@ -1,0 +1,125 @@
+# SPDX-FileCopyrightText: 2019 Peter Lemenkov <lemenkov@gmail.com>
+# SPDX-License-Identifier: MIT
+
+"""Decoder for Oracle's OSON binary JSON image (the on-the-wire form of a
+native ``JSON`` column, 21c+).
+
+The format was reverse-engineered from images captured off a live 21c server
+(see docs/PROTOCOL.md §17); every encoding below is backed by a captured sample
+with known content. An OSON image is:
+
+    magic "FF 4A 5A" | version(1) | flags(ub2) | body
+
+``flags & 0x2000`` marks a *tree* (container) image; otherwise the body is a
+single bare scalar. A tree body is::
+
+    num_fnames(ub1) | fnames_seg_size(ub2) | tree_seg_size(ub2) | reserved(ub2)
+    hash_array(num_fnames * 1)        # one hash byte per field name (unused here)
+    offset_array(num_fnames * ub2)    # field-id -> offset into fnames_seg
+    fnames_seg                        # the field names, each <len><utf8>
+    tree_seg                          # the node tree, root at offset 0
+
+Nodes (within tree_seg, or the lone scalar of a non-tree image):
+
+    0x00..0x1F  short string, length = tag, then that many UTF-8 bytes
+    0x20..0x2F  number, Oracle NUMBER of (tag - 0x1F) bytes
+    0x30        null      0x31  true      0x32  false
+    0x33        string, ub1 length prefix, then UTF-8 bytes
+    0x34        number, ub1 length prefix, then Oracle NUMBER bytes
+    (tag & 0xC0) == 0x80   object: count(ub1), field_id(ub1)*count,
+                           value_offset(ub2)*count   (offsets rel. to tree_seg)
+    (tag & 0xC0) == 0xC0   array:  count(ub1), value_offset(ub2)*count
+
+A field id is 1-based; ``offset_array[id-1]`` locates its name in fnames_seg.
+
+Not yet covered (no captured sample): images whose flags select ub4 segment
+sizes / ub4 node offsets (very large documents), ub2 field-ids (>255 distinct
+keys), and the extended scalar types JSON can carry (binary double/float, date,
+timestamp, interval). These raise ``OsonError`` rather than decode wrong.
+"""
+
+from oracle.types import decode_number
+
+OSON_MAGIC = b"\xff\x4a\x5a"
+
+# Image flags (header ub2).
+_FLAG_TREE = 0x2000          # container image (object/array) vs bare scalar
+
+
+class OsonError(Exception):
+    """Raised on an OSON image whose encoding we do not yet decode."""
+
+
+def _u16(buf: bytes, pos: int) -> int:
+    return (buf[pos] << 8) | buf[pos + 1]
+
+
+def decode_oson(data: bytes) -> object:
+    """Decode an OSON image to the corresponding Python value."""
+    if data[:3] != OSON_MAGIC:
+        raise OsonError(f"not an OSON image (magic {data[:3].hex()})")
+    flags = _u16(data, 4)
+    pos = 6
+    if not (flags & _FLAG_TREE):
+        # Bare scalar image: reserved(ub1), value_size(ub1), scalar node.
+        size = data[pos + 1]
+        seg = data[pos + 2:pos + 2 + size]
+        value, _ = _decode_node(seg, 0, None, seg)
+        return value
+    num_fnames = data[pos]
+    fnames_size = _u16(data, pos + 1)
+    tree_size = _u16(data, pos + 3)
+    pos += 7                                  # + reserved ub2
+    pos += num_fnames                         # hash array (1 byte / field)
+    offsets = [_u16(data, pos + 2 * i) for i in range(num_fnames)]
+    pos += 2 * num_fnames
+    fnames_seg = data[pos:pos + fnames_size]
+    pos += fnames_size
+    tree_seg = data[pos:pos + tree_size]
+
+    def field_name(field_id: int) -> str:
+        off = offsets[field_id - 1]
+        length = fnames_seg[off]
+        return fnames_seg[off + 1:off + 1 + length].decode("utf-8")
+
+    value, _ = _decode_node(tree_seg, 0, field_name, tree_seg)
+    return value
+
+
+def _decode_node(seg: bytes, off: int, field_name, tree: bytes):
+    # Returns (python_value, next_offset). `tree` is the tree segment that
+    # container value-offsets are relative to; `field_name` maps an object's
+    # field id to its key (None for scalar-only images).
+    tag = seg[off]
+    if tag <= 0x1F:                           # inline short string
+        return seg[off + 1:off + 1 + tag].decode("utf-8"), off + 1 + tag
+    if 0x20 <= tag <= 0x2F:                    # number, length packed in tag
+        length = tag - 0x1F
+        return decode_number(seg[off + 1:off + 1 + length]), off + 1 + length
+    if tag == 0x30:
+        return None, off + 1
+    if tag == 0x31:
+        return True, off + 1
+    if tag == 0x32:
+        return False, off + 1
+    if tag == 0x33:                           # string, ub1 length prefix
+        length = seg[off + 1]
+        return seg[off + 2:off + 2 + length].decode("utf-8"), off + 2 + length
+    if tag == 0x34:                           # number, ub1 length prefix
+        length = seg[off + 1]
+        return decode_number(seg[off + 2:off + 2 + length]), off + 2 + length
+    if (tag & 0xC0) == 0xC0:                   # array container
+        count = seg[off + 1]
+        p = off + 2
+        elem_offsets = [_u16(seg, p + 2 * i) for i in range(count)]
+        return ([_decode_node(tree, o, field_name, tree)[0]
+                 for o in elem_offsets], p + 2 * count)
+    if (tag & 0xC0) == 0x80:                   # object container
+        count = seg[off + 1]
+        p = off + 2
+        ids = [seg[p + i] for i in range(count)]
+        p += count
+        val_offsets = [_u16(seg, p + 2 * i) for i in range(count)]
+        return ({field_name(i): _decode_node(tree, o, field_name, tree)[0]
+                 for i, o in zip(ids, val_offsets)}, p + 2 * count)
+    raise OsonError(f"unsupported OSON node tag 0x{tag:02x} at offset {off}")
