@@ -1597,6 +1597,56 @@ class LOBIntegration(_IntegrationBase):
 
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
+class JSONIntegration(_IntegrationBase):
+    # Native JSON (OSON) columns, 21c+ (#30). The server delivers the JSON
+    # value as a LOB locator; pyoracle reads the OSON image over TTI_LOBOPS and
+    # decodes it to a Python value. Skipped on servers without the JSON type.
+    def _setup_json(self):
+        from oracle.exceptions import DatabaseError
+        try:
+            self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER, doc JSON)")
+        except DatabaseError as exc:
+            if exc.code == 902:        # ORA-00902: invalid datatype (pre-21c)
+                self.skipTest("native JSON type needs a 21c+ server")
+            raise
+
+    def _roundtrip(self, doc_text):
+        # Single-row round trip: insert one JSON doc, read it back decoded.
+        # (Multi-row JSON fetches ride the same LOB path as multi-row LOB reads
+        # and share the #45 desync limitation, so keep it to one row here.)
+        self.cur.execute(f"DELETE FROM {self.TABLE}")
+        self.conn.commit()
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES (1, JSON('{doc_text}'))")
+        self.conn.commit()
+        self.cur.execute(f"SELECT doc FROM {self.TABLE}")
+        return self.cur.fetchone()[0]
+
+    def test_object_array_scalars(self):
+        self._setup_json()
+        got = self._roundtrip('{"hello":"world","n":42,"arr":[1,2,3]}')
+        self.assertEqual(got, {"hello": "world", "n": 42, "arr": [1, 2, 3]})
+
+    def test_nested_with_bool_and_null(self):
+        self._setup_json()
+        got = self._roundtrip('{"a":{"b":[true,false,null],"s":"x"}}')
+        self.assertEqual(got, {"a": {"b": [True, False, None], "s": "x"}})
+
+    def test_top_level_array(self):
+        self._setup_json()
+        self.assertEqual(self._roundtrip('[1,2,3,"four",true]'),
+                         [1, 2, 3, "four", True])
+
+    def test_scalar_string(self):
+        self._setup_json()
+        self.assertEqual(self._roundtrip('"just a string"'), "just a string")
+
+    def test_scalar_null(self):
+        self._setup_json()
+        self.assertIsNone(self._roundtrip('null'))
+
+
+@unittest.skipUnless(_USER, _SKIP_REASON)
 class ChangePasswordIntegration(unittest.TestCase):
     """Connection.changepassword over the wire (#21). Each test changes the
     test user's password and always restores it (on the original, still-

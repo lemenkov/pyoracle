@@ -1342,3 +1342,60 @@ TNS_MARKER packets serve as break/attention signals. The marker body is 3 bytes:
 ## 16. Sequence Numbers
 
 Each TTC function call includes an incrementing sequence number (1 byte, wrapping from 127 back to 1). The sequence number is managed per-connection and ensures ordered request processing.
+
+## 17. Native JSON (OSON)
+
+Oracle 21c+ stores a native `JSON` column as a BLOB-backed **OSON** image (a
+compact binary JSON). The column's TNS data type is **119** (`TNS_TYPE_JSON`).
+On the wire it behaves exactly like a BLOB: the RXD row carries a LOB *locator*,
+and the OSON image is fetched over `TTI_LOBOPS` (§14). pyoracle reads it through
+the normal LOB locator path and then decodes the OSON in `oracle/oson.py`.
+
+The format below was reverse-engineered from images captured off a live 21c
+server, each with known content. An OSON image is:
+
+```
+magic "FF 4A 5A" | version (1) | flags (ub2) | body
+```
+
+`flags & 0x2000` marks a **tree** image (object/array). Otherwise the body is a
+single **bare scalar**: `reserved(ub1) | value_size(ub1) | <scalar node>`.
+
+A tree body is:
+
+```
+num_fnames (ub1) | fnames_seg_size (ub2) | tree_seg_size (ub2) | reserved (ub2)
+hash_array     (num_fnames × ub1)   one hash byte per field name (unused on read)
+offset_array   (num_fnames × ub2)   field-id → offset into fnames_seg
+fnames_seg                          field names, each <len(ub1)><utf8 bytes>
+tree_seg                            the node tree, root node at offset 0
+```
+
+A field id is 1-based: `offset_array[id - 1]` locates the field's name in
+`fnames_seg`.
+
+### 17.1 Node encoding
+
+| Tag byte            | Node                                                        |
+|---------------------|-------------------------------------------------------------|
+| `0x00`–`0x1F`       | short string, length = tag, then that many UTF-8 bytes      |
+| `0x20`–`0x2F`       | number, Oracle NUMBER of `(tag − 0x1F)` bytes               |
+| `0x30` / `0x31` / `0x32` | `null` / `true` / `false`                              |
+| `0x33`              | string, `ub1` length prefix, then UTF-8 bytes               |
+| `0x34`              | number, `ub1` length prefix, then Oracle NUMBER bytes       |
+| `(tag & 0xC0) == 0x80` | object: `count(ub1)`, `field_id(ub1)×count`, `value_offset(ub2)×count` |
+| `(tag & 0xC0) == 0xC0` | array: `count(ub1)`, `value_offset(ub2)×count`           |
+
+Container value-offsets are relative to the tree segment start. Objects list
+their `(field_id, value_offset)` pairs in document order.
+
+> **Not yet covered** (no captured sample): images whose flags select `ub4`
+> segment sizes / `ub4` node offsets (very large documents), `ub2` field-ids
+> (> 255 distinct keys), and the extended scalar types JSON can carry (binary
+> double/float, date, timestamp, interval). The decoder raises `OsonError` on
+> these rather than decode them wrong. JSON **binds** (inserting from Python)
+> are also future work; today JSON is read-only.
+>
+> Multi-row JSON `SELECT`s ride the same LOB-locator path as multi-row LOB
+> reads and share the #45 desync limitation under load — single-row reads are
+> reliable.

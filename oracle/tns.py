@@ -22,7 +22,8 @@ from oracle.tns_consts import (
     TNS_EXEC_OPTION_BATCH_ERRORS,
     TNS_LOB_OP_READ, TNS_TYPE_BDOUBLE, TNS_TYPE_BFILE,
     TNS_TYPE_BFLOAT, TNS_TYPE_BLOB, TNS_TYPE_CLOB, TNS_TYPE_DATE,
-    TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_LONG, TNS_TYPE_LONGRAW,
+    TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_JSON, TNS_TYPE_LONG,
+    TNS_TYPE_LONGRAW,
     TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_REFCURSOR, TNS_TYPE_RID,
     TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_UROWID, TNS_TYPE_VARCHAR,
     TTI_LOBOPS,
@@ -677,7 +678,11 @@ def decode_token_uds(Data: bytes, Acc: object) -> tuple:
     NewFormat = RowFormat + [Col] if isinstance(RowFormat, list) else [Col]
     return decode_packet(Rest, (Cursor, NewFormat, Rows))
 
-_LOB_DATA_TYPES = frozenset((TNS_TYPE_CLOB, TNS_TYPE_BLOB, TNS_TYPE_BFILE))
+# A native JSON column (21c+, #30) is delivered exactly like a BLOB: the RXD
+# carries a LOB locator and the OSON image comes back over TTI_LOBOPS. We read
+# it through the same locator path and decode the OSON in `LOB.read()`.
+_LOB_DATA_TYPES = frozenset((TNS_TYPE_CLOB, TNS_TYPE_BLOB, TNS_TYPE_BFILE,
+                             TNS_TYPE_JSON))
 _ROWID_DATA_TYPES = frozenset((TNS_TYPE_RID,))
 _UROWID_DATA_TYPES = frozenset((TNS_TYPE_UROWID,))
 _LONG_DATA_TYPES = frozenset((TNS_TYPE_LONG, TNS_TYPE_LONGRAW))
