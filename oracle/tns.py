@@ -21,7 +21,8 @@ from oracle.tns_consts import (
     TTI_WRN, TNS_BIND_DIR_INPUT, TNS_AL8I4_ARRAY_DML_ROWCOUNTS,
     TNS_EXEC_OPTION_BATCH_ERRORS,
     TNS_LOB_OP_READ, TNS_TYPE_BDOUBLE, TNS_TYPE_BFILE,
-    TNS_TYPE_BFLOAT, TNS_TYPE_BLOB, TNS_TYPE_CLOB, TNS_TYPE_DATE,
+    TNS_TYPE_BFLOAT, TNS_TYPE_BLOB, TNS_TYPE_BOOLEAN, TNS_TYPE_CLOB,
+    TNS_TYPE_DATE,
     TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_JSON, TNS_TYPE_LONG,
     TNS_TYPE_LONGRAW,
     TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_REFCURSOR, TNS_TYPE_RID,
@@ -1843,8 +1844,12 @@ def encode_token_rxd(Token: object) -> bytes:
     if Token is None:
         return bytes([0])
     if isinstance(Token, bool):
-        # bool is an int subclass; reject explicitly so callers don't get a
-        # surprise integer 0/1 when they meant something more specific.
+        # Native SQL BOOLEAN bind on 23ai (#54): the value is a 2-byte DALC
+        # `02 01 <0/1>` (TRUE = 01 01, FALSE = 01 00; captured from
+        # python-oracledb). Pre-23ai servers have no BOOLEAN type, so fall back
+        # to the historical NUMBER 0/1 binding there (bool is an int subclass).
+        if _ENCODE_FIELD_VERSION.get() >= 17:    # FIELD_VERSION_23_1
+            return bytes([2, 1, 1 if Token else 0])
         Bytes = encode_token_num(int(Token))
         return bytes([len(Bytes)]) + Bytes
     if isinstance(Token, int):
@@ -1950,6 +1955,13 @@ def encode_token_oac(Token: object) -> bytes:
         # Non-finite floats (inf / nan) bind as native BINARY_DOUBLE — NUMBER
         # can't represent them (see encode_token_rxd).
         return encode_token_raw(TNS_TYPE_BDOUBLE, 8, 0, 0, 0)
+    if isinstance(Token, bool):
+        # Native BOOLEAN OAC on 23ai (#54): type 252, fixed size 4 (matches
+        # python-oracledb's `fc 01 00 00 01 04 …`). Pre-23ai falls back to the
+        # NUMBER OAC, pairing with the NUMBER value in encode_token_rxd.
+        if _ENCODE_FIELD_VERSION.get() >= 17:    # FIELD_VERSION_23_1
+            return encode_token_raw(TNS_TYPE_BOOLEAN, 4, 0, 0, 0)
+        return encode_token_raw(TNS_TYPE_NUMBER, 22, 0, 0, 0)
     if isinstance(Token, (int, float, complex, Decimal)):
         return encode_token_raw(TNS_TYPE_NUMBER, 22, 0, 0, 0)
     if isinstance(Token, datetime.timedelta):
