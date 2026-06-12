@@ -1597,6 +1597,32 @@ class LOBIntegration(_IntegrationBase):
 
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
+class BooleanIntegration(_IntegrationBase):
+    # Native SQL BOOLEAN columns, 23ai+ (#54, TNS type 252). Skipped on servers
+    # without the type (21c/11g reject the column with ORA-00902).
+    def _setup_bool(self):
+        from oracle.exceptions import DatabaseError
+        try:
+            self.cur.execute(
+                f"CREATE TABLE {self.TABLE} (id NUMBER, flag BOOLEAN)")
+        except DatabaseError as exc:
+            if exc.code == 902:        # ORA-00902: invalid datatype (pre-23ai)
+                self.skipTest("native BOOLEAN type needs a 23ai+ server")
+            raise
+
+    def test_boolean_decode(self):
+        self._setup_bool()
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (1, TRUE)")
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (2, FALSE)")
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (3, NULL)")
+        self.conn.commit()
+        self.cur.execute(f"SELECT id, flag FROM {self.TABLE} ORDER BY id")
+        rows = self.cur.fetchall()
+        self.assertEqual(rows, [(1, True), (2, False), (3, None)])
+        self.assertIsInstance(rows[0][1], bool)
+
+
+@unittest.skipUnless(_USER, _SKIP_REASON)
 class JSONIntegration(_IntegrationBase):
     # Native JSON (OSON) columns, 21c+ (#30). The server delivers the JSON
     # value as a LOB locator; pyoracle reads the OSON image over TTI_LOBOPS and
