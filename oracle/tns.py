@@ -288,8 +288,7 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
         Rest = _skip_chunked_bytes(Rest)
     (_, Rest) = decode_ub4(Rest)              # version
     (Charset, Rest) = decode_ub4(Rest)        # charset id
-    Csfrm = Rest[0]                           # noqa: F841
-    Rest = Rest[1:]
+    Rest = Rest[1:]                           # skip the csfrm byte
     (MaxSize, Rest) = decode_ub4(Rest)
     if Is12c:
         (_, Rest) = decode_ub4(Rest)          # oaccolid (12.2+)
