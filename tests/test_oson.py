@@ -12,7 +12,7 @@ import json
 import unittest
 from decimal import Decimal
 
-from oracle.oson import decode_oson, OsonError
+from oracle.oson import decode_oson, json_to_text, OsonError
 
 
 # (label, JSON document, captured OSON image as hex)
@@ -98,6 +98,27 @@ class TestOsonDecode(unittest.TestCase):
         self.assertEqual(d["arr"], [1, 2, 3])
         self.assertIsInstance(d["arr"], list)
         self.assertIsInstance(d, dict)
+
+
+class TestJsonToText(unittest.TestCase):
+    # json_to_text serialises a JSON bind value (#50) to text for a string bind.
+
+    def test_basic_types(self):
+        self.assertEqual(json_to_text({"a": 1, "b": [True, None]}),
+                         '{"a": 1, "b": [true, null]}')
+
+    def test_decimal_integral_and_fractional(self):
+        # Integral Decimal stays an exact int; fractional goes through float.
+        self.assertEqual(json_to_text({"q": Decimal("3")}), '{"q": 3}')
+        self.assertEqual(json_to_text(Decimal("19.99")), "19.99")
+
+    def test_non_ascii_kept_utf8(self):
+        # ensure_ascii=False keeps the emoji as UTF-8, not a \\u escape.
+        self.assertEqual(json_to_text({"x": "héllo😀"}), '{"x": "héllo😀"}')
+
+    def test_unserialisable_raises(self):
+        with self.assertRaises(TypeError):
+            json_to_text({"d": object()})
 
 
 if __name__ == "__main__":

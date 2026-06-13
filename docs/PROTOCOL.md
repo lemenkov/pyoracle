@@ -1393,12 +1393,26 @@ their `(field_id, value_offset)` pairs in document order.
 > segment sizes / `ub4` node offsets (very large documents), `ub2` field-ids
 > (> 255 distinct keys), and the extended scalar types JSON can carry (binary
 > double/float, date, timestamp, interval). The decoder raises `OsonError` on
-> these rather than decode them wrong. JSON **binds** (inserting from Python)
-> are also future work; today JSON is read-only.
+> these rather than decode them wrong.
 >
 > Multi-row JSON `SELECT`s ride the same LOB-locator path as multi-row LOB
 > reads and share the #45 desync limitation under load — single-row reads are
 > reliable.
+
+### 17.2 Binds (#50)
+
+pyoracle binds a JSON value by serialising it to **JSON text** (`json.dumps`,
+`ensure_ascii=False`) and binding the text as a `VARCHAR`; the server casts it
+to the column's `JSON` type — the same approach as VECTOR binds (§18.1). A bare
+Python `dict` is auto-detected as JSON (it has no other bind meaning); wrap a
+`list` / scalar in `oracle.JSON(value)` to bind it as JSON too, since a bare
+`list` means a VECTOR and bare scalars bind as their native SQL types. `Decimal`
+serialises as a JSON number (integral values stay exact, others via `float`),
+matching the decoder, which returns JSON numbers as `Decimal`.
+
+Like the VECTOR native bind, an inline binary **OSON** bind (the inverse of the
+§17.1 decoder, sent over the same value framing as #62) is future work; the text
+cast covers every type the decoder handles with no row-data-assembler changes.
 
 ## 18. Native VECTOR (23ai+)
 

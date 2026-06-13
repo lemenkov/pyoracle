@@ -1772,6 +1772,45 @@ class JSONIntegration(_IntegrationBase):
         self._setup_json()
         self.assertIsNone(self._roundtrip('null'))
 
+    # Binds (#50): a bare dict binds as JSON; oracle.JSON(value) forces JSON on
+    # lists / scalars. pyoracle serialises to JSON text and the server casts it.
+    def _bind_roundtrip(self, value):
+        self.cur.execute(f"DELETE FROM {self.TABLE}")
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES (1, :doc)", [value])
+        self.conn.commit()
+        self.cur.execute(f"SELECT doc FROM {self.TABLE}")
+        return self.cur.fetchone()[0]
+
+    def test_bind_dict(self):
+        self._setup_json()
+        self.assertEqual(
+            self._bind_roundtrip({"hello": "world", "n": 42, "arr": [1, 2, 3]}),
+            {"hello": "world", "n": 42, "arr": [1, 2, 3]})
+
+    def test_bind_nested_dict(self):
+        self._setup_json()
+        self.assertEqual(
+            self._bind_roundtrip({"a": {"b": [True, False, None], "s": "x"}}),
+            {"a": {"b": [True, False, None], "s": "x"}})
+
+    def test_bind_json_wrapper_list(self):
+        self._setup_json()
+        self.assertEqual(
+            self._bind_roundtrip(oracle.JSON([1, 2, 3, "four", True])),
+            [1, 2, 3, "four", True])
+
+    def test_bind_json_wrapper_scalar(self):
+        self._setup_json()
+        self.assertEqual(self._bind_roundtrip(oracle.JSON("just a string")),
+                         "just a string")
+
+    def test_bind_decimal_stays_exact(self):
+        from decimal import Decimal
+        self._setup_json()
+        got = self._bind_roundtrip({"price": Decimal("19.99")})
+        self.assertEqual(got, {"price": Decimal("19.99")})
+
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class ChangePasswordIntegration(unittest.TestCase):
@@ -2058,6 +2097,26 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                 await Cur.execute("SELECT v FROM PYORACLE_ASYNC_VEC")
                 self.assertEqual(await Cur.fetchone(), ([1.5, 2.5, 3.5],))
                 await self._drop_async(Cur, "PYORACLE_ASYNC_VEC")
+
+    async def test_json_bind_roundtrip(self):
+        # Async parity for JSON binds (#50): bind a dict, read it back.
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                await self._drop_async(Cur, "PYORACLE_ASYNC_JSON")
+                try:
+                    await Cur.execute(
+                        "CREATE TABLE PYORACLE_ASYNC_JSON (doc JSON)")
+                except oracle.DatabaseError as e:
+                    if e.code == 902:
+                        self.skipTest("native JSON type needs a 21c+ server")
+                    raise
+                await Cur.execute(
+                    "INSERT INTO PYORACLE_ASYNC_JSON VALUES (:doc)",
+                    [{"k": "v", "n": [1, 2, 3]}])
+                await Cur.execute("SELECT doc FROM PYORACLE_ASYNC_JSON")
+                self.assertEqual(await Cur.fetchone(),
+                                 ({"k": "v", "n": [1, 2, 3]},))
+                await self._drop_async(Cur, "PYORACLE_ASYNC_JSON")
 
     async def _drop_async(self, cur, table):
         try:

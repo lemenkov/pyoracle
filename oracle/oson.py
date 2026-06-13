@@ -50,6 +50,27 @@ class OsonError(Exception):
     """Raised on an OSON image whose encoding we do not yet decode."""
 
 
+def json_to_text(value: object) -> str:
+    """Serialise a Python value to JSON text for a JSON bind (#50).
+
+    pyoracle binds this text as a string and the server casts it to the
+    column's JSON type — the native binary OSON encoder is future work (the
+    decoder is the inverse). ``Decimal`` is emitted as a JSON number (integral
+    values stay exact; others go through ``float``); other unsupported types
+    raise ``TypeError`` from :func:`json.dumps`. ``ensure_ascii=False`` keeps
+    UTF-8 text natural (pyoracle advertises AL32UTF8)."""
+    import json
+    from decimal import Decimal
+
+    def default(o):
+        if isinstance(o, Decimal):
+            return int(o) if o == o.to_integral_value() else float(o)
+        raise TypeError(
+            f"object of type {type(o).__name__} is not JSON-serialisable")
+
+    return json.dumps(value, ensure_ascii=False, default=default)
+
+
 def _u16(buf: bytes, pos: int) -> int:
     return (buf[pos] << 8) | buf[pos + 1]
 

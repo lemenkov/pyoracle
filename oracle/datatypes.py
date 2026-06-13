@@ -152,3 +152,28 @@ class IntervalYM:
 # IntervalYM is defined above, so register its Python-type mapping now that the
 # class exists (lets `cursor.var(oracle.IntervalYM)` resolve).
 _PYTYPE_TO_DBTYPE[IntervalYM] = DB_TYPE_INTERVAL_YM
+
+
+class JSON:
+    """Bind marker: send the wrapped Python value into a native ``JSON`` column
+    (21c+). A bare ``dict`` already binds as JSON automatically; wrap a
+    ``list`` / ``str`` / number / ``bool`` / ``None`` in ``JSON`` to bind *it*
+    as JSON too (a bare list otherwise means a VECTOR, and bare scalars bind as
+    their native SQL types). The value must be JSON-serialisable.
+
+    pyoracle serialises the value to JSON text and binds it as a string; the
+    server casts it to the column's JSON type (see docs/PROTOCOL.md §17.2).
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: object):
+        self.value = value
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, JSON):
+            return NotImplemented
+        return self.value == other.value
+
+    def __repr__(self) -> str:
+        return f"JSON({self.value!r})"
