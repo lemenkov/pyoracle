@@ -12,7 +12,7 @@ reverse-engineer a feature against a modern server (12.1+), the same
 capture-first method used for the 11g work.
 
 Usage:
-    python3 tools/capture_proxy.py --listen 1599 --target localhost:1523 \\
+    python3 tools/capture_proxy.py --listen 1599 --target 127.0.0.1:1523 \\
             --out /tmp/capture.log
 
 Then point the reference client at the proxy port (1599) instead of the real
@@ -29,8 +29,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--listen", type=int, default=1599,
                     help="local port to listen on (default 1599)")
-    ap.add_argument("--target", default="localhost:1521",
-                    help="real listener host:port (default localhost:1521)")
+    ap.add_argument("--target", default="127.0.0.1:1521",
+                    help="real listener host:port (default 127.0.0.1:1521)")
     ap.add_argument("--out", default="/tmp/capture.log",
                     help="capture log path (default /tmp/capture.log)")
     ap.add_argument("--append", action="store_true",
@@ -38,6 +38,12 @@ def main() -> None:
     args = ap.parse_args()
 
     thost, tport = args.target.rsplit(":", 1)
+    if thost == "localhost":
+        # "localhost" resolves to IPv6 ::1, but the gvenzl / Oracle Free
+        # listeners bind IPv4 only — connecting to ::1 just gets the connection
+        # closed (the client then sees a bare DPY-4011 with no useful reason).
+        # Prefer IPv4 so captures don't silently fail.
+        thost = "127.0.0.1"
     target = (thost, int(tport))
     out = open(args.out, "ab" if args.append else "wb")
     lock = threading.Lock()
