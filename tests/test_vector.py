@@ -25,6 +25,16 @@ FIXTURES = [
      "c00c000000000000"),
     ("int8_simple", [1, -2, 3, -4],
      "db0000120400000004c015e8add236a58f01fe03fc"),
+    # BINARY (bit) vectors (#60): element_type 5, count = dimension/bit count,
+    # payload = bits packed 8/byte (ceil(count/8) bytes), surfaced verbatim.
+    ("bin8_aa", [0xAA],
+     "db01001005000000088000000000000000aa"),
+    ("bin8_one", [0x01],
+     "db0100100500000008800000000000000001"),
+    ("bin16_aa01", [0xAA, 0x01],
+     "db01001005000000108000000000000000aa01"),
+    ("bin24_010203", [0x01, 0x02, 0x03],
+     "db01001005000000188000000000000000010203"),
 ]
 
 
@@ -48,6 +58,13 @@ class TestVectorDecode(unittest.TestCase):
         got = decode_vector(bytes.fromhex(
             "db0000120200000003c012388ac0059c28bfc00000c0200000c0600000"))
         self.assertTrue(all(isinstance(v, float) for v in got))
+
+    def test_binary_returns_packed_bytes(self):
+        # VECTOR(16, BINARY) '[170, 1]' -> two packed bytes, ints, verbatim.
+        got = decode_vector(bytes.fromhex(
+            "db01001005000000108000000000000000aa01"))
+        self.assertEqual(got, [0xAA, 0x01])
+        self.assertTrue(all(isinstance(v, int) for v in got))
 
     def test_bad_magic_raises(self):
         with self.assertRaises(VectorError):

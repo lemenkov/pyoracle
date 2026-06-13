@@ -1399,3 +1399,56 @@ their `(field_id, value_offset)` pairs in document order.
 > Multi-row JSON `SELECT`s ride the same LOB-locator path as multi-row LOB
 > reads and share the #45 desync limitation under load — single-row reads are
 > reliable.
+
+## 18. Native VECTOR (23ai+)
+
+Oracle 23ai+ stores a native `VECTOR` column as a binary image delivered, like
+JSON (§17), through a LOB locator: the RXD row carries a locator and the image
+is fetched over `TTI_LOBOPS` (§14). The column's TNS data type is **127**
+(`TNS_TYPE_VECTOR`). pyoracle reads it through the normal LOB locator path and
+decodes the image in `oracle/vector.py`.
+
+The format below was reverse-engineered from images captured off a live 23ai
+server, each with known content. A VECTOR image is:
+
+```
+magic 0xDB | version (ub1) | flags (ub2) | element_type (ub1) | num_elements (ub4)
+[ norm (8 bytes, present when flags & 0x10) ]
+elements ...
+```
+
+`version` is `0x00` for FLOAT32/FLOAT64/INT8 and `0x01` for BINARY; the decoder
+ignores it. The 8-byte `norm` is a cached magnitude (sortable-encoded, see
+below) that is not part of the value and is skipped.
+
+| `element_type` | Type     | Element encoding                                        |
+|----------------|----------|---------------------------------------------------------|
+| `2`            | FLOAT32  | 4 bytes, order-preserving ("sortable") float            |
+| `3`            | FLOAT64  | 8 bytes, order-preserving ("sortable") float            |
+| `4`            | INT8     | 1 byte, plain two's-complement                          |
+| `5`            | BINARY   | bits packed 8/byte; see below                           |
+
+**Sortable float** (FLOAT32/64): the encoding makes a byte-wise compare order
+values numerically — for a positive value the sign bit is set, for a negative
+value every bit is inverted. Reverse it by: if the top bit is set, clear it;
+otherwise invert all bits. Then read the result as a big-endian IEEE-754 float.
+
+**BINARY** (bit vectors): `num_elements` is the **dimension (bit) count**, not a
+byte count, and the payload is those bits packed 8 to a byte —
+`ceil(num_elements / 8)` bytes. pyoracle surfaces the packed bytes verbatim as a
+list of ints, matching the form a `VECTOR(n, BINARY)` literal takes (e.g.
+`'[170, 1]'` for a 16-dim vector stores bytes `AA 01` and reads back `[170, 1]`).
+
+Captured reference images:
+
+```
+[1.5, 2.5, 3.5]  FLOAT32  db 00 0012 02 00000003 c012388ac0059c28 ...
+[1, -2, 3, -4]   INT8     db 00 0012 04 00000004 c015e8add236a58f 01 fe 03 fc
+[170]            BINARY   db 01 0010 05 00000008 8000000000000000 aa
+[170, 1]         BINARY   db 01 0010 05 00000010 8000000000000000 aa 01
+```
+
+> **Not yet covered:** VECTOR **binds** (inserting a vector from Python) — today
+> VECTOR is read-only; see #60-followup. SPARSE vectors are not captured. As
+> with JSON, multi-row VECTOR `SELECT`s share the #45 LOB desync limitation
+> under load; single-row reads are reliable.
