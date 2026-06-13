@@ -1121,15 +1121,21 @@ class ErrorAndRowcountIntegration(_IntegrationBase):
         # Exception code: the ORA number; str(): the full server message.
         self.assertEqual(ctx.exception.code, 942)
         self.assertIn("ORA-00942", str(ctx.exception))
-        self.assertIn("table or view does not exist", str(ctx.exception))
+        # Assert the message fragments separately: 23ai+ embeds the object name
+        # (table or view "PYO"."NOPE…" does not exist), so the literal
+        # "table or view does not exist" no longer appears as one substring.
+        self.assertIn("table or view", str(ctx.exception))
+        self.assertIn("does not exist", str(ctx.exception))
 
     def test_error_message_for_invalid_number(self):
         self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
         with self.assertRaises(oracle.DatabaseError) as ctx:
             self.cur.execute(f"INSERT INTO {self.TABLE} VALUES ('not-a-number')")
+        # The ORA-01722 code is the stable contract; the English text varies by
+        # version (11g/21c: "invalid number"; 23ai: "unable to convert string
+        # value … to a number"), so assert on the code + prefix, not the phrase.
         self.assertEqual(ctx.exception.code, 1722)
         self.assertIn("ORA-01722", str(ctx.exception))
-        self.assertIn("invalid number", str(ctx.exception))
 
     def test_error_message_for_unique_constraint(self):
         self.cur.execute(

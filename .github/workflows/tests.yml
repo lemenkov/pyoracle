@@ -41,10 +41,11 @@ jobs:
           tests.test_api_conveniences
           tests.test_connection
 
-  # Integration tests against a real Oracle server, run against both testbeds
-  # (#28): 11g (:1521/XE) and 21c (:1521/XEPDB1, field version 16). fail-fast is
-  # off so a flake on one DB doesn't cancel the other; a generous --shm-size
-  # keeps the memory-fragile 21c container from OOM-stalling under the suite.
+  # Integration tests against a real Oracle server, run across three testbeds
+  # (#28, #52): 11g (:1521/XE), 21c (:1521/XEPDB1, field version 16) and 23ai
+  # Free (:1521/FREEPDB1, field version 17). fail-fast is off so a flake on one
+  # DB doesn't cancel the others; a generous --shm-size keeps the memory-fragile
+  # 21c/23ai containers from OOM-stalling under the suite.
   integration:
     name: Integration tests (${{ matrix.db.name }})
     runs-on: ubuntu-latest
@@ -61,6 +62,10 @@ jobs:
             image: "gvenzl/oracle-xe:21-slim"
             service: "XEPDB1"
             field_version: "16"
+          - name: "Oracle 23ai Free"
+            image: "gvenzl/oracle-free:23-slim"
+            service: "FREEPDB1"
+            field_version: "17"
     services:
       oracle:
         image: ${{ matrix.db.image }}
