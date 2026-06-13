@@ -90,6 +90,8 @@ def main() -> None:
             threading.Thread(target=handle, args=(conn,), daemon=True).start()
     except KeyboardInterrupt:
         print("\nproxy: stopped", flush=True)
+    finally:
+        out.close()
 
 
 if __name__ == "__main__":
