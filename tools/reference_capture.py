@@ -28,7 +28,6 @@ records the bytes. changepassword changes the password and changes it back.
 """
 
 import argparse
-import sys
 
 import oracledb   # python-oracledb; thin mode is the default
 
@@ -126,4 +125,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
