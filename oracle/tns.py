@@ -9,6 +9,7 @@ from oracle.crypto import encrypt_password
 from oracle.cursor import cursor
 from oracle.datatypes import BinaryDouble, BinaryFloat, IntervalYM, Var
 from oracle.date import date
+from oracle.vector import is_vector_bind, vector_to_literal
 from oracle.tns_consts import (
     AL16UTF16_CHARSET, AL32UTF8_CHARSET, CharsetDict, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_SID,
     FIELD_VERSION_11_2, FIELD_VERSION_12_1, FIELD_VERSION_12_2,
@@ -1844,6 +1845,10 @@ def encode_token_rxd(Token: object) -> bytes:
         return encode_token_rxd(Token._value)
     if Token is None:
         return bytes([0])
+    if is_vector_bind(Token):
+        # VECTOR bind on 23ai (#55): send the text literal as a string; the
+        # server casts it. Mirrors the OAC path in encode_token_oac.
+        Token = vector_to_literal(Token)
     if isinstance(Token, bool):
         # Native SQL BOOLEAN bind on 23ai (#54): the value is a 2-byte DALC
         # `02 01 <0/1>` (TRUE = 01 01, FALSE = 01 00; captured from
@@ -1948,6 +1953,11 @@ def encode_token_oac(Token: object) -> bytes:
         # NULL value (0 bytes): a minimal VARCHAR OAC, again avoiding the
         # 32767 LONG-reorder swap when a NULL bind precedes another bind.
         return encode_token_raw(TNS_TYPE_VARCHAR, 1, 16, AL32UTF8_CHARSET, 0)
+    if is_vector_bind(Token):
+        # VECTOR bind on 23ai (#55): bind the vector's text literal as a string
+        # and let the server cast VARCHAR -> VECTOR. Falls through to the str
+        # OAC below.
+        Token = vector_to_literal(Token)
     if isinstance(Token, BinaryFloat):
         return encode_token_raw(TNS_TYPE_BFLOAT, 4, 0, 0, 0)
     if isinstance(Token, BinaryDouble):

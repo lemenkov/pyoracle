@@ -1655,6 +1655,14 @@ class VectorIntegration(_IntegrationBase):
         self.cur.execute(f"SELECT v FROM {self.TABLE}")
         return self.cur.fetchone()[0]
 
+    def _bind_roundtrip(self, coltype, value):
+        # Bind a Python sequence (#55) and read it back.
+        self._setup_vec(coltype)
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (:v)", [value])
+        self.conn.commit()
+        self.cur.execute(f"SELECT v FROM {self.TABLE}")
+        return self.cur.fetchone()[0]
+
     def test_float32(self):
         got = self._roundtrip("VECTOR(3, FLOAT32)", "[1.5, 2.5, 3.5]")
         self.assertEqual(got, [1.5, 2.5, 3.5])
@@ -1678,6 +1686,41 @@ class VectorIntegration(_IntegrationBase):
         got = self._roundtrip("VECTOR(16, BINARY)", "[170, 1]")
         self.assertEqual(got, [170, 1])
         self.assertTrue(all(isinstance(v, int) for v in got))
+
+    # Binds (#55): pyoracle renders the sequence as a VECTOR text literal and
+    # the server casts it; covers plain lists and typed array.array values.
+    def test_bind_float32_list(self):
+        self.assertEqual(
+            self._bind_roundtrip("VECTOR(4, FLOAT32)", [-1, 0, 2.25, -8]),
+            [-1.0, 0.0, 2.25, -8.0])
+
+    def test_bind_float32_array(self):
+        import array
+        self.assertEqual(
+            self._bind_roundtrip("VECTOR(3, FLOAT32)",
+                                 array.array("f", [1.5, 2.5, 3.5])),
+            [1.5, 2.5, 3.5])
+
+    def test_bind_float64_array(self):
+        import array
+        self.assertEqual(
+            self._bind_roundtrip("VECTOR(3, FLOAT64)",
+                                 array.array("d", [0.1, 2.5, 3.5])),
+            [0.1, 2.5, 3.5])
+
+    def test_bind_int8(self):
+        import array
+        self.assertEqual(
+            self._bind_roundtrip("VECTOR(4, INT8)",
+                                 array.array("b", [1, -2, 3, -4])),
+            [1, -2, 3, -4])
+
+    def test_bind_binary(self):
+        import array
+        self.assertEqual(
+            self._bind_roundtrip("VECTOR(16, BINARY)",
+                                 array.array("B", [170, 1])),
+            [170, 1])
 
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
@@ -1995,6 +2038,26 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                     [(0, "r0"), (1, "r1"), (2, "r2")],
                 )
                 await Cur.execute("DROP TABLE PYORACLE_ASYNC_TEST")
+
+    async def test_vector_bind_roundtrip(self):
+        # Async parity for VECTOR binds (#55): bind a sequence, read it back.
+        import array
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                await self._drop_async(Cur, "PYORACLE_ASYNC_VEC")
+                try:
+                    await Cur.execute(
+                        "CREATE TABLE PYORACLE_ASYNC_VEC (v VECTOR(3, FLOAT32))")
+                except oracle.DatabaseError as e:
+                    if e.code in (902, 907):
+                        self.skipTest("native VECTOR type needs a 23ai+ server")
+                    raise
+                await Cur.execute(
+                    "INSERT INTO PYORACLE_ASYNC_VEC VALUES (:v)",
+                    [array.array("f", [1.5, 2.5, 3.5])])
+                await Cur.execute("SELECT v FROM PYORACLE_ASYNC_VEC")
+                self.assertEqual(await Cur.fetchone(), ([1.5, 2.5, 3.5],))
+                await self._drop_async(Cur, "PYORACLE_ASYNC_VEC")
 
     async def _drop_async(self, cur, table):
         try:

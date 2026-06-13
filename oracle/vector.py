@@ -27,6 +27,7 @@ Returns a list of Python floats (FLOAT32/64) or ints (INT8 values, or BINARY
 packed bytes).
 """
 
+import array
 import struct
 
 VECTOR_MAGIC = 0xDB
@@ -88,3 +89,32 @@ def decode_vector(image: bytes) -> list:
     raise VectorError(
         f"unsupported VECTOR element type {element_type} "
         "(only FLOAT32/FLOAT64/INT8/BINARY reverse-engineered so far)")
+
+
+def is_vector_bind(value: object) -> bool:
+    """True if `value` is a vector-like sequence we bind as a VECTOR.
+
+    An ``array.array`` (any typecode) or a non-empty list/tuple of real numbers
+    qualifies. Strings, bytes and bool elements are left for the other bind
+    paths.
+    """
+    if isinstance(value, array.array):
+        return True
+    return bool(value) and isinstance(value, (list, tuple)) and all(
+        isinstance(x, (int, float)) and not isinstance(x, bool)
+        for x in value)
+
+
+def vector_to_literal(value: object) -> str:
+    """Render a vector-like sequence as Oracle's ``VECTOR`` text literal, e.g.
+    ``[1.5, 2.5, 3.5]``. pyoracle binds this as a string and the server casts
+    VARCHAR -> VECTOR; the result is precision-identical to a native binary
+    bind (an inline binary VECTOR image is the future native path, see #62 /
+    docs/PROTOCOL.md §18.1). Integer-valued elements render as ints (needed for
+    INT8 / BINARY columns); other values keep full float precision via repr.
+    """
+    def fmt(x):
+        if isinstance(x, int) or (isinstance(x, float) and x.is_integer()):
+            return str(int(x))
+        return repr(float(x))
+    return "[" + ", ".join(fmt(x) for x in value) + "]"
