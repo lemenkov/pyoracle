@@ -1672,6 +1672,13 @@ class VectorIntegration(_IntegrationBase):
         self.assertEqual(got, [1, -2, 3, -4])
         self.assertTrue(all(isinstance(v, int) for v in got))
 
+    def test_binary(self):
+        # BINARY (bit) vectors (#60): the literal gives one packed byte per 8
+        # dimensions; pyoracle surfaces those packed bytes verbatim.
+        got = self._roundtrip("VECTOR(16, BINARY)", "[170, 1]")
+        self.assertEqual(got, [170, 1])
+        self.assertTrue(all(isinstance(v, int) for v in got))
+
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class JSONIntegration(_IntegrationBase):

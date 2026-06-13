@@ -12,15 +12,19 @@ known content. The image is:
     [ norm (8 bytes, when flags & 0x10) ]
     elements...
 
-`element_type`: 2 = FLOAT32, 3 = FLOAT64, 4 = INT8 (and BINARY, not yet
-captured). FLOAT32 / FLOAT64 elements are stored in Oracle's order-preserving
-("sortable") float encoding — the sign bit is flipped for a positive value and
-all bits are inverted for a negative one — so a byte-wise compare orders them
-numerically. INT8 elements are plain two's-complement bytes. The 8-byte norm is
-a cached magnitude (also sortable-encoded) that we skip; it is not part of the
-value.
+`element_type`: 2 = FLOAT32, 3 = FLOAT64, 4 = INT8, 5 = BINARY. FLOAT32 /
+FLOAT64 elements are stored in Oracle's order-preserving ("sortable") float
+encoding — the sign bit is flipped for a positive value and all bits are
+inverted for a negative one — so a byte-wise compare orders them numerically.
+INT8 elements are plain two's-complement bytes. For BINARY (bit) vectors
+`num_elements` is the number of dimensions (bits), packed 8 to a byte, so the
+payload is ``ceil(num_elements / 8)`` bytes stored verbatim; we surface those
+packed bytes unchanged (matching the form a ``VECTOR(n, BINARY)`` literal takes,
+e.g. ``[170]`` ⇒ byte ``0xAA``). The 8-byte norm is a cached magnitude (also
+sortable-encoded) that we skip; it is not part of the value.
 
-Returns a list of Python floats (FLOAT32/64) or ints (INT8).
+Returns a list of Python floats (FLOAT32/64) or ints (INT8 values, or BINARY
+packed bytes).
 """
 
 import struct
@@ -31,6 +35,7 @@ VECTOR_MAGIC = 0xDB
 _VEC_FLOAT32 = 2
 _VEC_FLOAT64 = 3
 _VEC_INT8 = 4
+_VEC_BINARY = 5
 
 _FLAG_NORM = 0x10        # an 8-byte magnitude follows the header
 
@@ -75,6 +80,11 @@ def decode_vector(image: bytes) -> list:
     if element_type == _VEC_INT8:
         return [v - 256 if v > 127 else v
                 for v in image[pos:pos + count]]
+    if element_type == _VEC_BINARY:
+        # `count` is the dimension (bit) count; the payload is the bits packed
+        # 8 to a byte. Surface the packed bytes verbatim.
+        nbytes = (count + 7) // 8
+        return list(image[pos:pos + nbytes])
     raise VectorError(
         f"unsupported VECTOR element type {element_type} "
-        "(only FLOAT32/FLOAT64/INT8 reverse-engineered so far)")
+        "(only FLOAT32/FLOAT64/INT8/BINARY reverse-engineered so far)")
