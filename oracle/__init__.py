@@ -13,7 +13,7 @@ from oracle.datatypes import (
     CURSOR, DB_TYPE_BINARY_DOUBLE, DB_TYPE_BINARY_FLOAT, DB_TYPE_CURSOR,
     DB_TYPE_DATE, DB_TYPE_INTERVAL_DS, DB_TYPE_INTERVAL_YM, DB_TYPE_NUMBER,
     DB_TYPE_RAW, DB_TYPE_TIMESTAMP, DB_TYPE_TIMESTAMP_TZ, DB_TYPE_VARCHAR,
-    NUMBER, STRING, BinaryDouble, BinaryFloat, IntervalYM, Var,
+    NUMBER, STRING, BinaryDouble, BinaryFloat, IntervalYM, JSON, Var,
 )
 from oracle.exceptions import (
     DataError, DatabaseError, Error, IntegrityError, InterfaceError,
@@ -75,7 +75,7 @@ __all__ = [
     "apilevel", "threadsafety", "paramstyle",
     "connect", "connect_async", "create_pool", "create_pool_async",
     "OracleConnect", "AsyncOracleConnect", "Pool", "AsyncPool",
-    "BinaryFloat", "BinaryDouble", "IntervalYM", "Var",
+    "BinaryFloat", "BinaryDouble", "IntervalYM", "JSON", "Var",
     "NUMBER", "STRING", "DB_TYPE_NUMBER", "DB_TYPE_VARCHAR",
     "DB_TYPE_RAW", "DB_TYPE_DATE", "CURSOR", "DB_TYPE_CURSOR",
     "DB_TYPE_TIMESTAMP", "DB_TYPE_TIMESTAMP_TZ", "DB_TYPE_BINARY_FLOAT",
