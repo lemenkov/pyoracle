@@ -28,7 +28,6 @@ records the bytes. changepassword changes the password and changes it back.
 """
 
 import argparse
-import sys
 
 import oracledb   # python-oracledb; thin mode is the default
 
@@ -61,7 +60,7 @@ def scenario_changepassword(conn, user, password):
     # encoding/key that the 11g capture couldn't pin down.
     new = password + "X9"
     conn.changepassword(password, new)
-    print(f"changepassword -> {password!r} -> {new!r} OK")
+    print("changepassword -> new password set OK")
     conn.changepassword(new, password)
     print("changepassword -> restored original")
 
@@ -126,4 +125,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
