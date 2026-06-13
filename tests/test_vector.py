@@ -9,7 +9,11 @@ a known vector (see docs/PROTOCOL.md §18). No server is needed to run these.
 
 import unittest
 
-from oracle.vector import decode_vector, VectorError
+import array
+
+from oracle.vector import (
+    decode_vector, VectorError, is_vector_bind, vector_to_literal,
+)
 
 
 # (label, expected values, captured VECTOR image as hex)
@@ -74,6 +78,29 @@ class TestVectorDecode(unittest.TestCase):
         # element_type 9 is not one we decode; must raise, not corrupt.
         with self.assertRaises(VectorError):
             decode_vector(bytes.fromhex("db00001209000000010000000000000000"))
+
+
+class TestVectorBind(unittest.TestCase):
+    # Bind side (#55): a vector-like value renders to a VECTOR text literal that
+    # pyoracle binds as a string (server casts VARCHAR -> VECTOR).
+
+    def test_detects_sequences(self):
+        self.assertTrue(is_vector_bind([1.0, 2.0]))
+        self.assertTrue(is_vector_bind((1, 2, 3)))
+        self.assertTrue(is_vector_bind(array.array("f", [1.0])))
+        self.assertTrue(is_vector_bind(array.array("B", [1, 2])))
+
+    def test_ignores_non_vectors(self):
+        for v in ("[1,2]", b"\x01\x02", [], [True, False], ["a"], 42, None):
+            self.assertFalse(is_vector_bind(v), v)
+
+    def test_literal_float_and_int(self):
+        # Integer-valued elements render as ints (needed for INT8 / BINARY);
+        # fractional values keep full float precision.
+        self.assertEqual(vector_to_literal([1, 2, 3]), "[1, 2, 3]")
+        self.assertEqual(vector_to_literal([-1.0, 0.0, 2.25]), "[-1, 0, 2.25]")
+        self.assertEqual(vector_to_literal(array.array("B", [170, 1])),
+                         "[170, 1]")
 
 
 if __name__ == "__main__":
