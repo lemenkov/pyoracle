@@ -299,15 +299,20 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
     (_, Rest) = _read_str_with_length(Rest)   # type name
     (_, Rest) = decode_ub4(Rest)              # column position
     (_, Rest) = decode_ub4(Rest)              # uds flags
+    DomainSchema = DomainName = b""
     if _DECODE_FIELD_VERSION.get() >= 17:     # FIELD_VERSION_23_1
-        # 23c (field version 17) adds two trailing per-column metadata fields,
-        # related to SQL domains / column annotations. They are empty (each a
-        # ub4 0, i.e. `00 00` on the wire) for ordinary columns; consume them
-        # so the next column / the row format stays byte-aligned. Captured by
-        # diffing a `SELECT 1 FROM DUAL` describe on 21c vs 23ai. Columns that
-        # actually carry a domain or annotations are not yet reverse-engineered.
-        (_, Rest) = decode_ub4(Rest)          # 23c domain metadata (empty)
-        (_, Rest) = decode_ub4(Rest)          # 23c annotation metadata (empty)
+        # 23c (field version 17) appends the column's SQL-domain schema and
+        # name, each a ub4-counted DALC string (the same codec as the column
+        # name above) — empty (a single 0x00) for a column with no domain.
+        # Earlier code read them as plain ub4s, which only survives the empty
+        # case; a real domain (e.g. `01 03 03 'PYO' 01 07 07 'PYO_DOM'`) then
+        # desynced the row (#53). Reverse-engineered by diffing a domain column
+        # vs a plain one on 23ai, cross-checked against python-oracledb's
+        # domain_schema/domain_name. Column annotations are carried elsewhere in
+        # the describe (a plain column and an annotated one have identical
+        # trailing fields here), so they neither appear nor desync here.
+        (DomainSchema, Rest) = _read_str_with_length(Rest)
+        (DomainName, Rest) = _read_str_with_length(Rest)
     Col = {
         'column_name': ColName,
         'data_type': DataType,
@@ -317,6 +322,8 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
         'max_size': MaxSize,
         'charset': Charset,
         'null_ok': NullOk,
+        'domain_schema': DomainSchema or None,
+        'domain_name': DomainName or None,
     }
     return (Col, Rest)
 
