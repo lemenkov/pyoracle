@@ -1819,6 +1819,51 @@ class JSONIntegration(_IntegrationBase):
 
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
+class SqlDomainIntegration(_IntegrationBase):
+    # 23ai SQL-domain columns (#53). At field version 17 a column with a SQL
+    # domain carries its schema+name in the per-column describe; before the fix
+    # that non-empty layout desynced the row decode. Needs a 23ai server AND the
+    # CREATE DOMAIN privilege; skips otherwise (incl. pre-23ai, which lacks the
+    # syntax). Run with PYORACLE_TEST_FIELD_VERSION=17 to exercise the fv17 path.
+    DOMAIN = "PYO_DOM_T"
+
+    def _setup_domain(self):
+        from oracle.exceptions import DatabaseError
+        try:
+            self.cur.execute(f"DROP DOMAIN {self.DOMAIN} FORCE")
+        except DatabaseError:
+            pass
+        try:
+            self.cur.execute(f"CREATE DOMAIN {self.DOMAIN} AS NUMBER(3,0)")
+        except DatabaseError as exc:
+            # pre-23ai doesn't know the DOMAIN syntax: 11g/21c raise ORA-00901
+            # ("invalid CREATE command"), others 900/902/907; 1031 = the user
+            # lacks CREATE DOMAIN. Skip on any of these.
+            if exc.code in (900, 901, 902, 907, 1031):
+                self.skipTest("SQL domains need a 23ai server + CREATE DOMAIN")
+            raise
+
+    def test_domain_column_select(self):
+        self._setup_domain()
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} "
+            f"(id NUMBER, d NUMBER DOMAIN {self.DOMAIN})")
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (1, 42)")
+        self.conn.commit()
+        # A multi-column SELECT mixing the domain column would desync the row
+        # decode before the fix; it should now return cleanly.
+        self.cur.execute(f"SELECT id, d FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchone(), (1, 42))
+
+    def tearDown(self):
+        try:
+            self.cur.execute(f"DROP DOMAIN {self.DOMAIN} FORCE")
+        except Exception:
+            pass
+        super().tearDown()
+
+
+@unittest.skipUnless(_USER, _SKIP_REASON)
 class ChangePasswordIntegration(unittest.TestCase):
     """Connection.changepassword over the wire (#21). Each test changes the
     test user's password and always restores it (on the original, still-

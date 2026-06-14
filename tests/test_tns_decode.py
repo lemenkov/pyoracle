@@ -582,5 +582,42 @@ class TestTnsBaseDecoders(unittest.TestCase):
         ]
         self.assertEqual(decode_kv(Data, 39, []), (KVs, Remainder))
 
+
+class TestDcbColumnFv17Domain(unittest.TestCase):
+    """23ai (field version 17) per-column SQL-domain metadata (#53). Fixtures
+    are the real per-column DCB bytes captured from a 23ai server: a plain
+    NUMBER column and a NUMBER column using a SQL domain (PYO.PYO_DOM)."""
+
+    # NUMBER column 'A', no domain — the two trailing fields are empty (`00 00`)
+    PLAIN = bytes.fromhex(
+        "0200008101160000000000000000010101010141000000000000")
+    # NUMBER column 'B' using SQL domain PYO.PYO_DOM — schema/name as
+    # ub4-counted DALC strings (`01 03 03 'PYO' 01 07 07 'PYO_DOM'`).
+    DOMAIN = bytes.fromhex(
+        "020000810116000000000000000001010101014200000002400001030350"
+        "594f01070750594f5f444f4d")
+
+    def _decode_at_fv17(self, data):
+        from oracle.tns import _decode_dcb_column, _DECODE_FIELD_VERSION
+        tok = _DECODE_FIELD_VERSION.set(17)
+        try:
+            return _decode_dcb_column(data)
+        finally:
+            _DECODE_FIELD_VERSION.reset(tok)
+
+    def test_plain_column_has_no_domain_and_consumes_all(self):
+        col, rest = self._decode_at_fv17(self.PLAIN)
+        self.assertEqual(col['domain_schema'], None)
+        self.assertEqual(col['domain_name'], None)
+        self.assertEqual(rest, b"")          # no desync: every byte consumed
+
+    def test_domain_column_parses_schema_name_and_consumes_all(self):
+        col, rest = self._decode_at_fv17(self.DOMAIN)
+        self.assertEqual(col['domain_schema'], b"PYO")
+        self.assertEqual(col['domain_name'], b"PYO_DOM")
+        self.assertEqual(col['data_type'], 2)   # NUMBER
+        self.assertEqual(rest, b"")          # the bug was leaving bytes here
+
+
 if __name__ == '__main__':
     unittest.main()

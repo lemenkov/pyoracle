@@ -762,6 +762,18 @@ handler passes `connection.field_version` into `decode_packet`, which
 publishes it (via a `ContextVar`) to the token decoders for the duration
 of that response.
 
+**23ai (field version 17)** appends two more per-column fields after
+`uds_flags`: the column's **SQL-domain schema** and **domain name**, each a
+`str_with_length` (a `ub4` count, then a DALC string — the same codec as
+`column_name`), empty (a single `00`) for a column with no domain. Earlier
+pyoracle read them as plain `ub4`s, which only survives the empty case; a real
+domain (`01 03 03 'PYO' 01 07 07 'PYO_DOM'`) then desynced the row decode
+(#53). Reverse-engineered by diffing a domain column vs a plain one on 23ai and
+cross-checked against python-oracledb's `domain_schema` / `domain_name`. Column
+**annotations** are carried elsewhere in the describe (a plain column and an
+annotated one have identical trailing fields here), so they neither surface nor
+desync at this point — surfacing them is future work.
+
 **Chunked (LONG) values.** A value whose length byte is `254` is sent in
 chunks. On 11g each chunk is a single length byte followed by that many
 data bytes, terminated by a zero byte. 12c+ prefixes each chunk with a
