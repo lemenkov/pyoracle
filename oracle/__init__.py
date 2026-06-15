@@ -21,6 +21,7 @@ from oracle.exceptions import (
     Warning,
 )
 from oracle.pool import Pool
+from oracle.vector import SparseVector
 
 
 def connect(*args, **kwargs) -> OracleConnect:
@@ -75,7 +76,7 @@ __all__ = [
     "apilevel", "threadsafety", "paramstyle",
     "connect", "connect_async", "create_pool", "create_pool_async",
     "OracleConnect", "AsyncOracleConnect", "Pool", "AsyncPool",
-    "BinaryFloat", "BinaryDouble", "IntervalYM", "JSON", "Var",
+    "BinaryFloat", "BinaryDouble", "IntervalYM", "JSON", "SparseVector", "Var",
     "NUMBER", "STRING", "DB_TYPE_NUMBER", "DB_TYPE_VARCHAR",
     "DB_TYPE_RAW", "DB_TYPE_DATE", "CURSOR", "DB_TYPE_CURSOR",
     "DB_TYPE_TIMESTAMP", "DB_TYPE_TIMESTAMP_TZ", "DB_TYPE_BINARY_FLOAT",

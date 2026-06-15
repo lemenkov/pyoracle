@@ -13,6 +13,7 @@ import array
 
 from oracle.vector import (
     decode_vector, VectorError, is_vector_bind, vector_to_literal,
+    SparseVector,
 )
 
 
@@ -101,6 +102,43 @@ class TestVectorBind(unittest.TestCase):
         self.assertEqual(vector_to_literal([-1.0, 0.0, 2.25]), "[-1, 0, 2.25]")
         self.assertEqual(vector_to_literal(array.array("B", [170, 1])),
                          "[170, 1]")
+
+
+class TestSparseVector(unittest.TestCase):
+    # SPARSE vectors (#68), captured from VECTOR(n, T, SPARSE) columns on 23ai:
+    # version 2, flag 0x20, then count(ub2) + indices(ub4) + values.
+    def test_decode_float32(self):
+        self.assertEqual(
+            decode_vector(bytes.fromhex(
+                "db0200320200000008c00752e50db3a3a2000200000002000000"
+                "05bfc00000c0200000")),
+            SparseVector(8, [2, 5], [1.5, 2.5]))
+
+    def test_decode_float32_index0_and_negative(self):
+        self.assertEqual(
+            decode_vector(bytes.fromhex(
+                "db0200320200000008bff6a09e667f3bcd00020000000000000007"
+                "bf800000407fffff")),
+            SparseVector(8, [0, 7], [1.0, -1.0]))
+
+    def test_decode_int8(self):
+        self.assertEqual(
+            decode_vector(bytes.fromhex(
+                "db0200320400000008c01400000000000000020000000200000005"
+                "03fc")),
+            SparseVector(8, [2, 5], [3, -4]))
+
+    def test_decode_wide_index_ub4(self):
+        self.assertEqual(
+            decode_vector(bytes.fromhex(
+                "db020032020000012cc00752e50db3a3a20002000000010000012b"
+                "bfc00000c0200000")),
+            SparseVector(300, [1, 299], [1.5, 2.5]))
+
+    def test_is_vector_bind_and_literal(self):
+        sv = SparseVector(8, [2, 5], [1.5, 2.5])
+        self.assertTrue(is_vector_bind(sv))
+        self.assertEqual(vector_to_literal(sv), "[8, [2, 5], [1.5, 2.5]]")
 
 
 if __name__ == "__main__":

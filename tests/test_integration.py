@@ -1728,6 +1728,13 @@ class VectorIntegration(_IntegrationBase):
                                  array.array("B", [170, 1])),
             [170, 1])
 
+    def test_sparse_roundtrip(self):
+        # SPARSE vectors (#68): bind a SparseVector and read it back.
+        from oracle import SparseVector
+        sv = SparseVector(8, [2, 5], [1.5, 2.5])
+        self.assertEqual(
+            self._bind_roundtrip("VECTOR(8, FLOAT32, SPARSE)", sv), sv)
+
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class JSONIntegration(_IntegrationBase):
@@ -2164,6 +2171,27 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                 await Cur.execute("SELECT v FROM PYORACLE_ASYNC_VEC")
                 self.assertEqual(await Cur.fetchone(), ([1.5, 2.5, 3.5],))
                 await self._drop_async(Cur, "PYORACLE_ASYNC_VEC")
+
+    async def test_sparse_vector_bind_roundtrip(self):
+        # Async parity for SPARSE vectors (#68).
+        from oracle import SparseVector
+        sv = SparseVector(8, [2, 5], [1.5, 2.5])
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                await self._drop_async(Cur, "PYORACLE_ASYNC_SPV")
+                try:
+                    await Cur.execute(
+                        "CREATE TABLE PYORACLE_ASYNC_SPV "
+                        "(v VECTOR(8, FLOAT32, SPARSE))")
+                except oracle.DatabaseError as e:
+                    if e.code in (902, 907):
+                        self.skipTest("native VECTOR type needs a 23ai+ server")
+                    raise
+                await Cur.execute(
+                    "INSERT INTO PYORACLE_ASYNC_SPV VALUES (:v)", [sv])
+                await Cur.execute("SELECT v FROM PYORACLE_ASYNC_SPV")
+                self.assertEqual(await Cur.fetchone(), (sv,))
+                await self._drop_async(Cur, "PYORACLE_ASYNC_SPV")
 
     async def test_json_bind_roundtrip(self):
         # Async parity for JSON binds (#50): bind a dict, read it back.
