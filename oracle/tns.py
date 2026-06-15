@@ -20,6 +20,26 @@ def _json_bind_text(Token: object) -> str:
     # VARCHAR -> JSON. Lazy import keeps oson off the tns import chain.
     from oracle.oson import json_to_text
     return json_to_text(Token.value if isinstance(Token, JSON) else Token)
+
+
+def _native_lob_bind_value(image: bytes) -> bytes:
+    # Native inline bind value for a LOB-backed type (VECTOR #62, JSON #70): a
+    # fixed descriptor, the image length (ub2), 22 zero bytes, then the image
+    # framed like RAW (encode_chr).
+    return (VECTOR_BIND_DESCRIPTOR + len(image).to_bytes(2, "big")
+            + b"\x00" * 22 + encode_chr(image))
+
+
+def _json_oson_image(Token: object):
+    # The OSON image for a dict / JSON() bind (#70), or None when the value is
+    # too large/complex for the native encoder so the caller falls back to the
+    # text cast (#50/#64) — which the server parses just as well.
+    from oracle.oson import encode_oson, OsonError
+    value = Token.value if isinstance(Token, JSON) else Token
+    try:
+        return encode_oson(value)
+    except OsonError:
+        return None
 from oracle.tns_consts import (
     AL16UTF16_CHARSET, AL32UTF8_CHARSET, CharsetDict, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_SID,
     FIELD_VERSION_11_2, FIELD_VERSION_12_1, FIELD_VERSION_12_2,
@@ -1862,16 +1882,16 @@ def encode_token_rxd(Token: object) -> bytes:
     if Token is None:
         return bytes([0])
     if isinstance(Token, (dict, JSON)):
-        # JSON bind (#50): send the JSON text as a string; the server casts it.
-        # Mirrors the OAC path in encode_token_oac.
+        # JSON bind: native OSON image (#70) when encodable, else the text cast
+        # (#50). The OAC path in encode_token_oac makes the same choice.
+        Image = _json_oson_image(Token)
+        if Image is not None:
+            return _native_lob_bind_value(Image)
         Token = _json_bind_text(Token)
     elif is_vector_bind(Token):
-        # Native VECTOR bind on 23ai (#62): a fixed descriptor, then the image
-        # length (ub2), 22 zero bytes, then the binary image framed like RAW
-        # (encode_chr). The OAC counterpart is VECTOR_BIND_OAC.
-        Image = encode_vector(Token)
-        return (VECTOR_BIND_DESCRIPTOR + len(Image).to_bytes(2, "big")
-                + b"\x00" * 22 + encode_chr(Image))
+        # Native VECTOR bind on 23ai (#62): the OAC counterpart is
+        # VECTOR_BIND_OAC.
+        return _native_lob_bind_value(encode_vector(Token))
     if isinstance(Token, bool):
         # Native SQL BOOLEAN bind on 23ai (#54): the value is a 2-byte DALC
         # `02 01 <0/1>` (TRUE = 01 01, FALSE = 01 00; captured from
@@ -1977,8 +1997,12 @@ def encode_token_oac(Token: object) -> bytes:
         # 32767 LONG-reorder swap when a NULL bind precedes another bind.
         return encode_token_raw(TNS_TYPE_VARCHAR, 1, 16, AL32UTF8_CHARSET, 0)
     if isinstance(Token, (dict, JSON)):
-        # JSON bind on 21c+ (#50): bind the JSON text as a string and let the
-        # server cast VARCHAR -> JSON. Falls through to the str OAC below.
+        # JSON bind: a native JSON OAC (#70) when the value is OSON-encodable,
+        # else the VARCHAR OAC for the text cast (#50). Must match the choice in
+        # encode_token_rxd.
+        if _json_oson_image(Token) is not None:
+            from oracle.oson import JSON_BIND_OAC
+            return JSON_BIND_OAC
         Token = _json_bind_text(Token)
     elif is_vector_bind(Token):
         # Native VECTOR bind on 23ai (#62): type 127, cont-flag 0x02000000,

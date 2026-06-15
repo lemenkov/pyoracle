@@ -100,6 +100,120 @@ def json_to_text(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, default=default)
 
 
+def _oson_scalar_node(value) -> bytes:
+    from decimal import Decimal
+    from oracle.tns import encode_token_num, encode_token_decimal
+    if value is None:
+        return b"\x30"
+    if value is True:
+        return b"\x31"
+    if value is False:
+        return b"\x32"
+    if isinstance(value, str):
+        b = value.encode("utf-8")
+        if len(b) > 0xFF:
+            raise OsonError("string too long for the native OSON encoder")
+        return (bytes([len(b)]) + b) if len(b) <= 0x1F else b"\x33" + bytes([len(b)]) + b
+    if isinstance(value, Decimal):
+        nb = encode_token_decimal(value)
+        return b"\x34" + bytes([len(nb)]) + nb
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        nb = encode_token_num(value)
+        return b"\x34" + bytes([len(nb)]) + nb
+    raise OsonError(f"cannot OSON-encode {type(value).__name__}")
+
+
+def _oson_emit(value, buf: bytearray, fid) -> int:
+    # Append `value`'s node to `buf`; return its start offset. Containers use
+    # ub1 count + ub1 field-ids + ub2 value-offsets (matching the server's
+    # compact small-document form, flag 0x04). > 255 entries would need ub2 —
+    # raise so the caller falls back to the text cast.
+    start = len(buf)
+    if isinstance(value, dict):
+        if len(value) > 0xFF:
+            raise OsonError("object too wide for the native OSON encoder")
+        items = list(value.items())
+        buf += bytes([0x84, len(items)])
+        for k in value:
+            buf += bytes([fid(k)])
+        off_pos = len(buf)
+        buf += b"\x00\x00" * len(items)
+        offs = [_oson_emit(v, buf, fid) for _, v in items]
+        for i, o in enumerate(offs):
+            buf[off_pos + 2 * i:off_pos + 2 * i + 2] = o.to_bytes(2, "big")
+        return start
+    if isinstance(value, list):
+        if len(value) > 0xFF:
+            raise OsonError("array too long for the native OSON encoder")
+        buf += bytes([0xC4, len(value)])
+        off_pos = len(buf)
+        buf += b"\x00\x00" * len(value)
+        offs = [_oson_emit(v, buf, fid) for v in value]
+        for i, o in enumerate(offs):
+            buf[off_pos + 2 * i:off_pos + 2 * i + 2] = o.to_bytes(2, "big")
+        return start
+    buf += _oson_scalar_node(value)
+    return start
+
+
+# Native JSON bind OAC (#70): like the VECTOR one (§18.1) but type 119 with a
+# 32 MiB max length. Captured from python-oracledb on 21c.
+JSON_BIND_OAC = bytes.fromhex(
+    "77010000040200000000040200000000000000040200000000")
+
+
+def encode_oson(value) -> bytes:
+    """Encode a Python value to an OSON image (the inverse of decode_oson) for a
+    native JSON bind (#70). Covers the common small-document shape — scalars,
+    objects/arrays up to 255 entries, strings up to 255 bytes, segments up to
+    64 KiB — and raises OsonError for anything larger so the bind path can fall
+    back to the text cast (which the server parses just as well). Container
+    value-offsets are ub2 (the compact 0x04 form); field-name hashes are sent as
+    zero (the server accepts that — verified by round-trip on 21c)."""
+    if not isinstance(value, (dict, list)):
+        node = _oson_scalar_node(value)
+        return b"\xff\x4a\x5a\x01" + b"\x00\x16\x00" + bytes([len(node)]) + node
+    fnames = []
+    ids = {}
+
+    def fid(name):
+        if not isinstance(name, str):
+            raise OsonError("JSON object keys must be strings")
+        if name not in ids:
+            ids[name] = len(fnames) + 1
+            fnames.append(name)
+            if len(fnames) > 0xFF:
+                raise OsonError("too many distinct keys for the native encoder")
+        return ids[name]
+
+    def walk(v):
+        if isinstance(v, dict):
+            for k, sub in v.items():
+                fid(k)
+                walk(sub)
+        elif isinstance(v, list):
+            for sub in v:
+                walk(sub)
+    walk(value)
+
+    fnames_b = [n.encode("utf-8") for n in fnames]
+    fnames_seg = b"".join(bytes([len(b)]) + b for b in fnames_b)
+    off_arr = b""
+    pos = 0
+    for b in fnames_b:
+        off_arr += pos.to_bytes(2, "big")
+        pos += 1 + len(b)
+    hash_arr = b"\x00" * len(fnames)
+    tree = bytearray()
+    _oson_emit(value, tree, fid)
+    if len(fnames_seg) > 0xFFFF or len(tree) > 0xFFFF:
+        raise OsonError("document too large for the native OSON encoder")
+    header = (b"\xff\x4a\x5a\x01" + b"\x21\x06" + bytes([len(fnames)])
+              + len(fnames_seg).to_bytes(2, "big") + len(tree).to_bytes(2, "big")
+              + b"\x00\x00")
+    return header + hash_arr + off_arr + fnames_seg + bytes(tree)
+
+
 def _u16(buf: bytes, pos: int) -> int:
     return (buf[pos] << 8) | buf[pos + 1]
 
