@@ -1416,13 +1416,17 @@ order-preserving ("sortable") form:
 | `0x7C` | TIMESTAMP WITH TIME ZONE| 13    |
 | `0x3D` | INTERVAL YEAR TO MONTH  | 5     |
 | `0x3E` | INTERVAL DAY TO SECOND  | 11    |
+| `0x7D` | DATE (ub4-offset images)| 7     |
 
-> **Not yet covered** (raises `OsonError` rather than decode wrong): images
-> whose header flags select **`ub4` segment sizes / node offsets** —
-> oracledb-produced and large documents set this (e.g. flags `0x2102`, the
-> `0x0100` bit, makes container offsets `ub4`); and **`ub2` field-ids**
-> (> 255 distinct keys). Both tracked under #69. There is also a `0x7D` DATE
-> tag variant seen only in those `ub4`-offset images.
+**Container value-offset width.** Object/array value-offsets are `ub2` only when
+the header flag `0x04` is set (server `JSON_OBJECT` / `JSON()` literals do);
+**oracledb-produced images clear it (flags `0x2102`) and use `ub4` offsets**.
+Reading the wrong width walks offset 0 → infinite recursion, so the decoder
+picks the width from the flag (#69).
+
+> **Not yet covered** (raises `OsonError` rather than decode wrong): **`ub2`
+> field-ids** in objects with > 255 distinct keys (field-ids are `ub1` today),
+> and `ub4` *segment sizes* (fnames/tree segments > 64 KiB). Tracked under #69.
 >
 > Multi-row JSON `SELECT`s ride the same LOB-locator path as multi-row LOB
 > reads and share the #45 desync limitation under load — single-row reads are

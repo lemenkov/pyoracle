@@ -56,6 +56,7 @@ _EXT_SCALAR = {
     0x36: (8, decode_binary_double),
     0x7F: (4, decode_binary_float),
     0x3C: (7, decode_date),          # DATE
+    0x7D: (7, decode_date),          # DATE (variant seen in ub4-offset images)
     0x39: (11, decode_date),         # TIMESTAMP
     0x7C: (13, decode_date),         # TIMESTAMP WITH TIME ZONE
     0x3D: (5, decode_interval_ym),
@@ -64,6 +65,10 @@ _EXT_SCALAR = {
 
 # Image flags (header ub2).
 _FLAG_TREE = 0x2000          # container image (object/array) vs bare scalar
+_FLAG_UB2_OFFSETS = 0x04     # container value-offsets are ub2; else ub4 (#69).
+                             # Server JSON_OBJECT / JSON() literals set it;
+                             # oracledb-produced images (flags 0x2102) clear it
+                             # and use ub4 offsets.
 
 
 class OsonError(Exception):
@@ -95,17 +100,23 @@ def _u16(buf: bytes, pos: int) -> int:
     return (buf[pos] << 8) | buf[pos + 1]
 
 
+def _uint(buf: bytes, pos: int, size: int) -> int:
+    return int.from_bytes(buf[pos:pos + size], "big")
+
+
 def decode_oson(data: bytes) -> object:
     """Decode an OSON image to the corresponding Python value."""
     if data[:3] != OSON_MAGIC:
         raise OsonError(f"not an OSON image (magic {data[:3].hex()})")
     flags = _u16(data, 4)
     pos = 6
+    # Container value-offsets are ub2 when the compact flag is set, else ub4.
+    off_size = 2 if (flags & _FLAG_UB2_OFFSETS) else 4
     if not (flags & _FLAG_TREE):
         # Bare scalar image: reserved(ub1), value_size(ub1), scalar node.
         size = data[pos + 1]
         seg = data[pos + 2:pos + 2 + size]
-        value, _ = _decode_node(seg, 0, None, seg)
+        value, _ = _decode_node(seg, 0, None, seg, off_size)
         return value
     num_fnames = data[pos]
     fnames_size = _u16(data, pos + 1)
@@ -123,14 +134,15 @@ def decode_oson(data: bytes) -> object:
         length = fnames_seg[off]
         return fnames_seg[off + 1:off + 1 + length].decode("utf-8")
 
-    value, _ = _decode_node(tree_seg, 0, field_name, tree_seg)
+    value, _ = _decode_node(tree_seg, 0, field_name, tree_seg, off_size)
     return value
 
 
-def _decode_node(seg: bytes, off: int, field_name, tree: bytes):
+def _decode_node(seg: bytes, off: int, field_name, tree: bytes, off_size: int = 2):
     # Returns (python_value, next_offset). `tree` is the tree segment that
     # container value-offsets are relative to; `field_name` maps an object's
-    # field id to its key (None for scalar-only images).
+    # field id to its key (None for scalar-only images). `off_size` is the
+    # width (2 or 4) of container value-offsets for this image (#69).
     tag = seg[off]
     if tag <= 0x1F:                           # inline short string
         return seg[off + 1:off + 1 + tag].decode("utf-8"), off + 1 + tag
@@ -152,17 +164,19 @@ def _decode_node(seg: bytes, off: int, field_name, tree: bytes):
     if (tag & 0xC0) == 0xC0:                   # array container
         count = seg[off + 1]
         p = off + 2
-        elem_offsets = [_u16(seg, p + 2 * i) for i in range(count)]
-        return ([_decode_node(tree, o, field_name, tree)[0]
-                 for o in elem_offsets], p + 2 * count)
+        elem_offsets = [_uint(seg, p + off_size * i, off_size)
+                        for i in range(count)]
+        return ([_decode_node(tree, o, field_name, tree, off_size)[0]
+                 for o in elem_offsets], p + off_size * count)
     if (tag & 0xC0) == 0x80:                   # object container
         count = seg[off + 1]
         p = off + 2
         ids = [seg[p + i] for i in range(count)]
         p += count
-        val_offsets = [_u16(seg, p + 2 * i) for i in range(count)]
-        return ({field_name(i): _decode_node(tree, o, field_name, tree)[0]
-                 for i, o in zip(ids, val_offsets)}, p + 2 * count)
+        val_offsets = [_uint(seg, p + off_size * i, off_size)
+                       for i in range(count)]
+        return ({field_name(i): _decode_node(tree, o, field_name, tree, off_size)[0]
+                 for i, o in zip(ids, val_offsets)}, p + off_size * count)
     if tag in _EXT_SCALAR:                      # extended scalar (#69)
         length, dec = _EXT_SCALAR[tag]
         return dec(seg[off + 1:off + 1 + length]), off + 1 + length

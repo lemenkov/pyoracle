@@ -142,6 +142,32 @@ class TestOsonExtendedScalars(unittest.TestCase):
             IntervalYM(3, 2))
 
 
+class TestOsonUb4Offsets(unittest.TestCase):
+    # ub4 container value-offsets (#69): oracledb-produced images clear the
+    # compact-offset flag (flags 0x2102) and use 4-byte offsets; the ub2 reader
+    # used to mis-read them and recurse. Fixtures captured from oracledb native
+    # JSON binds on 21c.
+    def test_ub4_object(self):
+        self.assertEqual(decode_oson(bytes.fromhex(
+            "ff4a5a012102020004001400002ce50000000201610162a40201020000000c"
+            "000000103402c1023402c103")), {"a": 1, "b": 2})
+
+    def test_ub4_array(self):
+        self.assertEqual(decode_oson(bytes.fromhex(
+            "ff4a5a01210200000000260000e005000000160000001a0000001e0000002200"
+            "0000253402c1023402c1033402c10433017831")), [1, 2, 3, "x", True])
+
+    def test_ub4_object_with_date_and_extended(self):
+        # ub4 offsets + the 0x7D DATE tag variant + mixed scalars.
+        got = decode_oson(bytes.fromhex(
+            "ff4a5a01210204000a002b0000133170820000000600030008026264027473"
+            "016e0173a40401030204000000160000001b00000023000000273403c10233"
+            "7d787c060f0d01013402c10833026869"))
+        self.assertEqual(got, {"bd": Decimal("1.5"),
+                               "ts": datetime.datetime(2024, 6, 15, 12, 0, 0),
+                               "n": 7, "s": "hi"})
+
+
 class TestJsonToText(unittest.TestCase):
     # json_to_text serialises a JSON bind value (#50) to text for a string bind.
 
