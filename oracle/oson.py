@@ -32,15 +32,35 @@ Nodes (within tree_seg, or the lone scalar of a non-tree image):
 
 A field id is 1-based; ``offset_array[id-1]`` locates its name in fnames_seg.
 
-Not yet covered (no captured sample): images whose flags select ub4 segment
-sizes / ub4 node offsets (very large documents), ub2 field-ids (>255 distinct
-keys), and the extended scalar types JSON can carry (binary double/float, date,
-timestamp, interval). These raise ``OsonError`` rather than decode wrong.
+Extended scalar nodes (binary double/float, date, timestamp, interval) are
+decoded too (see ``_EXT_SCALAR``). Not yet covered (raise ``OsonError`` rather
+than decode wrong): images whose flags select ub4 segment sizes / ub4 node
+offsets (oracledb-produced and large documents) and ub2 field-ids (>255 distinct
+keys) — both tracked under #69.
 """
 
-from oracle.types import decode_number
+from oracle.types import (
+    decode_number, decode_date, decode_binary_float, decode_binary_double,
+    decode_interval_ds, decode_interval_ym,
+)
 
 OSON_MAGIC = b"\xff\x4a\x5a"
+
+# Extended scalar node tags (#69): each is a tag byte followed by a fixed-width
+# Oracle binary value (no length prefix — the width is intrinsic to the type),
+# decoded by the same routines used for the column wire forms. Tag values
+# reverse-engineered from JSON_SCALAR(<native>) images captured on 21c (each
+# backed by a fixture in tests/test_oson.py); binary_float/double are stored in
+# the order-preserving ("sortable") form, which decode_binary_* already invert.
+_EXT_SCALAR = {
+    0x36: (8, decode_binary_double),
+    0x7F: (4, decode_binary_float),
+    0x3C: (7, decode_date),          # DATE
+    0x39: (11, decode_date),         # TIMESTAMP
+    0x7C: (13, decode_date),         # TIMESTAMP WITH TIME ZONE
+    0x3D: (5, decode_interval_ym),
+    0x3E: (11, decode_interval_ds),
+}
 
 # Image flags (header ub2).
 _FLAG_TREE = 0x2000          # container image (object/array) vs bare scalar
@@ -143,4 +163,7 @@ def _decode_node(seg: bytes, off: int, field_name, tree: bytes):
         val_offsets = [_u16(seg, p + 2 * i) for i in range(count)]
         return ({field_name(i): _decode_node(tree, o, field_name, tree)[0]
                  for i, o in zip(ids, val_offsets)}, p + 2 * count)
+    if tag in _EXT_SCALAR:                      # extended scalar (#69)
+        length, dec = _EXT_SCALAR[tag]
+        return dec(seg[off + 1:off + 1 + length]), off + 1 + length
     raise OsonError(f"unsupported OSON node tag 0x{tag:02x} at offset {off}")
