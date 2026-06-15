@@ -1527,6 +1527,22 @@ future native path:
   the `0xFE` chunk marker). Retrofitting this into the shared row-data assembler
   is the remaining work; tracked as #62.
 
-> **Not yet covered:** the native binary bind above (text bind ships instead).
-> SPARSE vectors are not captured. As with JSON, multi-row VECTOR `SELECT`s
-> share the #45 LOB desync limitation under load; single-row reads are reliable.
+### 18.2 SPARSE vectors (#68)
+
+A `VECTOR(n, T, SPARSE)` column stores only the non-zero elements. Its image is
+**version `2`** with the **`0x20`** flag set, and after the header + norm carries:
+
+```
+count (ub2) | indices (ub4 × count) | values (element × count)
+```
+
+`num_elements` (header) is the total dimension count; `count` is the number of
+stored elements; the values use the same per-element encoding as a dense image
+(sortable FLOAT32/64, raw INT8). pyoracle decodes it to an `oracle.SparseVector`
+(`num_dimensions`, `indices`, `values`) and binds one back via the text literal
+`[dims, [indices], [values]]`. Captured on 23ai across FLOAT32/INT8 and a
+300-dim vector (index 299 confirms the ub4 indices).
+
+> **Not yet covered:** the native binary bind in §18.1 (text bind ships
+> instead). As with JSON, multi-row VECTOR `SELECT`s share the #45 LOB desync
+> limitation under load; single-row reads are reliable.
