@@ -8,10 +8,12 @@ known JSON document (see docs/PROTOCOL.md §15). No server is needed to run
 these — they pin the decoder against the actual wire format.
 """
 
+import datetime
 import json
 import unittest
 from decimal import Decimal
 
+from oracle.datatypes import IntervalYM
 from oracle.oson import decode_oson, json_to_text, OsonError
 
 
@@ -98,6 +100,46 @@ class TestOsonDecode(unittest.TestCase):
         self.assertEqual(d["arr"], [1, 2, 3])
         self.assertIsInstance(d["arr"], list)
         self.assertIsInstance(d, dict)
+
+
+class TestOsonExtendedScalars(unittest.TestCase):
+    # Native extended scalar nodes (#69), captured from JSON_SCALAR(<native>)
+    # images on 21c. Each is a bare-scalar OSON image (flags 0x0016): a tag byte
+    # then a fixed-width Oracle binary value.
+    def test_binary_double(self):
+        self.assertEqual(
+            decode_oson(bytes.fromhex("ff4a5a010016000936bff8000000000000")), 1.5)
+
+    def test_binary_float(self):
+        self.assertEqual(
+            decode_oson(bytes.fromhex("ff4a5a01001600057fc0200000")), 2.5)
+
+    def test_date(self):
+        self.assertEqual(
+            decode_oson(bytes.fromhex("ff4a5a01001600083c787c060f010101")),
+            datetime.datetime(2024, 6, 15, 0, 0, 0))
+
+    def test_timestamp(self):
+        self.assertEqual(
+            decode_oson(bytes.fromhex(
+                "ff4a5a010016000c39787e060f0d340f2faabe58")),
+            datetime.datetime(2026, 6, 15, 12, 51, 14, 799719))
+
+    def test_timestamp_tz(self):
+        got = decode_oson(bytes.fromhex(
+            "ff4a5a010016000e7c787e060f0d323135cad020143c"))
+        self.assertEqual(got, datetime.datetime(
+            2026, 6, 15, 12, 49, 48, 902484, tzinfo=datetime.timezone.utc))
+
+    def test_interval_ds(self):
+        self.assertEqual(
+            decode_oson(bytes.fromhex("ff4a5a010016000c3e800000023c3c3c80000000")),
+            datetime.timedelta(days=2))
+
+    def test_interval_ym(self):
+        self.assertEqual(
+            decode_oson(bytes.fromhex("ff4a5a01001600063d800000033e")),
+            IntervalYM(3, 2))
 
 
 class TestJsonToText(unittest.TestCase):

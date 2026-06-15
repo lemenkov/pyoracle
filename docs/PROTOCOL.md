@@ -1401,11 +1401,28 @@ A field id is 1-based: `offset_array[id - 1]` locates the field's name in
 Container value-offsets are relative to the tree segment start. Objects list
 their `(field_id, value_offset)` pairs in document order.
 
-> **Not yet covered** (no captured sample): images whose flags select `ub4`
-> segment sizes / `ub4` node offsets (very large documents), `ub2` field-ids
-> (> 255 distinct keys), and the extended scalar types JSON can carry (binary
-> double/float, date, timestamp, interval). The decoder raises `OsonError` on
-> these rather than decode them wrong.
+**Extended scalar nodes (#69).** JSON can carry Oracle-native scalars (e.g. via
+`JSON_SCALAR(<native>)`). Each is a tag byte followed by a fixed-width Oracle
+binary value (no length prefix — the width is intrinsic), decoded by the same
+routines as the column wire forms; binary float/double are in the
+order-preserving ("sortable") form:
+
+| Tag    | Type                    | Width |
+|--------|-------------------------|-------|
+| `0x36` | BINARY_DOUBLE           | 8     |
+| `0x7F` | BINARY_FLOAT            | 4     |
+| `0x3C` | DATE                    | 7     |
+| `0x39` | TIMESTAMP               | 11    |
+| `0x7C` | TIMESTAMP WITH TIME ZONE| 13    |
+| `0x3D` | INTERVAL YEAR TO MONTH  | 5     |
+| `0x3E` | INTERVAL DAY TO SECOND  | 11    |
+
+> **Not yet covered** (raises `OsonError` rather than decode wrong): images
+> whose header flags select **`ub4` segment sizes / node offsets** —
+> oracledb-produced and large documents set this (e.g. flags `0x2102`, the
+> `0x0100` bit, makes container offsets `ub4`); and **`ub2` field-ids**
+> (> 255 distinct keys). Both tracked under #69. There is also a `0x7D` DATE
+> tag variant seen only in those `ub4`-offset images.
 >
 > Multi-row JSON `SELECT`s ride the same LOB-locator path as multi-row LOB
 > reads and share the #45 desync limitation under load — single-row reads are
