@@ -14,7 +14,7 @@ import unittest
 from decimal import Decimal
 
 from oracle.datatypes import IntervalYM
-from oracle.oson import decode_oson, json_to_text, OsonError
+from oracle.oson import decode_oson, encode_oson, json_to_text, OsonError
 
 
 # (label, JSON document, captured OSON image as hex)
@@ -187,6 +187,51 @@ class TestJsonToText(unittest.TestCase):
     def test_unserialisable_raises(self):
         with self.assertRaises(TypeError):
             json_to_text({"d": object()})
+
+
+class TestEncodeOson(unittest.TestCase):
+    # encode_oson builds the OSON image for a native JSON bind (#70). It is the
+    # inverse of decode_oson, so every encodable value must round-trip through
+    # the existing decoder (which is itself pinned to captured server images).
+
+    def _roundtrip(self, value):
+        self.assertEqual(decode_oson(encode_oson(value)), value)
+
+    def test_scalars(self):
+        for v in (None, True, False, 42, -7, 1.5, "x", "scalar",
+                  Decimal("19.99"), "x" * 0x1F, "y" * 0x20):
+            with self.subTest(v=v):
+                self._roundtrip(v)
+
+    def test_objects(self):
+        self._roundtrip({"a": 1, "b": "hi"})
+        self._roundtrip({"price": Decimal("19.99")})
+        self._roundtrip({"on": True, "off": False, "nil": None})
+
+    def test_arrays(self):
+        self._roundtrip([1, 2, "x", True, None])
+        self._roundtrip([])
+
+    def test_nested(self):
+        self._roundtrip({"k": [1, {"m": 2}]})
+        self._roundtrip([{"a": 1}, {"a": 2}])
+
+    def test_wide_object_roundtrips_via_decode(self):
+        # 200 keys still fits the ub1 count; verify both encode and decode.
+        self._roundtrip({f"k{i:03d}": i for i in range(200)})
+
+    def test_oversized_falls_back_with_osonerror(self):
+        # The bind path relies on these raising so it can use the text cast.
+        with self.assertRaises(OsonError):
+            encode_oson("x" * 256)                 # string past ub1 length
+        with self.assertRaises(OsonError):
+            encode_oson({f"k{i}": i for i in range(256)})   # > 255 keys
+        with self.assertRaises(OsonError):
+            encode_oson(list(range(256)))          # > 255 array entries
+
+    def test_non_string_key_raises(self):
+        with self.assertRaises(OsonError):
+            encode_oson({1: "a"})
 
 
 if __name__ == "__main__":

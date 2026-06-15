@@ -1436,20 +1436,33 @@ order-preserving ("sortable") form:
 > reads and share the #45 desync limitation under load — single-row reads are
 > reliable.
 
-### 17.2 Binds (#50)
+### 17.2 Binds (#50, #70)
 
-pyoracle binds a JSON value by serialising it to **JSON text** (`json.dumps`,
-`ensure_ascii=False`) and binding the text as a `VARCHAR`; the server casts it
-to the column's `JSON` type — the same approach as VECTOR binds (§18.1). A bare
-Python `dict` is auto-detected as JSON (it has no other bind meaning); wrap a
-`list` / scalar in `oracle.JSON(value)` to bind it as JSON too, since a bare
-`list` means a VECTOR and bare scalars bind as their native SQL types. `Decimal`
-serialises as a JSON number (integral values stay exact, others via `float`),
-matching the decoder, which returns JSON numbers as `Decimal`.
+A bare Python `dict` is auto-detected as JSON (it has no other bind meaning);
+wrap a `list` / scalar in `oracle.JSON(value)` to bind it as JSON too, since a
+bare `list` means a VECTOR and bare scalars bind as their native SQL types.
+`Decimal` binds as a JSON number (integral values stay exact, others via
+`float`), matching the decoder, which returns JSON numbers as `Decimal`.
 
-Like the VECTOR native bind, an inline binary **OSON** bind (the inverse of the
-§17.1 decoder, sent over the same value framing as #62) is future work; the text
-cast covers every type the decoder handles with no row-data-assembler changes.
+pyoracle prefers a **native binary OSON** bind (#70, the inverse of the §17.1
+decoder in `oracle/oson.py:encode_oson`). It is sent exactly like the native
+VECTOR bind (§18.1): the bind OAC is the JSON one (`JSON_BIND_OAC`, type 119
+with a 32 MiB max length, captured from python-oracledb on 21c) and the value
+carries the same 19-byte LOB-backed descriptor, the image length (ub2), 22 zero
+bytes, then the OSON image over the 12c length framing. The encoder writes the
+compact small-document form — the object/array node uses a ub1 count, ub1
+field-ids and ub2 value-offsets; field-name hashes are sent as zero (the server
+accepts that, verified by round-trip). Both fv16 (21c) and fv17 (23ai) accept
+it.
+
+`encode_oson` raises `OsonError` for anything it does not encode compactly —
+strings over 255 bytes, objects/arrays over 255 entries, segments over 64 KiB —
+and the bind path then falls back to the **text cast** (#50): serialise to JSON
+text (`json.dumps`, `ensure_ascii=False`) and bind it as a `VARCHAR` the server
+casts to `JSON`. So a wide (>255-key) document still binds, via the text path,
+and reads back through the §17.1 wide-object decode. (Reading back a document
+with a string longer than the decoder's ub1-string support is the separate,
+pre-existing long-string decode gap, not a bind limitation.)
 
 ## 18. Native VECTOR (23ai+)
 
