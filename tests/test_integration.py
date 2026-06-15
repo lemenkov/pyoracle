@@ -1778,6 +1778,22 @@ class JSONIntegration(_IntegrationBase):
         self._setup_json()
         self.assertIsNone(self._roundtrip('null'))
 
+    def test_wide_object_over_255_keys(self):
+        # > 255 distinct keys (#69): the OSON header uses a ub2 num_fnames and
+        # the object node ub2 count + ub2 field-ids. A too-small offline fixture
+        # can't reach this, so exercise it end-to-end.
+        self._setup_json()
+        doc = {f"key{i:03d}": i for i in range(300)}
+        self.cur.execute(f"DELETE FROM {self.TABLE}")
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE} VALUES (1, :doc)", [doc])
+        self.conn.commit()
+        self.cur.execute(f"SELECT doc FROM {self.TABLE}")
+        got = self.cur.fetchone()[0]
+        self.assertEqual(len(got), 300)
+        self.assertEqual(got["key000"], 0)
+        self.assertEqual(got["key299"], 299)
+
     # Binds (#50): a bare dict binds as JSON; oracle.JSON(value) forces JSON on
     # lists / scalars. pyoracle serialises to JSON text and the server casts it.
     def _bind_roundtrip(self, value):

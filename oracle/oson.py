@@ -69,6 +69,10 @@ _FLAG_UB2_OFFSETS = 0x04     # container value-offsets are ub2; else ub4 (#69).
                              # Server JSON_OBJECT / JSON() literals set it;
                              # oracledb-produced images (flags 0x2102) clear it
                              # and use ub4 offsets.
+_FLAG_UB2_FNAMES = 0x0400    # num_fnames is ub2 (object with > 255 field names);
+                             # else ub1 (#69). A container node tag with the
+                             # 0x08 bit then also has a ub2 count + ub2 field-ids.
+_TAG_WIDE_COUNT = 0x08       # container count + field-ids are ub2, not ub1
 
 
 class OsonError(Exception):
@@ -118,10 +122,15 @@ def decode_oson(data: bytes) -> object:
         seg = data[pos + 2:pos + 2 + size]
         value, _ = _decode_node(seg, 0, None, seg, off_size)
         return value
-    num_fnames = data[pos]
-    fnames_size = _u16(data, pos + 1)
-    tree_size = _u16(data, pos + 3)
-    pos += 7                                  # + reserved ub2
+    if flags & _FLAG_UB2_FNAMES:              # > 255 field names (#69)
+        num_fnames = _u16(data, pos)
+        pos += 2
+    else:
+        num_fnames = data[pos]
+        pos += 1
+    fnames_size = _u16(data, pos)
+    tree_size = _u16(data, pos + 2)
+    pos += 6                                  # fnames_size + tree_size + reserved
     pos += num_fnames                         # hash array (1 byte / field)
     offsets = [_u16(data, pos + 2 * i) for i in range(num_fnames)]
     pos += 2 * num_fnames
@@ -161,18 +170,21 @@ def _decode_node(seg: bytes, off: int, field_name, tree: bytes, off_size: int = 
     if tag == 0x34:                           # number, ub1 length prefix
         length = seg[off + 1]
         return decode_number(seg[off + 2:off + 2 + length]), off + 2 + length
+    # A container with > 255 entries / field-ids uses ub2 count + ub2 field-ids
+    # (tag 0x08 bit); otherwise ub1. Value-offset width is per-image (off_size).
+    csz = 2 if (tag & _TAG_WIDE_COUNT) else 1
     if (tag & 0xC0) == 0xC0:                   # array container
-        count = seg[off + 1]
-        p = off + 2
+        count = _uint(seg, off + 1, csz)
+        p = off + 1 + csz
         elem_offsets = [_uint(seg, p + off_size * i, off_size)
                         for i in range(count)]
         return ([_decode_node(tree, o, field_name, tree, off_size)[0]
                  for o in elem_offsets], p + off_size * count)
     if (tag & 0xC0) == 0x80:                   # object container
-        count = seg[off + 1]
-        p = off + 2
-        ids = [seg[p + i] for i in range(count)]
-        p += count
+        count = _uint(seg, off + 1, csz)
+        p = off + 1 + csz
+        ids = [_uint(seg, p + csz * i, csz) for i in range(count)]
+        p += csz * count
         val_offsets = [_uint(seg, p + off_size * i, off_size)
                        for i in range(count)]
         return ({field_name(i): _decode_node(tree, o, field_name, tree, off_size)[0]

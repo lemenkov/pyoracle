@@ -1418,15 +1418,19 @@ order-preserving ("sortable") form:
 | `0x3E` | INTERVAL DAY TO SECOND  | 11    |
 | `0x7D` | DATE (ub4-offset images)| 7     |
 
-**Container value-offset width.** Object/array value-offsets are `ub2` only when
-the header flag `0x04` is set (server `JSON_OBJECT` / `JSON()` literals do);
-**oracledb-produced images clear it (flags `0x2102`) and use `ub4` offsets**.
-Reading the wrong width walks offset 0 → infinite recursion, so the decoder
-picks the width from the flag (#69).
+**Width selectors (#69).** Three independent width choices:
+- *Container value-offsets* are `ub2` only when the header flag `0x04` is set
+  (server `JSON_OBJECT` / `JSON()` literals); oracledb-produced images clear it
+  (flags `0x2102`) and use `ub4`. Reading the wrong width walks offset 0 →
+  infinite recursion, so the decoder picks the width from the flag.
+- *`num_fnames`* is `ub2` (else `ub1`) when the header flag `0x0400` is set —
+  i.e. the document has > 255 field names.
+- A *container node tag* with the `0x08` bit (object `0x88`/`0xac` vs `0x84`/
+  `0xa4`) has a `ub2` count and `ub2` field-ids; otherwise `ub1`.
 
-> **Not yet covered** (raises `OsonError` rather than decode wrong): **`ub2`
-> field-ids** in objects with > 255 distinct keys (field-ids are `ub1` today),
-> and `ub4` *segment sizes* (fnames/tree segments > 64 KiB). Tracked under #69.
+> **Not yet covered** (raises `OsonError` rather than decode wrong): `ub4`
+> *segment sizes* — fnames / tree segments larger than 64 KiB. Niche; the
+> common large-document and oracledb cases are handled.
 >
 > Multi-row JSON `SELECT`s ride the same LOB-locator path as multi-row LOB
 > reads and share the #45 desync limitation under load — single-row reads are
