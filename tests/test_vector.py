@@ -12,8 +12,7 @@ import unittest
 import array
 
 from oracle.vector import (
-    decode_vector, VectorError, is_vector_bind, vector_to_literal,
-    SparseVector,
+    decode_vector, VectorError, is_vector_bind, encode_vector, SparseVector,
 )
 
 
@@ -82,8 +81,8 @@ class TestVectorDecode(unittest.TestCase):
 
 
 class TestVectorBind(unittest.TestCase):
-    # Bind side (#55): a vector-like value renders to a VECTOR text literal that
-    # pyoracle binds as a string (server casts VARCHAR -> VECTOR).
+    # Bind side (#62): a vector-like value encodes to its native binary image
+    # (encode_vector), the inverse of decode_vector.
 
     def test_detects_sequences(self):
         self.assertTrue(is_vector_bind([1.0, 2.0]))
@@ -95,13 +94,27 @@ class TestVectorBind(unittest.TestCase):
         for v in ("[1,2]", b"\x01\x02", [], [True, False], ["a"], 42, None):
             self.assertFalse(is_vector_bind(v), v)
 
-    def test_literal_float_and_int(self):
-        # Integer-valued elements render as ints (needed for INT8 / BINARY);
-        # fractional values keep full float precision.
-        self.assertEqual(vector_to_literal([1, 2, 3]), "[1, 2, 3]")
-        self.assertEqual(vector_to_literal([-1.0, 0.0, 2.25]), "[-1, 0, 2.25]")
-        self.assertEqual(vector_to_literal(array.array("B", [170, 1])),
-                         "[170, 1]")
+    def test_encode_matches_read_image(self):
+        # The bind image equals the read image except its norm is zeroed, so
+        # decode(encode(x)) == x for every element type.
+        self.assertEqual(
+            encode_vector(array.array("f", [1.5, 2.5, 3.5])).hex(),
+            "db00001202000000030000000000000000bfc00000c0200000c0600000")
+        self.assertEqual(
+            decode_vector(encode_vector(array.array("d", [1.5, -2.5]))),
+            [1.5, -2.5])
+        self.assertEqual(
+            decode_vector(encode_vector(array.array("b", [1, -2, 3]))),
+            [1, -2, 3])
+        self.assertEqual(
+            decode_vector(encode_vector(array.array("B", [170, 1]))),
+            [170, 1])
+        self.assertEqual(decode_vector(encode_vector([1.5, 2.5, 3.5])),
+                         [1.5, 2.5, 3.5])     # plain list -> FLOAT32
+
+    def test_encode_sparse_roundtrips(self):
+        sv = SparseVector(8, [2, 5], [1.5, 2.5])
+        self.assertEqual(decode_vector(encode_vector(sv)), sv)
 
 
 class TestSparseVector(unittest.TestCase):
@@ -135,10 +148,14 @@ class TestSparseVector(unittest.TestCase):
                 "bfc00000c0200000")),
             SparseVector(300, [1, 299], [1.5, 2.5]))
 
-    def test_is_vector_bind_and_literal(self):
+    def test_is_vector_bind_and_encode(self):
         sv = SparseVector(8, [2, 5], [1.5, 2.5])
         self.assertTrue(is_vector_bind(sv))
-        self.assertEqual(vector_to_literal(sv), "[8, [2, 5], [1.5, 2.5]]")
+        # encodes to a version-2 / flag-0x20 sparse image that round-trips.
+        img = encode_vector(sv)
+        self.assertEqual(img[1], 2)                       # version 2
+        self.assertTrue(((img[2] << 8) | img[3]) & 0x20)  # sparse flag
+        self.assertEqual(decode_vector(img), sv)
 
 
 if __name__ == "__main__":

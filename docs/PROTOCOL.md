@@ -1499,33 +1499,27 @@ Captured reference images:
 [170, 1]         BINARY   db 01 0010 05 00000010 8000000000000000 aa 01
 ```
 
-### 18.1 Binds (#55)
+### 18.1 Binds (#55 / #62)
 
-pyoracle binds a vector by rendering the Python sequence as the **text literal**
-(`[1.5, 2.5, 3.5]`) and binding it as a `VARCHAR`; the server casts it to the
-column's `VECTOR` type. Integer-valued elements render as ints (so INT8 / BINARY
-columns accept them); fractional values keep full float precision via `repr`.
-The cast is precision-identical to a native binary bind — a FLOAT32 column
-rounds `0.1` to `0.10000000149…` either way. This rides the well-tested string
-bind path, so it needs no changes to the row-data assembler.
+pyoracle binds a vector with the **native binary image** (matching
+python-oracledb). The full exec bind for a vector is `OAC | TTI_RXD | value`:
 
-**Native binary bind (reverse-engineered, not yet shipped).** python-oracledb
-sends the binary image inline instead, and the format is fully cracked for a
-future native path:
-
-- **OAC**: type 127, but unlike a plain 12c OAC the *cont-flag* field is
-  `0x02000000` and the *oaccolid* field is the 1 MiB max length —
-  `7f 01 00 00 | 04 00100000 | 00 | 04 02000000 | 00 00 00 00 | 04 00100000`.
-  Without the `0x02000000` flag the server rejects the inline value with
-  ORA-03120.
-- **Image**: identical to the read image (§18) but the 8-byte norm is sent as
-  **zeros** — the server recomputes the magnitude. FLOAT32/64 use the same
-  sortable encoding, INT8 raw bytes, BINARY packed bytes.
-- **Value framing**: a two-piece, LOB-descriptor-style form rather than a plain
-  inline value: `<total_len> <22-byte zero indicator> <chunked image>`, where
-  the chunked image uses the normal 12c length framing (single byte < 254, else
-  the `0xFE` chunk marker). Retrofitting this into the shared row-data assembler
-  is the remaining work; tracked as #62.
+- **OAC** (`encode_token_oac`): a fixed 25-byte block — type 127, the *cont-flag*
+  field `0x02000000`, and the *oaccolid* field set to the 1 MiB max length:
+  `7f 01 00 00 | 04 00100000 | 00 | 04 02000000 | 00 00 00 00 | 04 00100000 | 00`.
+  Without the `0x02000000` flag the server rejects the inline value (ORA-03120);
+  a too-short OAC desyncs (ORA-03106).
+- **Value** (`encode_token_rxd`, after the `TTI_RXD`=0x07 token): a fixed 19-byte
+  **descriptor** (`01 28 28 00 26 00 04 61 08 00 00 00 01 00 00 00 00 00 00` —
+  the same one python-oracledb uses for any LOB-backed inline bind, so #70 JSON
+  reuses it), then the **image length (ub2)**, **22 zero bytes**, then the image
+  framed like RAW (`encode_chr`: a single length byte < 254, else the `0xFE`
+  marker + `ub4` chunks). Both constants are stable across element types and
+  sizes; works at field version 16 and 17.
+- **Image** (`encode_vector`): the read image (§18) with the 8-byte norm sent as
+  **zeros** (the server recomputes it). FLOAT32/64 use the sortable encoding,
+  INT8 raw bytes, BINARY packed bytes; a SparseVector emits the §18.2 sparse
+  image. Dense `list`/`tuple` → FLOAT32; an `array.array` maps by typecode.
 
 ### 18.2 SPARSE vectors (#68)
 
@@ -1539,10 +1533,9 @@ count (ub2) | indices (ub4 × count) | values (element × count)
 `num_elements` (header) is the total dimension count; `count` is the number of
 stored elements; the values use the same per-element encoding as a dense image
 (sortable FLOAT32/64, raw INT8). pyoracle decodes it to an `oracle.SparseVector`
-(`num_dimensions`, `indices`, `values`) and binds one back via the text literal
-`[dims, [indices], [values]]`. Captured on 23ai across FLOAT32/INT8 and a
-300-dim vector (index 299 confirms the ub4 indices).
+(`num_dimensions`, `indices`, `values`) and binds one back natively via §18.1
+(the sparse image carries the same OAC + descriptor). Captured on 23ai across
+FLOAT32/INT8 and a 300-dim vector (index 299 confirms the ub4 indices).
 
-> **Not yet covered:** the native binary bind in §18.1 (text bind ships
-> instead). As with JSON, multi-row VECTOR `SELECT`s share the #45 LOB desync
-> limitation under load; single-row reads are reliable.
+> As with JSON, multi-row VECTOR `SELECT`s share the #45 LOB desync limitation
+> under load; single-row reads are reliable.

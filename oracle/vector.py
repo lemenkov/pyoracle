@@ -147,21 +147,74 @@ def is_vector_bind(value: object) -> bool:
         for x in value)
 
 
-def vector_to_literal(value: object) -> str:
-    """Render a vector-like sequence as Oracle's ``VECTOR`` text literal, e.g.
-    ``[1.5, 2.5, 3.5]``. pyoracle binds this as a string and the server casts
-    VARCHAR -> VECTOR; the result is precision-identical to a native binary
-    bind (an inline binary VECTOR image is the future native path, see #62 /
-    docs/PROTOCOL.md §18.1). Integer-valued elements render as ints (needed for
-    INT8 / BINARY columns); other values keep full float precision via repr.
-    A ``SparseVector`` renders as ``[dims, [indices], [values]]``.
-    """
-    def fmt(x):
-        if isinstance(x, int) or (isinstance(x, float) and x.is_integer()):
-            return str(int(x))
-        return repr(float(x))
+# Native binary VECTOR bind (#62). Captured from python-oracledb on 23ai
+# (docs/PROTOCOL.md §18.1): the bind OAC is type 127 with the cont-flag field
+# 0x02000000 and a 1 MiB max length; the value carries a fixed descriptor (the
+# same one python-oracledb uses for any LOB-backed inline bind), then the image
+# length (ub2), 22 zero bytes, then the image via the normal 12c length framing.
+# Both constants are stable across element types and vector sizes.
+VECTOR_BIND_OAC = bytes.fromhex(
+    "7f010000040010000000040200000000000000040010000000")
+VECTOR_BIND_DESCRIPTOR = bytes.fromhex("01282800260004610800000001000000000000")
+
+# Per-element-type (version, flags) for the bind image. FLOAT32/64/INT8 use
+# version 0 / flags 0x12; BINARY version 1 / flags 0x10; a sparse image is
+# version 2 with the 0x20 flag added.
+_BIND_HEADER = {
+    _VEC_FLOAT32: (0, 0x0012),
+    _VEC_FLOAT64: (0, 0x0012),
+    _VEC_INT8: (0, 0x0012),
+    _VEC_BINARY: (1, 0x0010),
+}
+_TYPECODE_ELEMENT = {"f": _VEC_FLOAT32, "d": _VEC_FLOAT64,
+                     "b": _VEC_INT8, "B": _VEC_BINARY}
+
+
+def _sort_uint(value: int, bits: int) -> int:
+    # Inverse of _unsort_uint: positive -> set the top bit; negative -> invert.
+    top = 1 << (bits - 1)
+    mask = (1 << bits) - 1
+    return (~value & mask) if (value & top) else (value | top)
+
+
+def _encode_float(x: float, fmt: str, bits: int) -> bytes:
+    u = int.from_bytes(struct.pack(">" + fmt, x), "big")
+    return _sort_uint(u, bits).to_bytes(bits // 8, "big")
+
+
+def _encode_dense_body(values, element_type: int) -> bytes:
+    if element_type == _VEC_FLOAT32:
+        return b"".join(_encode_float(v, "f", 32) for v in values)
+    if element_type == _VEC_FLOAT64:
+        return b"".join(_encode_float(v, "d", 64) for v in values)
+    return bytes(int(v) & 0xFF for v in values)          # INT8 / packed bytes
+
+
+def encode_vector(value: object) -> bytes:
+    """Encode a vector bind value to its VECTOR binary image (the inverse of
+    decode_vector). Dense list/tuple -> FLOAT32; an array.array maps by typecode
+    (f/d/b/B); a SparseVector -> a sparse FLOAT32 image. The 8-byte norm is sent
+    as zeros (the server recomputes it)."""
     if isinstance(value, SparseVector):
-        idx = ", ".join(str(int(i)) for i in value.indices)
-        vals = ", ".join(fmt(v) for v in value.values)
-        return f"[{value.num_dimensions}, [{idx}], [{vals}]]"
-    return "[" + ", ".join(fmt(x) for x in value) + "]"
+        element_type = _VEC_FLOAT32
+        flags = _BIND_HEADER[element_type][1] | _FLAG_SPARSE
+        header = (bytes([VECTOR_MAGIC, 2]) + flags.to_bytes(2, "big")
+                  + bytes([element_type])
+                  + value.num_dimensions.to_bytes(4, "big") + b"\x00" * 8)
+        indices = b"".join(int(i).to_bytes(4, "big") for i in value.indices)
+        return (header + len(value.indices).to_bytes(2, "big") + indices
+                + _encode_dense_body(value.values, element_type))
+    if isinstance(value, array.array):
+        element_type = _TYPECODE_ELEMENT.get(value.typecode, _VEC_FLOAT32)
+    else:
+        element_type = _VEC_FLOAT32
+    version, flags = _BIND_HEADER[element_type]
+    if element_type == _VEC_BINARY:
+        body = bytes(int(v) & 0xFF for v in value)
+        count = len(body) * 8
+    else:
+        body = _encode_dense_body(value, element_type)
+        count = len(value)
+    return (bytes([VECTOR_MAGIC, version]) + flags.to_bytes(2, "big")
+            + bytes([element_type]) + count.to_bytes(4, "big")
+            + b"\x00" * 8 + body)

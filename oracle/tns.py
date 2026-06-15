@@ -9,7 +9,9 @@ from oracle.crypto import encrypt_password
 from oracle.cursor import cursor
 from oracle.datatypes import BinaryDouble, BinaryFloat, IntervalYM, JSON, Var
 from oracle.date import date
-from oracle.vector import is_vector_bind, vector_to_literal
+from oracle.vector import (
+    is_vector_bind, encode_vector, VECTOR_BIND_OAC, VECTOR_BIND_DESCRIPTOR,
+)
 
 
 def _json_bind_text(Token: object) -> str:
@@ -1864,9 +1866,12 @@ def encode_token_rxd(Token: object) -> bytes:
         # Mirrors the OAC path in encode_token_oac.
         Token = _json_bind_text(Token)
     elif is_vector_bind(Token):
-        # VECTOR bind on 23ai (#55): send the text literal as a string; the
-        # server casts it. Mirrors the OAC path in encode_token_oac.
-        Token = vector_to_literal(Token)
+        # Native VECTOR bind on 23ai (#62): a fixed descriptor, then the image
+        # length (ub2), 22 zero bytes, then the binary image framed like RAW
+        # (encode_chr). The OAC counterpart is VECTOR_BIND_OAC.
+        Image = encode_vector(Token)
+        return (VECTOR_BIND_DESCRIPTOR + len(Image).to_bytes(2, "big")
+                + b"\x00" * 22 + encode_chr(Image))
     if isinstance(Token, bool):
         # Native SQL BOOLEAN bind on 23ai (#54): the value is a 2-byte DALC
         # `02 01 <0/1>` (TRUE = 01 01, FALSE = 01 00; captured from
@@ -1976,10 +1981,10 @@ def encode_token_oac(Token: object) -> bytes:
         # server cast VARCHAR -> JSON. Falls through to the str OAC below.
         Token = _json_bind_text(Token)
     elif is_vector_bind(Token):
-        # VECTOR bind on 23ai (#55): bind the vector's text literal as a string
-        # and let the server cast VARCHAR -> VECTOR. Falls through to the str
-        # OAC below.
-        Token = vector_to_literal(Token)
+        # Native VECTOR bind on 23ai (#62): type 127, cont-flag 0x02000000,
+        # 1 MiB max — the fixed OAC python-oracledb sends. The image rides in
+        # encode_token_rxd.
+        return VECTOR_BIND_OAC
     if isinstance(Token, BinaryFloat):
         return encode_token_raw(TNS_TYPE_BFLOAT, 4, 0, 0, 0)
     if isinstance(Token, BinaryDouble):

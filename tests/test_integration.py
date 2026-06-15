@@ -1693,8 +1693,8 @@ class VectorIntegration(_IntegrationBase):
         self.assertEqual(got, [170, 1])
         self.assertTrue(all(isinstance(v, int) for v in got))
 
-    # Binds (#55): pyoracle renders the sequence as a VECTOR text literal and
-    # the server casts it; covers plain lists and typed array.array values.
+    # Binds (#62): pyoracle sends the native binary VECTOR image; covers plain
+    # lists and typed array.array values.
     def test_bind_float32_list(self):
         self.assertEqual(
             self._bind_roundtrip("VECTOR(4, FLOAT32)", [-1, 0, 2.25, -8]),
