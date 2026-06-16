@@ -234,5 +234,35 @@ class TestEncodeOson(unittest.TestCase):
             encode_oson({1: "a"})
 
 
+class TestDecodeOsonLarge(unittest.TestCase):
+    # Large-document decode (#88): strings >255 B and trees >64 KiB. The ub2/ub4
+    # string nodes are pinned against a real 10.2-style image captured from 21c;
+    # the ub4 tree/count/offset header bytes are written explicitly per the
+    # format reverse-engineered from live 21c images (the real ones are >64 KiB,
+    # too large to embed — JSONIntegration exercises those against the server).
+
+    def test_ub2_string_node_0x37(self):
+        # Captured 21c image for {"s": "x"*500}: object node, value is a 0x37
+        # string with a ub2 length (0x01f4 = 500). Prefix is the real captured
+        # header/nodes; the 500-byte body is the known 'x' run.
+        Resp = bytes.fromhex(
+            "ff4a5a01210601000201fc0000820000017384010100053701f4") + b"x" * 500
+        self.assertEqual(decode_oson(Resp), {"s": "x" * 500})
+
+    def test_ub4_string_node_0x38(self):
+        # 0x38 = string with a ub4 length prefix (used for values >64 KiB);
+        # exercised here as a bare scalar with a short body.
+        Resp = bytes.fromhex("ff4a5a010000000a380000000568656c6c6f")
+        self.assertEqual(decode_oson(Resp), "hello")
+
+    def test_ub4_tree_size_count_and_offsets(self):
+        # flag 0x1000 -> ub4 tree_size; array node tag 0xf0 -> ub4 count (0x10)
+        # + ub4 value-offsets (0x20). A 2-element array [null, null].
+        Resp = bytes.fromhex(
+            "ff4a5a0130060000000000000f0000"      # hdr: flags 3006, ub4 tree_size=15
+            "f0000000020000000d0000000e3030")     # array: 0xf0, count4=2, offs4 13/14, 30 30
+        self.assertEqual(decode_oson(Resp), [None, None])
+
+
 if __name__ == "__main__":
     unittest.main()
