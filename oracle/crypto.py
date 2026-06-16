@@ -12,29 +12,16 @@ from hashlib import sha512
 from secrets import token_bytes
 import sys
 
-# O3LOGON (DES) is the *pre-10g* authenticator — the old 8-byte DES session-key
-# handshake used by Oracle 8i/9i. 10g already uses O5LOGON (AES session key),
-# just with the legacy DES verifier and no salt (see the unsalted branch in
-# o5logon below), so 10g is the oldest protocol we actually exercise. This pure
-# O3LOGON path therefore has NO testbed and is UNTESTED — and is likely to stay
-# that way for a long while (standing up a 9i/8i server is far harder than the
-# 10g one, and there's little demand). Kept for completeness / if a 9i box ever
-# turns up; do not assume it is correct without a capture to validate against.
-def o3logon(Sess: bytes, KeySess: bytes, Password: bytes) -> tuple[bytes, bytes, bytes]:
-    IVec = bytes(8)
-
-    cipher = DES.new(KeySess[0:8], DES.MODE_CBC, IVec)
-    SrvSess = cipher.decrypt(Sess)
-
-    N = (8 - (len(Password) % 8 )) % 8
-    CliPass = Password + bytes(N)
-
-    cipher = DES.new(SrvSess[0:8], DES.MODE_CBC, IVec)
-    AuthPass = cipher.encrypt(CliPass)
-    return (AuthPass, b"", b"")
-
+# Note on the ancient O3LOGON handshake (8-byte DES session key via TTI_3LOGON,
+# Oracle 8i and earlier): a speculative, never-tested implementation lived here
+# and was removed (it remains in git history). It is NOT needed for 9i — a real
+# Oracle 9.2.0.4 server (#90) authenticates with the same salt-less DES O5LOGON
+# flow as 10g: an AES session key over the legacy DES verifier, no salt (the
+# both-salts-None branch in o5logon below). 8i is the only true O3LOGON consumer
+# and is effectively untestable (installers exist for old Windows only), so
+# reinstating it would need a fresh capture to validate against.
 def des_verifier(User: bytes, Password: bytes) -> bytes:
-    # The classic Oracle DES password verifier (pre-11g / O3LOGON): the
+    # The classic Oracle DES password verifier (pre-11g): the
     # uppercased UTF-16BE username+password, DES-CBC encrypted under the fixed
     # key 0x0123456789ABCDEF, then DES-CBC encrypted again under the last 8
     # bytes of that — the verifier is the last 8 bytes of the second pass.
