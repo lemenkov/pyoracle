@@ -83,6 +83,11 @@ class AsyncOracleConnect:
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self.seq = 1
+        # Break/reset state, mirrors OracleConnect (#45): bytes held past a
+        # marker for the next recv(), and a latch so we answer a server break
+        # with exactly one reset then drain the rest silently (2:1 ratio).
+        self._pending = b""
+        self._in_break = False
         self.conn_key = None
         self.server_version = 0
         self.session_id = None
@@ -223,8 +228,28 @@ class AsyncOracleConnect:
 
     async def recv(self, Acc: bytes, Data: bytes) -> tuple[int, bytes] | bool:
         """Same packet-reassembly state machine as `OracleConnect.recv`,
-        but awaiting the StreamReader instead of `sock.recv`."""
+        but awaiting the StreamReader instead of `sock.recv`. Seeds from and
+        preserves into self._pending so a coalesced break|reset|error is not
+        dropped (#45)."""
+        Acc = self._pending + Acc
+        self._pending = b""
         while True:
+            while len(Acc) >= 8:
+                (Flag, Type, Body, Rest) = assemble_packet(Acc, self.sdu)
+                if Flag is True and Type == TNS_MARKER:
+                    self._pending = Rest
+                    return (TNS_MARKER, b"")
+                if Flag is True and Rest == b"":
+                    return (Type, Data + Body)
+                if Flag is True and Rest != b"":
+                    Acc = Rest
+                    Data = Data + Body
+                    continue
+                if Body is not None:
+                    Acc = Rest or b""
+                    Data = Data + Body
+                    continue
+                break
             try:
                 if self.timeout:
                     NetworkData = await asyncio.wait_for(
@@ -241,21 +266,23 @@ class AsyncOracleConnect:
             if not NetworkData:
                 return False
             Acc = Acc + NetworkData
-            while len(Acc) >= 8:
-                (Flag, Type, Body, Rest) = assemble_packet(Acc, self.sdu)
-                if Flag is True and Type == TNS_MARKER:
-                    return (TNS_MARKER, b"")
-                if Flag is True and Rest == b"":
-                    return (Type, Data + Body)
-                if Flag is True and Rest != b"":
-                    Acc = Rest
-                    Data = Data + Body
-                    continue
-                if Body is not None:
-                    Acc = Rest or b""
-                    Data = Data + Body
-                    continue
-                break
+
+    async def _next_data_packet(self, Acc: bytes = b"", Data: bytes = b"") \
+            -> tuple[int, bytes] | bool:
+        """Async port of `OracleConnect._next_data_packet` (#45): receive the
+        next DATA packet, answering a server break with a single reset and
+        draining the rest (the server's terminal reset) silently."""
+        while True:
+            Received = await self.recv(Acc, Data)
+            if Received is False:
+                return False
+            (Type, Packet) = Received
+            if Type != TNS_MARKER:
+                self._in_break = False
+                return (Type, Packet)
+            if not self._in_break:
+                await self.send(TNS_MARKER, b"\x01\x00\x02")
+                self._in_break = True
 
     # ----- login state machine -----
 
@@ -267,6 +294,8 @@ class AsyncOracleConnect:
                 logger.debug("handle_login (async): peer closed")
                 return 1
             (Type, Packet) = Received
+            if Type != TNS_MARKER:
+                self._in_break = False
             match Type:
                 case t if t == TNS_ACCEPT:
                     (Ver, Opts, Sdu) = struct.unpack(">hhh", Packet[:6])
@@ -293,7 +322,10 @@ class AsyncOracleConnect:
                                          Packet[0])
                     continue
                 case t if t == TNS_MARKER:
-                    await self.send(TNS_MARKER, b"\x01\x00\x02")
+                    # Single reset per break episode, then drain (#45).
+                    if not self._in_break:
+                        await self.send(TNS_MARKER, b"\x01\x00\x02")
+                        self._in_break = True
                     continue
                 case t if t == TNS_REDIRECT:
                     from oracle.tns import parse_redirect_address
@@ -372,19 +404,13 @@ class AsyncOracleConnect:
     async def _handle_response(self, Acc: tuple | None = None) -> object:
         if Acc is None:
             Acc = (None, None, [])
-        while True:
-            Received = await self.recv(b"", b"")
-            if Received is False:
-                raise InterfaceError("connection closed while awaiting response")
-            (Type, Packet) = Received
-            match Type:
-                case t if t == TNS_DATA:
-                    return decode_packet(Packet, Acc, self.field_version)
-                case t if t == TNS_MARKER:
-                    await self.send(TNS_MARKER, b"\x01\x00\x02")
-                    continue
-                case _:
-                    raise Exception("Unexpected response type", Type)
+        Received = await self._next_data_packet(b"", b"")
+        if Received is False:
+            raise InterfaceError("connection closed while awaiting response")
+        (Type, Packet) = Received
+        if Type == TNS_DATA:
+            return decode_packet(Packet, Acc, self.field_version)
+        raise Exception("Unexpected response type", Type)
 
     # ----- execute / fetch (kept minimal for the first cut) -----
 
@@ -556,14 +582,11 @@ class AsyncOracleConnect:
         from oracle.tns_consts import TTI_LOB, TTI_OER
         Buffer = b""
         while True:
-            Received = await self.recv(b"", b"")
+            Received = await self._next_data_packet(b"", b"")
             if Received is False:
                 raise InterfaceError("connection closed during LOBOPS response")
             (Type, Packet) = Received
             if Type != TNS_DATA:
-                if Type == TNS_MARKER:
-                    await self.send(TNS_MARKER, b"\x01\x00\x02")
-                    continue
                 raise Exception("Unexpected LOBOPS response type", Type)
             Pos = 0
             OerSeen = False

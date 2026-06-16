@@ -1601,6 +1601,27 @@ class LOBIntegration(_IntegrationBase):
                              {"i": Id})
             self.assertEqual(self.cur.fetchone()[0], Text)
 
+    def test_error_then_large_lob_stays_synced(self):
+        # #45: an errored call leaves the server's break/reset markers on the
+        # wire; mishandling them (replying to every marker) storms the line and
+        # discards the next response's data, so a large CLOB read right after a
+        # few errors came back empty. Interleave errored SELECTs with a 50 KB
+        # CLOB read and assert the content is intact and the connection usable.
+        from oracle.exceptions import DatabaseError
+        self._setup()
+        Big = "A" * 50000
+        self.cur.execute(
+            f"INSERT INTO {self.TABLE}(id, c) VALUES (1, :c)", {"c": Big})
+        self.conn.commit()
+        for _ in range(8):
+            with self.assertRaises(DatabaseError):
+                self.cur.execute("SELECT * FROM pyoracle_no_such_table_45")
+                self.cur.fetchall()
+            self.cur.execute(f"SELECT c FROM {self.TABLE} WHERE id=1")
+            (Got,) = self.cur.fetchone()
+            self.assertEqual(len(Got), len(Big))
+            self.assertEqual(Got, Big)
+
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class BooleanIntegration(_IntegrationBase):
@@ -2329,6 +2350,32 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                     (3, "hello async clob", b"\xde\xad\xbe\xef"),
                 ])
                 await Cur.execute("DROP TABLE PYORACLE_ASYNC_LOB")
+
+    async def test_error_then_large_lob_stays_synced(self):
+        # #45 (async parity): errored calls leave break/reset markers; a few of
+        # them followed by a large CLOB read must not desync the stream.
+        from oracle.exceptions import DatabaseError
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                await self._drop_async(Cur, "PYORACLE_ASYNC_LOB45")
+                await Cur.execute(
+                    "CREATE TABLE PYORACLE_ASYNC_LOB45 (id NUMBER, c CLOB)")
+                Big = "A" * 50000
+                await Cur.execute(
+                    "INSERT INTO PYORACLE_ASYNC_LOB45 VALUES (1, :c)",
+                    {"c": Big})
+                await Conn.commit()
+                for _ in range(8):
+                    with self.assertRaises(DatabaseError):
+                        await Cur.execute(
+                            "SELECT * FROM pyoracle_no_such_table_45")
+                        await Cur.fetchall()
+                    await Cur.execute(
+                        "SELECT c FROM PYORACLE_ASYNC_LOB45 WHERE id=1")
+                    (Got,) = await Cur.fetchone()
+                    self.assertEqual(len(Got), len(Big))
+                    self.assertEqual(Got, Big)
+                await Cur.execute("DROP TABLE PYORACLE_ASYNC_LOB45")
 
     async def test_async_plsql_in_bind(self):
         async with await oracle.connect_async(**self._kwargs()) as Conn:
