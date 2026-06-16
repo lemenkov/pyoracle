@@ -474,10 +474,12 @@ class AsyncOracleConnect:
             if CachedCursor:
                 self._cursor_cache.pop(CacheKey, None)
             raise
-        if (Type == 'change' and not Def
+        if (CacheKey is not None and Type == 'change' and not Def
                 and isinstance(Result, tuple) and len(Result) >= 3
                 and isinstance(Result[2], int) and Result[2] > 0
                 and Result[1] in (0, 1403)):
+            # Gate the write on CacheKey too so 12c+ (cache disabled) never
+            # parks a stray {None: cursor_id} entry (#80); mirrors the sync fix.
             CursorId = Result[2]
             self._cursor_cache.pop(CacheKey, None)
             self._cursor_cache[CacheKey] = CursorId
