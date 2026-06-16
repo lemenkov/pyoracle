@@ -456,7 +456,12 @@ def _read_refcursor_out(Rest: bytes) -> tuple[dict, bytes]:
     Rest = _skip_bytes_with_length(Rest)         # current date
     for _ in range(4):                           # dcbflag / mdbz / mnpr / mxpr
         (_, Rest) = decode_ub4(Rest)
-    Rest = _skip_bytes_with_length(Rest)         # dcbqcky
+    if _DECODE_FIELD_VERSION.get() >= FIELD_VERSION_11_2:
+        # dcbqcky (query-cache key) is an 11g addition; a 10g (field version 4)
+        # nested-cursor describe ends after the four ub4 flags. Skipping a
+        # phantom one here consumes the cursor id and desyncs the IOV decode of
+        # a REF CURSOR OUT bind (#84) — same pre-11g gap as decode_token_dcb.
+        Rest = _skip_bytes_with_length(Rest)     # dcbqcky
     (CursorId, Rest) = decode_ub4(Rest)
     Rest = Rest[1:]                              # per-value indicator byte
     return ({'_refcursor': True, 'cursor_id': CursorId,
