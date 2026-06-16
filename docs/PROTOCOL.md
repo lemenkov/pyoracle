@@ -359,12 +359,20 @@ runtime array from 7 to 11, with runtime index 6 (`TNS_RCAP_TTC`) gaining
 `ZERO_COPY | 32K` (`0x05`). pyoracle models both arrays as `{index: value}`
 maps keyed on the field version in `oracle/tns.py` (`capability_arrays`).
 
-> **12c+ blocker (issue #27).** Advertising a 12c+ field version is necessary
-> for 21c login but not sufficient: it changes how the server frames every
-> subsequent message (DTY table form, OER layout, datatype encodings), so it
-> must land together with the matching version-gated decoders. The 256-bit
-> O5LOGON crypto is already solved (§4.5); the capability layout is now fully
-> mapped (this section); the remaining work is the version-gated formats.
+The negotiated version can also go *below* 11.2: an Oracle **10g** server
+settles on field version **4**. pyoracle advertises its highest version and
+gates the *older* wire formats on `field_version < FIELD_VERSION_11_2` — the
+pre-11g describe layout (§6.4) and the unsalted DES auth (§4.4) — so a single
+build speaks 10g through 23ai. (Reference field versions: 10.2 = 4, 11.2 = 6,
+12.1 = 7, 12.2 = 8, 19c = 12, 21c = 16, 23ai = 17.)
+
+> **12c+ support (issue #27) — RESOLVED.** Advertising a 12c+ field version is
+> necessary for 21c login but not sufficient: it changes how the server frames
+> every subsequent message (DTY table form, OER layout, datatype encodings), so
+> it had to land together with the matching version-gated decoders. All of that
+> is now done — the 256-bit O5LOGON crypto (§4.5), the capability layout (this
+> section) and the version-gated formats. pyoracle logs in and runs its full
+> test suite against 11g, **12c+ (21c, 23ai)** and 10g from one build.
 
 ### 4.3 Session Setup (TTI_FUN/TTI_SESS)
 
@@ -395,13 +403,31 @@ The `AUTH_VFR_DATA` length (NbPair field) determines the authentication variant:
 | 6949   | O5LOGON  | 192-bit  | AES-192-CBC |
 | 18453  | O5LOGON  | 256-bit  | AES-256-CBC |
 
+**Oracle 10g (field version 4)** has no 11g/12c password verifier, so it sends
+`AUTH_SESSKEY` with an **empty** `AUTH_VFR_DATA` (no salt) and no PBKDF2 fields.
+pyoracle detects the absence of *both* the salt and the derived salt and takes
+the legacy **DES-verifier** path (the 128-bit case below). Note this is still an
+AES session key: **O5LOGON debuted in 10g** — 11g only *added* the salted SHA-1
+verifier (the 192-bit variant), and 12c the PBKDF2 verifier (256-bit). The
+genuinely older **O3LOGON** (an 8-byte *DES* session key; Oracle 8i/9i; tokens
+`TTI_3LOGON` / `TTI_3LOGA`, §3.2) is a different, pre-10g handshake that pyoracle
+carries (`crypto.o3logon`) but cannot test for lack of a 9i/8i server, so 10g is
+the oldest auth pyoracle is verified against.
+
 ### 4.5 Authentication Response (TTI_FUN/TTI_AUTH)
 
 The client computes the authentication response:
 
 **Key derivation** depends on the variant:
 
-- **128-bit (O5LOGON)**: DES-CBC encryption of normalized `USER+PASSWORD`, producing a 16-byte session key.
+- **128-bit, no salt (10g / legacy DES verifier)**: `KeySess` is the classic
+  Oracle DES verifier zero-padded to a 16-byte AES-128 key. The verifier is the
+  normalized (uppercased, UTF-16BE) `USER+PASSWORD` run through DES-CBC under the
+  fixed key `0x0123456789ABCDEF`, then DES-CBC again under the **last 8 bytes** of
+  that result — the verifier is the last 8 bytes of the second pass (this equals
+  the value stored in `sys.user$.password`). Then `ConnKey = MD5(XOR(SrvSess[16:32],
+  CliSess[16:32]))`. Verified against a live 10.2.0.5 server (the derived verifier
+  matches `sys.user$.password`; login succeeds sync + async).
 - **192-bit** (11g XE): SHA-1 hash of `PASSWORD + unhex(SALT)`, zero-padded to 24 bytes (the
   AES-192 `KeySess`).
 - **256-bit** (12c+, e.g. 21c XE): `Data = PBKDF2-HMAC-SHA512(PASSWORD, salt =
@@ -431,13 +457,11 @@ The client computes the authentication response:
 - `AUTH_PBKDF2_SPEEDY_KEY` carries `Data` so the server can recover it (and verify the
   password) without the plaintext.
 
-> **12c+ login status (UNSOLVED):** the 256-bit crypto above is implemented and verified
-> byte-identical to python-oracledb — every derived value matches and the `TTI_AUTH` message
-> is byte-structurally identical to oracledb's (same logon mode, key/value set, KV flags, and
-> field encodings). Yet 21c still returns `ORA-01017`. The remaining difference is **not** in
-> the auth message; the leading suspect is the capability negotiation (oracledb's DTY exchange
-> is far larger than pyoracle's), which may gate the server's acceptance of the 12c verifier.
-> Still under investigation.
+> **12c+ login — RESOLVED.** The 256-bit crypto above is byte-identical to
+> python-oracledb and 21c / 23ai now log in and run the full test suite. The
+> earlier `ORA-01017` was indeed not in the auth message: it was the capability
+> negotiation — pyoracle's compile/runtime cap arrays had to match the 21.1
+> vectors (§4.2) for the server to accept the 12c verifier.
 
 The auth response message:
 ```
@@ -756,13 +780,27 @@ type_name (str_with_length, skipped) |
 column_position (ub2, skipped) | uds_flags (ub4, skipped)
 ```
 
+**Pre-11g (field version < 11.2, e.g. 10g = 4)** *omits two fields* the layout
+above shows, both of which are 11g additions:
+- the per-column trailing **`uds_flags`** ub4 is absent — 10g ends the per-column
+  block at `column_position`. Reading a phantom `uds_flags` consumes the next
+  column's first bytes, so on a multi-column describe every column after the
+  first is mis-typed (and the row decode desyncs).
+- the **`dcbqcky`** trailer is absent — the query result cache is an 11g feature,
+  so there is no query-cache key. Skipping a phantom `bytes_with_length` here
+  consumes the first row token.
+
+pyoracle gates both on `field_version >= FIELD_VERSION_11_2` (#84/#85),
+reverse-engineered by diffing 1/2/6-column, mixed-type and 0-row describes from a
+live 10.2.0.5 server against the identical 11g responses.
+
 12c+ (field version >= 12.2) differs from 11g in the per-column block:
 scale is `sb1` (a raw signed byte) rather than 11g's variable-length
 sb4, and an extra `oaccolid` ub4 follows `max_size`. pyoracle decodes
-both, gated on the negotiated TTC field version (§4.2): the response
-handler passes `connection.field_version` into `decode_packet`, which
-publishes it (via a `ContextVar`) to the token decoders for the duration
-of that response.
+all three (10g / 11g / 12c+), gated on the negotiated TTC field version
+(§4.2): the response handler passes `connection.field_version` into
+`decode_packet`, which publishes it (via a `ContextVar`) to the token
+decoders for the duration of that response.
 
 **23ai (field version 17)** appends two more per-column fields after
 `uds_flags`: the column's **SQL-domain schema** and **domain name**, each a
@@ -816,10 +854,14 @@ value per OUT / IN OUT bind **in bind order** (IN binds contribute nothing):
   a trailing 1-byte indicator (`0x00` = present).
   e.g. NUMBER `10` → `02 c1 0b 00`, VARCHAR `"hi!"` → `03 68 69 21 00`.
 - **REF CURSOR** OUT value: a 1-byte length, then an inline describe of the
-  cursor's result set (the same per-column metadata as a `TTI_DCB`, §6.4),
-  then the nested cursor id (`ub2`) and a 1-byte indicator. The client then
+  cursor's result set (the same per-column metadata *and trailer* as a `TTI_DCB`,
+  §6.4), then the nested cursor id (`ub2`) and a 1-byte indicator. The client then
   drains that cursor id with `TTI_FETCH` (§5.2). See python-oracledb's
-  `_create_cursor_from_describe`.
+  `_create_cursor_from_describe`. Because this nested describe reuses the §6.4
+  format, it carries the **same pre-11g difference**: at field version < 11.2 (10g)
+  there is no `dcbqcky` trailer, so skipping a phantom one consumes the cursor id
+  and desyncs the IOV decode. pyoracle gates it identically (#84/#87); the
+  per-column metadata already shares the field-version-gated decoder.
 
 After the values come the usual `TTI_RPA` and `TTI_OER` tokens.
 
