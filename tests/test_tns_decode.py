@@ -147,6 +147,31 @@ class TestTnsCommandDecoders(unittest.TestCase):
         self.assertEqual(RowFormat[0]['data_type'], 2)   # NUMBER
         self.assertEqual(RowFormat[0]['column_name'], b'1')
 
+    def test_decode_select_response_10g(self):
+        # Full 6-column, 3-row response captured from a live Oracle 10.2.0.5
+        # server (SELECT id,name,price,created,code,flag FROM t84), decoded with
+        # 10g's negotiated field version 4. Guards the pre-11g DCB format (#84):
+        # the per-column metadata has no `uds flags` ub4 and the describe trailer
+        # has no `dcbqcky` — both 11g additions. With the 11g layout this buffer
+        # mis-parses column 2 onward and desyncs the rows.
+        import contextvars
+        import datetime
+        from decimal import Decimal
+        from oracle.tns import decode_packet
+        Resp = bytes.fromhex(
+            "101736595fbfc8d361f990557c35c1301c42787e061008050c016b01064d02000a000116000000000000000102010202494400000001800000011e0000000002036901011e01040104044e414d4500000101020008010201160000000000000001050105055052494345000001020c00000001010000000000000001070107074352454154454400000103608000000104000000000203690101040104010404434f444500000104020001000116000000000000000104010404464c414700000105010707787e061008050c0101021fe8010a010a0602010600010f0000000702c10205616c70686103c11464077878010f010101044142303102c1020702c103046265746104c2020133077879061e010101044344303201801501063f0702c1040567616d6d6102c00207787a0c19010101044546303302c10208010603028e6a0001030000000000000401010106010302057b00000103013803000120000000000000000000000900010100000000194f52412d30313430333a206e6f206461746120666f756e640a")
+        Result = contextvars.copy_context().run(
+            decode_packet, Resp, (None, None, []), 4)   # field version 4 = 10g
+        RowFormat = Result[3][1]
+        Rows = Result[4]
+        self.assertEqual([c['data_type'] for c in RowFormat], [2, 1, 2, 12, 96, 2])
+        self.assertEqual(RowFormat[1]['column_name'], b'NAME')
+        self.assertEqual(Rows, [
+            [1, 'alpha', Decimal('19.99'), datetime.datetime(2020, 1, 15), 'AB01', 1],
+            [2, 'beta', Decimal('100.5'), datetime.datetime(2021, 6, 30), 'CD02', 0],
+            [3, 'gamma', Decimal('0.01'), datetime.datetime(2022, 12, 25), 'EF03', 1],
+        ])
+
     def test_decode_token_pro_11g(self):
         # Authentic 11g PRO response (same bytes as test_tns_assemble_02, minus
         # the 8-byte TNS header and 2-byte data flags). field_version 6 = 11.2.

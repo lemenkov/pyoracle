@@ -284,7 +284,11 @@ def decode_token_dcb(Data: bytes, Acc: object) -> tuple:
     Rest = _skip_bytes_with_length(Rest)
     for _ in range(4):
         (_, Rest) = decode_ub4(Rest)
-    Rest = _skip_bytes_with_length(Rest)
+    if _DECODE_FIELD_VERSION.get() >= FIELD_VERSION_11_2:
+        # dcbqcky (query-cache key) is an 11g addition (the result cache landed
+        # in 11g); 10g's describe ends after the four ub4 flags, so skipping a
+        # phantom bytes-with-length here would consume the first row token (#84).
+        Rest = _skip_bytes_with_length(Rest)
     return decode_packet(Rest, (Cursor, Columns, Rows))
 
 def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
@@ -320,7 +324,13 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
     (_, Rest) = _read_str_with_length(Rest)   # schema
     (_, Rest) = _read_str_with_length(Rest)   # type name
     (_, Rest) = decode_ub4(Rest)              # column position
-    (_, Rest) = decode_ub4(Rest)              # uds flags
+    if _DECODE_FIELD_VERSION.get() >= FIELD_VERSION_11_2:
+        # `uds flags` is an 11g addition; a 10g (field version 4) describe ends
+        # the per-column metadata at column position. Reading a phantom ub4 here
+        # eats the next column's first bytes (or the DCB trailer's date length),
+        # desyncing the whole row decode (#84). Verified against a live 10.2.0.5
+        # server across 1/2/6-column, mixed-type and 0-row describes.
+        (_, Rest) = decode_ub4(Rest)          # uds flags
     DomainSchema = DomainName = b""
     if _DECODE_FIELD_VERSION.get() >= 17:     # FIELD_VERSION_23_1
         # 23c (field version 17) appends the column's SQL-domain schema and
