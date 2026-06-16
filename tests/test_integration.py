@@ -21,6 +21,7 @@ import unittest
 from decimal import Decimal
 
 import oracle
+from oracle.tns_consts import FIELD_VERSION_12_1
 
 # Resolve the TLS proxy fixture without depending on the `tests` package
 # layout (works under both `python -m unittest tests.test_integration` and
@@ -1216,7 +1217,10 @@ class CursorCacheIntegration(_IntegrationBase):
         return handles[0] if handles else None
 
     def test_repeated_dml_reuses_cursor(self):
-        if _FIELD_VERSION >= 7:   # FIELD_VERSION_12_1: cache disabled on 12c+
+        if self.conn.field_version >= FIELD_VERSION_12_1:
+            # The cache is disabled on the *negotiated* 12c+ connection, so gate
+            # on that — not on PYORACLE_TEST_FIELD_VERSION, which is unset when
+            # the suite simply points at a 21c server (#81).
             self.skipTest("cursor cache is disabled on 12c+ (re-parse each execute)")
         self.cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER, v VARCHAR2(10))")
         Sql = f"INSERT INTO {self.TABLE} VALUES (:id, :v)"
@@ -1253,7 +1257,7 @@ class CursorCacheIntegration(_IntegrationBase):
         self.assertNotIn(Sql, self.conn._cursor_cache)
 
     def test_cache_evicts_oldest_when_full(self):
-        if _FIELD_VERSION >= 7:   # FIELD_VERSION_12_1: cache disabled on 12c+
+        if self.conn.field_version >= FIELD_VERSION_12_1:   # cache off on 12c+ (#81)
             self.skipTest("cursor cache is disabled on 12c+ (re-parse each execute)")
         # Drive past `_cursor_cache_max` distinct DML statements and
         # confirm the cache stays bounded and keeps the most recent.
