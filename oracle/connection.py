@@ -35,28 +35,6 @@ logger = logging.getLogger(__name__)
 # spinning forever.
 _MAX_REDIRECTS = 5
 
-_BFILE_HELPER_NAME = "pyoracle_bfile_read"
-_BFILE_HELPER_SQL = """\
-CREATE OR REPLACE FUNCTION pyoracle_bfile_read (
-    p_dir IN VARCHAR2,
-    p_file IN VARCHAR2
-) RETURN BLOB IS
-    loc BFILE := BFILENAME(p_dir, p_file);
-    result BLOB;
-    src_offset INTEGER := 1;
-    dst_offset INTEGER := 1;
-    src_len INTEGER;
-BEGIN
-    DBMS_LOB.CREATETEMPORARY(result, TRUE);
-    DBMS_LOB.FILEOPEN(loc, DBMS_LOB.LOB_READONLY);
-    src_len := DBMS_LOB.GETLENGTH(loc);
-    DBMS_LOB.LOADBLOBFROMFILE(result, loc, src_len, dst_offset, src_offset);
-    DBMS_LOB.FILECLOSE(loc);
-    RETURN result;
-END;
-"""
-
-
 def _format_version(Packed: int) -> str | None:
     # Oracle packs the release into a single integer: major (8 bits),
     # minor (4), update (8), patch (4), port-specific update (8). Verified
@@ -627,56 +605,75 @@ class OracleConnect:
         self._confirm_lobops()
 
     def _confirm_lobops(self) -> None:
-        # Drain a TTI_LOBOPS response that carries no content (WRITE / temp
-        # ops): receive the RPA + OER packet, decode the OER, and raise on a
-        # non-zero ORA error. decode_lobops_oer skips the RPA's binary locator
-        # and matches the OER regardless of call status (which is 5, not 1,
+        # Drain a TTI_LOBOPS response that carries no content (WRITE / temp /
+        # BFILE open-close ops): receive the RPA + OER packet and raise on a
+        # non-zero ORA error.
+        Received = self._next_data_packet(b"", b"")
+        if Received is False:
+            raise Exception("Connection closed during LOBOPS")
+        self._raise_lobops_error(Received[1])
+
+    def _raise_lobops_error(self, Packet: bytes) -> None:
+        # Decode the OER trailing a content-free LOBOPS response and raise on a
+        # real ORA error. decode_lobops_oer skips the RPA's binary locator and
+        # matches the OER regardless of call status (which is 5, not 1,
         # immediately after a PL/SQL execute — the case that desynced the temp
         # LOB write following a temp-LOB-bind exec).
         from oracle.tns import decode_lobops_oer
         from oracle.exceptions import from_ora_code
-        Received = self._next_data_packet(b"", b"")
-        if Received is False:
-            raise Exception("Connection closed during LOBOPS WRITE")
-        (_, Packet) = Received
         (ErrCode, Message) = decode_lobops_oer(Packet, self.field_version)
         if ErrCode and ErrCode not in (0, 1403):
             raise from_ora_code(ErrCode)(
                 Message or f"ORA-{ErrCode:05d}", code=ErrCode)
 
-    def bfile_read(self, directory_name: str, file_name: str) -> bytes:
-        # BFILE READ goes through a server-side helper that does the
-        # DBMS_LOB.FILEOPEN / READ / FILECLOSE dance into a temporary
-        # BLOB, then returns that BLOB by value. The driver creates
-        # the helper on first use, then re-uses it across calls.
-        #
-        # Why the helper instead of inlining everything in TTI_LOBOPS:
-        # BFILEs need an explicit FILEOPEN before READ, and the LOBOPS
-        # opcode for that hasn't been reverse-engineered (the unmodified
-        # READ opcode returns empty bytes against an unopened BFILE).
-        # The helper sidesteps the opcode question by going through
-        # PL/SQL — and uses two same-type VARCHAR2 binds so it also
-        # sidesteps the mixed-type bind bug (#13).
-        from oracle.exceptions import DatabaseError
-        Cur = self.cursor()
+    def bfile_read_native(self, Locator: bytes) -> bytes:
+        # Read a BFILE natively over TTI_LOBOPS (#46): FILE_OPEN -> READ ->
+        # FILE_CLOSE, no PL/SQL helper. FILE_OPEN returns an *updated* locator
+        # in its RPA (with the open flag set); READ / CLOSE must use that one —
+        # a READ against the original locator returns empty bytes (the symptom
+        # that originally blocked native BFILE support). The locator goes on the
+        # wire ub2-length-prefixed (locator_prefixed), as for temp LOBs.
+        from oracle.tns_consts import (TTI_RPA, TNS_LOB_OP_FILE_OPEN,
+                                       TNS_LOB_OP_FILE_CLOSE)
+        # A BFILE locator as fetched (LOB.raw) leads with its own ub2
+        # inner-length; the encoder re-adds that prefix, so pass the body. The
+        # FILE_OPEN response RPA already hands back the body form.
+        if len(Locator) >= 2 and ((Locator[0] << 8) | Locator[1]) == len(Locator) - 2:
+            Locator = Locator[2:]
+        self.send(TNS_DATA, encode_dictionary(self._make_dict(
+            DictionaryType.lobops, locator=Locator,
+            operation=TNS_LOB_OP_FILE_OPEN)))
+        Received = self._next_data_packet(b"", b"")
+        if Received is False:
+            raise Exception("Connection closed during BFILE FILE_OPEN")
+        (_, Packet) = Received
+        self._raise_lobops_error(Packet)
+        if not Packet or Packet[0] != TTI_RPA:
+            raise Exception("Unexpected FILE_OPEN response",
+                            Packet[:8].hex() if Packet else None)
+        OpenLen = (Packet[1] << 8) | Packet[2]
+        Opened = Packet[3:3 + OpenLen]
         try:
-            Cur.execute(
-                f"SELECT {_BFILE_HELPER_NAME}(:d, :f) FROM DUAL",
-                {"d": directory_name, "f": file_name},
-            )
-        except DatabaseError as exc:
-            # ORA-00904 (invalid identifier) or ORA-06550 (PL/SQL compile
-            # — "PLS-00201: identifier must be declared") both mean the
-            # helper isn't installed yet. Install it and retry.
-            if exc.code not in (904, 6550):
-                raise
-            Install = self.cursor()
-            Install.execute(_BFILE_HELPER_SQL)
-            Cur = self.cursor()
-            Cur.execute(
-                f"SELECT {_BFILE_HELPER_NAME}(:d, :f) FROM DUAL",
-                {"d": directory_name, "f": file_name},
-            )
+            self.send(TNS_DATA, encode_dictionary(self._make_dict(
+                DictionaryType.lobops, locator=Opened, locator_prefixed=True)))
+            Content = self._read_lob_response()
+        finally:
+            self.send(TNS_DATA, encode_dictionary(self._make_dict(
+                DictionaryType.lobops, locator=Opened,
+                operation=TNS_LOB_OP_FILE_CLOSE)))
+            self._confirm_lobops()
+        return Content
+
+    def bfile_read(self, directory_name: str, file_name: str) -> bytes:
+        # Read a BFILE by directory object + filename. Resolves the locator with
+        # a SELECT BFILENAME and reads it natively over TTI_LOBOPS (#46) — the
+        # cursor's LOB auto-resolve runs bfile_read_native under the hood. (This
+        # used to install a PL/SQL DBMS_LOB helper; the native FILE_OPEN/READ/
+        # FILE_CLOSE sequence removed that, along with its CREATE PROCEDURE
+        # privilege requirement and schema side effects.)
+        Cur = self.cursor()
+        Cur.execute("SELECT BFILENAME(:d, :f) FROM DUAL",
+                    {"d": directory_name, "f": file_name})
         return Cur.fetchone()[0]
 
     def _read_lob_response(self) -> bytes:

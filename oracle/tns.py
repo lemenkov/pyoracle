@@ -52,7 +52,9 @@ from oracle.tns_consts import (
     TTI_RXH, TTI_SESS, TTI_SPFP, TTI_STA, TTI_STRT, TTI_STOP, TTI_UDS,
     TTI_WRN, TNS_BIND_DIR_INPUT, TNS_AL8I4_ARRAY_DML_ROWCOUNTS,
     TNS_EXEC_OPTION_BATCH_ERRORS,
-    TNS_LOB_OP_READ, TNS_LOB_OP_WRITE, TNS_TYPE_BDOUBLE, TNS_TYPE_BFILE,
+    TNS_LOB_OP_READ, TNS_LOB_OP_WRITE,
+    TNS_LOB_OP_FILE_OPEN, TNS_LOB_OP_FILE_CLOSE,
+    TNS_TYPE_BDOUBLE, TNS_TYPE_BFILE,
     TNS_TYPE_BFLOAT, TNS_TYPE_BLOB, TNS_TYPE_BOOLEAN, TNS_TYPE_CLOB,
     TNS_TYPE_DATE,
     TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_JSON, TNS_TYPE_LONG,
@@ -1655,6 +1657,38 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
                 Chunk = Data[K:K + 0x7FFF]
                 Out += encode_sb4(len(Chunk)) + Chunk
             Out += encode_sb4(0)                # zero-length terminator
+        return Out
+    if Dictionary.get('operation') in (TNS_LOB_OP_FILE_OPEN,
+                                        TNS_LOB_OP_FILE_CLOSE):
+        # BFILE open / close (#46). Same field block as READ but with source
+        # offset 0 and no read amount. FILE_OPEN sets the amount pointer and
+        # sends the open mode (sb4 0x0B = read-only) where READ sends the read
+        # amount; FILE_CLOSE sends neither. The locator is ub2-length-prefixed
+        # (declared len + 2), like every temp / BFILE LOBOPS. Reverse-engineered
+        # from python-oracledb on 21c, byte-for-byte.
+        Locator = Dictionary['locator']
+        Operation = Dictionary['operation']
+        IsOpen = Operation == TNS_LOB_OP_FILE_OPEN
+        Out = bytes([TTI_FUN, TTI_LOBOPS, Tseq])
+        Out += bytes([1])                       # source pointer present
+        Out += encode_sb4(len(Locator) + 2)     # source locator length (+ub2)
+        Out += bytes([0])                       # dest pointer absent
+        Out += encode_sb4(0)                    # dest_length
+        Out += encode_sb4(0)                    # short source offset
+        Out += encode_sb4(0)                    # short dest offset
+        Out += bytes([0])                       # charset pointer absent
+        Out += bytes([0])                       # short amount absent
+        Out += bytes([0])                       # null lob pointer absent
+        Out += encode_sb4(Operation)            # operation code
+        Out += bytes([0])                       # scn array pointer absent
+        Out += bytes([0])                       # scn array length
+        Out += encode_sb4(0)                    # source offset (ub8)
+        Out += encode_sb4(0)                    # dest offset (ub8)
+        Out += bytes([1 if IsOpen else 0])      # amount pointer (open mode)
+        Out += struct.pack(">HHH", 0, 0, 0)     # three reserved ub16be slots
+        Out += struct.pack(">H", len(Locator)) + Locator   # ub2-prefixed
+        if IsOpen:
+            Out += encode_sb4(0x0B)             # open mode: read-only
         return Out
     Locator = Dictionary['locator']
     # `amount` is in chars for CLOB / NCLOB and in bytes for BLOB / BFILE.

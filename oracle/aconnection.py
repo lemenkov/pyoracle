@@ -586,40 +586,64 @@ class AsyncOracleConnect:
 
     async def _confirm_lobops(self) -> None:
         """Async port of the sync `_confirm_lobops`: receive a content-free
-        LOBOPS response (WRITE / temp ops) and raise on a non-zero OER.
-        decode_lobops_oer matches the OER regardless of call status."""
-        from oracle.tns import decode_lobops_oer
-        from oracle.exceptions import from_ora_code
+        LOBOPS response (WRITE / temp / BFILE open-close) and raise on a
+        non-zero OER."""
         Received = await self._next_data_packet(b"", b"")
         if Received is False:
-            raise Exception("Connection closed during LOBOPS WRITE")
-        (_, Packet) = Received
+            raise Exception("Connection closed during LOBOPS")
+        self._raise_lobops_error(Received[1])
+
+    def _raise_lobops_error(self, Packet: bytes) -> None:
+        """Decode the OER trailing a content-free LOBOPS response and raise on a
+        real ORA error (call status agnostic — see the sync docstring)."""
+        from oracle.tns import decode_lobops_oer
+        from oracle.exceptions import from_ora_code
         (ErrCode, Message) = decode_lobops_oer(Packet, self.field_version)
         if ErrCode and ErrCode not in (0, 1403):
             raise from_ora_code(ErrCode)(
                 Message or f"ORA-{ErrCode:05d}", code=ErrCode)
 
-    async def bfile_read(self, directory_name: str, file_name: str) -> bytes:
-        """Async port of the sync `bfile_read`. Uses the same server-side
-        helper function (auto-installed on first use)."""
-        from oracle.connection import _BFILE_HELPER_NAME, _BFILE_HELPER_SQL
-        from oracle.exceptions import DatabaseError
-        Cur = self.cursor()
+    async def bfile_read_native(self, Locator: bytes) -> bytes:
+        """Async port of the sync `bfile_read_native` (#46): FILE_OPEN ->
+        READ -> FILE_CLOSE over TTI_LOBOPS, using the open-flagged locator the
+        server returns from FILE_OPEN."""
+        from oracle.tns_consts import (TTI_RPA, TNS_LOB_OP_FILE_OPEN,
+                                       TNS_LOB_OP_FILE_CLOSE)
+        # See the sync bfile_read_native: strip LOB.raw's leading ub2
+        # inner-length so the encoder's prefix isn't doubled.
+        if len(Locator) >= 2 and ((Locator[0] << 8) | Locator[1]) == len(Locator) - 2:
+            Locator = Locator[2:]
+        await self.send(TNS_DATA, encode_dictionary(self._make_dict(
+            DictionaryType.lobops, locator=Locator,
+            operation=TNS_LOB_OP_FILE_OPEN)))
+        Received = await self._next_data_packet(b"", b"")
+        if Received is False:
+            raise Exception("Connection closed during BFILE FILE_OPEN")
+        (_, Packet) = Received
+        self._raise_lobops_error(Packet)
+        if not Packet or Packet[0] != TTI_RPA:
+            raise Exception("Unexpected FILE_OPEN response",
+                            Packet[:8].hex() if Packet else None)
+        OpenLen = (Packet[1] << 8) | Packet[2]
+        Opened = Packet[3:3 + OpenLen]
         try:
-            await Cur.execute(
-                f"SELECT {_BFILE_HELPER_NAME}(:d, :f) FROM DUAL",
-                {"d": directory_name, "f": file_name},
-            )
-        except DatabaseError as exc:
-            if exc.code not in (904, 6550):
-                raise
-            Install = self.cursor()
-            await Install.execute(_BFILE_HELPER_SQL)
-            Cur = self.cursor()
-            await Cur.execute(
-                f"SELECT {_BFILE_HELPER_NAME}(:d, :f) FROM DUAL",
-                {"d": directory_name, "f": file_name},
-            )
+            await self.send(TNS_DATA, encode_dictionary(self._make_dict(
+                DictionaryType.lobops, locator=Opened, locator_prefixed=True)))
+            Content = await self._read_lob_response()
+        finally:
+            await self.send(TNS_DATA, encode_dictionary(self._make_dict(
+                DictionaryType.lobops, locator=Opened,
+                operation=TNS_LOB_OP_FILE_CLOSE)))
+            await self._confirm_lobops()
+        return Content
+
+    async def bfile_read(self, directory_name: str, file_name: str) -> bytes:
+        """Read a BFILE by directory object + filename. Resolves the locator
+        with a `SELECT BFILENAME` and reads it natively (#46); the cursor's LOB
+        auto-resolve runs `bfile_read_native` under the hood."""
+        Cur = self.cursor()
+        await Cur.execute("SELECT BFILENAME(:d, :f) FROM DUAL",
+                          {"d": directory_name, "f": file_name})
         Row = await Cur.fetchone()
         return Row[0]
 
