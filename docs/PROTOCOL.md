@@ -1425,12 +1425,15 @@ single **bare scalar**: `reserved(ub1) | value_size(ub1) | <scalar node>`.
 A tree body is:
 
 ```
-num_fnames (ub1) | fnames_seg_size (ub2) | tree_seg_size (ub2) | reserved (ub2)
+num_fnames (ub1) | fnames_seg_size (ub2) | tree_seg_size (ub2|ub4) | reserved (ub2)
 hash_array     (num_fnames × ub1)   one hash byte per field name (unused on read)
 offset_array   (num_fnames × ub2)   field-id → offset into fnames_seg
 fnames_seg                          field names, each <len(ub1)><utf8 bytes>
 tree_seg                            the node tree, root node at offset 0
 ```
+
+`tree_seg_size` is **`ub4`** (not `ub2`) when the header flag `0x1000` is set —
+i.e. the tree segment exceeds 64 KiB (#88). `fnames_seg_size` stays `ub2`.
 
 A field id is 1-based: `offset_array[id - 1]` locates the field's name in
 `fnames_seg`.
@@ -1444,8 +1447,10 @@ A field id is 1-based: `offset_array[id - 1]` locates the field's name in
 | `0x30` / `0x31` / `0x32` | `null` / `true` / `false`                              |
 | `0x33`              | string, `ub1` length prefix, then UTF-8 bytes               |
 | `0x34`              | number, `ub1` length prefix, then Oracle NUMBER bytes       |
-| `(tag & 0xC0) == 0x80` | object: `count(ub1)`, `field_id(ub1)×count`, `value_offset(ub2)×count` |
-| `(tag & 0xC0) == 0xC0` | array: `count(ub1)`, `value_offset(ub2)×count`           |
+| `0x37`              | string, `ub2` length prefix (value > 255 bytes, #88)        |
+| `0x38`              | string, `ub4` length prefix (value > 64 KiB, #88)           |
+| `(tag & 0xC0) == 0x80` | object: `count`, `field_id × count`, `value_offset × count` |
+| `(tag & 0xC0) == 0xC0` | array: `count`, `value_offset × count`                   |
 
 Container value-offsets are relative to the tree segment start. Objects list
 their `(field_id, value_offset)` pairs in document order.
@@ -1467,19 +1472,26 @@ order-preserving ("sortable") form:
 | `0x3E` | INTERVAL DAY TO SECOND  | 11    |
 | `0x7D` | DATE (ub4-offset images)| 7     |
 
-**Width selectors (#69).** Three independent width choices:
-- *Container value-offsets* are `ub2` only when the header flag `0x04` is set
-  (server `JSON_OBJECT` / `JSON()` literals); oracledb-produced images clear it
-  (flags `0x2102`) and use `ub4`. Reading the wrong width walks offset 0 →
-  infinite recursion, so the decoder picks the width from the flag.
-- *`num_fnames`* is `ub2` (else `ub1`) when the header flag `0x0400` is set —
-  i.e. the document has > 255 field names.
-- A *container node tag* with the `0x08` bit (object `0x88`/`0xac` vs `0x84`/
-  `0xa4`) has a `ub2` count and `ub2` field-ids; otherwise `ub1`.
+**Width selectors (#69, #88).** Widths are chosen by header flags and per-node
+tag bits:
+- *Container count + field-ids* — from the container node tag: `ub4` if the
+  `0x10` bit is set (> 65535 entries/keys), else `ub2` if the `0x08` bit is set
+  (> 255), else `ub1`.
+- *Container value-offsets* — `ub4` if the container tag's `0x20` bit is set
+  (the container's values span a > 64 KiB tree, #88), otherwise the image-level
+  width: `ub2` when header flag `0x04` is set (server `JSON_OBJECT` / `JSON()`
+  literals), else `ub4` (oracledb-produced, flags `0x2102`). Reading the wrong
+  width walks offset 0 → infinite recursion, so the width is taken per node.
+- *`tree_seg_size`* — `ub4` when header flag `0x1000` is set (tree > 64 KiB).
+- *`num_fnames`* — `ub2` when header flag `0x0400` is set (> 255 field names),
+  else `ub1`.
+- *String value length* — `ub1` (`0x33`), `ub2` (`0x37`), or `ub4` (`0x38`).
 
-> **Not yet covered** (raises `OsonError` rather than decode wrong): `ub4`
-> *segment sizes* — fnames / tree segments larger than 64 KiB. Niche; the
-> common large-document and oracledb cases are handled.
+> **Not yet covered** (raises `OsonError` / mis-decodes rather than guess): a
+> `ub4` *fnames* segment (> 64 KiB of distinct field names) and a `ub8` hash-id
+> array — both extreme and unobserved in captures. The common large-document
+> cases (long strings, > 64 KiB trees, > 65535-element containers, oracledb
+> images) are all handled.
 >
 > Multi-row JSON `SELECT`s ride the same LOB-locator path as multi-row LOB
 > reads and share the #45 desync limitation under load — single-row reads are

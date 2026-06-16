@@ -1865,6 +1865,25 @@ class JSONIntegration(_IntegrationBase):
         got = self._bind_roundtrip({"price": Decimal("19.99")})
         self.assertEqual(got, {"price": Decimal("19.99")})
 
+    def test_large_documents_decode(self):
+        # #88: reading a native JSON column whose OSON image uses the large-doc
+        # encodings — string values >255 B (ub2 0x37), >64 KiB (ub4 0x38), a
+        # tree >64 KiB (ub4 tree_size), and a container with >64 KiB of values /
+        # >65535 entries (ub4 offsets / ub4 count). These bind via the text-cast
+        # fallback (the compact encoder refuses them) and must round-trip on read.
+        self._setup_json()
+        cases = [
+            {"s": "x" * 500},                              # ub2 string
+            {"big": "y" * 70000},                          # ub4 string + ub4 tree
+            list(range(30000)),                            # ub4 offsets (big tree)
+            list(range(70000)),                            # ub4 count (>65535 elems)
+            {"a": {"b": {"c": "z" * 1000}}, "l": ["s" * 400, "t" * 60000]},
+        ]
+        for n, v in enumerate(cases):
+            wrapped = v if isinstance(v, dict) else oracle.JSON(v)
+            got = self._bind_roundtrip(wrapped)
+            self.assertEqual(got, v, f"case {n}")
+
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class SqlDomainIntegration(_IntegrationBase):

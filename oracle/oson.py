@@ -72,7 +72,14 @@ _FLAG_UB2_OFFSETS = 0x04     # container value-offsets are ub2; else ub4 (#69).
 _FLAG_UB2_FNAMES = 0x0400    # num_fnames is ub2 (object with > 255 field names);
                              # else ub1 (#69). A container node tag with the
                              # 0x08 bit then also has a ub2 count + ub2 field-ids.
+_FLAG_UB4_TREE_SIZE = 0x1000  # tree-segment size is ub4, not ub2 (tree > 64 KiB);
+                             # set on large documents (#88). fnames_size stays ub2.
 _TAG_WIDE_COUNT = 0x08       # container count + field-ids are ub2, not ub1
+_TAG_UB4_COUNT = 0x10        # container count + field-ids are ub4 (> 65535
+                             # entries/keys, #88); takes precedence over 0x08.
+_TAG_UB4_OFFSETS = 0x20      # this container's value-offsets are ub4 (a container
+                             # whose values span a >64 KiB tree, #88), overriding
+                             # the image-level offset width.
 
 
 class OsonError(Exception):
@@ -243,8 +250,12 @@ def decode_oson(data: bytes) -> object:
         num_fnames = data[pos]
         pos += 1
     fnames_size = _u16(data, pos)
-    tree_size = _u16(data, pos + 2)
-    pos += 6                                  # fnames_size + tree_size + reserved
+    if flags & _FLAG_UB4_TREE_SIZE:           # tree > 64 KiB (#88)
+        tree_size = _uint(data, pos + 2, 4)
+        pos += 8                              # fnames_size(2) + tree_size(4) + reserved(2)
+    else:
+        tree_size = _u16(data, pos + 2)
+        pos += 6                              # fnames_size + tree_size + reserved
     pos += num_fnames                         # hash array (1 byte / field)
     offsets = [_u16(data, pos + 2 * i) for i in range(num_fnames)]
     pos += 2 * num_fnames
@@ -284,25 +295,34 @@ def _decode_node(seg: bytes, off: int, field_name, tree: bytes, off_size: int = 
     if tag == 0x34:                           # number, ub1 length prefix
         length = seg[off + 1]
         return decode_number(seg[off + 2:off + 2 + length]), off + 2 + length
+    if tag == 0x37:                           # string, ub2 length prefix (>255 B, #88)
+        length = _u16(seg, off + 1)
+        return seg[off + 3:off + 3 + length].decode("utf-8"), off + 3 + length
+    if tag == 0x38:                           # string, ub4 length prefix (>64 KiB, #88)
+        length = _uint(seg, off + 1, 4)
+        return seg[off + 5:off + 5 + length].decode("utf-8"), off + 5 + length
     # A container with > 255 entries / field-ids uses ub2 count + ub2 field-ids
-    # (tag 0x08 bit); otherwise ub1. Value-offset width is per-image (off_size).
-    csz = 2 if (tag & _TAG_WIDE_COUNT) else 1
+    # (tag 0x08 bit); otherwise ub1. The value-offset width is per-image
+    # (off_size), but a large container overrides it to ub4 via the tag 0x20 bit
+    # (#88) — its values span a >64 KiB tree so ub2 offsets can't address them.
+    csz = 4 if (tag & _TAG_UB4_COUNT) else (2 if (tag & _TAG_WIDE_COUNT) else 1)
+    osz = 4 if (tag & _TAG_UB4_OFFSETS) else off_size
     if (tag & 0xC0) == 0xC0:                   # array container
         count = _uint(seg, off + 1, csz)
         p = off + 1 + csz
-        elem_offsets = [_uint(seg, p + off_size * i, off_size)
+        elem_offsets = [_uint(seg, p + osz * i, osz)
                         for i in range(count)]
         return ([_decode_node(tree, o, field_name, tree, off_size)[0]
-                 for o in elem_offsets], p + off_size * count)
+                 for o in elem_offsets], p + osz * count)
     if (tag & 0xC0) == 0x80:                   # object container
         count = _uint(seg, off + 1, csz)
         p = off + 1 + csz
         ids = [_uint(seg, p + csz * i, csz) for i in range(count)]
         p += csz * count
-        val_offsets = [_uint(seg, p + off_size * i, off_size)
+        val_offsets = [_uint(seg, p + osz * i, osz)
                        for i in range(count)]
         return ({field_name(i): _decode_node(tree, o, field_name, tree, off_size)[0]
-                 for i, o in zip(ids, val_offsets)}, p + off_size * count)
+                 for i, o in zip(ids, val_offsets)}, p + osz * count)
     if tag in _EXT_SCALAR:                      # extended scalar (#69)
         length, dec = _EXT_SCALAR[tag]
         return dec(seg[off + 1:off + 1 + length]), off + 1 + length
