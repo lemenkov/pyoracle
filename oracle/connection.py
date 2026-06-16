@@ -597,11 +597,9 @@ class OracleConnect:
         # callers gate on field_version. The response is a single TTI_RPA token
         # carrying the new locator: 0x08, ub2 length, then the locator bytes.
         from oracle.tns_consts import TTI_RPA
-        from oracle.exceptions import NotSupportedError
-        if is_blob:
-            raise NotSupportedError("temp BLOB create not yet wired (#91)")
         Data = encode_dictionary(self._make_dict(DictionaryType.lobops,
-                                                 create_temp=True))
+                                                 create_temp=True,
+                                                 is_blob=is_blob))
         self.send(TNS_DATA, Data)
         Received = self._next_data_packet(b"", b"")
         if Received is False:
@@ -630,32 +628,21 @@ class OracleConnect:
 
     def _confirm_lobops(self) -> None:
         # Drain a TTI_LOBOPS response that carries no content (WRITE / temp
-        # ops): walk packets until the trailing TTI_OER, decode it, and raise on
-        # a non-zero ORA error. Mirrors the break/reset-aware receive in
-        # _read_lob_response, but checks the call status instead of collecting
-        # LOB_DATA.
-        from oracle.tns_consts import TTI_OER
-        from oracle.tns import decode_packet
+        # ops): receive the RPA + OER packet, decode the OER, and raise on a
+        # non-zero ORA error. decode_lobops_oer skips the RPA's binary locator
+        # and matches the OER regardless of call status (which is 5, not 1,
+        # immediately after a PL/SQL execute — the case that desynced the temp
+        # LOB write following a temp-LOB-bind exec).
+        from oracle.tns import decode_lobops_oer
         from oracle.exceptions import from_ora_code
-        while True:
-            Received = self._next_data_packet(b"", b"")
-            if Received is False:
-                raise Exception("Connection closed during LOBOPS WRITE")
-            (Type, Packet) = Received
-            # The OER opens with TTI_OER + call_status (`04 01 01`); scan for it.
-            for I in range(len(Packet) - 2):
-                if (Packet[I] == TTI_OER and Packet[I + 1] == 0x01
-                        and (Packet[I + 2] == 0x01
-                             or (I + 3 < len(Packet) and Packet[I + 3] == 0x01))):
-                    Result = decode_packet(Packet[I:], (None, None, []),
-                                           self.field_version)
-                    ErrCode = Result[1] if isinstance(Result, tuple) else 0
-                    Message = Result[5] if (isinstance(Result, tuple)
-                                            and len(Result) > 5) else None
-                    if ErrCode and ErrCode not in (0, 1403):
-                        raise from_ora_code(ErrCode)(
-                            Message or f"ORA-{ErrCode:05d}", code=ErrCode)
-                    return
+        Received = self._next_data_packet(b"", b"")
+        if Received is False:
+            raise Exception("Connection closed during LOBOPS WRITE")
+        (_, Packet) = Received
+        (ErrCode, Message) = decode_lobops_oer(Packet, self.field_version)
+        if ErrCode and ErrCode not in (0, 1403):
+            raise from_ora_code(ErrCode)(
+                Message or f"ORA-{ErrCode:05d}", code=ErrCode)
 
     def bfile_read(self, directory_name: str, file_name: str) -> bytes:
         # BFILE READ goes through a server-side helper that does the

@@ -560,11 +560,9 @@ class AsyncOracleConnect:
         """Async port of the sync `create_temp_lob` (#91). Allocates a
         session-duration temporary LOB and returns its locator. 12c+ only."""
         from oracle.tns_consts import TTI_RPA
-        from oracle.exceptions import NotSupportedError
-        if is_blob:
-            raise NotSupportedError("temp BLOB create not yet wired (#91)")
         Data = encode_dictionary(self._make_dict(DictionaryType.lobops,
-                                                 create_temp=True))
+                                                 create_temp=True,
+                                                 is_blob=is_blob))
         await self.send(TNS_DATA, Data)
         Received = await self._next_data_packet(b"", b"")
         if Received is False:
@@ -587,29 +585,19 @@ class AsyncOracleConnect:
         await self._confirm_lobops()
 
     async def _confirm_lobops(self) -> None:
-        """Async port of the sync `_confirm_lobops`: drain a content-free
-        LOBOPS response (WRITE / temp ops) and raise on a non-zero OER."""
-        from oracle.tns_consts import TTI_OER
-        from oracle.tns import decode_packet
+        """Async port of the sync `_confirm_lobops`: receive a content-free
+        LOBOPS response (WRITE / temp ops) and raise on a non-zero OER.
+        decode_lobops_oer matches the OER regardless of call status."""
+        from oracle.tns import decode_lobops_oer
         from oracle.exceptions import from_ora_code
-        while True:
-            Received = await self._next_data_packet(b"", b"")
-            if Received is False:
-                raise Exception("Connection closed during LOBOPS WRITE")
-            (Type, Packet) = Received
-            for I in range(len(Packet) - 2):
-                if (Packet[I] == TTI_OER and Packet[I + 1] == 0x01
-                        and (Packet[I + 2] == 0x01
-                             or (I + 3 < len(Packet) and Packet[I + 3] == 0x01))):
-                    Result = decode_packet(Packet[I:], (None, None, []),
-                                           self.field_version)
-                    ErrCode = Result[1] if isinstance(Result, tuple) else 0
-                    Message = Result[5] if (isinstance(Result, tuple)
-                                            and len(Result) > 5) else None
-                    if ErrCode and ErrCode not in (0, 1403):
-                        raise from_ora_code(ErrCode)(
-                            Message or f"ORA-{ErrCode:05d}", code=ErrCode)
-                    return
+        Received = await self._next_data_packet(b"", b"")
+        if Received is False:
+            raise Exception("Connection closed during LOBOPS WRITE")
+        (_, Packet) = Received
+        (ErrCode, Message) = decode_lobops_oer(Packet, self.field_version)
+        if ErrCode and ErrCode not in (0, 1403):
+            raise from_ora_code(ErrCode)(
+                Message or f"ORA-{ErrCode:05d}", code=ErrCode)
 
     async def bfile_read(self, directory_name: str, file_name: str) -> bytes:
         """Async port of the sync `bfile_read`. Uses the same server-side

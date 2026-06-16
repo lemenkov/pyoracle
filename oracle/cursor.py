@@ -3,7 +3,7 @@
 
 import re
 
-from oracle.datatypes import Var
+from oracle.datatypes import TempLob, Var
 from oracle.exceptions import (
     DatabaseError, InterfaceError, NotSupportedError, ProgrammingError,
     from_ora_code,
@@ -88,7 +88,33 @@ class Cursor:
     def execute(self, operation: str, parameters=None) -> 'Cursor':
         self._check_open()
         Bind = _resolve_parameters(operation, parameters)
+        Bind = self._promote_large_lob_binds(operation, Bind)
         return self._run(operation, Bind)
+
+    def _promote_large_lob_binds(self, operation: str, Bind: list) -> list:
+        # Large CLOB / BLOB into a PL/SQL locator param (#91): a str / bytes
+        # bind over the 32767-byte PL/SQL VARCHAR2 / RAW limit can't go through
+        # the streamed path (ORA-01460). Stream it into a server temp LOB and
+        # bind the locator instead. Only for PL/SQL blocks (plain DML keeps the
+        # streamed-LONG path) and only on 12c+ (11g rejects CREATE_TEMP).
+        Conn = self._connection
+        if (getattr(Conn, 'field_version', 0) < FIELD_VERSION_12_1
+                or not _is_plsql(operation) or not Bind):
+            return Bind
+        Promoted = []
+        for Value in Bind:
+            if isinstance(Value, str) and len(Value.encode('utf-8')) > 32767:
+                Locator = Conn.create_temp_lob()
+                Conn.write_temp_lob(Locator, Value)
+                Promoted.append(TempLob(Locator, False, len(Value) * 4))
+            elif (isinstance(Value, (bytes, bytearray))
+                    and len(Value) > 32767):
+                Locator = Conn.create_temp_lob(is_blob=True)
+                Conn.write_temp_lob(Locator, bytes(Value), is_blob=True)
+                Promoted.append(TempLob(Locator, True, len(Value)))
+            else:
+                Promoted.append(Value)
+        return Promoted
 
     def _run(self, operation: str, Bind: list, Batch: list | None = None,
              BatchErrors: bool = False,

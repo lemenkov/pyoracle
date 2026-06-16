@@ -16,6 +16,33 @@ from oracle.tns_consts import (
 )
 
 
+class TempLob:
+    """A bind marker for a server-side temporary LOB (#91).
+
+    Large CLOB / BLOB values (> 32767 bytes) cannot be bound into a PL/SQL
+    locator parameter through the regular streamed path — the server rejects
+    them with ORA-01460. The driver instead allocates a temp LOB
+    (TTI_LOBOPS CREATE_TEMP), streams the value into it (WRITE) and binds this
+    marker, which carries the resulting locator. The bind encoder emits a
+    CLOB / BLOB OAC plus the LOB-descriptor value (`01 28 28` + ub2 length +
+    locator), the same descriptor framing the native VECTOR / JSON binds use.
+
+    `oac_size` is the byte budget announced in the OAC (CLOB = chars * 4 for
+    AL32UTF8, BLOB = byte length), matching python-oracledb.
+    """
+
+    __slots__ = ("locator", "is_blob", "oac_size")
+
+    def __init__(self, locator: bytes, is_blob: bool, oac_size: int):
+        self.locator = locator
+        self.is_blob = is_blob
+        self.oac_size = oac_size
+
+    def __repr__(self) -> str:
+        kind = "BLOB" if self.is_blob else "CLOB"
+        return f"TempLob({kind}, {len(self.locator)}B locator)"
+
+
 class _DbType:
     """An Oracle bind type usable as a `cursor.var()` / OUT-bind type spec."""
 
