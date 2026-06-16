@@ -485,10 +485,13 @@ class OracleConnect:
         # Stash the cursor id the server returned so the next execute of
         # the same SQL can skip parsing. Same scoping as the lookup:
         # DML only, no Def overrides.
-        if (Type == 'change' and not Def
+        if (CacheKey is not None and Type == 'change' and not Def
                 and isinstance(Result, tuple) and len(Result) >= 3
                 and isinstance(Result[2], int) and Result[2] > 0
                 and Result[1] in (0, 1403)):
+            # CacheKey is None whenever the cache is disabled for this execute
+            # (12c+, where a cached re-execute fails) — gating the write on it
+            # too keeps a stray {None: cursor_id} entry out of the cache (#80).
             CursorId = Result[2]
             # LRU bump: move the entry to the end on hit; evict the oldest
             # entry when the cache fills up.
