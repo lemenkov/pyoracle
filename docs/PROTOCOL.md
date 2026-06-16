@@ -1290,11 +1290,21 @@ TTI_FUN | TTI_LOBOPS | SeqNum |
   ub1 scn_array_length       # 0
   ub8 source_offset          # 1-based offset into the LOB
   ub8 dest_offset            # 0 for plain reads
-  ub1 amount_pointer_flag    # 1 if amount is sent at end
+  ub1 amount_pointer_flag    # 1 if amount is sent at end (READ), 0 for WRITE
   ub16be 0, 0, 0             # three reserved array-LOB slots
-  [ raw  locator ]           # raw bytes, length = source_locator_length
-  [ ub8  amount ]            # if amount_pointer_flag == 1
+  [ locator ]                # see locator framing below
+  [ ub8  amount ]            # READ: amount to read (no trailing data)
+  [ 0x0E + chunked-bytes ]   # WRITE: marker + payload (see §14.2)
 ```
+
+**Locator framing (two variants).** A *persistent*-LOB READ sends the locator
+raw, with `source_locator_length` = the locator byte count. A *temporary*-LOB
+op (CREATE_TEMP / WRITE, and a READ of a temp locator) instead sends the
+locator as a `ub2`-length-prefixed field and declares `source_locator_length`
+= locator length **+ 2** (counting the prefix) — the form python-oracledb uses.
+A temp-LOB READ returns empty content without the prefix; switching persistent
+reads to the prefixed form regresses them on 11g + 21c. pyoracle keeps the raw
+form by default and opts into the prefix per call (`locator_prefixed`).
 
 ### 14.2 Opcodes
 
@@ -1302,6 +1312,18 @@ TTI_FUN | TTI_LOBOPS | SeqNum |
 |-----------|-------------------|--------------------------------------|
 | `0x0001`  | GET_LENGTH        | Total length of the LOB              |
 | `0x0002`  | READ              | Read content from the LOB            |
+
+**CREATE_TEMP body** (no source locator): a fixed field block captured verbatim
+from python-oracledb on 21c, differing between CLOB (type `0x70`) and BLOB
+(type `0x71`) in the type-spec bytes and both ending with the trailing
+`sb4 0x0369`. The server returns the new locator in the response RPA.
+
+**WRITE payload.** After the locator the request appends a `0x0E` marker then a
+chunked-bytes field: when the data is `<= 0xFC` bytes, a `ub1` length + the
+bytes; otherwise a `0xFE` marker followed by repeated `<sb4 chunk_len><chunk>`
+(chunks `<= 0x7FFF` bytes) terminated by a zero-length chunk. CLOB data is
+UTF-16BE on the wire; BLOB data is raw. `source_offset` is the 1-based write
+position (1 = overwrite from start).
 | `0x0020`  | TRIM              | Truncate the LOB                     |
 | `0x0040`  | WRITE             | Write content into the LOB           |
 | `0x0100`  | FILE_OPEN         | Open a BFILE                         |
@@ -1339,11 +1361,18 @@ The `LOB_DATA` chunk is length-prefixed with the version-gated
 `bytes_with_length` form (§6.4): 11g uses single-byte chunk lengths,
 12c+ a `0xFE` marker with `ub4` chunk lengths and a zero terminator.
 `_read_lob_response` walks tokens until the trailing OER; that OER opens
-with `04 01 01` (TTI_OER + `call_status` ub4 = 1) and then a per-call
-end-to-end seq# whose length byte varies, so the stop scan keys on the
-`04 01 01` prefix rather than a fixed 4th byte. Without the `ub4`
-chunk-length handling on 12c the content desyncs and the reader blocks
-waiting for a packet that never comes (the LOB fetch hangs).
+with `04 01 XX` (TTI_OER + `call_status` ub4) and then a per-call
+end-to-end seq#. Without the `ub4` chunk-length handling on 12c the
+content desyncs and the reader blocks waiting for a packet that never
+comes (the LOB fetch hangs).
+
+**The OER `call_status` is not always 1.** It is `1` after a standalone
+LOBOPS, but `5` immediately after a PL/SQL execute (the temp-LOB bind path,
+§14.4). A content-free LOBOPS response (WRITE / temp ops) is therefore decoded
+by `decode_lobops_oer`, which skips the RPA's binary locator (it can contain a
+stray `0x04`) using the `ub2` length prefix, then matches the OER token + a
+valid `ub4` length **regardless of the status value** — a fixed `04 01 01`
+scan misses the post-PL/SQL `04 01 05` and hangs.
 
 ### 14.4 Implementation status
 
@@ -1369,7 +1398,7 @@ in `oracle/tns.py`, response handling in
   layout is complex enough that we don't try to parse it, and we
   don't need anything out of it.
 
-LOB *writes* (LOB binds on INSERT / UPDATE) do **not** need a
+LOB *column* writes (LOB binds on INSERT / UPDATE) do **not** need a
 `TTI_LOBOPS` WRITE round-trip. They go through the regular VARCHAR2 / RAW
 bind path: a value larger than 4000 bytes is sent as a streamed LONG
 (the OAC max-size is set to the value's length, §5.3), and the server
@@ -1380,13 +1409,28 @@ in #8). This round-trips CLOB and BLOB binds byte-for-byte at arbitrary
 size; the integration suite covers 50 KiB and 500 KiB of both on 11g and
 12c+.
 
-A client-side temp-LOB path (`CREATE_TEMP` → `WRITE` → bind the locator →
-`FREE_TEMP`, opcodes in §14.2) is therefore unnecessary for binds and is
-not implemented. For the record, the request shapes were reverse-engineered
-against a 21c capture and verified there, but Oracle XE 11g rejects the
-`CREATE_TEMP` request outright (immediate FIN, no error packet) and no thin
-client speaks that opcode to 11g, so there is no reference to finish it
-against — and the streamed-LONG path above makes it moot.
+**Large LOB into a PL/SQL locator param needs a temp LOB (#91).** The streamed
+path above only works for LOB *columns*. Binding a str / bytes value over the
+32767-byte PL/SQL VARCHAR2 / RAW limit into a `CLOB` / `BLOB` **parameter** of a
+PL/SQL block fails with **ORA-01460** ("unimplemented or unreasonable
+conversion"). pyoracle handles it the way python-oracledb does, on 12c+:
+
+1. `CREATE_TEMP` (§14.2) allocates a session-duration temp LOB; the locator
+   comes back in the response RPA.
+2. `WRITE` streams the value into it (chunked-bytes payload, §14.2).
+3. The temp locator is bound as a CLOB / BLOB value: the OAC is type `0x70` /
+   `0x71` with the LOB cont-flag `0x02000000`, and the bind value is the
+   LOB-descriptor `01 28 28` + `ub2` locator length + locator (the same
+   descriptor framing the native VECTOR / JSON binds use, §18.1 / §17).
+4. `execute`. No `FREE_TEMP` — the temp LOB is released at session end.
+
+`Cursor.execute` / `AsyncCursor.execute` do this transparently: a PL/SQL block
+(detected by `_is_plsql`) with an over-limit str/bytes bind has that bind
+promoted to a `TempLob` marker before encoding. Plain DML keeps the
+streamed-LONG path. **11g is excluded** — it rejects `CREATE_TEMP` outright
+(immediate FIN, no error packet), there is no thin reference to crack it
+against, and a large PL/SQL LOB bind there keeps its prior ORA-01460 behaviour;
+the feature is gated on `field_version >= 12.1`.
 
 ## 15. TNS Marker Protocol
 
