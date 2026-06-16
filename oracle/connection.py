@@ -587,6 +587,30 @@ class OracleConnect:
             return Content.decode('utf-16-be', errors='replace')
         return Content
 
+    def create_temp_lob(self, is_blob: bool = False) -> bytes:
+        # Create a session-duration temporary LOB on the server (TTI_LOBOPS
+        # CREATE_TEMP, #91) and return its locator. Used to bind a large LOB
+        # value into a PL/SQL locator parameter, where the streamed-LONG bind
+        # path fails with ORA-01460. 12c+ only — 11g rejects CREATE_TEMP — so
+        # callers gate on field_version. The response is a single TTI_RPA token
+        # carrying the new locator: 0x08, ub2 length, then the locator bytes.
+        from oracle.tns_consts import TTI_RPA
+        from oracle.exceptions import NotSupportedError
+        if is_blob:
+            raise NotSupportedError("temp BLOB create not yet wired (#91)")
+        Data = encode_dictionary(self._make_dict(DictionaryType.lobops,
+                                                 create_temp=True))
+        self.send(TNS_DATA, Data)
+        Received = self._next_data_packet(b"", b"")
+        if Received is False:
+            raise Exception("Connection closed during CREATE_TEMP")
+        (_, Packet) = Received
+        if not Packet or Packet[0] != TTI_RPA:
+            raise Exception("Unexpected CREATE_TEMP response",
+                            Packet[:8].hex() if Packet else None)
+        LocLen = (Packet[1] << 8) | Packet[2]
+        return Packet[3:3 + LocLen]
+
     def bfile_read(self, directory_name: str, file_name: str) -> bytes:
         # BFILE READ goes through a server-side helper that does the
         # DBMS_LOB.FILEOPEN / READ / FILECLOSE dance into a temporary

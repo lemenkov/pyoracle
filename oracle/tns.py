@@ -1576,6 +1576,16 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
     # that's all the driver currently issues; other opcodes plug into the
     # same shape by varying `operation` and the pointer flags.
     Tseq = Dictionary['seq']
+    if Dictionary.get('create_temp'):
+        # CREATE_TEMP (op 0x0110, #91): allocate a session-duration temporary
+        # LOB; the server returns the new locator in the response RPA. The body
+        # is fixed (no source locator), captured from python-oracledb on 21c —
+        # the CLOB form ends with the AL32UTF8 charset id (sb4 873 = 0x0369).
+        # 12c+ only; 11g rejects CREATE_TEMP.
+        #   <field block: op 0x0110 + flags>  | 47 zero bytes | sb4 charset 873
+        Body = (bytes.fromhex("01012800010a0000010001020110000001010170")
+                + bytes(47) + bytes.fromhex("020369"))
+        return bytes([TTI_FUN, TTI_LOBOPS, Tseq]) + Body
     Locator = Dictionary['locator']
     # `amount` is in chars for CLOB / NCLOB and in bytes for BLOB / BFILE.
     # Don't pass the obvious-looking 0xFFFFFFFF "all" sentinel — XE 11g
