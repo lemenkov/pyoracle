@@ -1736,8 +1736,14 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
     return Out
 
 def encode_dictionary_login(Dictionary: dict) -> bytes:
-    PacketVersion = bytes([1,57]) # Packet version number
-    LowestCompatVersion = bytes([1,57]) # Lowest compatible version number
+    PacketVersion = bytes([1,57]) # Packet version number (313)
+    # Lowest compatible version we accept. The server negotiates
+    # min(its_max, our PacketVersion); it REFUSES the connect if that is below
+    # our floor. Oracle 9i's max protocol version is 312, so a floor of 313
+    # (our PacketVersion) made 9i refuse outright. 300 matches what the 9i
+    # client (sqlplus) advertises and lets 9i settle on 312, while newer servers
+    # still negotiate up to our 313 (the floor only gates the lower bound). (#90)
+    LowestCompatVersion = bytes([1,44]) # 300
     GSO = bytes([0,0]) # Global service options supported
     SDU = struct.pack(">h", Dictionary['sdu']) # SDU
     TDU = bytes([255,255]) # TDU
