@@ -27,7 +27,23 @@ def o3logon(Sess: bytes, KeySess: bytes, Password: bytes) -> tuple[bytes, bytes,
     AuthPass = cipher.encrypt(CliPass)
     return (AuthPass, b"", b"")
 
+def des_verifier(User: bytes, Password: bytes) -> bytes:
+    # The classic Oracle DES password verifier (pre-11g / O3LOGON): the
+    # uppercased UTF-16BE username+password, DES-CBC encrypted under the fixed
+    # key 0x0123456789ABCDEF, then DES-CBC encrypted again under the last 8
+    # bytes of that — the verifier is the last 8 bytes of the second pass.
+    IVec = bytes(8)
+    CliPass = norm(User + Password)
+    Inter = DES.new(unhexlify("0123456789ABCDEF"), DES.MODE_CBC, IVec).encrypt(CliPass)[-8:]
+    return DES.new(Inter, DES.MODE_CBC, IVec).encrypt(CliPass)[-8:]
+
 def o5logon(Sess: bytes, Salt: bytes | None, DerivedSalt: bytes | None, User: bytes, Password: bytes) -> tuple[bytes, bytes, bytes, int, bytes]:
+    # 10g (#47): an AES session key but NO verifier salt — the account has only
+    # the legacy DES verifier. The AES key is that 8-byte verifier zero-padded to
+    # 16; the rest is the salt-less 128-bit path (XOR cat_key + md5 ConnKey).
+    if (Salt is None) and (DerivedSalt is None):
+        KeySess = des_verifier(User, Password) + bytes(8)
+        return o5logon0(Sess, KeySess, None, None, Password, 128)
     # 128 bits
     if (Salt is None) and (DerivedSalt is not None):
         IVec = bytes(8)

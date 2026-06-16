@@ -104,5 +104,33 @@ class TestCryptoPrivateMethods(unittest.TestCase):
         self.assertEqual(norm(bytes("привет", 'UTF-8')),bytes([0,63,0,63,0,63,0,63,0,63,0,63,0,0,0,0]))
 
 
+from oracle.crypto import des_verifier, o5logon
+
+class TestO3Logon10g(unittest.TestCase):
+    # 10g (#47): pre-11g accounts have only the legacy DES verifier and the
+    # server sends an AES session key with NO salt. The DES verifier derivation
+    # is pinned to a ground-truth value read from sys.user$.password on a live
+    # 10.2.0.5 server for CREATE USER pyo IDENTIFIED BY pyo123 (uppercased
+    # username||password, double DES-CBC under 0x0123456789ABCDEF).
+    def test_des_verifier_matches_server(self):
+        self.assertEqual(des_verifier(b"PYO", b"pyo123"),
+                         unhexlify("E242A414206906CB"))
+        # case-insensitive: the lowercase username derives the same verifier.
+        self.assertEqual(des_verifier(b"pyo", b"pyo123"),
+                         unhexlify("E242A414206906CB"))
+
+    def test_o5logon_routes_unsalted_to_10g_path(self):
+        # With neither salt the dispatcher must take the 10g branch (AES key =
+        # 8-byte verifier zero-padded to 16) and not raise "unsupported key
+        # scheme". token_bytes is mocked so the result is deterministic.
+        Sess = bytes(32)
+        with patch('oracle.crypto.token_bytes', return_value=bytes(32)):
+            AuthPass, AuthSess, SpeedyKey, SpeedyKeyInd, ConnKey = o5logon(
+                Sess, None, None, b"PYO", b"pyo123")
+        self.assertEqual(len(ConnKey), 16)          # md5 -> AES-128 ConnKey
+        self.assertEqual(SpeedyKeyInd, 0)
+        self.assertTrue(AuthPass)
+
+
 if __name__ == '__main__':
     unittest.main()
