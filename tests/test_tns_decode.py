@@ -172,6 +172,28 @@ class TestTnsCommandDecoders(unittest.TestCase):
             [3, 'gamma', Decimal('0.01'), datetime.datetime(2022, 12, 25), 'EF03', 1],
         ])
 
+    def test_decode_refcursor_out_10g(self):
+        # REF CURSOR OUT bind from a callproc, captured from a live 10.2.0.5
+        # server (PROC OUT SYS_REFCURSOR opening SELECT 1 a, 'x' b ...). The
+        # nested-cursor describe in the IOV path shares the per-column DCB format
+        # and, like the top-level describe (#84), has no dcbqcky trailer at field
+        # version 4 — skipping a phantom one consumes the cursor id and desyncs.
+        import contextvars
+        import oracle
+        from oracle.tns import decode_packet
+        from oracle.cursor import Var
+        Resp = bytes.fromhex(
+            "00000b05010100010100000010073c010301024d020000817f0102000000000000000101010101410000006080000001010000000002036901010101010101014200000101010707787e0610081b26000000000102000801060302ac6900010101020000000000040105010401010000000101002f0000000000000000000000000700010100000000")
+        Bind = Var(oracle.CURSOR)
+        Result = contextvars.copy_context().run(
+            decode_packet, Resp[2:], (None, None, [], [Bind]), 4)  # fv4 = 10g
+        Record = Result[4][0]['out_values'][0]
+        self.assertTrue(Record['_refcursor'])
+        self.assertEqual(Record['cursor_id'], 2)
+        self.assertEqual([c['data_type'] for c in Record['row_format']], [2, 96])
+        self.assertEqual([c['column_name'] for c in Record['row_format']],
+                         [b'A', b'B'])
+
     def test_decode_token_pro_11g(self):
         # Authentic 11g PRO response (same bytes as test_tns_assemble_02, minus
         # the 8-byte TNS header and 2-byte data flags). field_version 6 = 11.2.
