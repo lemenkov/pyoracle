@@ -15,9 +15,9 @@
 #
 # BFILE locators have a different layout (43+ bytes carrying the directory
 # name and filename in plain ASCII) and require an explicit FILEOPEN before
-# READ — the LOBOPS opcode for that hasn't been reverse-engineered. We
-# work around it via a tiny server-side helper function that does the
-# FILEOPEN/READ/FILECLOSE dance and returns a temporary BLOB.
+# READ. We read them natively over TTI_LOBOPS — FILE_OPEN -> READ ->
+# FILE_CLOSE (#46, OracleConnect.bfile_read_native) — using the open-flagged
+# locator the server returns from FILE_OPEN.
 
 from oracle.tns_consts import (
     TNS_TYPE_BFILE, TNS_TYPE_BLOB, TNS_TYPE_CLOB, TNS_TYPE_JSON,
@@ -120,10 +120,7 @@ class LOB:
             from oracle.exceptions import InterfaceError
             raise InterfaceError("LOB has no connection to read from")
         if self.is_file:
-            parts = self._parse_bfile_locator()
-            if parts is None:
-                raise ValueError("malformed BFILE locator")
-            return self._connection.bfile_read(*parts)
+            return self._connection.bfile_read_native(self.raw)
         return self._connection.lob_read(self.raw, self.data_type)
 
     def _fetch_content(self) -> bytes:
@@ -161,10 +158,7 @@ class LOB:
             from oracle.exceptions import InterfaceError
             raise InterfaceError("LOB has no connection to read from")
         if self.is_file:
-            parts = self._parse_bfile_locator()
-            if parts is None:
-                raise ValueError("malformed BFILE locator")
-            return await self._connection.bfile_read(*parts)
+            return await self._connection.bfile_read_native(self.raw)
         return await self._connection.lob_read(self.raw, self.data_type)
 
     def __repr__(self) -> str:

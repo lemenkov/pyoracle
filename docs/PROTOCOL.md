@@ -1338,6 +1338,30 @@ position (1 = overwrite from start).
 | `0x11000` | IS_OPEN           | Test whether the LOB is open         |
 | `0x80000` | ARRAY             | Array-style operation                |
 
+**BFILE native read (#46).** A BFILE must be opened before it can be read.
+python-oracledb's `lob.read()` issues, on 21c: `FILE_ISOPEN` (pre-check, boolean
+result) → `FILE_OPEN` → `READ` → `FILE_CLOSE`. pyoracle does the minimal
+`FILE_OPEN → READ → FILE_CLOSE` (the ISOPEN pre-check is skippable). Details,
+reverse-engineered byte-for-byte and verified on 10g / 11g / 21c / 23ai:
+
+- The BFILE locator is the same one a `SELECT BFILENAME` returns; it is sent
+  **ub2-length-prefixed** (declared length + 2), like temp LOBs. As fetched
+  (`LOB.raw`) it already carries that leading ub2 inner-length, so the driver
+  strips it before re-encoding.
+- **`FILE_OPEN`** (op `0x0100`) sets the amount pointer and carries the open
+  mode as the trailing "amount" `sb4 0x0B` (read-only); source offset 0. Its
+  response RPA returns an **updated locator with an "open" flag byte set** —
+  `READ` and `FILE_CLOSE` must use *that* locator. A `READ` against the
+  original (unopened) locator returns empty bytes — the symptom that long
+  blocked native BFILE support.
+- **`READ`** (op `0x0002`) is the ordinary read with the ub2-prefixed (opened)
+  locator; content streams back as the normal `LOB_DATA` chunk (§14.3).
+- **`FILE_CLOSE`** (op `0x0200`) sends neither amount nor data.
+
+This replaced an earlier server-side PL/SQL helper
+(`DBMS_LOB.FILEOPEN`/`LOADBLOBFROMFILE`), removing its `CREATE PROCEDURE`
+privilege requirement and the stored function it left in the user's schema.
+
 ### 14.3 Response
 
 The server returns a `TNS_MSG_TYPE_LOB_DATA` (= 14) message carrying
