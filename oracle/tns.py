@@ -51,7 +51,7 @@ from oracle.tns_consts import (
     TTI_RXH, TTI_SESS, TTI_SPFP, TTI_STA, TTI_STRT, TTI_STOP, TTI_UDS,
     TTI_WRN, TNS_BIND_DIR_INPUT, TNS_AL8I4_ARRAY_DML_ROWCOUNTS,
     TNS_EXEC_OPTION_BATCH_ERRORS,
-    TNS_LOB_OP_READ, TNS_TYPE_BDOUBLE, TNS_TYPE_BFILE,
+    TNS_LOB_OP_READ, TNS_LOB_OP_WRITE, TNS_TYPE_BDOUBLE, TNS_TYPE_BFILE,
     TNS_TYPE_BFLOAT, TNS_TYPE_BLOB, TNS_TYPE_BOOLEAN, TNS_TYPE_CLOB,
     TNS_TYPE_DATE,
     TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_JSON, TNS_TYPE_LONG,
@@ -1586,6 +1586,51 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
         Body = (bytes.fromhex("01012800010a0000010001020110000001010170")
                 + bytes(47) + bytes.fromhex("020369"))
         return bytes([TTI_FUN, TTI_LOBOPS, Tseq]) + Body
+    if Dictionary.get('operation') == TNS_LOB_OP_WRITE:
+        # WRITE (op 0x0040, #91): push `data` into the LOB at `source_offset`.
+        # Reverse-engineered from python-oracledb on 21c (small + 60 KB CLOB
+        # writes, byte-for-byte). Differences from the READ shape above:
+        #   * operation = 0x0040
+        #   * the source-locator-length field counts the ub2 length prefix too
+        #     (len + 2), and the locator is sent as <ub2 len><bytes> rather than
+        #     raw — READ declares the bare length and sends the locator raw
+        #   * the amount pointer is absent (no trailing sb4 amount); the payload
+        #     is appended instead as a 0x0E marker + a chunked-bytes field:
+        #       <ub1 len><data>                       when len <= 0xFC, else
+        #       0xFE (<sb4 chunklen><chunk>)... <00>   (chunks <= 0x7FFF bytes)
+        # CLOB data must already be UTF-16BE; BLOB data is raw bytes.
+        Locator = Dictionary['locator']
+        Data = Dictionary['data']
+        SourceOffset = Dictionary.get('source_offset', 1)
+        Out = bytes([TTI_FUN, TTI_LOBOPS, Tseq])
+        Out += bytes([1])                       # source pointer present
+        Out += encode_sb4(len(Locator) + 2)     # source locator length (+ub2)
+        Out += bytes([0])                       # dest pointer absent
+        Out += encode_sb4(0)                    # dest_length
+        Out += encode_sb4(0)                    # short source offset
+        Out += encode_sb4(0)                    # short dest offset
+        Out += bytes([0])                       # charset pointer absent
+        Out += bytes([0])                       # short amount absent
+        Out += bytes([0])                       # null lob pointer absent
+        Out += encode_sb4(TNS_LOB_OP_WRITE)     # operation code
+        Out += bytes([0])                       # scn array pointer absent
+        Out += bytes([0])                       # scn array length
+        Out += encode_sb4(SourceOffset)         # source offset (ub8)
+        Out += encode_sb4(0)                    # dest offset (ub8)
+        Out += bytes([0])                       # amount pointer absent
+        Out += struct.pack(">HHH", 0, 0, 0)     # three reserved ub16be slots
+        Out += struct.pack(">H", len(Locator))  # ub2 locator length prefix
+        Out += Locator
+        Out += bytes([0x0E])                    # WRITE-data marker
+        if len(Data) <= 0xFC:
+            Out += bytes([len(Data)]) + Data
+        else:
+            Out += bytes([0xFE])
+            for K in range(0, len(Data), 0x7FFF):
+                Chunk = Data[K:K + 0x7FFF]
+                Out += encode_sb4(len(Chunk)) + Chunk
+            Out += encode_sb4(0)                # zero-length terminator
+        return Out
     Locator = Dictionary['locator']
     # `amount` is in chars for CLOB / NCLOB and in bytes for BLOB / BFILE.
     # Don't pass the obvious-looking 0xFFFFFFFF "all" sentinel — XE 11g
@@ -1602,7 +1647,14 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
 
     Out = bytes([TTI_FUN, TTI_LOBOPS, Tseq])
     Out += bytes([1])                       # source pointer present
-    Out += encode_sb4(LocatorLen)           # source locator length
+    # Persistent-LOB locators read back correctly with the bare length + raw
+    # locator. Temporary LOBs (#91) instead need the locator sent as a
+    # ub2-length-prefixed field with the declared length counting that prefix
+    # (len + 2) — exactly the form python-oracledb uses; without it a temp-LOB
+    # read returns empty content. Switching persistent reads to the prefixed
+    # form regresses them on 11g + 21c, so the prefix is opt-in per call.
+    Prefixed = Dictionary.get('locator_prefixed', False)
+    Out += encode_sb4(LocatorLen + 2 if Prefixed else LocatorLen)  # src loc len
     Out += bytes([0])                       # dest pointer absent
     Out += encode_sb4(0)                    # dest_length
     Out += encode_sb4(0)                    # short source offset
@@ -1617,7 +1669,10 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
     Out += encode_sb4(0)                    # dest offset (ub8)
     Out += bytes([1])                       # amount pointer present
     Out += struct.pack(">HHH", 0, 0, 0)     # three reserved ub16be slots
-    Out += Locator                          # raw locator bytes (no DALC)
+    if Prefixed:
+        Out += struct.pack(">H", LocatorLen) + Locator   # ub2-prefixed locator
+    else:
+        Out += Locator                      # raw locator bytes (no DALC)
     Out += encode_sb4(Amount)               # amount to read
     return Out
 

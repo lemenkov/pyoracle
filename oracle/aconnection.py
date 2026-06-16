@@ -541,17 +541,75 @@ class AsyncOracleConnect:
 
     # ----- LOB read (async mirror of `OracleConnect.lob_read`) -----
 
-    async def lob_read(self, Locator: bytes, DataType: int) -> str | bytes:
+    async def lob_read(self, Locator: bytes, DataType: int,
+                       prefixed: bool = False) -> str | bytes:
         """Async port of the sync `lob_read`. See its docstring for
-        the wire format we walk through."""
+        the wire format we walk through. `prefixed` opts into the
+        ub2-length-prefixed locator form required for temp LOBs (#91)."""
         from oracle.tns_consts import TNS_TYPE_CLOB
         Data = encode_dictionary(self._make_dict(DictionaryType.lobops,
-                                                  locator=Locator))
+                                                  locator=Locator,
+                                                  locator_prefixed=prefixed))
         await self.send(TNS_DATA, Data)
         Content = await self._read_lob_response()
         if DataType == TNS_TYPE_CLOB:
             return Content.decode('utf-16-be', errors='replace')
         return Content
+
+    async def create_temp_lob(self, is_blob: bool = False) -> bytes:
+        """Async port of the sync `create_temp_lob` (#91). Allocates a
+        session-duration temporary LOB and returns its locator. 12c+ only."""
+        from oracle.tns_consts import TTI_RPA
+        from oracle.exceptions import NotSupportedError
+        if is_blob:
+            raise NotSupportedError("temp BLOB create not yet wired (#91)")
+        Data = encode_dictionary(self._make_dict(DictionaryType.lobops,
+                                                 create_temp=True))
+        await self.send(TNS_DATA, Data)
+        Received = await self._next_data_packet(b"", b"")
+        if Received is False:
+            raise Exception("Connection closed during CREATE_TEMP")
+        (_, Packet) = Received
+        if not Packet or Packet[0] != TTI_RPA:
+            raise Exception("Unexpected CREATE_TEMP response",
+                            Packet[:8].hex() if Packet else None)
+        LocLen = (Packet[1] << 8) | Packet[2]
+        return Packet[3:3 + LocLen]
+
+    async def write_temp_lob(self, Locator: bytes, Data: bytes,
+                             is_blob: bool = False) -> None:
+        """Async port of the sync `write_temp_lob` (#91)."""
+        from oracle.tns_consts import TNS_LOB_OP_WRITE
+        Payload = Data if is_blob else Data.encode('utf-16-be')
+        Dict = self._make_dict(DictionaryType.lobops, locator=Locator,
+                               data=Payload, operation=TNS_LOB_OP_WRITE)
+        await self.send(TNS_DATA, encode_dictionary(Dict))
+        await self._confirm_lobops()
+
+    async def _confirm_lobops(self) -> None:
+        """Async port of the sync `_confirm_lobops`: drain a content-free
+        LOBOPS response (WRITE / temp ops) and raise on a non-zero OER."""
+        from oracle.tns_consts import TTI_OER
+        from oracle.tns import decode_packet
+        from oracle.exceptions import from_ora_code
+        while True:
+            Received = await self._next_data_packet(b"", b"")
+            if Received is False:
+                raise Exception("Connection closed during LOBOPS WRITE")
+            (Type, Packet) = Received
+            for I in range(len(Packet) - 2):
+                if (Packet[I] == TTI_OER and Packet[I + 1] == 0x01
+                        and (Packet[I + 2] == 0x01
+                             or (I + 3 < len(Packet) and Packet[I + 3] == 0x01))):
+                    Result = decode_packet(Packet[I:], (None, None, []),
+                                           self.field_version)
+                    ErrCode = Result[1] if isinstance(Result, tuple) else 0
+                    Message = Result[5] if (isinstance(Result, tuple)
+                                            and len(Result) > 5) else None
+                    if ErrCode and ErrCode not in (0, 1403):
+                        raise from_ora_code(ErrCode)(
+                            Message or f"ORA-{ErrCode:05d}", code=ErrCode)
+                    return
 
     async def bfile_read(self, directory_name: str, file_name: str) -> bytes:
         """Async port of the sync `bfile_read`. Uses the same server-side

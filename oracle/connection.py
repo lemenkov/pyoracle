@@ -567,7 +567,8 @@ class OracleConnect:
                 break
         return AllRows
 
-    def lob_read(self, Locator: bytes, DataType: int) -> str | bytes:
+    def lob_read(self, Locator: bytes, DataType: int,
+                 prefixed: bool = False) -> str | bytes:
         # Send TTI_LOBOPS READ for the given locator and decode the response.
         # The response carries:
         #
@@ -580,7 +581,8 @@ class OracleConnect:
         # is raw bytes. We decode CLOB to `str` and surface BLOB as `bytes`.
         from oracle.tns_consts import TNS_TYPE_CLOB
         Data = encode_dictionary(self._make_dict(DictionaryType.lobops,
-                                                  locator=Locator))
+                                                  locator=Locator,
+                                                  locator_prefixed=prefixed))
         self.send(TNS_DATA, Data)
         Content = self._read_lob_response()
         if DataType == TNS_TYPE_CLOB:
@@ -610,6 +612,50 @@ class OracleConnect:
                             Packet[:8].hex() if Packet else None)
         LocLen = (Packet[1] << 8) | Packet[2]
         return Packet[3:3 + LocLen]
+
+    def write_temp_lob(self, Locator: bytes, Data: bytes,
+                       is_blob: bool = False) -> None:
+        # Write `Data` into a (temporary) LOB via TTI_LOBOPS WRITE (op 0x0040,
+        # #91), starting at offset 1. CLOB content goes on the wire as UTF-16BE;
+        # BLOB content is raw bytes. The server answers with TTI_RPA (updated
+        # locator + bytes written) followed by TTI_OER (call status); we walk to
+        # the OER and raise on a real error. 12c+ only (paired with
+        # create_temp_lob). The encoder chunks payloads > 0xFC bytes itself.
+        from oracle.tns_consts import TNS_LOB_OP_WRITE
+        Payload = Data if is_blob else Data.encode('utf-16-be')
+        Dict = self._make_dict(DictionaryType.lobops, locator=Locator,
+                               data=Payload, operation=TNS_LOB_OP_WRITE)
+        self.send(TNS_DATA, encode_dictionary(Dict))
+        self._confirm_lobops()
+
+    def _confirm_lobops(self) -> None:
+        # Drain a TTI_LOBOPS response that carries no content (WRITE / temp
+        # ops): walk packets until the trailing TTI_OER, decode it, and raise on
+        # a non-zero ORA error. Mirrors the break/reset-aware receive in
+        # _read_lob_response, but checks the call status instead of collecting
+        # LOB_DATA.
+        from oracle.tns_consts import TTI_OER
+        from oracle.tns import decode_packet
+        from oracle.exceptions import from_ora_code
+        while True:
+            Received = self._next_data_packet(b"", b"")
+            if Received is False:
+                raise Exception("Connection closed during LOBOPS WRITE")
+            (Type, Packet) = Received
+            # The OER opens with TTI_OER + call_status (`04 01 01`); scan for it.
+            for I in range(len(Packet) - 2):
+                if (Packet[I] == TTI_OER and Packet[I + 1] == 0x01
+                        and (Packet[I + 2] == 0x01
+                             or (I + 3 < len(Packet) and Packet[I + 3] == 0x01))):
+                    Result = decode_packet(Packet[I:], (None, None, []),
+                                           self.field_version)
+                    ErrCode = Result[1] if isinstance(Result, tuple) else 0
+                    Message = Result[5] if (isinstance(Result, tuple)
+                                            and len(Result) > 5) else None
+                    if ErrCode and ErrCode not in (0, 1403):
+                        raise from_ora_code(ErrCode)(
+                            Message or f"ORA-{ErrCode:05d}", code=ErrCode)
+                    return
 
     def bfile_read(self, directory_name: str, file_name: str) -> bytes:
         # BFILE READ goes through a server-side helper that does the
