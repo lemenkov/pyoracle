@@ -227,14 +227,20 @@ The user only needs `CREATE SESSION` and `CREATE TABLE` privileges plus
 a writable tablespace. Each test creates and drops its own scratch
 table.
 
-> **Known flake.** A small number of integration tests occasionally fail
-> with `ORA-01013` ("user requested cancel of current operation") under
-> the high connect/disconnect rate the suite produces. The diagnosis
-> (issue #7) traces this to Oracle XE's listener-side login throttling
-> rather than a driver bug: the same patterns at >100ms connect intervals
-> don't flake, and the `Pool` (issue #6) avoids it entirely by keeping
-> connections warm. The test fixture has a small pre-connect pause to
-> tame it; a single re-run typically clears any remaining failures.
+> **Connect-rate note.** Oracle XE rate-limits very rapid new connections
+> at the listener (issue #7). The suite opens a fresh connection per test,
+> so it keeps a small pre-connect pause (default 50&nbsp;ms, override with
+> `PYORACLE_TEST_CONNECT_DELAY`) to stay under that limit; the `Pool`
+> (issue #6) avoids it entirely by keeping connections warm. At the default
+> pace the suite runs clean.
+>
+> Earlier this surfaced as a `ORA-01013` ("user requested cancel") flake
+> roughly one run in five: a mid-session cancel (from the throttle or an
+> errored call) tripped the driver's break/reset handling, desynced the
+> connection and cascaded into many failures. That driver bug was fixed in
+> issue #45, so the default-pace suite is now reliably green. Only running
+> with *no* pre-connect pause at all still trips the raw listener throttle,
+> which now shows up as dropped connections rather than `ORA-01013`.
 
 ## Contributing
 
