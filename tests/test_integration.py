@@ -1112,6 +1112,60 @@ class BindIntegration(_IntegrationBase):
 
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
+class TempLobBindIntegration(_IntegrationBase):
+    """Large CLOB / BLOB into a PL/SQL locator param (#91).
+
+    A str / bytes bind over the 32767-byte PL/SQL limit can't go through the
+    streamed path (ORA-01460). The driver transparently routes it through a
+    server temp LOB (CREATE_TEMP -> WRITE -> bind locator). 12c+ only — 11g
+    rejects CREATE_TEMP, so the feature is gated and large PL/SQL binds keep
+    their prior (ORA-01460) behaviour there.
+    """
+
+    def setUp(self):
+        super().setUp()
+        if self.conn.field_version < FIELD_VERSION_12_1:
+            self.skipTest("temp-LOB bind needs a 12c+ server (CREATE_TEMP)")
+        self.cur.execute(
+            "CREATE OR REPLACE FUNCTION pyo_clob_len(p CLOB) RETURN NUMBER IS "
+            "BEGIN RETURN DBMS_LOB.GETLENGTH(p); END;")
+        self.cur.execute(
+            "CREATE OR REPLACE FUNCTION pyo_blob_len(p BLOB) RETURN NUMBER IS "
+            "BEGIN RETURN DBMS_LOB.GETLENGTH(p); END;")
+
+    def test_large_clob_bind(self):
+        for n in (40000, 100000, 500000):
+            r = self.cur.var(oracle.NUMBER)
+            self.cur.execute("BEGIN :r := pyo_clob_len(:p); END;",
+                             {"r": r, "p": "X" * n})
+            self.assertEqual(r.getvalue(), n)
+
+    def test_large_blob_bind(self):
+        for n in (40000, 100000, 300000):
+            r = self.cur.var(oracle.NUMBER)
+            self.cur.execute("BEGIN :r := pyo_blob_len(:p); END;",
+                             {"r": r, "p": b"\xab" * n})
+            self.assertEqual(r.getvalue(), n)
+
+    def test_small_bind_unaffected(self):
+        # Values within the PL/SQL limit keep the regular streamed path.
+        for n in (10, 100, 30000):
+            r = self.cur.var(oracle.NUMBER)
+            self.cur.execute("BEGIN :r := pyo_clob_len(:p); END;",
+                             {"r": r, "p": "Y" * n})
+            self.assertEqual(r.getvalue(), n)
+
+    def test_repeated_mixed_sizes_stay_synced(self):
+        # The temp-LOB ops are interleaved with the execute; a stale OER scan
+        # used to desync the next write. Exercise the alternating path.
+        for n in (100, 100000, 30000, 200000, 50):
+            r = self.cur.var(oracle.NUMBER)
+            self.cur.execute("BEGIN :r := pyo_clob_len(:p); END;",
+                             {"r": r, "p": "Z" * n})
+            self.assertEqual(r.getvalue(), n)
+
+
+@unittest.skipUnless(_USER, _SKIP_REASON)
 class ErrorAndRowcountIntegration(_IntegrationBase):
     """Verify that DatabaseError carries the server's message text and that
     Cursor.rowcount reflects the affected-row count from the OER block."""

@@ -567,7 +567,8 @@ class OracleConnect:
                 break
         return AllRows
 
-    def lob_read(self, Locator: bytes, DataType: int) -> str | bytes:
+    def lob_read(self, Locator: bytes, DataType: int,
+                 prefixed: bool = False) -> str | bytes:
         # Send TTI_LOBOPS READ for the given locator and decode the response.
         # The response carries:
         #
@@ -580,12 +581,68 @@ class OracleConnect:
         # is raw bytes. We decode CLOB to `str` and surface BLOB as `bytes`.
         from oracle.tns_consts import TNS_TYPE_CLOB
         Data = encode_dictionary(self._make_dict(DictionaryType.lobops,
-                                                  locator=Locator))
+                                                  locator=Locator,
+                                                  locator_prefixed=prefixed))
         self.send(TNS_DATA, Data)
         Content = self._read_lob_response()
         if DataType == TNS_TYPE_CLOB:
             return Content.decode('utf-16-be', errors='replace')
         return Content
+
+    def create_temp_lob(self, is_blob: bool = False) -> bytes:
+        # Create a session-duration temporary LOB on the server (TTI_LOBOPS
+        # CREATE_TEMP, #91) and return its locator. Used to bind a large LOB
+        # value into a PL/SQL locator parameter, where the streamed-LONG bind
+        # path fails with ORA-01460. 12c+ only — 11g rejects CREATE_TEMP — so
+        # callers gate on field_version. The response is a single TTI_RPA token
+        # carrying the new locator: 0x08, ub2 length, then the locator bytes.
+        from oracle.tns_consts import TTI_RPA
+        Data = encode_dictionary(self._make_dict(DictionaryType.lobops,
+                                                 create_temp=True,
+                                                 is_blob=is_blob))
+        self.send(TNS_DATA, Data)
+        Received = self._next_data_packet(b"", b"")
+        if Received is False:
+            raise Exception("Connection closed during CREATE_TEMP")
+        (_, Packet) = Received
+        if not Packet or Packet[0] != TTI_RPA:
+            raise Exception("Unexpected CREATE_TEMP response",
+                            Packet[:8].hex() if Packet else None)
+        LocLen = (Packet[1] << 8) | Packet[2]
+        return Packet[3:3 + LocLen]
+
+    def write_temp_lob(self, Locator: bytes, Data: bytes,
+                       is_blob: bool = False) -> None:
+        # Write `Data` into a (temporary) LOB via TTI_LOBOPS WRITE (op 0x0040,
+        # #91), starting at offset 1. CLOB content goes on the wire as UTF-16BE;
+        # BLOB content is raw bytes. The server answers with TTI_RPA (updated
+        # locator + bytes written) followed by TTI_OER (call status); we walk to
+        # the OER and raise on a real error. 12c+ only (paired with
+        # create_temp_lob). The encoder chunks payloads > 0xFC bytes itself.
+        from oracle.tns_consts import TNS_LOB_OP_WRITE
+        Payload = Data if is_blob else Data.encode('utf-16-be')
+        Dict = self._make_dict(DictionaryType.lobops, locator=Locator,
+                               data=Payload, operation=TNS_LOB_OP_WRITE)
+        self.send(TNS_DATA, encode_dictionary(Dict))
+        self._confirm_lobops()
+
+    def _confirm_lobops(self) -> None:
+        # Drain a TTI_LOBOPS response that carries no content (WRITE / temp
+        # ops): receive the RPA + OER packet, decode the OER, and raise on a
+        # non-zero ORA error. decode_lobops_oer skips the RPA's binary locator
+        # and matches the OER regardless of call status (which is 5, not 1,
+        # immediately after a PL/SQL execute — the case that desynced the temp
+        # LOB write following a temp-LOB-bind exec).
+        from oracle.tns import decode_lobops_oer
+        from oracle.exceptions import from_ora_code
+        Received = self._next_data_packet(b"", b"")
+        if Received is False:
+            raise Exception("Connection closed during LOBOPS WRITE")
+        (_, Packet) = Received
+        (ErrCode, Message) = decode_lobops_oer(Packet, self.field_version)
+        if ErrCode and ErrCode not in (0, 1403):
+            raise from_ora_code(ErrCode)(
+                Message or f"ORA-{ErrCode:05d}", code=ErrCode)
 
     def bfile_read(self, directory_name: str, file_name: str) -> bytes:
         # BFILE READ goes through a server-side helper that does the

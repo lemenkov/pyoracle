@@ -7,9 +7,10 @@
 from oracle.cursor import (
     _assign_out_binds,
     _column_description,
+    _is_plsql,
     _resolve_parameters,
 )
-from oracle.datatypes import Var
+from oracle.datatypes import TempLob, Var
 from oracle.exceptions import (
     DatabaseError, InterfaceError, NotSupportedError, ProgrammingError,
     from_ora_code,
@@ -81,7 +82,32 @@ class AsyncCursor:
     async def execute(self, operation: str, parameters=None) -> 'AsyncCursor':
         self._check_open()
         Bind = _resolve_parameters(operation, parameters)
+        Bind = await self._promote_large_lob_binds(operation, Bind)
         return await self._run(operation, Bind)
+
+    async def _promote_large_lob_binds(self, operation: str,
+                                       Bind: list) -> list:
+        """Async port of `Cursor._promote_large_lob_binds` (#91): stream a
+        > 32767-byte CLOB / BLOB bind for a PL/SQL block into a server temp LOB
+        and bind the locator, sidestepping ORA-01460. 12c+ / PL/SQL only."""
+        Conn = self._connection
+        if (getattr(Conn, 'field_version', 0) < FIELD_VERSION_12_1
+                or not _is_plsql(operation) or not Bind):
+            return Bind
+        Promoted = []
+        for Value in Bind:
+            if isinstance(Value, str) and len(Value.encode('utf-8')) > 32767:
+                Locator = await Conn.create_temp_lob()
+                await Conn.write_temp_lob(Locator, Value)
+                Promoted.append(TempLob(Locator, False, len(Value) * 4))
+            elif (isinstance(Value, (bytes, bytearray))
+                    and len(Value) > 32767):
+                Locator = await Conn.create_temp_lob(is_blob=True)
+                await Conn.write_temp_lob(Locator, bytes(Value), is_blob=True)
+                Promoted.append(TempLob(Locator, True, len(Value)))
+            else:
+                Promoted.append(Value)
+        return Promoted
 
     async def _run(self, operation: str, Bind: list,
                    Batch: list | None = None, BatchErrors: bool = False,

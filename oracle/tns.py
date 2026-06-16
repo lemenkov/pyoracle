@@ -7,7 +7,8 @@ from functools import reduce
 from oracle.crypto import o5logon
 from oracle.crypto import encrypt_password
 from oracle.cursor import cursor
-from oracle.datatypes import BinaryDouble, BinaryFloat, IntervalYM, JSON, Var
+from oracle.datatypes import (
+    BinaryDouble, BinaryFloat, IntervalYM, JSON, TempLob, Var)
 from oracle.date import date
 from oracle.vector import (
     is_vector_bind, encode_vector, VECTOR_BIND_OAC, VECTOR_BIND_DESCRIPTOR,
@@ -51,7 +52,7 @@ from oracle.tns_consts import (
     TTI_RXH, TTI_SESS, TTI_SPFP, TTI_STA, TTI_STRT, TTI_STOP, TTI_UDS,
     TTI_WRN, TNS_BIND_DIR_INPUT, TNS_AL8I4_ARRAY_DML_ROWCOUNTS,
     TNS_EXEC_OPTION_BATCH_ERRORS,
-    TNS_LOB_OP_READ, TNS_TYPE_BDOUBLE, TNS_TYPE_BFILE,
+    TNS_LOB_OP_READ, TNS_LOB_OP_WRITE, TNS_TYPE_BDOUBLE, TNS_TYPE_BFILE,
     TNS_TYPE_BFLOAT, TNS_TYPE_BLOB, TNS_TYPE_BOOLEAN, TNS_TYPE_CLOB,
     TNS_TYPE_DATE,
     TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_JSON, TNS_TYPE_LONG,
@@ -605,6 +606,26 @@ def decode_token_oer(Data: bytes, Acc: tuple) -> tuple:
     RetFormat = (RowCount, RowFormat)
     return (CallStatus, ErrCode, CursorId, RetFormat, Rows, Message, Rowid,
             BatchErrors, RowCounts)
+
+def decode_lobops_oer(Packet: bytes, FieldVersion: int) -> tuple[int, str | None]:
+    # Pull the (error code, message) out of a content-free TTI_LOBOPS response
+    # (WRITE / temp ops): TTI_RPA (updated locator + amount) optionally followed
+    # by a trailing charset, then TTI_OER. The RPA's locator is binary and may
+    # contain a 0x04 byte, so skip past it (using its ub2 length) before
+    # scanning for the OER token — otherwise the scan can false-match inside the
+    # locator. The OER call status is NOT fixed (1 for a standalone op, 5 right
+    # after a PL/SQL call), so match the token + a valid ub4 length only, never
+    # a specific status value.
+    _DECODE_FIELD_VERSION.set(FieldVersion)
+    Pos = 0
+    if Packet and Packet[0] == TTI_RPA and len(Packet) >= 3:
+        Pos = 3 + ((Packet[1] << 8) | Packet[2])     # skip ub2-prefixed locator
+    while Pos < len(Packet) - 1:
+        if Packet[Pos] == TTI_OER and 1 <= Packet[Pos + 1] <= 4:
+            Result = decode_token_oer(Packet[Pos:], (None, None, []))
+            return (Result[1], Result[5] if len(Result) > 5 else None)
+        Pos += 1
+    return (0, None)
 
 def decode_token_oac(Data: bytes, Acc: object) -> tuple[int, int, int, int, bytes]:
     (DataType, Flg, Pre) = struct.unpack(">BBB", Data[:3])
@@ -1576,6 +1597,65 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
     # that's all the driver currently issues; other opcodes plug into the
     # same shape by varying `operation` and the pointer flags.
     Tseq = Dictionary['seq']
+    if Dictionary.get('create_temp'):
+        # CREATE_TEMP (op 0x0110, #91): allocate a session-duration temporary
+        # LOB; the server returns the new locator in the response RPA. The body
+        # is fixed (no source locator), captured verbatim from python-oracledb
+        # on 21c — it differs between CLOB (type 0x70) and BLOB (type 0x71) in
+        # the type-spec bytes, and both forms still end with the trailing sb4
+        # 0x0369. 12c+ only; 11g rejects CREATE_TEMP.
+        if Dictionary.get('is_blob'):
+            Body = (bytes.fromhex("01012800010a00000100010201100000000171")
+                    + bytes(47) + bytes.fromhex("020369"))
+        else:
+            Body = (bytes.fromhex("01012800010a0000010001020110000001010170")
+                    + bytes(47) + bytes.fromhex("020369"))
+        return bytes([TTI_FUN, TTI_LOBOPS, Tseq]) + Body
+    if Dictionary.get('operation') == TNS_LOB_OP_WRITE:
+        # WRITE (op 0x0040, #91): push `data` into the LOB at `source_offset`.
+        # Reverse-engineered from python-oracledb on 21c (small + 60 KB CLOB
+        # writes, byte-for-byte). Differences from the READ shape above:
+        #   * operation = 0x0040
+        #   * the source-locator-length field counts the ub2 length prefix too
+        #     (len + 2), and the locator is sent as <ub2 len><bytes> rather than
+        #     raw — READ declares the bare length and sends the locator raw
+        #   * the amount pointer is absent (no trailing sb4 amount); the payload
+        #     is appended instead as a 0x0E marker + a chunked-bytes field:
+        #       <ub1 len><data>                       when len <= 0xFC, else
+        #       0xFE (<sb4 chunklen><chunk>)... <00>   (chunks <= 0x7FFF bytes)
+        # CLOB data must already be UTF-16BE; BLOB data is raw bytes.
+        Locator = Dictionary['locator']
+        Data = Dictionary['data']
+        SourceOffset = Dictionary.get('source_offset', 1)
+        Out = bytes([TTI_FUN, TTI_LOBOPS, Tseq])
+        Out += bytes([1])                       # source pointer present
+        Out += encode_sb4(len(Locator) + 2)     # source locator length (+ub2)
+        Out += bytes([0])                       # dest pointer absent
+        Out += encode_sb4(0)                    # dest_length
+        Out += encode_sb4(0)                    # short source offset
+        Out += encode_sb4(0)                    # short dest offset
+        Out += bytes([0])                       # charset pointer absent
+        Out += bytes([0])                       # short amount absent
+        Out += bytes([0])                       # null lob pointer absent
+        Out += encode_sb4(TNS_LOB_OP_WRITE)     # operation code
+        Out += bytes([0])                       # scn array pointer absent
+        Out += bytes([0])                       # scn array length
+        Out += encode_sb4(SourceOffset)         # source offset (ub8)
+        Out += encode_sb4(0)                    # dest offset (ub8)
+        Out += bytes([0])                       # amount pointer absent
+        Out += struct.pack(">HHH", 0, 0, 0)     # three reserved ub16be slots
+        Out += struct.pack(">H", len(Locator))  # ub2 locator length prefix
+        Out += Locator
+        Out += bytes([0x0E])                    # WRITE-data marker
+        if len(Data) <= 0xFC:
+            Out += bytes([len(Data)]) + Data
+        else:
+            Out += bytes([0xFE])
+            for K in range(0, len(Data), 0x7FFF):
+                Chunk = Data[K:K + 0x7FFF]
+                Out += encode_sb4(len(Chunk)) + Chunk
+            Out += encode_sb4(0)                # zero-length terminator
+        return Out
     Locator = Dictionary['locator']
     # `amount` is in chars for CLOB / NCLOB and in bytes for BLOB / BFILE.
     # Don't pass the obvious-looking 0xFFFFFFFF "all" sentinel — XE 11g
@@ -1592,7 +1672,14 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
 
     Out = bytes([TTI_FUN, TTI_LOBOPS, Tseq])
     Out += bytes([1])                       # source pointer present
-    Out += encode_sb4(LocatorLen)           # source locator length
+    # Persistent-LOB locators read back correctly with the bare length + raw
+    # locator. Temporary LOBs (#91) instead need the locator sent as a
+    # ub2-length-prefixed field with the declared length counting that prefix
+    # (len + 2) — exactly the form python-oracledb uses; without it a temp-LOB
+    # read returns empty content. Switching persistent reads to the prefixed
+    # form regresses them on 11g + 21c, so the prefix is opt-in per call.
+    Prefixed = Dictionary.get('locator_prefixed', False)
+    Out += encode_sb4(LocatorLen + 2 if Prefixed else LocatorLen)  # src loc len
     Out += bytes([0])                       # dest pointer absent
     Out += encode_sb4(0)                    # dest_length
     Out += encode_sb4(0)                    # short source offset
@@ -1607,7 +1694,10 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
     Out += encode_sb4(0)                    # dest offset (ub8)
     Out += bytes([1])                       # amount pointer present
     Out += struct.pack(">HHH", 0, 0, 0)     # three reserved ub16be slots
-    Out += Locator                          # raw locator bytes (no DALC)
+    if Prefixed:
+        Out += struct.pack(">H", LocatorLen) + Locator   # ub2-prefixed locator
+    else:
+        Out += Locator                      # raw locator bytes (no DALC)
     Out += encode_sb4(Amount)               # amount to read
     return Out
 
@@ -1894,6 +1984,12 @@ def encode_token_rxd(Token: object) -> bytes:
         if Token._value is None:
             return bytes([0])
         return encode_token_rxd(Token._value)
+    if isinstance(Token, TempLob):
+        # Temp-LOB locator bind (#91): the LOB-descriptor prefix `01 28 28`
+        # (shared with the native VECTOR / JSON binds), a ub2 locator length,
+        # then the locator bytes. Verified against python-oracledb on 21c.
+        return (bytes.fromhex("012828") + struct.pack(">H", len(Token.locator))
+                + Token.locator)
     if Token is None:
         return bytes([0])
     if isinstance(Token, (dict, JSON)):
@@ -2007,6 +2103,23 @@ def encode_token_oac(Token: object) -> bytes:
         if DT == TNS_TYPE_REFCURSOR:
             return encode_token_raw(TNS_TYPE_REFCURSOR, 1, 0, UTF8_CHARSET, 0)
         raise Exception("Unsupported Var OAC type", DT)
+    if isinstance(Token, TempLob):
+        # Temp-LOB locator bind (#91): a CLOB / BLOB OAC carrying the LOB
+        # cont-flag 0x02000000 (the same flag the native VECTOR / JSON OACs
+        # set). The announced length is the source value's byte budget. Built
+        # explicitly because encode_token_raw zeroes the cont-flag.
+        DT = TNS_TYPE_BLOB if Token.is_blob else TNS_TYPE_CLOB
+        Charset = 0 if Token.is_blob else AL32UTF8_CHARSET
+        Csfrm = 0 if Token.is_blob else 1
+        return (bytes([DT, 1, 0, 0]) + encode_sb4(Token.oac_size)
+                + encode_sb4(0)                # max number of array elements
+                + encode_sb4(0x02000000)       # cont flag (ub8) — LOB
+                + encode_sb4(0)                # OID
+                + encode_sb4(0)                # version
+                + encode_sb4(Charset)          # charset id (ub2)
+                + bytes([Csfrm])               # character set form
+                + encode_sb4(0)                # LOB prefetch length
+                + encode_sb4(0))               # oaccolid (12.2+)
     if Token is None:
         # NULL value (0 bytes): a minimal VARCHAR OAC, again avoiding the
         # 32767 LONG-reorder swap when a NULL bind precedes another bind.
