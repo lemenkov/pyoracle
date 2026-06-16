@@ -90,6 +90,16 @@ class OracleConnect:
 
         self.sock = None
         self.seq = 1
+        # Bytes received past a marker packet, held for the next recv() so a
+        # coalesced break|reset|error is not lost (#45). Empty between calls.
+        self._pending = b""
+        # True while a server break/reset handshake is in progress: we answer a
+        # server break with exactly ONE reset, then drain the server's terminal
+        # reset (and any straggler markers) WITHOUT replying, matching
+        # python-oracledb's 2:1 server:client marker ratio. Replying to every
+        # marker — the old behaviour — ping-pongs into a reset storm that
+        # discards real data (#45). Cleared when a real DATA packet arrives.
+        self._in_break = False
         self.conn_key = None
         self.server_version = 0
         self.session_id = None
@@ -259,6 +269,9 @@ class OracleConnect:
                 logger.debug("handle_login: connection closed by peer")
                 return 1
             (Type, Packet) = Received
+            if Type != TNS_MARKER:
+                # A real packet ends any in-flight break/reset episode (#45).
+                self._in_break = False
             match Type:
                 case t if t == TNS_ACCEPT:
                     logger.debug("handle_login: accept")
@@ -310,8 +323,11 @@ class OracleConnect:
                     continue
                 case t if t == TNS_MARKER:
                     logger.debug("handle_login: marker")
-                    # Respond to marker with same marker pattern
-                    self.send(TNS_MARKER, b"\x01\x00\x02")
+                    # Single reset per break episode, then drain (#45) — never
+                    # echo every marker, which storms the line.
+                    if not self._in_break:
+                        self.send(TNS_MARKER, b"\x01\x00\x02")
+                        self._in_break = True
                     continue
                 case t if t == TNS_REDIRECT:
                     from oracle.tns import parse_redirect_address
@@ -610,14 +626,17 @@ class OracleConnect:
         # (call status). We pull the content out of the LOB chunk(s) and
         # use OER as the stop signal; everything between LOB and OER is
         # RPA-shaped metadata we don't need.
-        from oracle.tns_consts import TNS_MARKER, TTI_LOB, TTI_OER
+        from oracle.tns_consts import TTI_LOB, TTI_OER
         Buffer = b""
         while True:
-            (Type, Packet) = self.recv(b"", b"")
+            # Same break/reset-aware receive as the main response path (#45):
+            # a LOB read that gets cancelled mid-stream must complete the reset
+            # handshake instead of echoing markers and dropping content.
+            Received = self._next_data_packet(b"", b"")
+            if Received is False:
+                raise Exception("Connection closed during LOBOPS response")
+            (Type, Packet) = Received
             if Type != TNS_DATA:
-                if Type == TNS_MARKER:
-                    self.send(TNS_MARKER, b"\x01\x00\x02")
-                    continue
                 raise Exception("Unexpected LOBOPS response type", Type)
             Pos = 0
             OerSeen = False
@@ -775,24 +794,17 @@ class OracleConnect:
         from oracle.tns import decode_packet
         if Acc is None:
             Acc = (None, None, [])
-        # Iterative TNS_MARKER passthrough — keep replying to markers
-        # until a real TNS_DATA arrives. (Was recursive; the recursion
-        # depth could in principle grow if the server sent many markers
-        # in a row, and EOF crashed unpacking `recv() → False`.)
-        while True:
-            Received = self.recv(b"", b"")
-            if Received is False:
-                raise Exception("Connection closed while awaiting response")
-            (Type, Packet) = Received
-            match Type:
-                case t if t == TNS_DATA:
-                    return decode_packet(Packet, Acc, self.field_version)
-                case t if t == TNS_MARKER:
-                    logger.debug("response: marker")
-                    self.send(TNS_MARKER, b"\x01\x00\x02")
-                    continue
-                case _:
-                    raise Exception("Unexpected response type", Type)
+        # Receive the next DATA packet, transparently completing any server
+        # break/reset handshake (#45). _next_data_packet sends a single reset
+        # per break episode and drains the rest, so a cancelled/errored call
+        # no longer storms the line or discards the trailing error/result.
+        Received = self._next_data_packet(b"", b"")
+        if Received is False:
+            raise Exception("Connection closed while awaiting response")
+        (Type, Packet) = Received
+        if Type == TNS_DATA:
+            return decode_packet(Packet, Acc, self.field_version)
+        raise Exception("Unexpected response type", Type)
 
     def send(self, Type: int, Data: bytes | None) -> bool | None:
         # Iterative split-and-send. Was previously recursive, which blew
@@ -819,15 +831,14 @@ class OracleConnect:
         # multi-KiB response (e.g. a LOB content fetch that spans many
         # SDU-sized TCP segments) the recursion depth blew the default
         # Python limit during the auth handshake on some setups.
+        #
+        # Seed from any bytes preserved past the previous marker (#45): a
+        # server break/reset can arrive coalesced with the trailing error/LOB
+        # DATA in one TCP read, so on a marker we keep `Rest` in self._pending
+        # instead of dropping it, and drain it here before touching the socket.
+        Acc = self._pending + Acc
+        self._pending = b""
         while True:
-            try:
-                NetworkData = self.sock.recv(self.sdu)
-            except TimeoutError as exc:
-                raise self._timeout_error("read") from exc
-            if not NetworkData:
-                # Peer closed the connection.
-                return False
-            Acc = Acc + NetworkData
             # Drain as many complete packets as `Acc` already contains
             # before going back to the socket for more bytes. Need at
             # least 8 bytes for a TNS header before assemble_packet can
@@ -835,6 +846,11 @@ class OracleConnect:
             while len(Acc) >= 8:
                 (Flag, Type, Body, Rest) = assemble_packet(Acc, self.sdu)
                 if Flag is True and Type == TNS_MARKER:
+                    # Preserve everything after the marker (the coalesced
+                    # reset / error DATA) for the next recv() rather than
+                    # discarding it — the break state machine in
+                    # _next_data_packet drives the reset handshake.
+                    self._pending = Rest
                     return (TNS_MARKER, b"")
                 if Flag is True and Rest == b"":
                     return (Type, Data + Body)
@@ -852,6 +868,39 @@ class OracleConnect:
                     continue
                 # Not enough bytes yet for a full packet — back to recv.
                 break
+            try:
+                NetworkData = self.sock.recv(self.sdu)
+            except TimeoutError as exc:
+                raise self._timeout_error("read") from exc
+            if not NetworkData:
+                # Peer closed the connection.
+                return False
+            Acc = Acc + NetworkData
+
+    def _next_data_packet(self, Acc: bytes = b"", Data: bytes = b"") \
+            -> tuple[int, bytes] | bool:
+        # Receive the next TNS_DATA packet, transparently completing a server
+        # break/reset handshake (#45). The 21c server cancels an errored or
+        # interrupted call by sending a break marker (01 00 01) followed by a
+        # reset marker (01 00 02) and then the inline error/result DATA. A
+        # correct client answers with exactly ONE reset and drains the rest;
+        # python-oracledb does 2 server markers : 1 client reset. Replying to
+        # every marker storms the line and discards real data. self._in_break
+        # latches across recv() calls so we send at most one reset per break
+        # episode, and is cleared when a real DATA packet arrives.
+        while True:
+            Received = self.recv(Acc, Data)
+            if Received is False:
+                return False
+            (Type, Packet) = Received
+            if Type != TNS_MARKER:
+                self._in_break = False
+                return (Type, Packet)
+            if not self._in_break:
+                self.send(TNS_MARKER, b"\x01\x00\x02")
+                self._in_break = True
+            # else: drain the server's terminal reset (and any straggler
+            # markers) silently — do NOT reply, or the server replies again.
 
     def disconnect(self) -> None:
         if self.sock:

@@ -91,37 +91,39 @@ be *exactly* maximum-sized from a true continuation. In practice this has not
 been observed as the cause of any desync (the server appears to avoid emitting
 a maximally-sized final fragment), so the test holds for normal traffic.
 
-### 1.4 Break / attention markers (TNS_MARKER)
+### 1.4 Break / reset markers (TNS_MARKER)
 
-A `TNS_MARKER` (type 12) is an out-of-band break/attention signal. The server
-emits one (often several in a row — a "marker storm") to **cancel the call in
-progress**, e.g. when XE's per-second new-connection throttle rejects a logon
-with `ORA-01013` ("user requested cancel of current operation").
+A `TNS_MARKER` (type 12) is an out-of-band break/attention signal with a 3-byte
+body: `01 00 01` = **break** (interrupt the call), `01 00 02` = **reset**
+(clear the line). The server uses them to delimit a **cancelled call**: on 21c+
+*every errored call* — even a trivial `SELECT` against a missing table — comes
+back as `break` + `reset`, then the inline error (`ORA-00942`, `ORA-01013`, …)
+DATA. This is normal server behaviour, confirmed by capturing python-oracledb
+through a logging proxy (`tools/capture_proxy.py`).
 
-Semantics that matter for the receive path:
+The receive-side handshake that keeps the stream in sync (#45):
 
-- A marker **cancels in-flight data**: any bytes the server had already queued
-  before the break are stale and must be **discarded**, not reassembled. The
-  real response (the `ORA-01013` OER, etc.) arrives *after* the marker exchange.
-- `recv()` therefore returns a marker immediately and drops whatever else was
-  buffered in the same read; the caller (`_handle_response` / `_read_lob_response`)
-  replies with a reset marker (`\x01\x00\x02`) and reads again for the real
-  response. **Do not** "preserve" the post-marker bytes — that re-injects the
-  cancelled data and desyncs the stream (verified: doing so reds ~65 integration
-  tests on 11g).
-- pyoracle never *initiates* a break, so the client-side interrupt/reset
-  discard handshake does not arise here.
-
-> ⚠️ **Open: #45 desync.** Under full-suite load / connection churn a LOB read
-> can still occasionally land content in the wrong column (a CLOB read returns
-> empty and its bytes surface in the next BLOB column). The rapid-reconnect
-> reproduction instead trips XE's `ORA-01013` connection throttle (a marker
-> storm), and a *paced* standalone reproduction of the exact failing query is
-> clean over 490+ rounds — so the wrong-column desync has **not** yet been
-> isolated to a specific code path. Per the project's capture-first discipline,
-> the next step is a wire capture of a failing sequence (marker handling around
-> a LOB read is the prime suspect) before changing the framing code. Blocks safe
-> connection reuse and reliable 21c CI.
+- **One reset per break episode, then drain.** Answer the server's break with
+  **exactly one** reset marker (`01 00 02`) and then read further markers —
+  including the server's terminal reset — *without replying*, until the real
+  DATA packet arrives. python-oracledb does **2 server markers : 1 client
+  reset** per cancel; matching that ratio is the whole fix. Replying to *every*
+  marker (the old pyoracle behaviour) ping-pongs resets into a storm, and a
+  stray client reset landing while the server streams a large LOB makes the
+  client discard that content — the CLOB-comes-back-empty desync.
+- **Preserve the post-marker bytes.** A `break|reset|error` (or
+  `break|reset|LOB-content`) often arrives coalesced in one TCP read, so `recv()`
+  returns the marker but keeps the trailing bytes (`self._pending`) for the next
+  call instead of dropping them; otherwise the inline error/result is lost and
+  the next operation reads it misframed. (Preserving *without* the one-reset
+  rule above was a dead end — the still-storming bytes crash the packet parser;
+  both halves are required.)
+- pyoracle implements both in `OracleConnect._next_data_packet` (and its async
+  twin), with a `self._in_break` latch so at most one reset is sent per episode,
+  cleared when a real DATA packet returns. `_handle_response`, `_read_lob_response`
+  and the login loop all receive through it.
+- pyoracle never *initiates* a break (no client-side Ctrl-C/interrupt path), so
+  only the server-break case above arises.
 
 ## 2. Connection Phase
 
@@ -1348,8 +1350,13 @@ against — and the streamed-LONG path above makes it moot.
 
 TNS_MARKER packets serve as break/attention signals. The marker body is 3 bytes:
 
-- `0x01, 0x00, 0x02`: Standard marker. Client responds with the same marker pattern.
-- `0x01, 0x00, 0x01`: Break marker. Triggers a read-timeout mode where the client reads with a short timeout to collect remaining data.
+- `0x01, 0x00, 0x01`: **break** — the server is cancelling the in-flight call.
+- `0x01, 0x00, 0x02`: **reset** — line-clear acknowledgement.
+
+The server cancels an errored/interrupted call by sending `break` then `reset`
+followed by the inline error/result. The client answers with **exactly one**
+reset and drains the rest silently (2 server markers : 1 client reset). See
+§1.4 for the full handshake and the #45 desync it fixes.
 
 ## 16. Sequence Numbers
 
