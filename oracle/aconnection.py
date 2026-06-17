@@ -602,14 +602,14 @@ class AsyncOracleConnect:
         (_, Packet) = Resp
         Columns = decode_fv2_describe(Packet)
         _Bad = [C for C in Columns
-                if C.get('data_type') in (8, 24, 112, 113, 114)]
+                if C.get('data_type') in (112, 113, 114)]
         if _Bad:
             await self.send(TNS_DATA, encode_o7_close(0))
             await self._next_data_packet()
             from oracle.exceptions import NotSupportedError
             raise NotSupportedError(
                 f"Oracle 9i: column data type {_Bad[0]['data_type']} "
-                f"(LONG/LOB) not yet supported on the fv2 path (#102)")
+                f"(LOB) not yet supported on the fv2 path (#102)")
         # Fetch in batches: re-send the same exec+fetch TTI_ALL7 until the
         # server returns ORA-01403 (#99). Mirrors the sync path.
         AllRows: list = []

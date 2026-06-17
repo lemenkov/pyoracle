@@ -729,6 +729,25 @@ class TestFv2ExecResponse(unittest.TestCase):
         self.assertEqual(rows[2][1], 'carol')
 
 
+class TestFv2LongRows(unittest.TestCase):
+    """Oracle 9i LONG columns in a batch fetch (#102): the value is a chunked
+    DALC (0xfe form), no trailing descriptor. Fixture is a real response for
+    `SELECT id, l FROM lobtest` — LONG 'aaaa', LONG 20×'b', and a NULL LONG."""
+
+    RESP = bytes.fromhex(
+        "0602010200010a0000000702c10200fe046161616100000702c10300fe14"
+        "626262626262626262626262626262626262626200000702c10400008101"
+        "04010302057b00000101000300000000000000000000000000000101194f"
+        "52412d30313430333a206e6f206461746120666f756e640a")
+
+    def test_long_values_and_null(self):
+        from oracle.tns import decode_fv2_exec_response
+        cols = [{'data_type': 2}, {'data_type': 8, 'charset': 873}]
+        rows, err = decode_fv2_exec_response(self.RESP, cols)
+        self.assertEqual(err, 1403)
+        self.assertEqual(rows, [[1, 'aaaa'], [2, 'b' * 20], [3, None]])
+
+
 class TestFv2OerError(unittest.TestCase):
     """fv2 OER error + message extraction (#102). Fixture is a real parse-time
     error from a live 9.2.0.4 server (SELECT from a nonexistent table)."""
