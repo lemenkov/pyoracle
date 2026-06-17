@@ -1807,8 +1807,12 @@ not the native ROWID type 11) — exactly as JDBC does — so it returns as the
 familiar 18-char rowid string; the native ROWID return form desyncs the row
 stream (ORA-01002).
 
-**LONG / LONG RAW / CLOB / BLOB / BFILE** need streamed or LOB-locator framing
-the fv2 path does not yet implement; a `SELECT` of such a column would desync the
-server (ORA-01002), so the driver detects them in the describe and raises
-`NotSupportedError` before the execute. Transactions (`COMMIT` / `ROLLBACK`) work
-unchanged on 9i.
+**LONG / LONG RAW** are supported: requested in the define block with the 2 GiB
+max buffer, they stream back inline as a chunked DALC (the `0xfe` form — single
+or multi-chunk) and decode through the normal column path. In batch fetch they
+carry no per-row trailing descriptor (that only appears in single-row fetch).
+
+**CLOB / BLOB / BFILE** still need LOB-locator framing the fv2 path does not yet
+implement; a `SELECT` of such a column would desync the server (ORA-01002), so the
+driver detects them in the describe and raises `NotSupportedError` before the
+execute. Transactions (`COMMIT` / `ROLLBACK`) work unchanged on 9i.

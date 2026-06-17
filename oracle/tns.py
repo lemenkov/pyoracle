@@ -1689,6 +1689,10 @@ def _o7_define_entry(Col: dict) -> bytes:
         # JDBC does); the native ROWID return form desyncs the fv2 row stream
         # (ORA-01002). The value arrives as the familiar 18-char rowid string.
         DefType, MaxSize, Csfrm = TNS_TYPE_VARCHAR, 128, 0
+    elif Type in (TNS_TYPE_LONG, TNS_TYPE_LONGRAW):
+        # LONG / LONG RAW: request the native type with the 2 GiB max buffer
+        # (as JDBC does); the value streams back in the chunked DALC form.
+        DefType, MaxSize = Type, 0x7FFFFFFF
     else:
         DefType, MaxSize = Type, Col.get('max_size') or 0
     Flag = 0x21 if Type == TNS_TYPE_CHAR else 0x01
@@ -1815,14 +1819,17 @@ def decode_fv2_exec_response(Data: bytes, Columns: list) -> tuple[list, int]:
             Rest = Rest[1:]
             Row = []
             for Col in Columns:
+                DataType = Col.get('data_type')
+                # The value is a DALC; decode_dalc handles the 0xfe chunked form
+                # that LONG / LONG RAW stream in (in batch fetch they arrive
+                # inline as a plain chunked value, no trailing descriptor).
                 (Val, Rest) = decode_dalc(Rest)
                 # Per-column indicator: 0x00 = value present (one byte); 0x81 =
                 # NULL, a two-byte (81 01) marker following an empty value.
                 if Rest and Rest[0] == 0x81:
                     Rest = Rest[2:]
                     Row.append(None)
-                elif Col.get('data_type') in (TNS_TYPE_RID, TNS_TYPE_ROWID,
-                                              TNS_TYPE_UROWID):
+                elif DataType in (TNS_TYPE_RID, TNS_TYPE_ROWID, TNS_TYPE_UROWID):
                     # Defined as VARCHAR (see _o7_define_entry), so the value is
                     # already the rowid text — decode it directly, not via the
                     # native ROWID decoder.
