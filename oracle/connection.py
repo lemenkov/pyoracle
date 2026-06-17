@@ -9,6 +9,9 @@ from oracle.tns import encode_dictionary
 from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
 from oracle.tns import set_decode_dml_rowcounts
+from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe, encode_o7_exec,
+                        encode_o7_close, decode_fv2_describe,
+                        decode_fv2_exec_response)
 from oracle.exceptions import OperationalError
 from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
                         FIELD_VERSION_12_1, FIELD_VERSION_21_1)
@@ -458,6 +461,11 @@ class OracleConnect:
         if Batch is None:
             Batch = []
         Head = Query.strip().upper()
+        # Oracle 9i (field version < 10g) speaks the old TTI_ALL7 query dialect,
+        # not the TTI_ALL8 the rest of execute() builds. Route SELECTs through
+        # the dedicated four-call fv2 path (#97, PROTOCOL.md §19).
+        if Head.startswith('SELECT') and self.field_version < FIELD_VERSION_10_2:
+            return self._drain_cursor(self._execute_fv2(Query))
         if Head.startswith('SELECT'):
             Type = 'select'
         elif Head.startswith('BEGIN') or Head.startswith('DECLARE'):
@@ -533,6 +541,36 @@ class OracleConnect:
                 Oldest = next(iter(self._cursor_cache))
                 self._cursor_cache.pop(Oldest, None)
         return self._drain_cursor(Result)
+
+    def _execute_fv2(self, Query: str) -> object:
+        # Oracle 9i (field version 2) SELECT: the four-call TTI_ALL7 sequence
+        # (PROTOCOL.md §19) — parse, describe columns, execute+fetch, close.
+        # Returns the same tuple shape as a normal execute response so the
+        # cursor/_drain_cursor machinery is unchanged.
+        self.send(TNS_DATA, encode_o7_open(0))       # allocate a server cursor
+        self._next_data_packet()                     # OOPEN RPA (cursor id)
+        self.send(TNS_DATA, encode_o7_parse(0, Query))
+        self._next_data_packet()                     # parse RPA ack
+        self.send(TNS_DATA, encode_o7_describe(0))
+        Resp = self._next_data_packet()
+        if Resp is False:
+            raise Exception("Connection closed during 9i describe")
+        (_, Packet) = Resp
+        Columns = decode_fv2_describe(Packet)
+        self.send(TNS_DATA, encode_o7_exec(0, Columns))
+        Resp = self._next_data_packet()
+        if Resp is False:
+            raise Exception("Connection closed during 9i fetch")
+        (_, Packet) = Resp
+        (Rows, ErrCode) = decode_fv2_exec_response(Packet, Columns)
+        self.send(TNS_DATA, encode_o7_close(0))
+        self._next_data_packet()                     # close STA
+        if ErrCode and ErrCode not in (0, 1403):
+            from oracle.exceptions import from_ora_code
+            raise from_ora_code(ErrCode)(f"ORA-{ErrCode:05d}", code=ErrCode)
+        # (call_status, ora_code, cursor_id, (rowcount, row_format), rows, ...)
+        # call_status 0 + ora_code 0 => _drain_cursor won't issue TTI_FETCHes.
+        return (0, 0, 0, (len(Rows), Columns), Rows, None, None, [], None)
 
     def _drain_cursor(self, Result: object) -> object:
         # The EXEC response either bundles all rows inline (small SELECTs,

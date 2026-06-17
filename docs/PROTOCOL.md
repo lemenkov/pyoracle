@@ -1681,3 +1681,95 @@ FLOAT32/INT8 and a 300-dim vector (index 299 confirms the ub4 indices).
 
 > As with JSON, multi-row VECTOR `SELECT`s share the #45 LOB desync limitation
 > under load; single-row reads are reliable.
+
+## 19. Oracle 9i (pre-10g) query/fetch — the fv2 dialect (#97)
+
+Oracle 9i negotiates **TTC field version 2** (`FIELD_VERSION_9_2`). Its login is
+O3LOGON (§4, gated `field_version < FIELD_VERSION_10_2`); its **query/fetch path
+is a different RPC** from the `TTI_ALL8` (§5.1) pyoracle sends to 10g+. A 9i
+server answers an `ALL8` execute with an empty return, so SELECTs come back with
+no describe and no rows. 9i instead uses the older **`TTI_ALL7` (func `0x47`)**
+execute, and a query is a **four-call sequence** (reverse-engineered from the
+Oracle JDBC thin driver — ojdbc14 — captured against a live 9.2.0.4 server; the
+same reference that cracked the 9i login). All calls are `TTI_FUN (0x03) <func>
+<seq> …`. Gate every fv2 path on `field_version < FIELD_VERSION_10_2`.
+
+| # | Call           | Func               | Response                                   |
+|---|----------------|--------------------|--------------------------------------------|
+| 0 | Open cursor    | `0x02` (OOPEN)     | `TTI_RPA` (08) — allocates the server cursor|
+| 1 | Parse/describe | `0x47` (`TTI_ALL7`)| `TTI_RPA` (08) — cursor id                  |
+| 2 | Describe cols  | `0x62`             | `TTI_RPA` (08) — **column metadata** (below)|
+| 3 | Execute+fetch  | `0x47` (`TTI_ALL7`)| `TTI_RXH` (06) + N×`TTI_RXD` (07) + `TTI_OER`(04) ORA-01403 |
+| 4 | Close cursor   | `0x14`             | `TTI_STA` (09)                              |
+
+An **OOPEN** (`03 02 <seq> 01 00`) must precede the parse — it allocates the
+server cursor that the parse/describe/execute/close then operate on (they all
+carry cursor field 0 = "current"). Without it the parse fails **ORA-01001**
+("invalid cursor"). All five calls carry cursor/sequence byte `0`.
+
+Call 1 carries the SQL inline, length-prefixed, after a fixed option header
+(`02 80 21 01 01 01 01 <sqllen> 00 00 01 01 07 01 01 02 00 00 00 00 00 <SQL>
+01 01 01 01 00 00 00 00 00`); call 3 repeats `0x47` with option word `02 80 50`
+and a per-column **define block**. The `ORA-01403` ("no data found") trailing the
+row stream is the **end-of-fetch marker**, not an error (pyoracle already treats
+01403 as end-of-cursor, §6.7).
+
+### 19.1 fv2 describe (the `0x62` response — describe lives in the RPA)
+
+Unlike 10g+, which returns a dedicated `TTI_DCB` (§6.4), 9i packs the column
+metadata **inside the `TTI_RPA` (08)** answering the `0x62` call:
+
+```
+08 01 <numcols:1B> <column>*  <trailer>
+column = <OAC-fv2> <ub4 namelen> <ub4 namelen> <DALC name> 00 00
+```
+
+The per-column **`OAC-fv2`** is exactly the §5.3 OAC field order **minus the
+trailing `Mxlc` ub4** (a later-version addition):
+
+```
+DataType(1B) Flag(1B) Precision(1B) Scale(ub4) MaxLen(ub4)
+MaxArrLen(ub4) Flags2(ub4) ToId(DALC) Version(ub4) Charset(ub4) FormOfUse(1B)
+```
+
+The leading **`DataType` byte is the standard Oracle internal type code** — the
+same numbering as pyoracle's `TNS_TYPE_*` constants (1=VARCHAR2, 2=NUMBER,
+12=DATE, 23=RAW, 96=CHAR, 181=TIMESTAMP) — so the fv2 path **reuses the existing
+type→value decoders**, no new numbering. The column name follows as
+`ub4 namelen, ub4 namelen, DALC` (byte-length and char-length, then the
+DALC-encoded UPPERCASE name), then a two-byte `00 00` inter-column separator.
+
+> Two RE traps worth recording: a single-character column name (e.g. `N`)
+> mis-anchors if you scan for the name by ASCII — parse the OAC deterministically
+> instead; and the **last** column's OAC runs straight into the describe trailer,
+> so only interior columns segment cleanly by eye. Validated against eight live
+> captures (NUMBER/NUMBER(p,s)/VARCHAR2/CHAR/DATE/RAW/FLOAT/TIMESTAMP/NVARCHAR2,
+> 1–5 columns, 1–3 rows).
+
+### 19.2 fv2 row data
+
+The execute+fetch (`0x47`, call 3) carries a per-column **define block** telling
+the server the type the client wants each column returned as, then returns
+`TTI_RXH` (§6.1) + one `TTI_RXD` (§6.2) per row, terminated by `TTI_OER` carrying
+ORA-01403. The **row value encoding is version-independent** — Oracle NUMBER
+(§11.1), DATE (§11.2), and length-prefixed character/raw values decode with the
+existing §11 decoders (verified: `c1 2b`→42, `68 69`→"hi", a 7-byte date → the
+wire date). Multiple rows arrive in a single RXH+RXD stream when they fit the
+fetch array.
+
+The define block follows a fixed prefix (`01 01 <numcols> 00 00 01 01 01 0a
+00 00 00 00 00`) with one 13-byte entry per column:
+
+```
+<deftype:1B> <flag:1B> 00 00 <MaxSize:ub4> 00 00 00 00 <Charset:ub4> <FormOfUse:1B>
+```
+
+`deftype` is the client's *requested* return type built from the call-2 describe:
+NUMBER→`0x06` (VARNUM, MaxSize 22), VARCHAR2→`0x01` (MaxSize = described max),
+CHAR→`0x60` (flag `0x21`), DATE→`0x0c` (MaxSize 7).
+
+In the returned `TTI_RXD`, each column is a DALC value followed by an indicator:
+a present value is followed by a single `0x00`; a **NULL** column is an empty
+value (`0x00`) followed by the two-byte marker **`0x81 0x01`**. Missing the
+wider NULL indicator silently truncates the row stream (consumes one byte too
+few and desyncs the following rows).

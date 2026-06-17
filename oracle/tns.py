@@ -47,7 +47,7 @@ from oracle.tns_consts import (
     FIELD_VERSION_11_2, FIELD_VERSION_12_1, FIELD_VERSION_12_2,
     FIELD_VERSION_12_2_EXT1, FIELD_VERSION_19_1, FIELD_VERSION_21_1,
     FIELD_VERSION_23_1,
-    DictionaryType, TNS_DATA, TNS_REDIRECT, TTI_ALL8, TTI_AUTH, TTI_BVC,
+    DictionaryType, TNS_DATA, TNS_REDIRECT, TTI_ALL7, TTI_ALL8, TTI_AUTH, TTI_BVC,
     TTI_DCB, TTI_DTY, TTI_FETCH, TTI_FOB, TTI_FUN, TTI_IOV, TTI_LOB,
     TTI_LOGOFF, TTI_OAC, TTI_OER, TTI_PFN, TTI_PRO, TTI_RPA, TTI_RXD,
     TTI_RXH, TTI_SESS, TTI_SPFP, TTI_STA, TTI_STRT, TTI_STOP, TTI_UDS,
@@ -62,6 +62,7 @@ from oracle.tns_consts import (
     TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_JSON, TNS_TYPE_LONG,
     TNS_TYPE_LONGRAW, TNS_TYPE_VECTOR,
     TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_REFCURSOR, TNS_TYPE_RID,
+    TNS_TYPE_CHAR,
     TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_UROWID, TNS_TYPE_VARCHAR,
     TTI_LOBOPS,
     UTF8_CHARSET,
@@ -1609,6 +1610,174 @@ def encode_dictionary_fetch(Dictionary: dict) -> bytes:
     Cursor = encode_sb4(Dictionary['cursor'])
     Fetch = encode_sb4(Dictionary['fetch'])
     return bytes([TTI_FUN, TTI_FETCH, Tseq]) + Cursor + Fetch
+
+# ---------------------------------------------------------------------------
+# Oracle 9i (pre-10g, field version 2) query/fetch — the TTI_ALL7 dialect.
+# A SELECT is a four-call sequence (docs/PROTOCOL.md §19), reverse-engineered
+# from the Oracle JDBC thin driver against a live 9.2.0.4 server (#97). Gate
+# every fv2 path on `field_version < FIELD_VERSION_10_2`.
+# ---------------------------------------------------------------------------
+_O7_DESCRIBE_FUNC = 0x62          # describe columns (RPA carries the metadata)
+_O7_CLOSE_FUNC = 0x14             # close cursor
+
+def encode_o7_open(Seq: int) -> bytes:
+    # Call 0: OOPEN — allocate a server cursor. The server tracks it as the
+    # "current" cursor for the subsequent parse/describe/execute/close (which
+    # all carry cursor field 0). Without it the parse fails ORA-01001.
+    return bytes([TTI_FUN, 0x02, Seq, 0x01, 0x00])
+
+def encode_o7_parse(Seq: int, Sql: str) -> bytes:
+    # Call 1: TTI_ALL7 parse. The SQL is carried inline, sb4-length-prefixed,
+    # between two fixed option blocks (option word 02 80 21).
+    SqlBytes = Sql.encode('utf-8')
+    return (bytes([TTI_FUN, TTI_ALL7, Seq, 0x02, 0x80, 0x21, 0x01, 0x01, 0x01])
+            + encode_sb4(len(SqlBytes))
+            + bytes([0, 0, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0, 0, 0, 0, 0])
+            + SqlBytes
+            + bytes([0x01, 0x01, 0x01, 0x01, 0, 0, 0, 0, 0]))
+
+def encode_o7_describe(Seq: int) -> bytes:
+    # Call 2: fixed describe-columns request; response is the metadata RPA.
+    return bytes([TTI_FUN, _O7_DESCRIBE_FUNC, Seq,
+                  0x07, 0x01, 0x01, 0, 0, 0x01, 0x02, 0x01, 0x01])
+
+def _o7_define_entry(Col: dict) -> bytes:
+    # One 13/14-byte define entry: the client's requested return type for a
+    # column (built from the describe). deftype = VARNUM(6) for NUMBER, else the
+    # column type; CHAR carries flag 0x21; NUMBER/DATE/TIMESTAMP use a fixed
+    # buffer size, everything else the described max. charset defaults to 31
+    # (the server DB charset JDBC requests) unless the column is national.
+    Type = Col['data_type']
+    if Type == TNS_TYPE_NUMBER:
+        DefType, MaxSize = 0x06, 22
+    elif Type == TNS_TYPE_DATE:
+        DefType, MaxSize = TNS_TYPE_DATE, 7
+    elif Type in (TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ, 181):
+        DefType, MaxSize = Type, 13
+    else:
+        DefType, MaxSize = Type, Col.get('max_size') or 0
+    Flag = 0x21 if Type == TNS_TYPE_CHAR else 0x01
+    Charset = Col.get('charset') or 31
+    Csfrm = Col.get('csfrm') or 0
+    return (bytes([DefType, Flag, 0, 0]) + encode_sb4(MaxSize)
+            + bytes([0, 0, 0, 0]) + encode_sb4(Charset) + bytes([Csfrm]))
+
+def encode_o7_exec(Seq: int, Columns: list) -> bytes:
+    # Call 3: TTI_ALL7 execute + fetch (option word 02 80 50), carrying a define
+    # block (one entry per column) so the server returns the requested types.
+    Head = bytes([TTI_FUN, TTI_ALL7, Seq, 0x02, 0x80, 0x50,
+                  0x01, 0x01, 0, 0, 0, 0, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0])
+    Defines = (bytes([0x01, 0x01, len(Columns), 0, 0,
+                      0x01, 0x01, 0x01, 0x0a, 0, 0, 0, 0, 0])
+               + b"".join(_o7_define_entry(C) for C in Columns))
+    return Head + Defines
+
+def encode_o7_close(Seq: int) -> bytes:
+    # Call 4: close the cursor.
+    return bytes([TTI_FUN, _O7_CLOSE_FUNC, Seq, 0x01, 0x01])
+
+def _decode_oac_fv2(Rest: bytes) -> tuple[dict, bytes]:
+    # fv2 column descriptor = the modern decode_token_oac field order MINUS the
+    # trailing Mxlc ub4 (a later addition). The leading DataType byte is the
+    # standard Oracle type code (== TNS_TYPE_*), so existing value decoders are
+    # reused. Returns a column dict shaped like decode_token_dcb's output.
+    (DataType, Flag, Precision) = struct.unpack(">BBB", Rest[:3])
+    Rest = Rest[3:]
+    (DataScale, Rest) = decode_ub4(Rest)
+    (MaxLen, Rest) = decode_ub4(Rest)
+    (_Mal, Rest) = decode_ub4(Rest)
+    (_Fl2, Rest) = decode_ub4(Rest)
+    (_ToId, Rest) = decode_dalc(Rest)
+    (_Vsn, Rest) = decode_ub4(Rest)
+    (Charset, Rest) = decode_ub4(Rest)
+    Csfrm = Rest[0]
+    Rest = Rest[1:]
+    Col = {
+        'data_type': DataType,
+        'data_length': MaxLen,
+        'data_scale': DataScale,
+        'precision': Precision,
+        'max_size': MaxLen,
+        'charset': Charset,
+        'csfrm': Csfrm,
+        'null_ok': 1,
+        'domain_schema': None,
+        'domain_name': None,
+    }
+    return (Col, Rest)
+
+def decode_fv2_describe(Data: bytes) -> list[dict]:
+    # Parse the TTI_RPA (0x08) answering the 0x62 describe-columns call into a
+    # list of column dicts (docs/PROTOCOL.md §19.1). Layout:
+    #   08 01 <numcols> then per column: <OAC-fv2> ub4(NL) ub4(NL) DALC(name) 00 00
+    NumCols = Data[2]
+    Rest = Data[3:]
+    Columns = []
+    for _ in range(NumCols):
+        (Col, Rest) = _decode_oac_fv2(Rest)
+        (_NlBytes, Rest) = decode_ub4(Rest)   # name length in bytes
+        (_NlChars, Rest) = decode_ub4(Rest)   # name length in chars
+        (Name, Rest) = decode_dalc(Rest)
+        Col['column_name'] = Name if isinstance(Name, bytes) else b""
+        Columns.append(Col)
+        # two-byte inter-column separator
+        if len(Rest) >= 2 and Rest[0] == 0 and Rest[1] == 0:
+            Rest = Rest[2:]
+    return Columns
+
+def _decode_fv2_oer(Rest: bytes) -> tuple[int, int, bytes]:
+    # Minimal fv2 (9i) OER: the short pre-10g form. The exec+fetch terminates
+    # with `04 <ub4 rows-this-fetch> <ub4 ORA code> …`; ORA-01403 ("no data
+    # found") is the end-of-fetch marker, 0 is success (PROTOCOL.md §19.2). We
+    # only need the status + error code; the message DALC trailing the fixed
+    # middle is left to from_ora_code() in the caller.
+    Rest = Rest[1:]                                  # OER token
+    (RowsThisFetch, Rest) = decode_ub4(Rest)
+    (ErrCode, Rest) = decode_ub4(Rest)
+    return (RowsThisFetch, ErrCode, Rest)
+
+def decode_fv2_exec_response(Data: bytes, Columns: list) -> tuple[list, int]:
+    # Walk the fv2 (9i) execute+fetch response stream: TTI_RXH (06) then one
+    # TTI_RXD (07) per row, terminated by the short TTI_OER (04). The 9i row
+    # framing differs from 10g+: the RXH has no trailing bit-vector / rowid, and
+    # each column value is a DALC blob followed by a 1-byte indicator. Row
+    # values themselves use the version-independent §11 decoders. Returns
+    # (rows, ora_code) where ora_code 1403 == end-of-fetch (PROTOCOL.md §19.2).
+    from oracle.types import decode_value
+    Rows: list = []
+    ErrCode = 0
+    Rest = Data
+    while Rest:
+        Token = Rest[0]
+        if Token == TTI_RXH:
+            # token + 1B flags, then a run of small ub4 counts (numreq, iter,
+            # numiters, buffer length, …). The count of trailing fields varies,
+            # so consume ub4s until the next token appears. Safe because every
+            # RXH field is a small value (width byte 0x00/0x01), never a token
+            # byte (RXD 0x07 / OER 0x04 / RXH 0x06).
+            Rest = Rest[2:]
+            while Rest and Rest[0] not in (TTI_RXD, TTI_OER, TTI_RXH):
+                (_, Rest) = decode_ub4(Rest)
+        elif Token == TTI_RXD:
+            Rest = Rest[1:]
+            Row = []
+            for Col in Columns:
+                (Val, Rest) = decode_dalc(Rest)
+                # Per-column indicator: 0x00 = value present (one byte); 0x81 =
+                # NULL, a two-byte (81 01) marker following an empty value.
+                if Rest and Rest[0] == 0x81:
+                    Rest = Rest[2:]
+                    Row.append(None)
+                else:
+                    Rest = Rest[1:]
+                    Row.append(decode_value(Col, Val))
+            Rows.append(Row)
+        elif Token == TTI_OER:
+            (_, ErrCode, Rest) = _decode_fv2_oer(Rest)
+            break
+        else:
+            break
+    return (Rows, ErrCode)
 
 def encode_dictionary_lobops(Dictionary: dict) -> bytes:
     # TTI_LOBOPS request. See docs/PROTOCOL.md §14 for the field layout.
