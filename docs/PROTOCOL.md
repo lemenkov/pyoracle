@@ -1793,3 +1793,22 @@ statement — no describe, no fetch. The response is an RPA piggyback followed b
 the short OER whose **first field is the affected-row count** (ORA code 0 =
 success). 9i's parse carries no autocommit bit, so the client issues an explicit
 `TTI_COMMIT` when autocommit is on (verified to persist on 9.2.0.4).
+
+### 19.4 Errors, ROWID, and unsupported types (#102)
+
+A parse/execute that fails returns the **short OER** as the response (in place
+of the RPA), e.g. `04 00 02 03 ae … 28 'ORA-00942: …'`: field 1 is 0, field 2 the
+ORA code, and the trailing length-prefixed string is the message. The fv2 path
+checks the parse response for this and raises the real code + text rather than
+marching on into a desync.
+
+**ROWID** is requested in the define block as **VARCHAR(128)** (deftype `0x01`,
+not the native ROWID type 11) — exactly as JDBC does — so it returns as the
+familiar 18-char rowid string; the native ROWID return form desyncs the row
+stream (ORA-01002).
+
+**LONG / LONG RAW / CLOB / BLOB / BFILE** need streamed or LOB-locator framing
+the fv2 path does not yet implement; a `SELECT` of such a column would desync the
+server (ORA-01002), so the driver detects them in the describe and raises
+`NotSupportedError` before the execute. Transactions (`COMMIT` / `ROLLBACK`) work
+unchanged on 9i.

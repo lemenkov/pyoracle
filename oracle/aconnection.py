@@ -38,7 +38,8 @@ from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
                         FIELD_VERSION_12_1, FIELD_VERSION_21_1)
 from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe,
                         encode_o7_exec, encode_o7_close, decode_fv2_describe,
-                        decode_fv2_exec_response, decode_fv2_dml_response)
+                        decode_fv2_exec_response, decode_fv2_dml_response,
+                        decode_fv2_oer_error)
 from oracle.connection import _format_version, _MAX_REDIRECTS
 from oracle.tns_consts import (
     CONN_STATE_AUTHENTICATED, CONN_STATE_AUTH_NEGOTIATE,
@@ -555,6 +556,15 @@ class AsyncOracleConnect:
         await self.send(TNS_DATA, encode_o3logon_phase2(
             self._next_seq(), UserB, PwdField))
 
+    def _fv2_raise_for_error(self, Packet: bytes) -> None:
+        # Raise the server's error if `Packet` is a 9i OER with a real ORA code
+        # (mirror of OracleConnect._fv2_raise_for_error, #102).
+        (ErrCode, Message) = decode_fv2_oer_error(Packet)
+        if ErrCode and ErrCode not in (0, 1403):
+            from oracle.exceptions import from_ora_code
+            raise from_ora_code(ErrCode)(
+                Message or f"ORA-{ErrCode:05d}", code=ErrCode)
+
     async def _execute_fv2_dml(self, Query: str,
                                Bind: list | None = None) -> object:
         # Async port of OracleConnect._execute_fv2_dml (#101).
@@ -565,6 +575,7 @@ class AsyncOracleConnect:
         if Resp is False:
             raise Exception("Connection closed during 9i DML")
         (_, Packet) = Resp
+        self._fv2_raise_for_error(Packet)            # e.g. ORA-00942
         (RowCount, ErrCode) = decode_fv2_dml_response(Packet)
         await self.send(TNS_DATA, encode_o7_close(0))
         await self._next_data_packet()
@@ -581,13 +592,24 @@ class AsyncOracleConnect:
         await self.send(TNS_DATA, encode_o7_open(0))
         await self._next_data_packet()               # OOPEN RPA (cursor id)
         await self.send(TNS_DATA, encode_o7_parse(0, Query, Bind))
-        await self._next_data_packet()               # parse RPA ack
+        Resp = await self._next_data_packet()        # parse ack — or an OER
+        if Resp is not False:
+            self._fv2_raise_for_error(Resp[1])       # e.g. ORA-00942
         await self.send(TNS_DATA, encode_o7_describe(0))
         Resp = await self._next_data_packet()
         if Resp is False:
             raise Exception("Connection closed during 9i describe")
         (_, Packet) = Resp
         Columns = decode_fv2_describe(Packet)
+        _Bad = [C for C in Columns
+                if C.get('data_type') in (8, 24, 112, 113, 114)]
+        if _Bad:
+            await self.send(TNS_DATA, encode_o7_close(0))
+            await self._next_data_packet()
+            from oracle.exceptions import NotSupportedError
+            raise NotSupportedError(
+                f"Oracle 9i: column data type {_Bad[0]['data_type']} "
+                f"(LONG/LOB) not yet supported on the fv2 path (#102)")
         # Fetch in batches: re-send the same exec+fetch TTI_ALL7 until the
         # server returns ORA-01403 (#99). Mirrors the sync path.
         AllRows: list = []

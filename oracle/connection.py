@@ -11,7 +11,8 @@ from oracle.tns import exec_oac_signature
 from oracle.tns import set_decode_dml_rowcounts
 from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe, encode_o7_exec,
                         encode_o7_close, decode_fv2_describe,
-                        decode_fv2_exec_response, decode_fv2_dml_response)
+                        decode_fv2_exec_response, decode_fv2_dml_response,
+                        decode_fv2_oer_error)
 from oracle.exceptions import OperationalError
 from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
                         FIELD_VERSION_12_1, FIELD_VERSION_21_1)
@@ -548,6 +549,16 @@ class OracleConnect:
                 self._cursor_cache.pop(Oldest, None)
         return self._drain_cursor(Result)
 
+    def _fv2_raise_for_error(self, Packet: bytes) -> None:
+        # Raise the server's error if `Packet` is a 9i OER carrying a real ORA
+        # code (not success/end-of-fetch). Lets a parse-time failure surface as
+        # its true code + message instead of a downstream desync (#102).
+        (ErrCode, Message) = decode_fv2_oer_error(Packet)
+        if ErrCode and ErrCode not in (0, 1403):
+            from oracle.exceptions import from_ora_code
+            raise from_ora_code(ErrCode)(
+                Message or f"ORA-{ErrCode:05d}", code=ErrCode)
+
     def _execute_fv2(self, Query: str, Bind: list | None = None) -> object:
         # Oracle 9i (field version 2) SELECT: the four-call TTI_ALL7 sequence
         # (PROTOCOL.md §19) — parse, describe columns, execute+fetch, close.
@@ -556,13 +567,27 @@ class OracleConnect:
         self.send(TNS_DATA, encode_o7_open(0))       # allocate a server cursor
         self._next_data_packet()                     # OOPEN RPA (cursor id)
         self.send(TNS_DATA, encode_o7_parse(0, Query, Bind))
-        self._next_data_packet()                     # parse RPA ack
+        Resp = self._next_data_packet()              # parse RPA ack — or an OER
+        if Resp is not False:                        # surface a parse error
+            self._fv2_raise_for_error(Resp[1])       # (e.g. ORA-00942)
         self.send(TNS_DATA, encode_o7_describe(0))
         Resp = self._next_data_packet()
         if Resp is False:
             raise Exception("Connection closed during 9i describe")
         (_, Packet) = Resp
         Columns = decode_fv2_describe(Packet)
+        # LONG / LONG RAW / CLOB / BLOB / BFILE need streamed or locator framing
+        # not yet implemented for the fv2 path (#102); sending the exec for them
+        # desyncs the server (ORA-01002). Fail clearly before that instead.
+        _Bad = [C for C in Columns
+                if C.get('data_type') in (8, 24, 112, 113, 114)]
+        if _Bad:
+            self.send(TNS_DATA, encode_o7_close(0))
+            self._next_data_packet()
+            from oracle.exceptions import NotSupportedError
+            raise NotSupportedError(
+                f"Oracle 9i: column data type {_Bad[0]['data_type']} "
+                f"(LONG/LOB) not yet supported on the fv2 path (#102)")
         # Execute, then fetch in batches: each batch is the SAME exec+fetch
         # TTI_ALL7 re-sent; the server continues the cursor and signals the end
         # with ORA-01403 (#99). A batch with no rows also terminates the loop so
@@ -600,6 +625,7 @@ class OracleConnect:
         if Resp is False:
             raise Exception("Connection closed during 9i DML")
         (_, Packet) = Resp
+        self._fv2_raise_for_error(Packet)            # e.g. ORA-00942 / constraint
         (RowCount, ErrCode) = decode_fv2_dml_response(Packet)
         self.send(TNS_DATA, encode_o7_close(0))
         self._next_data_packet()                     # close STA

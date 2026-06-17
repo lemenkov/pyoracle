@@ -62,6 +62,7 @@ from oracle.tns_consts import (
     TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_JSON, TNS_TYPE_LONG,
     TNS_TYPE_LONGRAW, TNS_TYPE_VECTOR,
     TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_REFCURSOR, TNS_TYPE_RID,
+    TNS_TYPE_ROWID,
     TNS_TYPE_CHAR,
     TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_UROWID, TNS_TYPE_VARCHAR,
     TTI_LOBOPS,
@@ -1676,17 +1677,22 @@ def _o7_define_entry(Col: dict) -> bytes:
     # buffer size, everything else the described max. charset defaults to 31
     # (the server DB charset JDBC requests) unless the column is national.
     Type = Col['data_type']
+    Csfrm = Col.get('csfrm') or 0
     if Type == TNS_TYPE_NUMBER:
         DefType, MaxSize = 0x06, 22
     elif Type == TNS_TYPE_DATE:
         DefType, MaxSize = TNS_TYPE_DATE, 7
     elif Type in (TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ, 181):
         DefType, MaxSize = Type, 13
+    elif Type in (TNS_TYPE_RID, TNS_TYPE_ROWID, TNS_TYPE_UROWID):
+        # Request ROWID as VARCHAR so the server returns its text form (what
+        # JDBC does); the native ROWID return form desyncs the fv2 row stream
+        # (ORA-01002). The value arrives as the familiar 18-char rowid string.
+        DefType, MaxSize, Csfrm = TNS_TYPE_VARCHAR, 128, 0
     else:
         DefType, MaxSize = Type, Col.get('max_size') or 0
     Flag = 0x21 if Type == TNS_TYPE_CHAR else 0x01
     Charset = Col.get('charset') or 31
-    Csfrm = Col.get('csfrm') or 0
     return (bytes([DefType, Flag, 0, 0]) + encode_sb4(MaxSize)
             + bytes([0, 0, 0, 0]) + encode_sb4(Charset) + bytes([Csfrm]))
 
@@ -1764,6 +1770,25 @@ def _decode_fv2_oer(Rest: bytes) -> tuple[int, int, bytes]:
     (ErrCode, Rest) = decode_ub4(Rest)
     return (RowsThisFetch, ErrCode, Rest)
 
+def decode_fv2_oer_error(Packet: bytes) -> tuple[int, str | None]:
+    # If `Packet` is a 9i OER token, return its (ora_code, message); otherwise
+    # (0, None). Used to surface a parse/execute-time server error (e.g.
+    # ORA-00942) with the server's own text instead of letting the caller march
+    # on into a desync (#102). The human-readable "ORA-NNNNN: ..." is the
+    # trailing length-prefixed string; the fixed middle fields between the error
+    # code and it are version-specific, so locate the message as the final DALC
+    # rather than walking every field.
+    if not Packet or Packet[0] != TTI_OER:
+        return (0, None)
+    (_Rows, ErrCode, Rest) = _decode_fv2_oer(Packet)
+    Message = None
+    for I in range(len(Rest)):
+        Length = Rest[I]
+        if Length and I + 1 + Length == len(Rest):
+            Message = bytes(Rest[I + 1:]).decode('utf-8', errors='replace').rstrip()
+            break
+    return (ErrCode, Message)
+
 def decode_fv2_exec_response(Data: bytes, Columns: list) -> tuple[list, int]:
     # Walk the fv2 (9i) execute+fetch response stream: TTI_RXH (06) then one
     # TTI_RXD (07) per row, terminated by the short TTI_OER (04). The 9i row
@@ -1796,6 +1821,14 @@ def decode_fv2_exec_response(Data: bytes, Columns: list) -> tuple[list, int]:
                 if Rest and Rest[0] == 0x81:
                     Rest = Rest[2:]
                     Row.append(None)
+                elif Col.get('data_type') in (TNS_TYPE_RID, TNS_TYPE_ROWID,
+                                              TNS_TYPE_UROWID):
+                    # Defined as VARCHAR (see _o7_define_entry), so the value is
+                    # already the rowid text — decode it directly, not via the
+                    # native ROWID decoder.
+                    Rest = Rest[1:]
+                    Row.append(bytes(Val).decode('ascii', 'replace')
+                               if Val else None)
                 else:
                     Rest = Rest[1:]
                     Row.append(decode_value(Col, Val))
