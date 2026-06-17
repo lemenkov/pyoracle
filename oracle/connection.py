@@ -16,7 +16,8 @@ from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe, enc
                         decode_fv2_oer_error, decode_fv2_block_out,
                         encode_o7_lob_getlen,
                         encode_o7_lob_read, decode_fv2_lob_getlen,
-                        decode_fv2_lob_chunks)
+                        decode_fv2_lob_chunks, encode_o7_bfile_open,
+                        encode_o7_bfile_close, decode_fv2_opened_locator)
 from oracle.exceptions import OperationalError
 from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
                         FIELD_VERSION_12_1, FIELD_VERSION_21_1)
@@ -582,19 +583,10 @@ class OracleConnect:
             raise Exception("Connection closed during 9i describe")
         (_, Packet) = Resp
         Columns = decode_fv2_describe(Packet)
-        # CLOB (112) / BLOB (113) are read by the two-call TTI_LOBOPS sequence
-        # below. BFILE (114) still needs its own fv2 FILE_OPEN/READ/CLOSE
-        # framing (untested on 9i), so sending the exec for it would desync the
-        # server (ORA-01002) — fail clearly. (LONG / LONG RAW are handled inline,
-        # see decode_fv2_exec_response.) (#102)
-        _Bad = [C for C in Columns if C.get('data_type') in (114,)]
-        if _Bad:
-            self.send(TNS_DATA, encode_o7_close(0))
-            self._next_data_packet()
-            from oracle.exceptions import NotSupportedError
-            raise NotSupportedError(
-                f"Oracle 9i: column data type {_Bad[0]['data_type']} "
-                f"(BFILE) not yet supported on the fv2 path (#102)")
+        # CLOB (112) / BLOB (113) are read by the two-call TTI_LOBOPS GETLEN +
+        # READ, BFILE (114) by FILE_OPEN/READ/CLOSE — all resolved before the
+        # cursor close, see _resolve_fv2_lobs. (LONG / LONG RAW are handled inline
+        # in decode_fv2_exec_response.) (#102)
         # Execute, then fetch in batches: each batch is the SAME exec+fetch
         # TTI_ALL7 re-sent; the server continues the cursor and signals the end
         # with ORA-01403 (#99). A batch with no rows also terminates the loop so
@@ -639,6 +631,35 @@ class OracleConnect:
         self.send(TNS_DATA, encode_o7_lob_read(0, Locator, Amount))
         return self._read_fv2_lob_content()
 
+    def _bfile_read_fv2(self, Locator: bytes) -> bytes:
+        # 9i (fv2) BFILE read: FILE_OPEN → GETLEN → READ → FILE_CLOSE over
+        # TTI_LOBOPS (PROTOCOL §19.8). FILE_OPEN returns an *updated* locator
+        # (open flag set); GETLEN/READ/CLOSE must use that one. Returns the file
+        # bytes. The FILE_CLOSE runs in a finally so an opened file is always
+        # closed even if the read fails.
+        self.send(TNS_DATA, encode_o7_bfile_open(0, Locator))
+        Resp = self._next_data_packet(b"", b"")
+        if Resp is False:
+            raise Exception("Connection closed during 9i BFILE FILE_OPEN")
+        self._fv2_raise_for_error(Resp[1])           # e.g. ORA-22285
+        Opened = decode_fv2_opened_locator(Resp[1])
+        if Opened is None:
+            raise Exception("Unexpected 9i BFILE FILE_OPEN reply",
+                            Resp[1][:8].hex())
+        try:
+            self.send(TNS_DATA, encode_o7_lob_getlen(0, Opened))
+            Resp = self._next_data_packet(b"", b"")
+            if Resp is False:
+                raise Exception("Connection closed during 9i BFILE GETLEN")
+            Amount = decode_fv2_lob_getlen(Resp[1])
+            if Amount <= 0:
+                return b""
+            self.send(TNS_DATA, encode_o7_lob_read(0, Opened, Amount))
+            return self._read_fv2_lob_content()
+        finally:
+            self.send(TNS_DATA, encode_o7_bfile_close(0, Opened))
+            self._next_data_packet(b"", b"")         # drain FILE_CLOSE RPA + OER
+
     def _read_fv2_lob_content(self) -> bytes:
         # Read the content of a 9i (fv2) TTI_LOBOPS READ reply by accumulating
         # packets and re-parsing with decode_fv2_lob_chunks until it reports the
@@ -663,7 +684,10 @@ class OracleConnect:
         for Row in Rows:
             for I, Val in enumerate(Row):
                 if isinstance(Val, LOB):
-                    Content = self._lob_read_fv2(Val.raw)
+                    if Val.data_type == 114:        # BFILE: open / read / close
+                        Content = self._bfile_read_fv2(Val.raw)
+                    else:                           # CLOB / BLOB: GETLEN + READ
+                        Content = self._lob_read_fv2(Val.raw)
                     Row[I] = decode_fv2_lob(Columns[I].get('data_type'),
                                             Content,
                                             Columns[I].get('charset') or 0)
