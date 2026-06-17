@@ -11,7 +11,7 @@ from oracle.tns import exec_oac_signature
 from oracle.tns import set_decode_dml_rowcounts
 from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe, encode_o7_exec,
                         encode_o7_close, decode_fv2_describe,
-                        decode_fv2_exec_response)
+                        decode_fv2_exec_response, decode_fv2_dml_response)
 from oracle.exceptions import OperationalError
 from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
                         FIELD_VERSION_12_1, FIELD_VERSION_21_1)
@@ -464,8 +464,14 @@ class OracleConnect:
         # Oracle 9i (field version < 10g) speaks the old TTI_ALL7 query dialect,
         # not the TTI_ALL8 the rest of execute() builds. Route SELECTs through
         # the dedicated four-call fv2 path (#97, PROTOCOL.md §19).
-        if Head.startswith('SELECT') and self.field_version < FIELD_VERSION_10_2:
-            return self._drain_cursor(self._execute_fv2(Query, Bind))
+        if self.field_version < FIELD_VERSION_10_2:
+            if Head.startswith('SELECT'):
+                return self._drain_cursor(self._execute_fv2(Query, Bind))
+            # DML (INSERT/UPDATE/DELETE) over the fv2 TTI_ALL7 path (#101).
+            # PL/SQL blocks (BEGIN/DECLARE) are not yet supported on 9i (#102),
+            # so fall through to the ALL8 path (which will error) for those.
+            if not (Head.startswith('BEGIN') or Head.startswith('DECLARE')):
+                return self._execute_fv2_dml(Query, Bind)
         if Head.startswith('SELECT'):
             Type = 'select'
         elif Head.startswith('BEGIN') or Head.startswith('DECLARE'):
@@ -581,6 +587,28 @@ class OracleConnect:
         # (call_status, ora_code, cursor_id, (rowcount, row_format), rows, ...)
         # call_status 0 + ora_code 0 => _drain_cursor won't issue TTI_FETCHes.
         return (0, 0, 0, (len(AllRows), Columns), AllRows, None, None, [], None)
+
+    def _execute_fv2_dml(self, Query: str, Bind: list | None = None) -> object:
+        # Oracle 9i DML over TTI_ALL7 (#101): OOPEN, then a single parse that
+        # also executes the statement (option 02 80 21) — no describe/fetch. The
+        # affected-row count comes back in the response OER. Commit explicitly
+        # when autocommit is on (9i's parse doesn't carry an autocommit bit).
+        self.send(TNS_DATA, encode_o7_open(0))
+        self._next_data_packet()                     # OOPEN RPA
+        self.send(TNS_DATA, encode_o7_parse(0, Query, Bind))
+        Resp = self._next_data_packet()
+        if Resp is False:
+            raise Exception("Connection closed during 9i DML")
+        (_, Packet) = Resp
+        (RowCount, ErrCode) = decode_fv2_dml_response(Packet)
+        self.send(TNS_DATA, encode_o7_close(0))
+        self._next_data_packet()                     # close STA
+        if ErrCode and ErrCode not in (0, 1403):
+            from oracle.exceptions import from_ora_code
+            raise from_ora_code(ErrCode)(f"ORA-{ErrCode:05d}", code=ErrCode)
+        if self.autocommit:
+            self.commit()
+        return (0, 0, 0, (RowCount, None), [], None, None, [], None)
 
     def _drain_cursor(self, Result: object) -> object:
         # The EXEC response either bundles all rows inline (small SELECTs,

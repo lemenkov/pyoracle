@@ -1773,3 +1773,23 @@ a present value is followed by a single `0x00`; a **NULL** column is an empty
 value (`0x00`) followed by the two-byte marker **`0x81 0x01`**. Missing the
 wider NULL indicator silently truncates the row stream (consumes one byte too
 few and desyncs the following rows).
+
+A result set larger than the fetch-array size is drained by **re-sending the
+same exec+fetch `TTI_ALL7`** — the server continues the cursor and ends with
+ORA-01403 (#99; verified: 28 rows arrive as 10 + 10 + 8 across three identical
+exec calls).
+
+### 19.3 Binds and DML
+
+**Binds** (#100) ride in the **parse** call, not the execute: the option word
+flips `02 80 21` → `02 80 29`, a bind-count field precedes the SQL, and after the
+SQL trailer each bind's OAC (the same 13/14-byte descriptor as a define entry) is
+appended, followed by a single `TTI_RXD` (`0x07`) carrying all the bind values in
+order. The describe/execute calls are unchanged.
+
+**DML** (INSERT/UPDATE/DELETE, #101) is simpler than a query: `OOPEN` then a
+single `TTI_ALL7` parse (`02 80 21`, with binds if any) that *also executes* the
+statement — no describe, no fetch. The response is an RPA piggyback followed by
+the short OER whose **first field is the affected-row count** (ORA code 0 =
+success). 9i's parse carries no autocommit bit, so the client issues an explicit
+`TTI_COMMIT` when autocommit is on (verified to persist on 9.2.0.4).

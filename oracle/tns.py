@@ -1807,6 +1807,31 @@ def decode_fv2_exec_response(Data: bytes, Columns: list) -> tuple[list, int]:
             break
     return (Rows, ErrCode)
 
+def decode_fv2_dml_response(Data: bytes) -> tuple[int, int]:
+    # 9i DML (INSERT/UPDATE/DELETE) over TTI_ALL7: a single parse-executes the
+    # statement; the response is an RPA piggyback followed by the short OER
+    # whose first field is the affected-row count and second the ORA code
+    # (0 = success). Returns (rowcount, ora_code). #101.
+    if not Data:
+        return (0, 0)
+    Rest = Data
+    if Rest[0] == TTI_RPA:
+        # Skip the RPA piggyback (same shape as decode_token_rpa_piggyback):
+        # read the field count, consume that many ub4s, skip alignment zeros,
+        # leaving the stream on the trailing OER token.
+        Rest = Rest[1:]
+        (Num, Rest) = decode_ub4(Rest)
+        for _ in range(max(Num, 0)):
+            if not Rest or Rest[0] in (TTI_OER, TTI_RXH, TTI_RXD, TTI_STA):
+                break
+            (_, Rest) = decode_ub4(Rest)
+        while Rest and Rest[0] == 0:
+            Rest = Rest[1:]
+    if Rest and Rest[0] == TTI_OER:
+        (RowCount, ErrCode, _) = _decode_fv2_oer(Rest)
+        return (RowCount, ErrCode)
+    return (0, 0)
+
 def encode_dictionary_lobops(Dictionary: dict) -> bytes:
     # TTI_LOBOPS request. See docs/PROTOCOL.md §14 for the field layout.
     # This builds a READ request specifically (operation = 0x0002) since
