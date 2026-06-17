@@ -13,7 +13,8 @@ from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe, enc
                         encode_o7_close, encode_o7_block, encode_tokens_rxd,
                         decode_fv2_describe,
                         decode_fv2_exec_response, decode_fv2_dml_response,
-                        decode_fv2_oer_error, encode_o7_lob_getlen,
+                        decode_fv2_oer_error, decode_fv2_block_out,
+                        encode_o7_lob_getlen,
                         encode_o7_lob_read, decode_fv2_lob_getlen,
                         decode_fv2_lob_chunks)
 from oracle.exceptions import OperationalError
@@ -692,13 +693,24 @@ class OracleConnect:
 
     def _execute_fv2_block(self, Query: str, Bind: list | None = None) -> object:
         # Anonymous PL/SQL block over the fv2 TTI_ALL7 block path (#102,
-        # PROTOCOL §19.6; IN binds only). OOPEN, then encode_o7_block parse-
-        # executes the block. With binds the server replies with a "send the
-        # binds" prompt (it does NOT take inline values like DML); we then send
-        # the values as a standalone RXD and read the final RPA + OER. Without
-        # binds the parse-execute returns the RPA + OER directly. Commit
-        # explicitly when autocommit is on.
+        # PROTOCOL §19.6 / §19.7). OOPEN, then encode_o7_block parse-executes the
+        # block carrying an OAC per bind (no inline values — blocks don't use the
+        # DML 0x8000 inline-values mode). The server then replies with a bind
+        # prompt; the client sends the INPUT values (IN + IN OUT binds, in
+        # position order) as a standalone RXD, and the reply carries any OUT /
+        # IN OUT return values (an RXD before the RPA + OER). A pure-OUT block
+        # packs the prompt, the return values and the status into one packet and
+        # expects no input; a no-bind block returns the RPA + OER directly. OUT
+        # values are handed back as an {out_positions, out_values} record the
+        # cursor's _assign_out_binds decodes into the Var objects.
+        from oracle.datatypes import Var
         Bind = Bind or []
+        # IN + IN OUT binds carry an input value to send; every Var is an OUT
+        # (its returned value comes back). IN OUT = a Var with has_value set.
+        InputValues = [(B._value if isinstance(B, Var) else B)
+                       for B in Bind
+                       if not isinstance(B, Var) or B.has_value]
+        OutPositions = [I for I, B in enumerate(Bind) if isinstance(B, Var)]
         self.send(TNS_DATA, encode_o7_open(0))
         self._next_data_packet()                     # OOPEN RPA
         self.send(TNS_DATA, encode_o7_block(0, Query, Bind))
@@ -706,18 +718,18 @@ class OracleConnect:
         if Resp is False:
             raise Exception("Connection closed during 9i PL/SQL block")
         (_, Packet) = Resp
-        if Bind:
-            # A parse/compile error arrives here as an OER (e.g. ORA-06550);
-            # otherwise the packet is the bind prompt. Send the values either
-            # way — the prompt carries no data we need.
+        if InputValues:
+            # `Packet` is the bind prompt (or an OER on a compile error). Send
+            # the input values; the reply carries OUT values + RPA + OER.
             self._fv2_raise_for_error(Packet)
-            self.send(TNS_DATA, encode_tokens_rxd(Bind, b""))
+            self.send(TNS_DATA, encode_tokens_rxd(InputValues, b""))
             Resp = self._next_data_packet()
             if Resp is False:
                 raise Exception("Connection closed during 9i PL/SQL bind send")
             (_, Packet) = Resp
         self._fv2_raise_for_error(Packet)            # runtime error (ORA-06512 …)
-        (RowCount, ErrCode) = decode_fv2_dml_response(Packet)
+        (OutValues, RowCount, ErrCode) = decode_fv2_block_out(
+            Packet, len(OutPositions))
         self.send(TNS_DATA, encode_o7_close(0))
         self._next_data_packet()                     # close STA
         if ErrCode and ErrCode not in (0, 1403):
@@ -725,6 +737,9 @@ class OracleConnect:
             raise from_ora_code(ErrCode)(f"ORA-{ErrCode:05d}", code=ErrCode)
         if self.autocommit:
             self.commit()
+        if OutPositions:
+            Record = {'out_positions': OutPositions, 'out_values': OutValues}
+            return (0, 0, 0, (None, None), [Record], None, None, [], None)
         return (0, 0, 0, (RowCount, None), [], None, None, [], None)
 
     def _drain_cursor(self, Result: object) -> object:

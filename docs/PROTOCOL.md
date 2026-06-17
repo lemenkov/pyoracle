@@ -1878,6 +1878,37 @@ ORA-06512) surfaces from the OER via `_fv2_raise_for_error`, and the connection
 stays usable afterward. `encode_o7_block` builds the request and
 `OracleConnect._execute_fv2_block` (+ the async port) drives the sequence.
 
-**Scope:** IN binds only. OUT / IN OUT binds (the value the server returns in its
-reply) are a separate follow-up — they extend this same block exec with the
-return-bind (IOV) decode.
+OUT / IN OUT binds extend this same flow — see §19.7.
+
+### 19.7 PL/SQL block OUT / IN OUT binds (#102)
+
+The bind **direction is not encoded in the OAC or the option word** — a block
+with OUT binds is the same `02 04 29` parse-execute, with one OAC per bind in
+position order (every bind, regardless of direction). For a `Var` the OAC carries
+its registered type and return-buffer size (NUMBER → VARNUM(6)/22; VARCHAR →
+the Var size, default `0x7fff`). The server infers each bind's direction from the
+block and signals it in the prompt; the round-trip then differs by direction:
+
+- **Bind prompt** `0b 05 01 <numbinds> 00 01 01 00` + a direction section — one
+  mask per bind, `0x20` = IN, `0x10` = OUT, `0x30` = IN OUT. Its length varies
+  (the live server pads with a leading `00`), so the driver scans past the 8-byte
+  fixed prefix to the first RXD/RPA token rather than computing it
+  (`strip_fv2_bind_prompt`).
+- **Input values** (client → server): a `TTI_RXD` with the values of the **IN and
+  IN OUT** binds, in position order, skipping pure-OUT binds. Sent only when at
+  least one such bind exists.
+- **Return values** (server → client): a `TTI_RXD` carrying one `DALC value +
+  1-byte indicator` per **OUT and IN OUT** bind, in position order, skipping
+  pure-IN binds, immediately before the RPA + OER (`decode_fv2_block_out`).
+
+A **pure-OUT** block (no IN/IN OUT bind) needs no input frame: the server packs
+the prompt, the return RXD and the RPA + OER into a single reply. When inputs
+exist, the prompt is its own packet, the client sends the input RXD, and the
+return values arrive in the next reply.
+
+The returned values are handed to the cursor as the same
+`{'out_positions', 'out_values'}` record the modern IOV path produces, so
+`Cursor._assign_out_binds` decodes each by its `Var`'s type unchanged — a pure-OUT
+`Var` (`has_value` false) and an IN OUT `Var` (seeded with `setvalue`) are
+distinguished there. `_execute_fv2_block` drives the whole sequence (sync +
+async).
