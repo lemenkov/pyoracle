@@ -465,7 +465,7 @@ class OracleConnect:
         # not the TTI_ALL8 the rest of execute() builds. Route SELECTs through
         # the dedicated four-call fv2 path (#97, PROTOCOL.md §19).
         if Head.startswith('SELECT') and self.field_version < FIELD_VERSION_10_2:
-            return self._drain_cursor(self._execute_fv2(Query))
+            return self._drain_cursor(self._execute_fv2(Query, Bind))
         if Head.startswith('SELECT'):
             Type = 'select'
         elif Head.startswith('BEGIN') or Head.startswith('DECLARE'):
@@ -542,14 +542,14 @@ class OracleConnect:
                 self._cursor_cache.pop(Oldest, None)
         return self._drain_cursor(Result)
 
-    def _execute_fv2(self, Query: str) -> object:
+    def _execute_fv2(self, Query: str, Bind: list | None = None) -> object:
         # Oracle 9i (field version 2) SELECT: the four-call TTI_ALL7 sequence
         # (PROTOCOL.md §19) — parse, describe columns, execute+fetch, close.
         # Returns the same tuple shape as a normal execute response so the
         # cursor/_drain_cursor machinery is unchanged.
         self.send(TNS_DATA, encode_o7_open(0))       # allocate a server cursor
         self._next_data_packet()                     # OOPEN RPA (cursor id)
-        self.send(TNS_DATA, encode_o7_parse(0, Query))
+        self.send(TNS_DATA, encode_o7_parse(0, Query, Bind))
         self._next_data_packet()                     # parse RPA ack
         self.send(TNS_DATA, encode_o7_describe(0))
         Resp = self._next_data_packet()

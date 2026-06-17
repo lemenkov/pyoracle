@@ -471,7 +471,7 @@ class AsyncOracleConnect:
         # Oracle 9i (field version < 10g) speaks the old TTI_ALL7 query dialect
         # (#97, PROTOCOL.md §19); route SELECTs through the fv2 path.
         if Head.startswith('SELECT') and self.field_version < FIELD_VERSION_10_2:
-            return await self._drain_cursor(await self._execute_fv2(Query))
+            return await self._drain_cursor(await self._execute_fv2(Query, Bind))
         if Head.startswith('SELECT'):
             Type = 'select'
         elif Head.startswith('BEGIN') or Head.startswith('DECLARE'):
@@ -551,12 +551,12 @@ class AsyncOracleConnect:
         await self.send(TNS_DATA, encode_o3logon_phase2(
             self._next_seq(), UserB, PwdField))
 
-    async def _execute_fv2(self, Query: str) -> object:
+    async def _execute_fv2(self, Query: str, Bind: list | None = None) -> object:
         # Async port of OracleConnect._execute_fv2: the four-call (plus OOPEN)
         # Oracle 9i TTI_ALL7 SELECT sequence (#97, PROTOCOL.md §19).
         await self.send(TNS_DATA, encode_o7_open(0))
         await self._next_data_packet()               # OOPEN RPA (cursor id)
-        await self.send(TNS_DATA, encode_o7_parse(0, Query))
+        await self.send(TNS_DATA, encode_o7_parse(0, Query, Bind))
         await self._next_data_packet()               # parse RPA ack
         await self.send(TNS_DATA, encode_o7_describe(0))
         Resp = await self._next_data_packet()
