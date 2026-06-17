@@ -1714,6 +1714,76 @@ def encode_o7_close(Seq: int) -> bytes:
     # Call 4: close the cursor.
     return bytes([TTI_FUN, _O7_CLOSE_FUNC, Seq, 0x01, 0x01])
 
+# ---------------------------------------------------------------------------
+# fv2 (9i) LOB read — TTI_LOBOPS GETLEN + READ (PROTOCOL.md §19.5)
+# ---------------------------------------------------------------------------
+# 9i's TTI_LOBOPS request is far shorter than the modern (10g+) form, and JDBC
+# issues it as a *pair* per LOB cell: first GETLEN to learn the content length,
+# then READ to pull exactly that many chars (CLOB) / bytes (BLOB). The modern
+# single-shot READ returns empty on 9i. The locator is `_read_lob_column`'s
+# output (`00 54 <84-byte locator>`); its leading byte is dropped and the rest
+# (a ub1-length-prefixed block: `54 <84 bytes>`) is sent verbatim. The two
+# fixed framing blocks and the amount encoding were validated byte-for-byte
+# against cap_9i_lobread.log for both a CLOB and a BLOB. (#102)
+_O7_LOB_GETLEN_FIXED = bytes.fromhex("010156000000000001000101000000")
+_O7_LOB_READ_FIXED = bytes.fromhex("01015600000101000001000102000000")
+
+def encode_o7_lob_getlen(Seq: int, Locator: bytes) -> bytes:
+    # GETLEN: ask the server for the LOB's length. Trailer is a single 0x00
+    # (no read amount). Response carries the amount — see decode_fv2_lob_getlen.
+    return (bytes([TTI_FUN, TTI_LOBOPS, Seq]) + _O7_LOB_GETLEN_FIXED
+            + Locator[1:] + bytes([0]))
+
+def encode_o7_lob_read(Seq: int, Locator: bytes, Amount: int) -> bytes:
+    # READ: pull `Amount` chars/bytes (the value GETLEN returned) starting at
+    # offset 1. Response is `0e fe <chunks>` then an RPA + OER (read by the
+    # existing _read_lob_response loop).
+    return (bytes([TTI_FUN, TTI_LOBOPS, Seq]) + _O7_LOB_READ_FIXED
+            + Locator[1:] + encode_sb4(Amount))
+
+def decode_fv2_lob_chunks(Data: bytes) -> tuple[bytes, bool]:
+    # Parse the content of a 9i (fv2) TTI_LOBOPS READ reply: TTI_LOB (0e) then
+    # 0xfe, then `<ub1 len><bytes>` chunks ending at a zero-length chunk; the
+    # trailing RPA is ignored. Returns (content, complete). `complete` is False
+    # when the zero-length terminator hasn't been reached yet (the content
+    # spans more packets) — the caller appends the next packet and re-parses the
+    # full accumulated buffer. Unlike modern (10g+) replies the fv2 READ reply
+    # carries no `04 01 01` OER call-status (a single-row fetch happened to
+    # include one; a multi-row fetch does not), so the zero-length chunk is the
+    # only reliable terminator. (#102, PROTOCOL.md §19.5)
+    if len(Data) < 2 or Data[0] != TTI_LOB:
+        return (b"", False)
+    # Data[1] is the 0xfe chunked marker; a non-chunked single value would be
+    # `0e <len> <bytes>`, handled by treating Data[1] as the first chunk length.
+    Pos = 2 if Data[1] == 0xFE else 1
+    Content = b""
+    while Pos < len(Data):
+        ChunkLen = Data[Pos]
+        if ChunkLen == 0:
+            return (Content, True)              # zero-length chunk = end
+        if Pos + 1 + ChunkLen > len(Data):
+            break                               # chunk split across packets
+        Content += Data[Pos + 1:Pos + 1 + ChunkLen]
+        Pos += 1 + ChunkLen
+    return (Content, False)
+
+def decode_fv2_lob_getlen(Packet: bytes) -> int:
+    # GETLEN response layout: TTI_RPA (08) 00 <ub1 loclen><locator echo>
+    # <ub4 amount> TTI_OER. The amount is in chars for CLOB/NCLOB and bytes for
+    # BLOB. Returns 0 on an unexpected shape (e.g. an empty LOB) so the caller
+    # reads nothing rather than desyncing.
+    if not Packet or Packet[0] != TTI_RPA:
+        return 0
+    Pos = 2                                   # skip RPA token + its 0x00
+    if Pos >= len(Packet):
+        return 0
+    LocLen = Packet[Pos]
+    Pos += 1 + LocLen                         # skip the echoed locator
+    if Pos >= len(Packet):
+        return 0
+    (Amount, _) = decode_ub4(Packet[Pos:])
+    return Amount
+
 def _decode_oac_fv2(Rest: bytes) -> tuple[dict, bytes]:
     # fv2 column descriptor = the modern decode_token_oac field order MINUS the
     # trailing Mxlc ub4 (a later addition). The leading DataType byte is the
@@ -1801,6 +1871,7 @@ def decode_fv2_exec_response(Data: bytes, Columns: list) -> tuple[list, int]:
     # values themselves use the version-independent §11 decoders. Returns
     # (rows, ora_code) where ora_code 1403 == end-of-fetch (PROTOCOL.md §19.2).
     from oracle.types import decode_value
+    from oracle.lob import LOB
     Rows: list = []
     ErrCode = 0
     Rest = Data
@@ -1820,6 +1891,26 @@ def decode_fv2_exec_response(Data: bytes, Columns: list) -> tuple[list, int]:
             Row = []
             for Col in Columns:
                 DataType = Col.get('data_type')
+                if DataType in (112, 113):
+                    # CLOB / BLOB. A present cell is a LOB locator (ub4 num_bytes
+                    # + DALC locator) followed by a 1-byte 0x00 indicator;
+                    # _read_lob_column extracts the locator and the connection
+                    # round-trips it via TTI_LOBOPS (_lob_read_fv2). A NULL LOB
+                    # uses the scalar empty-value form instead — `00 81 01` (an
+                    # empty DALC then the `81 01` null indicator). A present
+                    # locator's num_bytes is always >= the 86-byte minimum (first
+                    # byte 0x01), so a leading 0x00 unambiguously means NULL.
+                    if Rest[:1] == b"\x00":
+                        Rest = Rest[1:]                  # empty DALC
+                        if Rest[:1] == b"\x81":
+                            Rest = Rest[2:]              # 81 01 null indicator
+                        Row.append(None)
+                    else:
+                        (Locator, Rest) = _read_lob_column(Rest)
+                        Rest = Rest[1:]                  # present indicator (0x00)
+                        Row.append(LOB(DataType, Locator)
+                                   if Locator is not None else None)
+                    continue
                 # The value is a DALC; decode_dalc handles the 0xfe chunked form
                 # that LONG / LONG RAW stream in (in batch fetch they arrive
                 # inline as a plain chunked value, no trailing descriptor).

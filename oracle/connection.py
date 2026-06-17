@@ -12,7 +12,9 @@ from oracle.tns import set_decode_dml_rowcounts
 from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe, encode_o7_exec,
                         encode_o7_close, decode_fv2_describe,
                         decode_fv2_exec_response, decode_fv2_dml_response,
-                        decode_fv2_oer_error)
+                        decode_fv2_oer_error, encode_o7_lob_getlen,
+                        encode_o7_lob_read, decode_fv2_lob_getlen,
+                        decode_fv2_lob_chunks)
 from oracle.exceptions import OperationalError
 from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
                         FIELD_VERSION_12_1, FIELD_VERSION_21_1)
@@ -576,19 +578,19 @@ class OracleConnect:
             raise Exception("Connection closed during 9i describe")
         (_, Packet) = Resp
         Columns = decode_fv2_describe(Packet)
-        # CLOB / BLOB / BFILE need LOB-locator framing not yet implemented for
-        # the fv2 path (#102); sending the exec for them desyncs the server
-        # (ORA-01002). Fail clearly before that. (LONG / LONG RAW are handled —
-        # they stream in the chunked DALC form, see decode_fv2_exec_response.)
-        _Bad = [C for C in Columns
-                if C.get('data_type') in (112, 113, 114)]
+        # CLOB (112) / BLOB (113) are read by the two-call TTI_LOBOPS sequence
+        # below. BFILE (114) still needs its own fv2 FILE_OPEN/READ/CLOSE
+        # framing (untested on 9i), so sending the exec for it would desync the
+        # server (ORA-01002) — fail clearly. (LONG / LONG RAW are handled inline,
+        # see decode_fv2_exec_response.) (#102)
+        _Bad = [C for C in Columns if C.get('data_type') in (114,)]
         if _Bad:
             self.send(TNS_DATA, encode_o7_close(0))
             self._next_data_packet()
             from oracle.exceptions import NotSupportedError
             raise NotSupportedError(
                 f"Oracle 9i: column data type {_Bad[0]['data_type']} "
-                f"(LOB) not yet supported on the fv2 path (#102)")
+                f"(BFILE) not yet supported on the fv2 path (#102)")
         # Execute, then fetch in batches: each batch is the SAME exec+fetch
         # TTI_ALL7 re-sent; the server continues the cursor and signals the end
         # with ORA-01403 (#99). A batch with no rows also terminates the loop so
@@ -605,6 +607,10 @@ class OracleConnect:
             AllRows.extend(Rows)
             if ErrCode == 1403 or not Rows:
                 break
+        # Resolve any LOB cells while the cursor is still open — JDBC reads the
+        # locators before the close, and so do we (#102). decode_fv2_exec_response
+        # left LOB objects in the rows; replace each with its content.
+        self._resolve_fv2_lobs(AllRows, Columns)
         self.send(TNS_DATA, encode_o7_close(0))
         self._next_data_packet()                     # close STA
         if ErrCode and ErrCode not in (0, 1403):
@@ -613,6 +619,50 @@ class OracleConnect:
         # (call_status, ora_code, cursor_id, (rowcount, row_format), rows, ...)
         # call_status 0 + ora_code 0 => _drain_cursor won't issue TTI_FETCHes.
         return (0, 0, 0, (len(AllRows), Columns), AllRows, None, None, [], None)
+
+    def _lob_read_fv2(self, Locator: bytes) -> bytes:
+        # 9i (fv2) LOB content read: the two-call TTI_LOBOPS GETLEN + READ
+        # (PROTOCOL.md §19.5). GETLEN returns the length; READ pulls that many
+        # chars/bytes. Returns raw bytes (CLOB decoding happens in the caller
+        # with the column charset). An empty LOB (amount 0) reads nothing.
+        self.send(TNS_DATA, encode_o7_lob_getlen(0, Locator))
+        Resp = self._next_data_packet(b"", b"")
+        if Resp is False:
+            raise Exception("Connection closed during 9i LOB GETLEN")
+        Amount = decode_fv2_lob_getlen(Resp[1])
+        if Amount <= 0:
+            return b""
+        self.send(TNS_DATA, encode_o7_lob_read(0, Locator, Amount))
+        return self._read_fv2_lob_content()
+
+    def _read_fv2_lob_content(self) -> bytes:
+        # Read the content of a 9i (fv2) TTI_LOBOPS READ reply by accumulating
+        # packets and re-parsing with decode_fv2_lob_chunks until it reports the
+        # zero-length terminator. The fv2 reply carries no OER call-status, so
+        # that terminator (not an OER) is the stop signal. (#102)
+        Data = b""
+        while True:
+            Received = self._next_data_packet(b"", b"")
+            if Received is False:
+                raise Exception("Connection closed during 9i LOB READ")
+            Data += Received[1]
+            (Content, Complete) = decode_fv2_lob_chunks(Data)
+            if Complete:
+                return Content
+
+    def _resolve_fv2_lobs(self, Rows: list, Columns: list) -> None:
+        # Replace LOB objects left by decode_fv2_exec_response with their
+        # content, in place, by round-tripping each locator (#102). Done while
+        # the 9i cursor is still open.
+        from oracle.lob import LOB
+        from oracle.types import decode_fv2_lob
+        for Row in Rows:
+            for I, Val in enumerate(Row):
+                if isinstance(Val, LOB):
+                    Content = self._lob_read_fv2(Val.raw)
+                    Row[I] = decode_fv2_lob(Columns[I].get('data_type'),
+                                            Content,
+                                            Columns[I].get('charset') or 0)
 
     def _execute_fv2_dml(self, Query: str, Bind: list | None = None) -> object:
         # Oracle 9i DML over TTI_ALL7 (#101): OOPEN, then a single parse that
