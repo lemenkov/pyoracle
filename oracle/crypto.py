@@ -12,16 +12,34 @@ from hashlib import sha512
 from secrets import token_bytes
 import sys
 
-# Note on the ancient O3LOGON handshake (8-byte DES session key via TTI_3LOGON,
-# Oracle 8i and earlier): a speculative, never-tested implementation lived here
-# and was removed (it remains in git history). It is NOT needed for 9i — a real
-# Oracle 9.2.0.4 server (#90) authenticates with the same salt-less DES O5LOGON
-# flow as 10g: an AES session key over the legacy DES verifier, no salt (the
-# both-salts-None branch in o5logon below). 8i is the only true O3LOGON consumer
-# and is effectively untestable (installers exist for old Windows only), so
-# reinstating it would need a fresh capture to validate against.
+# O3LOGON (DES): the pre-10g thin authenticator (TTI_3LOGA 0x52 -> TTI_3LOGON
+# 0x51). This is the path the Oracle JDBC thin driver uses against Oracle 9i —
+# and now pyoracle, gated on the negotiated field version (#90). (10g+ thin
+# clients instead use OSESSKEY/0x76 with an AES session key over the same DES
+# verifier; that's the o5logon path below. OCI/sqlplus uses OSESSKEY even on
+# 9i, which is why the OCI capture first misled us — the *thin* 9i path is
+# O3LOGON.) The flow: the server returns AUTH_SESSKEY (an 8-byte session key
+# DES-encrypted under the account's DES verifier); we decrypt it with the
+# verifier (`KeySess`, from des_verifier) to recover the plaintext session key,
+# then DES-encrypt the zero-padded password under it to get AUTH_PASSWORD.
+# VALIDATED 2026-06-17 against a real JDBC-thin -> 9.2.0.4 capture: verifier
+# E242A414206906CB + sesskey 83B9CF7F17B84F76 reproduces AUTH_PASSWORD
+# F18CC9AF1CE5A7E8 byte-for-byte (see tests/test_crypto.py).
+def o3logon(Sess: bytes, KeySess: bytes, Password: bytes) -> tuple[bytes, bytes, bytes]:
+    IVec = bytes(8)
+
+    cipher = DES.new(KeySess[0:8], DES.MODE_CBC, IVec)
+    SrvSess = cipher.decrypt(Sess)
+
+    N = (8 - (len(Password) % 8 )) % 8
+    CliPass = Password + bytes(N)
+
+    cipher = DES.new(SrvSess[0:8], DES.MODE_CBC, IVec)
+    AuthPass = cipher.encrypt(CliPass)
+    return (AuthPass, b"", b"")
+
 def des_verifier(User: bytes, Password: bytes) -> bytes:
-    # The classic Oracle DES password verifier (pre-11g): the
+    # The classic Oracle DES password verifier (pre-11g / O3LOGON): the
     # uppercased UTF-16BE username+password, DES-CBC encrypted under the fixed
     # key 0x0123456789ABCDEF, then DES-CBC encrypted again under the last 8
     # bytes of that — the verifier is the last 8 bytes of the second pass.

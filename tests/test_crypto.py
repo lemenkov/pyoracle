@@ -48,6 +48,24 @@ class TestCryptoValidateMethods(unittest.TestCase):
         Key = bytes([48,239,131,22,229,156,6,142,24,185,41,243,97,102,239,200,212,187,118,220,228,206,111,215])
         self.assertFalse(validate(Resp, Key))
 
+
+from oracle.crypto import o3logon, des_verifier
+
+class TestO3logon(unittest.TestCase):
+    # Pinned against a real JDBC-thin -> Oracle 9.2.0.4 handshake (#90):
+    # user PYO / password pyo123; the server returned AUTH_SESSKEY
+    # 83B9CF7F17B84F76 and the client (JDBC) answered AUTH_PASSWORD
+    # F18CC9AF1CE5A7E8. The DES verifier is the stored sys.user$.password.
+    def test_des_verifier_matches_stored(self):
+        self.assertEqual(des_verifier(b"PYO", b"pyo123").hex().upper(),
+                         "E242A414206906CB")
+
+    def test_o3logon_reproduces_captured_auth_password(self):
+        Verifier = des_verifier(b"PYO", b"pyo123")
+        SessKey = unhexlify("83B9CF7F17B84F76")
+        (AuthPass, _, _) = o3logon(SessKey, Verifier, b"pyo123")
+        self.assertEqual(AuthPass[:8].hex().upper(), "F18CC9AF1CE5A7E8")
+
 from oracle.crypto import bin_xor
 from oracle.crypto import cat_key
 from oracle.crypto import conn_key
