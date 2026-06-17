@@ -557,12 +557,22 @@ class OracleConnect:
             raise Exception("Connection closed during 9i describe")
         (_, Packet) = Resp
         Columns = decode_fv2_describe(Packet)
-        self.send(TNS_DATA, encode_o7_exec(0, Columns))
-        Resp = self._next_data_packet()
-        if Resp is False:
-            raise Exception("Connection closed during 9i fetch")
-        (_, Packet) = Resp
-        (Rows, ErrCode) = decode_fv2_exec_response(Packet, Columns)
+        # Execute, then fetch in batches: each batch is the SAME exec+fetch
+        # TTI_ALL7 re-sent; the server continues the cursor and signals the end
+        # with ORA-01403 (#99). A batch with no rows also terminates the loop so
+        # a malformed response can't spin forever.
+        AllRows: list = []
+        ErrCode = 0
+        while True:
+            self.send(TNS_DATA, encode_o7_exec(0, Columns))
+            Resp = self._next_data_packet()
+            if Resp is False:
+                raise Exception("Connection closed during 9i fetch")
+            (_, Packet) = Resp
+            (Rows, ErrCode) = decode_fv2_exec_response(Packet, Columns)
+            AllRows.extend(Rows)
+            if ErrCode == 1403 or not Rows:
+                break
         self.send(TNS_DATA, encode_o7_close(0))
         self._next_data_packet()                     # close STA
         if ErrCode and ErrCode not in (0, 1403):
@@ -570,7 +580,7 @@ class OracleConnect:
             raise from_ora_code(ErrCode)(f"ORA-{ErrCode:05d}", code=ErrCode)
         # (call_status, ora_code, cursor_id, (rowcount, row_format), rows, ...)
         # call_status 0 + ora_code 0 => _drain_cursor won't issue TTI_FETCHes.
-        return (0, 0, 0, (len(Rows), Columns), Rows, None, None, [], None)
+        return (0, 0, 0, (len(AllRows), Columns), AllRows, None, None, [], None)
 
     def _drain_cursor(self, Result: object) -> object:
         # The EXEC response either bundles all rows inline (small SELECTs,

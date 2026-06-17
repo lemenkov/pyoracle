@@ -564,18 +564,26 @@ class AsyncOracleConnect:
             raise Exception("Connection closed during 9i describe")
         (_, Packet) = Resp
         Columns = decode_fv2_describe(Packet)
-        await self.send(TNS_DATA, encode_o7_exec(0, Columns))
-        Resp = await self._next_data_packet()
-        if Resp is False:
-            raise Exception("Connection closed during 9i fetch")
-        (_, Packet) = Resp
-        (Rows, ErrCode) = decode_fv2_exec_response(Packet, Columns)
+        # Fetch in batches: re-send the same exec+fetch TTI_ALL7 until the
+        # server returns ORA-01403 (#99). Mirrors the sync path.
+        AllRows: list = []
+        ErrCode = 0
+        while True:
+            await self.send(TNS_DATA, encode_o7_exec(0, Columns))
+            Resp = await self._next_data_packet()
+            if Resp is False:
+                raise Exception("Connection closed during 9i fetch")
+            (_, Packet) = Resp
+            (Rows, ErrCode) = decode_fv2_exec_response(Packet, Columns)
+            AllRows.extend(Rows)
+            if ErrCode == 1403 or not Rows:
+                break
         await self.send(TNS_DATA, encode_o7_close(0))
         await self._next_data_packet()               # close STA
         if ErrCode and ErrCode not in (0, 1403):
             from oracle.exceptions import from_ora_code
             raise from_ora_code(ErrCode)(f"ORA-{ErrCode:05d}", code=ErrCode)
-        return (0, 0, 0, (len(Rows), Columns), Rows, None, None, [], None)
+        return (0, 0, 0, (len(AllRows), Columns), AllRows, None, None, [], None)
 
     async def _drain_cursor(self, Result: object) -> object:
         """Mirror of the sync drain loop: pulls follow-up FETCH packets
