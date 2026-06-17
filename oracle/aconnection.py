@@ -34,13 +34,17 @@ from oracle.tns import encode_dictionary
 from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
 from oracle.tns import set_decode_dml_rowcounts
-from oracle.tns import CCAP_FIELD_VERSION, FIELD_VERSION_12_1, FIELD_VERSION_21_1
+from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
+                        FIELD_VERSION_12_1, FIELD_VERSION_21_1)
+from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe,
+                        encode_o7_exec, encode_o7_close, decode_fv2_describe,
+                        decode_fv2_exec_response)
 from oracle.connection import _format_version, _MAX_REDIRECTS
 from oracle.tns_consts import (
     CONN_STATE_AUTHENTICATED, CONN_STATE_AUTH_NEGOTIATE,
     CONN_STATE_CONNECTED, CONN_STATE_DISCONNECTED,
     DictionaryType, TNS_ACCEPT, TNS_CONNECT, TNS_DATA, TNS_MARKER,
-    TNS_REDIRECT, TNS_REFUSE, TNS_RESEND, TTI_DTY, TTI_PRO, TTI_RPA,
+    TNS_REDIRECT, TNS_REFUSE, TNS_RESEND, TTI_DTY, TTI_OER, TTI_PRO, TTI_RPA,
     TTI_SESS, TTI_WRN,
 )
 
@@ -311,12 +315,47 @@ class AsyncOracleConnect:
                             Data = encode_dictionary(self._make_dict(DictionaryType.dty))
                             await self.send(TNS_DATA, Data)
                         case p if p == TTI_DTY:
-                            Data = encode_dictionary(self._make_dict(DictionaryType.sess))
-                            await self.send(TNS_DATA, Data)
+                            if self.field_version < FIELD_VERSION_10_2:
+                                # Pre-10g (9i): O3LOGON thin auth (#90). Async
+                                # port of OracleConnect's branch.
+                                from oracle.tns import encode_o3logon_phase1
+                                self._o3_phase = 1
+                                await self.send(TNS_DATA, encode_o3logon_phase1(
+                                    self._next_seq(), self.user.encode('utf-8')))
+                            else:
+                                Data = encode_dictionary(self._make_dict(DictionaryType.sess))
+                                await self.send(TNS_DATA, Data)
                         case p if p == TTI_RPA:
+                            if getattr(self, "_o3_phase", 0) == 1:
+                                await self._send_o3logon_phase2(Packet)
+                                continue
                             return await self._handle_rpa(Packet[1:])
                         case p if p == TTI_WRN:
                             logger.debug("handle_login: recv WRN %s", Packet[1:])
+                        case p if p == TTI_OER:
+                            from oracle.tns import decode_packet, decode_ub4
+                            from oracle.exceptions import (DatabaseError,
+                                                           from_ora_code)
+                            if getattr(self, "_o3_phase", 0) == 2:
+                                # 9i's OER is the short pre-10g form: skip
+                                # call_status, seq, rowcount, then the ORA code.
+                                Rest = Packet[1:]
+                                for _ in range(3):
+                                    (_, Rest) = decode_ub4(Rest)
+                                (ErrCode, _) = decode_ub4(Rest)
+                                Message = None
+                            else:
+                                Result = decode_packet(Packet, (None, None, []),
+                                                       self.field_version)
+                                ErrCode = Result[1]
+                                Message = Result[5] if len(Result) > 5 else None
+                            if ErrCode and ErrCode not in (0, 1403):
+                                raise from_ora_code(ErrCode)(
+                                    Message or f"ORA-{ErrCode:05d}", code=ErrCode)
+                            if getattr(self, "_o3_phase", 0) == 2:
+                                self.conn_state = CONN_STATE_AUTHENTICATED
+                                return 0
+                            raise DatabaseError("authentication failed")
                         case _:
                             logger.debug("handle_login: unknown token %s",
                                          Packet[0])
@@ -429,6 +468,10 @@ class AsyncOracleConnect:
         if Batch is None:
             Batch = []
         Head = Query.strip().upper()
+        # Oracle 9i (field version < 10g) speaks the old TTI_ALL7 query dialect
+        # (#97, PROTOCOL.md §19); route SELECTs through the fv2 path.
+        if Head.startswith('SELECT') and self.field_version < FIELD_VERSION_10_2:
+            return await self._drain_cursor(await self._execute_fv2(Query))
         if Head.startswith('SELECT'):
             Type = 'select'
         elif Head.startswith('BEGIN') or Head.startswith('DECLARE'):
@@ -487,6 +530,52 @@ class AsyncOracleConnect:
                 Oldest = next(iter(self._cursor_cache))
                 self._cursor_cache.pop(Oldest, None)
         return await self._drain_cursor(Result)
+
+    async def _send_o3logon_phase2(self, Packet: bytes) -> None:
+        # Async port of OracleConnect._send_o3logon_phase2 (#90): decrypt the
+        # session key from the TTI_3LOGA RPA with the account DES verifier,
+        # DES-encrypt the zero-padded password, send TTI_3LOGON.
+        from binascii import hexlify, unhexlify
+        from oracle.crypto import o3logon, des_verifier
+        from oracle.tns import encode_o3logon_phase2
+        Length = Packet[2]
+        SessKey = unhexlify(Packet[3:3 + Length])
+        UserB = self.user.encode('utf-8')
+        PassB = self.password.encode('utf-8')
+        Verifier = des_verifier(UserB, PassB)
+        (AuthPass, _, _) = o3logon(SessKey, Verifier, PassB)
+        PadCount = (8 - len(PassB) % 8) % 8
+        PwdField = (hexlify(AuthPass).decode('ascii').upper()
+                    + str(PadCount)).encode('ascii')
+        self._o3_phase = 2
+        await self.send(TNS_DATA, encode_o3logon_phase2(
+            self._next_seq(), UserB, PwdField))
+
+    async def _execute_fv2(self, Query: str) -> object:
+        # Async port of OracleConnect._execute_fv2: the four-call (plus OOPEN)
+        # Oracle 9i TTI_ALL7 SELECT sequence (#97, PROTOCOL.md §19).
+        await self.send(TNS_DATA, encode_o7_open(0))
+        await self._next_data_packet()               # OOPEN RPA (cursor id)
+        await self.send(TNS_DATA, encode_o7_parse(0, Query))
+        await self._next_data_packet()               # parse RPA ack
+        await self.send(TNS_DATA, encode_o7_describe(0))
+        Resp = await self._next_data_packet()
+        if Resp is False:
+            raise Exception("Connection closed during 9i describe")
+        (_, Packet) = Resp
+        Columns = decode_fv2_describe(Packet)
+        await self.send(TNS_DATA, encode_o7_exec(0, Columns))
+        Resp = await self._next_data_packet()
+        if Resp is False:
+            raise Exception("Connection closed during 9i fetch")
+        (_, Packet) = Resp
+        (Rows, ErrCode) = decode_fv2_exec_response(Packet, Columns)
+        await self.send(TNS_DATA, encode_o7_close(0))
+        await self._next_data_packet()               # close STA
+        if ErrCode and ErrCode not in (0, 1403):
+            from oracle.exceptions import from_ora_code
+            raise from_ora_code(ErrCode)(f"ORA-{ErrCode:05d}", code=ErrCode)
+        return (0, 0, 0, (len(Rows), Columns), Rows, None, None, [], None)
 
     async def _drain_cursor(self, Result: object) -> object:
         """Mirror of the sync drain loop: pulls follow-up FETCH packets

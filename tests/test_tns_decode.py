@@ -666,5 +666,68 @@ class TestDcbColumnFv17Domain(unittest.TestCase):
         self.assertEqual(rest, b"")          # the bug was leaving bytes here
 
 
+class TestFv2Describe(unittest.TestCase):
+    """Oracle 9i (field version 2) describe-in-RPA decode (#97, PROTOCOL §19.1).
+    Fixture is the real 0x62-describe RPA captured from a live 9.2.0.4 server for
+    `select cast(1 as number(9,4)) zqnum, cast('x' as varchar2(20)) zqvc,
+    cast('y' as char(6)) zqchr, sysdate zqdate, cast(2 as integer) zqint`."""
+
+    DESCRIBE = bytes.fromhex(
+        "08010502000000011600000000000001050105055a514e554d000001800000"
+        "011400000000011f0101040104045a515643000060800000010600000000011f"
+        "0101050105055a5143485200000c000000010100000000000001060106065a51"
+        "44415445000002000000011600000000000001050105055a51494e5400000400"
+        "0000000101000300000000000000000000000000000101")
+
+    def test_decode_columns(self):
+        from oracle.tns import decode_fv2_describe
+        cols = decode_fv2_describe(self.DESCRIBE)
+        got = [(c['column_name'], c['data_type']) for c in cols]
+        # type codes == TNS_TYPE_*: VARCHAR2 1, NUMBER 2, CHAR 96, DATE 12
+        self.assertEqual(got, [
+            (b'ZQNUM', 2), (b'ZQVC', 1), (b'ZQCHR', 96),
+            (b'ZQDATE', 12), (b'ZQINT', 2)])
+
+
+class TestFv2ExecResponse(unittest.TestCase):
+    """Oracle 9i (field version 2) execute+fetch row-stream decode (#97,
+    PROTOCOL §19.2): RXH + per-row RXD + short OER (ORA-01403 = end-of-fetch).
+    Fixtures are real responses from a live 9.2.0.4 server."""
+
+    # SELECT 42 AS n FROM DUAL — one NUMBER column, one row (value c1 2b = 42).
+    NUM = bytes.fromhex(
+        "0602010100010a0000000702c12b0004010102057b00000101000300000000"
+        "0000000000000000000000000101194f52412d30313430333a206e6f206461"
+        "746120666f756e640a")
+    # SELECT id, name, created FROM t97 — NUMBER/VARCHAR2/DATE, three rows, the
+    # middle row has NULL name + NULL created (null indicator 81 01).
+    NULLROWS = bytes.fromhex(
+        "0602010300010a0000000702c1020005616c6963650007787e061111150800"
+        "0702c103000081010081010702c10400056361726f6c0007787e0611111508"
+        "0004010302057b000001010003000000000000000000000000000000010100"
+        "0000194f52412d30313430333a206e6f206461746120666f756e640a")
+
+    def test_single_number_row(self):
+        from oracle.tns import decode_fv2_exec_response
+        cols = [{'data_type': 2}]
+        rows, err = decode_fv2_exec_response(self.NUM, cols)
+        self.assertEqual(err, 1403)              # end-of-fetch marker
+        self.assertEqual(rows, [[42]])
+
+    def test_nulls_do_not_desync_rows(self):
+        from oracle.tns import decode_fv2_exec_response
+        cols = [{'data_type': 2}, {'data_type': 1}, {'data_type': 12}]
+        rows, err = decode_fv2_exec_response(self.NULLROWS, cols)
+        self.assertEqual(err, 1403)
+        # All three rows present; the NULL row's value columns decode to None.
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[0][0], 1)
+        self.assertEqual(rows[0][1], 'alice')
+        self.assertEqual(rows[1][0], 2)
+        self.assertEqual(rows[1][1], None)
+        self.assertEqual(rows[1][2], None)
+        self.assertEqual(rows[2][1], 'carol')
+
+
 if __name__ == '__main__':
     unittest.main()
