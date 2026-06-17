@@ -642,7 +642,7 @@ def decode_token_oac(Data: bytes, Acc: object) -> tuple[int, int, int, int, byte
     (ToId, R4) = decode_dalc(R3)
     (VSN, R5) = decode_ub4(R4)
     (Charset, R6) = decode_ub4(R5)
-    FormOfUse = R6[0]
+    _FormOfUse = R6[0]                      # csfrm byte — skipped (R6[1:] below)
     (Mxlc, R7) = decode_ub4(R6[1:])
     return (DataType, MaxDataLength, DataScale, Charset, R7)
 
@@ -2910,9 +2910,9 @@ def lnxpak2(List: list[int], I: int) -> list[int]:
 def lnxren(N: float, I: int) -> list[int]:
     if N < 1.0:
         return lnxren(N * 100.0, I-1)
-    elif 1.0 <= N and N < 10.0:
+    elif N < 10.0:                  # 1.0 <= N < 10.0 (the cascade guarantees ≥1.0)
         return lnxpak(([I] + lnxren4(N,0,1,[]))[::-1])
-    elif 10.0 <= N and N < 100.0:
+    elif N < 100.0:                 # 10.0 <= N < 100.0
         return lnxpak(([I] + lnxren4(N,0,0,[]))[::-1])
     else: # N >= 100.0
         return lnxren(N * 0.01, I+1)

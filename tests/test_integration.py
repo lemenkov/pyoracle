@@ -1809,7 +1809,7 @@ class VectorIntegration(_IntegrationBase):
 
     def test_sparse_roundtrip(self):
         # SPARSE vectors (#68): bind a SparseVector and read it back.
-        from oracle import SparseVector
+        from oracle.vector import SparseVector
         sv = SparseVector(8, [2, 5], [1.5, 2.5])
         self.assertEqual(
             self._bind_roundtrip("VECTOR(8, FLOAT32, SPARSE)", sv), sv)
@@ -1953,6 +1953,8 @@ class SqlDomainIntegration(_IntegrationBase):
         try:
             self.cur.execute(f"DROP DOMAIN {self.DOMAIN} FORCE")
         except DatabaseError:
+            # No leftover domain from a prior run (or pre-23ai, which has no
+            # DROP DOMAIN) — nothing to clean up, proceed to create it.
             pass
         try:
             self.cur.execute(f"CREATE DOMAIN {self.DOMAIN} AS NUMBER(3,0)")
@@ -1980,6 +1982,8 @@ class SqlDomainIntegration(_IntegrationBase):
         try:
             self.cur.execute(f"DROP DOMAIN {self.DOMAIN} FORCE")
         except Exception:
+            # Best-effort teardown: the domain may never have been created
+            # (skipped / pre-23ai test), so any drop error is irrelevant.
             pass
         super().tearDown()
 
@@ -2272,7 +2276,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_sparse_vector_bind_roundtrip(self):
         # Async parity for SPARSE vectors (#68).
-        from oracle import SparseVector
+        from oracle.vector import SparseVector
         sv = SparseVector(8, [2, 5], [1.5, 2.5])
         async with await oracle.connect_async(**self._kwargs()) as Conn:
             async with Conn.cursor() as Cur:
