@@ -6,8 +6,17 @@ name: CodeQL
 on:
   push:
     branches: [master]
+    # Docs-only changes have no code for CodeQL to analyse — skip them.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSES/**'
   pull_request:
     branches: [master]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSES/**'
   schedule:
     # Weekly Monday 06:17 UTC — off the hour to dodge cron spikes.
     - cron: '17 6 * * 1'

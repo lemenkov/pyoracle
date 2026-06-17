@@ -6,8 +6,20 @@ name: Tests
 on:
   push:
     branches: [master]
+    # Docs-only changes don't affect the driver, so skip the (expensive, live-
+    # Oracle) test runs when nothing outside these paths changed. A commit that
+    # also touches code still runs — the filter only skips when every changed
+    # file matches. (CI budget, #7)
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSES/**'
   pull_request:
     branches: [master]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSES/**'
 
 # Cancel a superseded run when a new commit is pushed to the same ref, so rapid
 # pushes don't stack up and exhaust the Actions concurrency/usage budget.
