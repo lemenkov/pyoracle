@@ -5,21 +5,12 @@ from oracle.tns import assemble_packet
 from oracle.tns import decode_packet
 from oracle.tns import decode_ub4
 from oracle.tns import parse_redirect_address
-from oracle.tns import decode_token_bvc
-from oracle.tns import decode_token_dcb
-from oracle.tns import decode_token_iov
-from oracle.tns import decode_token_lob
-from oracle.tns import decode_token_net
 from oracle.tns import decode_token_oer
 from oracle.tns import decode_token_oac
 from oracle.tns import decode_token_pro
 from oracle.tns import decode_token_rpa
-from oracle.tns import decode_token_uds
-from oracle.tns import decode_token_rxd
-from oracle.tns import decode_token_rxh
-from oracle.tns import decode_token_wrn
 from oracle.tns_consts import (
-    AL32UTF8_CHARSET, TNS_ACCEPT, TNS_DATA, TNS_RESEND, TTI_AUTH, TTI_SESS,
+    TNS_ACCEPT, TNS_DATA, TNS_RESEND, TTI_AUTH, TTI_SESS,
 )
 import unittest
 
@@ -1007,13 +998,13 @@ class TestFv2OutBinds(unittest.TestCase):
 
     def test_var_oac_number_is_varnum(self):
         from oracle.tns import _o7_bind_oac
-        from oracle import datatypes as dt
+        import oracle.datatypes as dt
         self.assertEqual(_o7_bind_oac(dt.Var(int)),
                          bytes.fromhex("06010000011600000000011f01"))
 
     def test_var_oac_string_size_32767(self):
         from oracle.tns import _o7_bind_oac
-        from oracle import datatypes as dt
+        import oracle.datatypes as dt
         # VARCHAR OUT buffer is 0x7fff (matching JDBC), not the 4000 of an
         # inline str IN bind.
         self.assertEqual(_o7_bind_oac(dt.Var(str)),
@@ -1021,7 +1012,7 @@ class TestFv2OutBinds(unittest.TestCase):
 
     def test_outnum_request_matches_capture(self):
         from oracle.tns import encode_o7_block
-        from oracle import datatypes as dt
+        import oracle.datatypes as dt
         self.assertEqual(encode_o7_block(0, "BEGIN :1 := 42; END;",
                                          [dt.Var(int)]), self.OUTNUM_REQ)
 
