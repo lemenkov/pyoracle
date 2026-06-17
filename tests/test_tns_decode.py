@@ -927,5 +927,59 @@ class TestFv2DmlResponse(unittest.TestCase):
         self.assertEqual(ora_code, 0)
 
 
+class TestFv2Block(unittest.TestCase):
+    """Oracle 9i anonymous PL/SQL block over TTI_ALL7 (#102, PROTOCOL §19.6).
+    A block uses its own ALL7 option word (`01 21` / `02 04 29`, not the DML
+    `02 80 xx`), and sends bind values in a SEPARATE round-trip after a server
+    prompt rather than inline. All fixtures are real frames from a live 9.2.0.4
+    server: `BEGIN NULL; END;` and `BEGIN DBMS_OUTPUT.PUT_LINE(:1); END;`."""
+
+    NOARG_REQ = bytes.fromhex(
+        "0347000121010101011000000101070101020000000000424547494e204e554c"
+        "4c3b20454e443b010101010000000000")
+    NOARG_RESP = bytes.fromhex(
+        "08010203073450000401010000000101002f0000000000000000000000000000"
+        "0101")
+    INBIND_REQ = bytes.fromhex(
+        "03470002042901010101240000010107010102000000010101424547494e2044"
+        "424d535f4f55545055542e5055545f4c494e45283a31293b20454e443b010101"
+        "01000000000001010000027fff00000000011f01")
+    INBIND_VAL = bytes.fromhex("070768656c6c6f3969")
+    INBIND_RESP = bytes.fromhex(
+        "0801020307355e000401010000000101002f0000000000000000000000000000"
+        "0101")
+
+    def test_noarg_request_matches_capture(self):
+        from oracle.tns import encode_o7_block
+        self.assertEqual(encode_o7_block(0, "BEGIN NULL; END;"), self.NOARG_REQ)
+
+    def test_noarg_response_success(self):
+        from oracle.tns import decode_fv2_dml_response
+        _rowcount, ora_code = decode_fv2_dml_response(self.NOARG_RESP)
+        self.assertEqual(ora_code, 0)
+
+    def test_inbind_request_option_and_no_inline_value(self):
+        from oracle.tns import encode_o7_block
+        got = encode_o7_block(0, "BEGIN DBMS_OUTPUT.PUT_LINE(:1); END;",
+                              ["hello9i"])
+        # Block-with-binds option word, not the DML 02 80 29.
+        self.assertEqual(got[3:6], bytes.fromhex("020429"))
+        # The bind VALUE must NOT be appended inline (it goes in a separate RXD).
+        self.assertNotIn(b"hello9i", got)
+        # Byte-identical to the capture except the bind OAC max_size (we declare
+        # VARCHAR 4000 = 02 0fa0; JDBC declares 32767 = 02 7fff).
+        self.assertEqual(got.replace(bytes.fromhex("020fa0"),
+                                     bytes.fromhex("027fff")), self.INBIND_REQ)
+
+    def test_inbind_value_frame_matches_capture(self):
+        from oracle.tns import encode_tokens_rxd
+        self.assertEqual(encode_tokens_rxd(["hello9i"], b""), self.INBIND_VAL)
+
+    def test_inbind_final_response_success(self):
+        from oracle.tns import decode_fv2_dml_response
+        _rowcount, ora_code = decode_fv2_dml_response(self.INBIND_RESP)
+        self.assertEqual(ora_code, 0)
+
+
 if __name__ == '__main__':
     unittest.main()

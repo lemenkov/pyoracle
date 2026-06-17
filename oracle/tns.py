@@ -1665,6 +1665,33 @@ def encode_o7_parse(Seq: int, Sql: str, Binds: list | None = None) -> bytes:
         Out += encode_tokens_rxd(Binds, b"")
     return Out
 
+def encode_o7_block(Seq: int, Sql: str, Binds: list | None = None) -> bytes:
+    # Anonymous PL/SQL block parse-execute over TTI_ALL7 (#102, PROTOCOL §19.6).
+    # Same framing as encode_o7_parse EXCEPT the option word: a block uses
+    # `01 21` (no binds) / `02 04 29` (binds) where a SELECT/DML uses
+    # `02 80 21` / `02 80 29` — the 0x8000 "values are inline" bit is NOT set,
+    # so the server rejects DML opts on a block with ORA-00600. Consequently the
+    # bind OACs are sent here but the VALUES are NOT appended inline; the server
+    # answers with a "send the binds" prompt and the caller then sends the
+    # values as a standalone RXD (encode_tokens_rxd). Verified byte-for-byte
+    # against cap_9i_plsql_{noarg,inbind}.log.
+    Binds = Binds or []
+    SqlBytes = Sql.encode('utf-8')
+    OptBytes = bytes([0x02, 0x04, 0x29]) if Binds else bytes([0x01, 0x21])
+    BindCount = bytes([0x01, 0x01, len(Binds)]) if Binds else bytes([0, 0])
+    Out = (bytes([TTI_FUN, TTI_ALL7, Seq]) + OptBytes
+           + bytes([0x01, 0x01, 0x01])
+           + encode_sb4(len(SqlBytes))
+           + bytes([0, 0, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0, 0, 0])
+           + BindCount
+           + SqlBytes
+           + bytes([0x01, 0x01, 0x01, 0x01, 0, 0, 0, 0, 0]))
+    if Binds:
+        # Bind OACs only — the values follow in a separate RXD frame after the
+        # server's bind prompt (the 0x8000-inline path is not used for blocks).
+        Out += b"".join(_o7_bind_oac(V) for V in Binds)
+    return Out
+
 def encode_o7_describe(Seq: int) -> bytes:
     # Call 2: fixed describe-columns request; response is the metadata RPA.
     return bytes([TTI_FUN, _O7_DESCRIBE_FUNC, Seq,

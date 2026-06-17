@@ -37,7 +37,8 @@ from oracle.tns import set_decode_dml_rowcounts
 from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
                         FIELD_VERSION_12_1, FIELD_VERSION_21_1)
 from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe,
-                        encode_o7_exec, encode_o7_close, decode_fv2_describe,
+                        encode_o7_exec, encode_o7_close, encode_o7_block,
+                        encode_tokens_rxd, decode_fv2_describe,
                         decode_fv2_exec_response, decode_fv2_dml_response,
                         decode_fv2_oer_error, encode_o7_lob_getlen,
                         encode_o7_lob_read, decode_fv2_lob_getlen,
@@ -477,8 +478,10 @@ class AsyncOracleConnect:
             if Head.startswith('SELECT'):
                 return await self._drain_cursor(
                     await self._execute_fv2(Query, Bind))
-            if not (Head.startswith('BEGIN') or Head.startswith('DECLARE')):
-                return await self._execute_fv2_dml(Query, Bind)
+            # Anonymous PL/SQL block over the fv2 block path (#102, IN binds).
+            if Head.startswith('BEGIN') or Head.startswith('DECLARE'):
+                return await self._execute_fv2_block(Query, Bind)
+            return await self._execute_fv2_dml(Query, Bind)
         if Head.startswith('SELECT'):
             Type = 'select'
         elif Head.startswith('BEGIN') or Head.startswith('DECLARE'):
@@ -581,6 +584,38 @@ class AsyncOracleConnect:
         (RowCount, ErrCode) = decode_fv2_dml_response(Packet)
         await self.send(TNS_DATA, encode_o7_close(0))
         await self._next_data_packet()
+        if ErrCode and ErrCode not in (0, 1403):
+            from oracle.exceptions import from_ora_code
+            raise from_ora_code(ErrCode)(f"ORA-{ErrCode:05d}", code=ErrCode)
+        if self.autocommit:
+            await self.commit()
+        return (0, 0, 0, (RowCount, None), [], None, None, [], None)
+
+    async def _execute_fv2_block(self, Query: str,
+                                 Bind: list | None = None) -> object:
+        # Async port of OracleConnect._execute_fv2_block (#102, PROTOCOL §19.6;
+        # IN binds only). OOPEN + block parse-execute; with binds the server
+        # prompts for the values, which we send as a standalone RXD before
+        # reading the final RPA + OER.
+        Bind = Bind or []
+        await self.send(TNS_DATA, encode_o7_open(0))
+        await self._next_data_packet()               # OOPEN RPA
+        await self.send(TNS_DATA, encode_o7_block(0, Query, Bind))
+        Resp = await self._next_data_packet()
+        if Resp is False:
+            raise Exception("Connection closed during 9i PL/SQL block")
+        (_, Packet) = Resp
+        if Bind:
+            self._fv2_raise_for_error(Packet)        # parse/compile error
+            await self.send(TNS_DATA, encode_tokens_rxd(Bind, b""))
+            Resp = await self._next_data_packet()
+            if Resp is False:
+                raise Exception("Connection closed during 9i PL/SQL bind send")
+            (_, Packet) = Resp
+        self._fv2_raise_for_error(Packet)            # runtime error
+        (RowCount, ErrCode) = decode_fv2_dml_response(Packet)
+        await self.send(TNS_DATA, encode_o7_close(0))
+        await self._next_data_packet()               # close STA
         if ErrCode and ErrCode not in (0, 1403):
             from oracle.exceptions import from_ora_code
             raise from_ora_code(ErrCode)(f"ORA-{ErrCode:05d}", code=ErrCode)
