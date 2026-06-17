@@ -1632,6 +1632,24 @@ def _o7_bind_oac(Value: object) -> bytes:
     # client's declared type for an input bind. Number → VARNUM(6); str →
     # VARCHAR sized 4000 (what JDBC declares); bytes → RAW; None defaults to a
     # 1-byte VARCHAR. charset 31, csfrm 1 (csfrm 0 for RAW). #100.
+    #
+    # A `Var` (an OUT / IN OUT bind, #102) declares its registered type and
+    # return-buffer size instead: NUMBER rides as VARNUM(6)/22 like an inline
+    # number; RAW carries csfrm 0; everything else uses the Var's size (VARCHAR
+    # defaults to 32767, matching JDBC). The mode (IN/OUT/IN OUT) is NOT in the
+    # OAC — the server infers it from the block and signals it in the bind
+    # prompt; see decode_fv2_block_out.
+    from oracle.datatypes import Var
+    if isinstance(Value, Var):
+        VType = Value.dbtype.tns_type
+        if VType == TNS_TYPE_NUMBER:
+            Type, MaxSize, Csfrm = 0x06, 22, 1
+        elif VType == TNS_TYPE_RAW:
+            Type, MaxSize, Csfrm = TNS_TYPE_RAW, Value.size, 0
+        else:
+            Type, MaxSize, Csfrm = VType, Value.size, 1
+        return (bytes([Type, 0x01, 0, 0]) + encode_sb4(MaxSize)
+                + bytes([0, 0, 0, 0]) + encode_sb4(31) + bytes([Csfrm]))
     if isinstance(Value, str):
         Type, MaxSize, Csfrm = TNS_TYPE_VARCHAR, 4000, 1
     elif isinstance(Value, (bytes, bytearray)):
@@ -1989,6 +2007,55 @@ def decode_fv2_dml_response(Data: bytes) -> tuple[int, int]:
         (RowCount, ErrCode, _) = _decode_fv2_oer(Rest)
         return (RowCount, ErrCode)
     return (0, 0)
+
+# Token that opens the 9i bind-values prompt the server sends after a PL/SQL
+# block parse-execute carrying binds: `0b 05 01 <numbinds> 00 01 01 00` then one
+# direction byte per bind (0x20 = IN, 0x10 = OUT, 0x30 = IN OUT). #102.
+_FV2_BIND_PROMPT = 0x0B
+
+def strip_fv2_bind_prompt(Data: bytes) -> bytes:
+    # Drop a leading bind prompt, if present, returning the bytes that follow
+    # (the OUT-value RXD + RPA + OER). A pure-OUT block's reply packs the prompt,
+    # the return values and the call status together; an IN / IN OUT block sends
+    # the prompt in its own packet (consumed before the values are sent), so this
+    # is a no-op there. The prompt is `0b 05 01 <numbinds> 00 01 01 00` then a
+    # direction section (bytes 0x00 / 0x10 / 0x20 / 0x30 — IN/OUT/IN OUT masks
+    # and padding) whose exact length varies, so rather than computing it we scan
+    # past the 8-byte fixed prefix to the first RXD (07) or RPA (08) token — the
+    # prompt itself never contains either. (#102, PROTOCOL §19.7)
+    if len(Data) >= 8 and Data[0] == _FV2_BIND_PROMPT:
+        Pos = 8
+        while Pos < len(Data) and Data[Pos] not in (TTI_RXD, TTI_RPA):
+            Pos += 1
+        return Data[Pos:]
+    return Data
+
+def decode_fv2_block_out(Data: bytes,
+                         NumOut: int) -> tuple[list, int, int]:
+    # Parse a 9i PL/SQL block reply that returns OUT / IN OUT values (#102,
+    # PROTOCOL §19.7). After any bind prompt is stripped, the reply is an
+    # optional TTI_RXD (07) carrying `NumOut` × (DALC value + 1-byte indicator)
+    # in OUT-bind position order, then the RPA + short OER. Returns
+    # (out_values, rowcount, ora_code); out_values holds the raw value bytes per
+    # OUT bind (None for a NULL OUT), to be decoded by the caller against each
+    # Var's declared type.
+    Rest = strip_fv2_bind_prompt(Data)
+    OutValues: list = []
+    if NumOut > 0 and Rest and Rest[0] == TTI_RXD:
+        Rest = Rest[1:]
+        for _ in range(NumOut):
+            (Val, Rest) = decode_dalc(Rest)
+            if Rest and Rest[0] == 0x81:        # 81 01 NULL indicator
+                Rest = Rest[2:]
+                OutValues.append(None)
+            else:
+                if Rest:
+                    Rest = Rest[1:]             # present indicator (00)
+                OutValues.append(bytes(Val)
+                                 if isinstance(Val, (bytes, bytearray)) and Val
+                                 else None)
+    (RowCount, ErrCode) = decode_fv2_dml_response(Rest)
+    return (OutValues, RowCount, ErrCode)
 
 def encode_dictionary_lobops(Dictionary: dict) -> bytes:
     # TTI_LOBOPS request. See docs/PROTOCOL.md §14 for the field layout.

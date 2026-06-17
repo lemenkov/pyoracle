@@ -981,5 +981,76 @@ class TestFv2Block(unittest.TestCase):
         self.assertEqual(ora_code, 0)
 
 
+class TestFv2OutBinds(unittest.TestCase):
+    """Oracle 9i PL/SQL block OUT / IN OUT binds (#102, PROTOCOL §19.7). The
+    bind mode isn't in the OAC; the server returns OUT / IN OUT values as a
+    TTI_RXD (one DALC value + indicator per OUT bind, position order) before the
+    RPA + OER. Fixtures are real frames from a live 9.2.0.4 server."""
+
+    # BEGIN :1 := 42; END;  with :1 a pure-OUT number — parse-exec + the reply
+    # (bind prompt + return RXD '07 02 c12b 00'(=42) + RPA + OER, one packet).
+    OUTNUM_REQ = bytes.fromhex(
+        "03470002042901010101140000010107010102000000010101424547494e203a"
+        "31203a3d2034323b20454e443b01010101000000000006010000011600000000"
+        "011f01")
+    OUTNUM_RESP = bytes.fromhex(
+        "0b05010100010100100702c12b0008010203074790000401010000000101002f"
+        "00000000000000000000000000000101")
+    # IN OUT string reply: return RXD '07 04 696e5f6f 00'(=in_o) + RPA + OER.
+    INOUT_RESP = bytes.fromhex(
+        "0704696e5f6f00080102030747e9000401010000000101002f00000000000000"
+        "000000000000000101")
+    # Mixed (:1 IN, :2 IN OUT, :3 OUT) reply: 2 return values '4241'(BA),'42'(B).
+    MIXED_RESP = bytes.fromhex(
+        "070242410001420008010203074c43000401010000000101002f000000000000"
+        "00000000000000000101")
+
+    def test_var_oac_number_is_varnum(self):
+        from oracle.tns import _o7_bind_oac
+        from oracle import datatypes as dt
+        self.assertEqual(_o7_bind_oac(dt.Var(int)),
+                         bytes.fromhex("06010000011600000000011f01"))
+
+    def test_var_oac_string_size_32767(self):
+        from oracle.tns import _o7_bind_oac
+        from oracle import datatypes as dt
+        # VARCHAR OUT buffer is 0x7fff (matching JDBC), not the 4000 of an
+        # inline str IN bind.
+        self.assertEqual(_o7_bind_oac(dt.Var(str)),
+                         bytes.fromhex("01010000027fff00000000011f01"))
+
+    def test_outnum_request_matches_capture(self):
+        from oracle.tns import encode_o7_block
+        from oracle import datatypes as dt
+        self.assertEqual(encode_o7_block(0, "BEGIN :1 := 42; END;",
+                                         [dt.Var(int)]), self.OUTNUM_REQ)
+
+    def test_decode_pure_out_number(self):
+        from oracle.tns import decode_fv2_block_out
+        out, _rc, err = decode_fv2_block_out(self.OUTNUM_RESP, 1)
+        self.assertEqual(err, 0)
+        self.assertEqual(out, [bytes.fromhex("c12b")])   # Oracle number 42
+
+    def test_decode_inout(self):
+        from oracle.tns import decode_fv2_block_out
+        out, _rc, err = decode_fv2_block_out(self.INOUT_RESP, 1)
+        self.assertEqual(out, [b"in_o"])
+
+    def test_decode_mixed_two_outs(self):
+        from oracle.tns import decode_fv2_block_out
+        out, _rc, err = decode_fv2_block_out(self.MIXED_RESP, 2)
+        self.assertEqual(out, [b"BA", b"B"])
+
+    def test_strip_prompt_scans_to_rxd(self):
+        # The direction section length varies (JDBC sent 1 byte/bind here, the
+        # live server pads with a leading 00); the scan-based strip handles both.
+        from oracle.tns import strip_fv2_bind_prompt
+        jdbc = self.OUTNUM_RESP                              # 9-byte prompt
+        live = bytes.fromhex("0b0501010001010000") + bytes.fromhex("10") \
+            + self.OUTNUM_RESP[9:]                           # extra 00 padding
+        self.assertEqual(strip_fv2_bind_prompt(jdbc)[0], 0x07)
+        self.assertEqual(strip_fv2_bind_prompt(live)[0], 0x07)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -40,7 +40,8 @@ from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe,
                         encode_o7_exec, encode_o7_close, encode_o7_block,
                         encode_tokens_rxd, decode_fv2_describe,
                         decode_fv2_exec_response, decode_fv2_dml_response,
-                        decode_fv2_oer_error, encode_o7_lob_getlen,
+                        decode_fv2_oer_error, decode_fv2_block_out,
+                        encode_o7_lob_getlen,
                         encode_o7_lob_read, decode_fv2_lob_getlen,
                         decode_fv2_lob_chunks)
 from oracle.connection import _format_version, _MAX_REDIRECTS
@@ -593,11 +594,18 @@ class AsyncOracleConnect:
 
     async def _execute_fv2_block(self, Query: str,
                                  Bind: list | None = None) -> object:
-        # Async port of OracleConnect._execute_fv2_block (#102, PROTOCOL §19.6;
-        # IN binds only). OOPEN + block parse-execute; with binds the server
-        # prompts for the values, which we send as a standalone RXD before
-        # reading the final RPA + OER.
+        # Async port of OracleConnect._execute_fv2_block (#102, PROTOCOL §19.6 /
+        # §19.7). OOPEN + block parse-execute with an OAC per bind; the server
+        # prompts, the client sends the IN / IN OUT input values as a standalone
+        # RXD, and the reply carries any OUT / IN OUT return values before the
+        # RPA + OER. OUT values come back as an {out_positions, out_values}
+        # record the cursor decodes into the Var objects.
+        from oracle.datatypes import Var
         Bind = Bind or []
+        InputValues = [(B._value if isinstance(B, Var) else B)
+                       for B in Bind
+                       if not isinstance(B, Var) or B.has_value]
+        OutPositions = [I for I, B in enumerate(Bind) if isinstance(B, Var)]
         await self.send(TNS_DATA, encode_o7_open(0))
         await self._next_data_packet()               # OOPEN RPA
         await self.send(TNS_DATA, encode_o7_block(0, Query, Bind))
@@ -605,15 +613,16 @@ class AsyncOracleConnect:
         if Resp is False:
             raise Exception("Connection closed during 9i PL/SQL block")
         (_, Packet) = Resp
-        if Bind:
+        if InputValues:
             self._fv2_raise_for_error(Packet)        # parse/compile error
-            await self.send(TNS_DATA, encode_tokens_rxd(Bind, b""))
+            await self.send(TNS_DATA, encode_tokens_rxd(InputValues, b""))
             Resp = await self._next_data_packet()
             if Resp is False:
                 raise Exception("Connection closed during 9i PL/SQL bind send")
             (_, Packet) = Resp
         self._fv2_raise_for_error(Packet)            # runtime error
-        (RowCount, ErrCode) = decode_fv2_dml_response(Packet)
+        (OutValues, RowCount, ErrCode) = decode_fv2_block_out(
+            Packet, len(OutPositions))
         await self.send(TNS_DATA, encode_o7_close(0))
         await self._next_data_packet()               # close STA
         if ErrCode and ErrCode not in (0, 1403):
@@ -621,6 +630,9 @@ class AsyncOracleConnect:
             raise from_ora_code(ErrCode)(f"ORA-{ErrCode:05d}", code=ErrCode)
         if self.autocommit:
             await self.commit()
+        if OutPositions:
+            Record = {'out_positions': OutPositions, 'out_values': OutValues}
+            return (0, 0, 0, (None, None), [Record], None, None, [], None)
         return (0, 0, 0, (RowCount, None), [], None, None, [], None)
 
     async def _execute_fv2(self, Query: str, Bind: list | None = None) -> object:
