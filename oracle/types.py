@@ -237,6 +237,20 @@ def decode_string(Data: bytes, Charset: int = AL32UTF8_CHARSET) -> str | None:
     return Data.decode(Encoding, errors='replace')
 
 
+def decode_fv2_lob(data_type: int, content: bytes, charset: int) -> str | bytes:
+    # Turn raw 9i LOB content (fetched via TTI_LOBOPS GETLEN + READ) into a
+    # Python value. CLOB / NCLOB (112) is sent in the column's DB charset — a
+    # single-byte run, NOT the UTF-16BE the modern path uses — so decode it with
+    # the column charset (same codec as a VARCHAR2). BLOB (113) stays bytes.
+    # Empty content yields "" / b"". (#102)
+    if data_type == 112:
+        if not content:
+            return ""
+        return content.decode(_CHARSET_PYTHON_NAME.get(charset, 'utf-8'),
+                              errors='replace')
+    return content or b""
+
+
 def decode_value(Column: dict, Data: bytes | list) -> object:
     # Dispatcher: pick the right decoder based on the column's TNS data type.
     # Unknown types are returned as raw bytes so callers can still see them.

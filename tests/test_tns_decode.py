@@ -748,6 +748,147 @@ class TestFv2LongRows(unittest.TestCase):
         self.assertEqual(rows, [[1, 'aaaa'], [2, 'b' * 20], [3, None]])
 
 
+class TestFv2LobRead(unittest.TestCase):
+    """Oracle 9i CLOB / BLOB read (#102, PROTOCOL §19.5). 9i hands a LOB cell as
+    a locator in the RXD, then the client pulls the content with a two-call
+    TTI_LOBOPS GETLEN + READ sequence (the modern single READ returns empty).
+    All fixtures are real frames from a live 9.2.0.4 server, query
+    `SELECT c, b FROM lobtest WHERE id = 1` (c = CLOB 'hello clob content',
+    b = BLOB ca fe ba be 01)."""
+
+    # Execute+fetch response: RXH, one RXD with the CLOB + BLOB locators, OER 1403.
+    RXD = bytes.fromhex(
+        "0602010200010a000701565600540001020c00000001000000010000000054f7"
+        "00007bdd00007bdc00020002001f000000000000000000000000000000000000"
+        "000709df000000000000000000000000000000000000000000007bdc0040b89a"
+        "00000001565600540001010c00000001000000010000000054f800007bdf0000"
+        "7bdc000300030000020200000000000000000000000000000000000709df0000"
+        "00000000000000000000000000000000000000007bdc0040b89a000000040101"
+        "02057b00000101000300000000000000000000000000000101194f52412d3031"
+        "3430333a206e6f206461746120666f756e640a")
+    # GETLEN / READ requests + responses captured for the CLOB column.
+    GETLEN_REQ = bytes.fromhex(
+        "036000010156000000000001000101000000540001020c000000010000000100"
+        "00000054f700007bdd00007bdc00020002001f00000000000000000000000000"
+        "0000000000000709df000000000000000000000000000000000000000000007b"
+        "dc0040b89a000000")
+    GETLEN_RESP = bytes.fromhex(
+        "0800540001020c00000001000000010000000054f700007bdd00007bdc000200"
+        "02001f000000000000000000000000000000000000000709df00000000000000"
+        "0000000000000000000000000000007bdc0040b89a0000011204010100000000"
+        "000000000000000000000000000000000101")
+    READ_REQ = bytes.fromhex(
+        "03600001015600000101000001000102000000540001020c0000000100000001"
+        "0000000054f700007bdd00007bdc00020002001f000000000000000000000000"
+        "000000000000000709df00000000000000000000000000000000000000000000"
+        "7bdc0040b89a00000112")
+    READ_RESP = bytes.fromhex(
+        "0efe1268656c6c6f20636c6f6220636f6e74656e74000800540001020c000000"
+        "01000000010000000054f700007bdd00007bdc00020002001f00000000000000"
+        "0000000000000000000000000709df0000000000000000000000000000000000"
+        "00000000007bdc0040b89a000001120401010000000000000000000000000000"
+        "0000000000000101")
+
+    def _locators(self):
+        from oracle.tns import decode_fv2_exec_response
+        from oracle.lob import LOB
+        cols = [{'data_type': 112, 'charset': 31}, {'data_type': 113}]
+        rows, err = decode_fv2_exec_response(self.RXD, cols)
+        self.assertEqual(err, 1403)
+        self.assertEqual(len(rows), 1)
+        self.assertIsInstance(rows[0][0], LOB)
+        self.assertIsInstance(rows[0][1], LOB)
+        return rows[0]
+
+    def test_rxd_yields_lob_locators(self):
+        clob, blob = self._locators()
+        self.assertEqual(clob.data_type, 112)
+        self.assertEqual(blob.data_type, 113)
+        # _read_lob_column returns the 86-byte `00 54 <84-byte locator>` block.
+        self.assertEqual(len(clob.raw), 86)
+        self.assertEqual(clob.raw[:2].hex(), "0054")
+
+    def test_getlen_request_matches_capture(self):
+        from oracle.tns import encode_o7_lob_getlen
+        clob, _ = self._locators()
+        self.assertEqual(encode_o7_lob_getlen(0, clob.raw), self.GETLEN_REQ)
+
+    def test_getlen_response_amount(self):
+        from oracle.tns import decode_fv2_lob_getlen
+        self.assertEqual(decode_fv2_lob_getlen(self.GETLEN_RESP), 18)
+
+    def test_read_request_matches_capture(self):
+        from oracle.tns import encode_o7_lob_read
+        clob, _ = self._locators()
+        self.assertEqual(encode_o7_lob_read(0, clob.raw, 18), self.READ_REQ)
+
+    def test_clob_content_decodes(self):
+        # The READ response content chunk (0e fe 12 <18 bytes>) decodes to the
+        # CLOB text under the column charset (single-byte, not UTF-16BE).
+        from oracle.types import decode_fv2_lob
+        content = bytes.fromhex("68656c6c6f20636c6f6220636f6e74656e74")
+        self.assertEqual(decode_fv2_lob(112, content, 31), "hello clob content")
+
+    def test_blob_content_stays_bytes(self):
+        from oracle.types import decode_fv2_lob
+        self.assertEqual(decode_fv2_lob(113, bytes.fromhex("cafebabe01"), 0),
+                         bytes.fromhex("cafebabe01"))
+
+    def test_empty_lob(self):
+        from oracle.types import decode_fv2_lob
+        self.assertEqual(decode_fv2_lob(112, b"", 31), "")
+        self.assertEqual(decode_fv2_lob(113, b"", 0), b"")
+
+    def test_null_lob_row_decodes_to_none(self):
+        # A row with NULL CLOB + NULL BLOB. The NULL LOB uses the scalar
+        # empty-value form `00 81 01` (not the locator form), and must not
+        # desync the following columns. Real RXD from a live 9.2.0.4 server,
+        # `SELECT id, c, b FROM lobtest WHERE id = 95` with all-NULL LOBs.
+        from oracle.tns import decode_fv2_exec_response
+        rxd = bytes.fromhex(
+            "0602010100010a000702c15f0000810100810104010102057b0000010100"
+            "0300000000000000000000000000000101194f52412d30313430333a206e"
+            "6f206461746120666f756e640a")
+        cols = [{'data_type': 2}, {'data_type': 112, 'charset': 31},
+                {'data_type': 113}]
+        rows, err = decode_fv2_exec_response(rxd, cols)
+        self.assertEqual(err, 1403)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], 94)         # id (c15f = 94)
+        self.assertIsNone(rows[0][1])            # NULL CLOB
+        self.assertIsNone(rows[0][2])            # NULL BLOB
+
+    def test_chunk_parser_complete_and_terminator(self):
+        # decode_fv2_lob_chunks pulls the content out of a `0e fe <chunks> 00`
+        # reply and reports completion at the zero-length terminator. This
+        # mirrors the multi-row READ reply, which has NO trailing OER.
+        from oracle.tns import decode_fv2_lob_chunks
+        content, done = decode_fv2_lob_chunks(self.READ_RESP)
+        self.assertTrue(done)
+        self.assertEqual(content, b"hello clob content")
+
+    def test_chunk_parser_multichunk(self):
+        from oracle.tns import decode_fv2_lob_chunks
+        # 0e fe, two 64-byte chunks + one 2-byte chunk, then 00 terminator.
+        body = (b"\x0e\xfe" + b"\x40" + b"A" * 64 + b"\x40" + b"B" * 64
+                + b"\x02" + b"CD" + b"\x00")
+        content, done = decode_fv2_lob_chunks(body)
+        self.assertTrue(done)
+        self.assertEqual(content, b"A" * 64 + b"B" * 64 + b"CD")
+
+    def test_chunk_parser_incomplete_then_complete(self):
+        # A chunk split across packets: the first slice is incomplete, the full
+        # buffer completes. (The reader re-parses the accumulated buffer.)
+        from oracle.tns import decode_fv2_lob_chunks
+        part1 = b"\x0e\xfe\x40" + b"A" * 30           # 64-byte chunk, only 30 here
+        content, done = decode_fv2_lob_chunks(part1)
+        self.assertFalse(done)
+        full = b"\x0e\xfe\x40" + b"A" * 64 + b"\x00"
+        content, done = decode_fv2_lob_chunks(full)
+        self.assertTrue(done)
+        self.assertEqual(content, b"A" * 64)
+
+
 class TestFv2OerError(unittest.TestCase):
     """fv2 OER error + message extraction (#102). Fixture is a real parse-time
     error from a live 9.2.0.4 server (SELECT from a nonexistent table)."""

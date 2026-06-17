@@ -39,7 +39,9 @@ from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
 from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe,
                         encode_o7_exec, encode_o7_close, decode_fv2_describe,
                         decode_fv2_exec_response, decode_fv2_dml_response,
-                        decode_fv2_oer_error)
+                        decode_fv2_oer_error, encode_o7_lob_getlen,
+                        encode_o7_lob_read, decode_fv2_lob_getlen,
+                        decode_fv2_lob_chunks)
 from oracle.connection import _format_version, _MAX_REDIRECTS
 from oracle.tns_consts import (
     CONN_STATE_AUTHENTICATED, CONN_STATE_AUTH_NEGOTIATE,
@@ -601,15 +603,17 @@ class AsyncOracleConnect:
             raise Exception("Connection closed during 9i describe")
         (_, Packet) = Resp
         Columns = decode_fv2_describe(Packet)
-        _Bad = [C for C in Columns
-                if C.get('data_type') in (112, 113, 114)]
+        # CLOB (112) / BLOB (113) read via the two-call TTI_LOBOPS sequence
+        # below; BFILE (114) is still unsupported on fv2 (untested framing).
+        # Mirrors the sync path (#102).
+        _Bad = [C for C in Columns if C.get('data_type') in (114,)]
         if _Bad:
             await self.send(TNS_DATA, encode_o7_close(0))
             await self._next_data_packet()
             from oracle.exceptions import NotSupportedError
             raise NotSupportedError(
                 f"Oracle 9i: column data type {_Bad[0]['data_type']} "
-                f"(LOB) not yet supported on the fv2 path (#102)")
+                f"(BFILE) not yet supported on the fv2 path (#102)")
         # Fetch in batches: re-send the same exec+fetch TTI_ALL7 until the
         # server returns ORA-01403 (#99). Mirrors the sync path.
         AllRows: list = []
@@ -624,12 +628,53 @@ class AsyncOracleConnect:
             AllRows.extend(Rows)
             if ErrCode == 1403 or not Rows:
                 break
+        # Resolve LOB cells while the cursor is still open (mirrors sync, #102).
+        await self._resolve_fv2_lobs(AllRows, Columns)
         await self.send(TNS_DATA, encode_o7_close(0))
         await self._next_data_packet()               # close STA
         if ErrCode and ErrCode not in (0, 1403):
             from oracle.exceptions import from_ora_code
             raise from_ora_code(ErrCode)(f"ORA-{ErrCode:05d}", code=ErrCode)
         return (0, 0, 0, (len(AllRows), Columns), AllRows, None, None, [], None)
+
+    async def _lob_read_fv2(self, Locator: bytes) -> bytes:
+        # Async port of the sync `_lob_read_fv2`: 9i two-call TTI_LOBOPS
+        # GETLEN + READ, returning raw content bytes (PROTOCOL.md §19.5, #102).
+        await self.send(TNS_DATA, encode_o7_lob_getlen(0, Locator))
+        Resp = await self._next_data_packet(b"", b"")
+        if Resp is False:
+            raise Exception("Connection closed during 9i LOB GETLEN")
+        Amount = decode_fv2_lob_getlen(Resp[1])
+        if Amount <= 0:
+            return b""
+        await self.send(TNS_DATA, encode_o7_lob_read(0, Locator, Amount))
+        return await self._read_fv2_lob_content()
+
+    async def _read_fv2_lob_content(self) -> bytes:
+        # Async port of the sync `_read_fv2_lob_content`: accumulate packets and
+        # re-parse with decode_fv2_lob_chunks until the zero-length terminator
+        # (the fv2 READ reply carries no OER call-status). (#102)
+        Data = b""
+        while True:
+            Received = await self._next_data_packet(b"", b"")
+            if Received is False:
+                raise Exception("Connection closed during 9i LOB READ")
+            Data += Received[1]
+            (Content, Complete) = decode_fv2_lob_chunks(Data)
+            if Complete:
+                return Content
+
+    async def _resolve_fv2_lobs(self, Rows: list, Columns: list) -> None:
+        # Async port of the sync `_resolve_fv2_lobs` (#102).
+        from oracle.lob import LOB
+        from oracle.types import decode_fv2_lob
+        for Row in Rows:
+            for I, Val in enumerate(Row):
+                if isinstance(Val, LOB):
+                    Content = await self._lob_read_fv2(Val.raw)
+                    Row[I] = decode_fv2_lob(Columns[I].get('data_type'),
+                                            Content,
+                                            Columns[I].get('charset') or 0)
 
     async def _drain_cursor(self, Result: object) -> object:
         """Mirror of the sync drain loop: pulls follow-up FETCH packets

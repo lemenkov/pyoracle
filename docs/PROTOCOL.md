@@ -1812,7 +1812,45 @@ max buffer, they stream back inline as a chunked DALC (the `0xfe` form — singl
 or multi-chunk) and decode through the normal column path. In batch fetch they
 carry no per-row trailing descriptor (that only appears in single-row fetch).
 
-**CLOB / BLOB / BFILE** still need LOB-locator framing the fv2 path does not yet
-implement; a `SELECT` of such a column would desync the server (ORA-01002), so the
-driver detects them in the describe and raises `NotSupportedError` before the
-execute. Transactions (`COMMIT` / `ROLLBACK`) work unchanged on 9i.
+**CLOB / BLOB** are read by the two-call TTI_LOBOPS sequence in §19.5. **BFILE**
+(type 114) still needs its own fv2 FILE_OPEN/READ/CLOSE framing, so the driver
+detects it in the describe and raises `NotSupportedError` before the execute (a
+`SELECT` of it would desync the server, ORA-01002). Transactions (`COMMIT` /
+`ROLLBACK`) work unchanged on 9i.
+
+### 19.5 CLOB / BLOB read — the two-call TTI_LOBOPS GETLEN + READ (#102)
+
+A CLOB / BLOB cell in the RXD is **not** an inline value: it is a LOB **locator**
+(`ub4 num_bytes` + a DALC block, the 86-byte `00 54 <84-byte locator>` form),
+followed by a 1-byte `00` present indicator. A NULL LOB instead uses the scalar
+empty-value form `00 81 01` (empty DALC + the `81 01` null indicator); a present
+locator's `num_bytes` is always ≥ 86 (first byte `0x01`), so a leading `0x00`
+unambiguously marks NULL. `_read_lob_column` extracts the locator; the cell
+becomes a `LOB` object that the fv2 SELECT path resolves **before closing the
+cursor** (`_resolve_fv2_lobs`), matching what the JDBC reference client does.
+
+9i's TTI_LOBOPS request is far shorter than the modern (10g+) form, and the
+reference client issues it as a **pair** per LOB cell (the modern single-shot
+READ returns empty on 9i):
+
+1. **GETLEN** — learn the content length:
+   `03 60 <seq> 01 01 56 00 00 00 00 00 01 00 01 01 00 00 00` `<ub1 len><locator>`
+   `00`. The locator field is `_read_lob_column`'s output with its leading byte
+   dropped (`54 <84 bytes>`). The reply is a TTI_RPA: `08 00 <ub1 len><locator
+   echo> <ub4 amount> …`; `amount` is in **chars** for CLOB and **bytes** for
+   BLOB.
+2. **READ** — pull exactly that amount, from offset 1:
+   `03 60 <seq> 01 01 56 00 00 01 01 00 00 01 00 01 02 00 00 00` `<ub1 len><locator>`
+   `<sb4 amount>`. The reply is the content: `0e fe` then `<ub1 len><bytes>`
+   chunks (9i uses ~64-byte chunks) ending at a **zero-length chunk**. The
+   trailing RPA is ignored. Unlike modern replies the fv2 READ reply carries
+   **no `04 01 01` OER call-status** (a single-row fetch happened to include one;
+   a multi-row fetch does not), so the zero-length chunk terminator — not an OER —
+   is the only reliable stop signal (`decode_fv2_lob_chunks`). Content may span
+   packets.
+
+An **empty** LOB (`EMPTY_CLOB()` / `EMPTY_BLOB()`) has a valid locator but GETLEN
+returns amount 0, so no READ is issued and the value is `""` / `b""`. CLOB content
+arrives in the column's **DB charset** (a single-byte run on a typical 9i, **not**
+the UTF-16BE the modern path uses) and is decoded with that charset; BLOB content
+is returned as raw bytes.
