@@ -43,7 +43,8 @@ from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe,
                         decode_fv2_oer_error, decode_fv2_block_out,
                         encode_o7_lob_getlen,
                         encode_o7_lob_read, decode_fv2_lob_getlen,
-                        decode_fv2_lob_chunks)
+                        decode_fv2_lob_chunks, encode_o7_bfile_open,
+                        encode_o7_bfile_close, decode_fv2_opened_locator)
 from oracle.connection import _format_version, _MAX_REDIRECTS
 from oracle.tns_consts import (
     CONN_STATE_AUTHENTICATED, CONN_STATE_AUTH_NEGOTIATE,
@@ -650,17 +651,8 @@ class AsyncOracleConnect:
             raise Exception("Connection closed during 9i describe")
         (_, Packet) = Resp
         Columns = decode_fv2_describe(Packet)
-        # CLOB (112) / BLOB (113) read via the two-call TTI_LOBOPS sequence
-        # below; BFILE (114) is still unsupported on fv2 (untested framing).
-        # Mirrors the sync path (#102).
-        _Bad = [C for C in Columns if C.get('data_type') in (114,)]
-        if _Bad:
-            await self.send(TNS_DATA, encode_o7_close(0))
-            await self._next_data_packet()
-            from oracle.exceptions import NotSupportedError
-            raise NotSupportedError(
-                f"Oracle 9i: column data type {_Bad[0]['data_type']} "
-                f"(BFILE) not yet supported on the fv2 path (#102)")
+        # CLOB/BLOB via GETLEN+READ, BFILE via FILE_OPEN/READ/CLOSE — all
+        # resolved before the cursor close in _resolve_fv2_lobs (#102).
         # Fetch in batches: re-send the same exec+fetch TTI_ALL7 until the
         # server returns ORA-01403 (#99). Mirrors the sync path.
         AllRows: list = []
@@ -697,6 +689,33 @@ class AsyncOracleConnect:
         await self.send(TNS_DATA, encode_o7_lob_read(0, Locator, Amount))
         return await self._read_fv2_lob_content()
 
+    async def _bfile_read_fv2(self, Locator: bytes) -> bytes:
+        # Async port of the sync `_bfile_read_fv2`: FILE_OPEN → GETLEN → READ →
+        # FILE_CLOSE; subsequent ops use the open-flagged locator FILE_OPEN
+        # returns (PROTOCOL §19.8, #102).
+        await self.send(TNS_DATA, encode_o7_bfile_open(0, Locator))
+        Resp = await self._next_data_packet(b"", b"")
+        if Resp is False:
+            raise Exception("Connection closed during 9i BFILE FILE_OPEN")
+        self._fv2_raise_for_error(Resp[1])
+        Opened = decode_fv2_opened_locator(Resp[1])
+        if Opened is None:
+            raise Exception("Unexpected 9i BFILE FILE_OPEN reply",
+                            Resp[1][:8].hex())
+        try:
+            await self.send(TNS_DATA, encode_o7_lob_getlen(0, Opened))
+            Resp = await self._next_data_packet(b"", b"")
+            if Resp is False:
+                raise Exception("Connection closed during 9i BFILE GETLEN")
+            Amount = decode_fv2_lob_getlen(Resp[1])
+            if Amount <= 0:
+                return b""
+            await self.send(TNS_DATA, encode_o7_lob_read(0, Opened, Amount))
+            return await self._read_fv2_lob_content()
+        finally:
+            await self.send(TNS_DATA, encode_o7_bfile_close(0, Opened))
+            await self._next_data_packet(b"", b"")
+
     async def _read_fv2_lob_content(self) -> bytes:
         # Async port of the sync `_read_fv2_lob_content`: accumulate packets and
         # re-parse with decode_fv2_lob_chunks until the zero-length terminator
@@ -718,7 +737,10 @@ class AsyncOracleConnect:
         for Row in Rows:
             for I, Val in enumerate(Row):
                 if isinstance(Val, LOB):
-                    Content = await self._lob_read_fv2(Val.raw)
+                    if Val.data_type == 114:        # BFILE: open / read / close
+                        Content = await self._bfile_read_fv2(Val.raw)
+                    else:                           # CLOB / BLOB: GETLEN + READ
+                        Content = await self._lob_read_fv2(Val.raw)
                     Row[I] = decode_fv2_lob(Columns[I].get('data_type'),
                                             Content,
                                             Columns[I].get('charset') or 0)

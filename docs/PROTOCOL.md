@@ -1912,3 +1912,28 @@ The returned values are handed to the cursor as the same
 `Var` (`has_value` false) and an IN OUT `Var` (seeded with `setvalue`) are
 distinguished there. `_execute_fv2_block` drives the whole sequence (sync +
 async).
+
+### 19.8 BFILE read (#102)
+
+A `BFILE` column (type 114) arrives in the RXD as a locator like CLOB/BLOB, but
+shorter and **variable length** — a `<ub2 inner-length>` + flags + the
+`DIRECTORY` object name and file name in plain ASCII (e.g. 34 bytes for
+`BFDIR` / `hello.bin`). `_read_lob_column` extracts it and `LOB.directory_name`
+/ `LOB.filename` parse it. Reading the file is a four-call TTI_LOBOPS sequence —
+the fv2 form of the modern `bfile_read_native`:
+
+1. **FILE_OPEN** (op middle `00 00 00 00 01 00 02 01 00 00 00 00`, trailer
+   `01 0b` = read-only mode) → the reply's RPA carries an **updated** locator
+   with the open flag set; GETLEN / READ / FILE_CLOSE must use *that* one
+   (`decode_fv2_opened_locator`). A bad file surfaces here as ORA-22288.
+2. **GETLEN** (§19.5 form) → the byte length.
+3. **READ** (§19.5 form) → the content as `0e fe <chunks>`.
+4. **FILE_CLOSE** (op middle `00 00 00 00 00 02 02 00 00 00 00`, no trailer).
+
+All four share the common fv2 LOBOPS shape `03 60 <seq> 01 <sb4 locator-length>
+<op middle> <locator[1:]> <trailer>` (`_encode_o7_lobop`); the locator length is
+computed because BFILE locators vary (CLOB/BLOB are a fixed 86 bytes).
+`_bfile_read_fv2` drives the sequence (closing in a `finally`) and is dispatched
+from `_resolve_fv2_lobs` by data type; the BFILE column resolves to the file
+bytes, like the modern path. This completes the 9i LOB surface (CLOB, BLOB,
+BFILE) and, with §19.6 / §19.7, the PL/SQL surface (IN, OUT, IN OUT).

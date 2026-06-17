@@ -1052,5 +1052,79 @@ class TestFv2OutBinds(unittest.TestCase):
         self.assertEqual(strip_fv2_bind_prompt(live)[0], 0x07)
 
 
+class TestFv2Bfile(unittest.TestCase):
+    """Oracle 9i BFILE read (#102, PROTOCOL §19.8): FILE_OPEN -> GETLEN -> READ
+    -> FILE_CLOSE over TTI_LOBOPS, where FILE_OPEN returns an open-flagged
+    locator the later ops use. Fixtures are real frames from a live 9.2.0.4
+    server: SELECT f FROM bftest, f = BFILENAME('BFDIR','hello.bin') (20 bytes
+    'BFILE-9i-content' + ca fe ba be)."""
+
+    RXD = bytes.fromhex(
+        "0602010100010a00070122220020000108080000000100000000000000054246"
+        "444952000968656c6c6f2e62696e0004010102057b0000010100030000000000"
+        "0000000000000000000101194f52412d30313430333a206e6f20646174612066"
+        "6f756e640a")
+    FOPEN_REQ = bytes.fromhex(
+        "0360000101220000000000010002010000000020000108080000000100000000"
+        "000000054246444952000968656c6c6f2e62696e010b")
+    FOPEN_RESP = bytes.fromhex(
+        "080020000108080000000100010000000000054246444952000968656c6c6f2e"
+        "62696e010b04010100000000000000000000000000000000000000000101")
+    GETLEN_REQ = bytes.fromhex(
+        "0360000101220000000000010001010000002000010808000000010001000000"
+        "0000054246444952000968656c6c6f2e62696e00")
+    GETLEN_RESP = bytes.fromhex(
+        "080020000108080000000100010000000000054246444952000968656c6c6f2e"
+        "62696e011404010100000000000000000000000000000000000000000101")
+    READ_REQ = bytes.fromhex(
+        "0360000101220000010100000100010200000020000108080000000100010000"
+        "000000054246444952000968656c6c6f2e62696e0114")
+    READ_RESP = bytes.fromhex(
+        "0efe144246494c452d39692d636f6e74656e74cafebabe000800200001080800"
+        "00000100010000000000054246444952000968656c6c6f2e62696e0114040101"
+        "00000000000000000000000000000000000000000101")
+    FCLOSE_REQ = bytes.fromhex(
+        "0360000101220000000000000002020000000020000108080000000100010000"
+        "000000054246444952000968656c6c6f2e62696e")
+
+    def _locator(self):
+        from oracle.tns import _read_lob_column
+        i = self.RXD.index(0x07) + 1
+        loc, _ = _read_lob_column(self.RXD[i:])
+        return loc
+
+    def test_rxd_yields_bfile_lob(self):
+        from oracle.tns import decode_fv2_exec_response
+        from oracle.lob import LOB
+        rows, err = decode_fv2_exec_response(self.RXD, [{'data_type': 114}])
+        self.assertEqual(err, 1403)
+        self.assertIsInstance(rows[0][0], LOB)
+        self.assertEqual(rows[0][0].data_type, 114)
+        # the locator carries the directory + file name in plain ASCII
+        self.assertEqual(rows[0][0].directory_name, "BFDIR")
+        self.assertEqual(rows[0][0].filename, "hello.bin")
+
+    def test_file_open_request_matches_capture(self):
+        from oracle.tns import encode_o7_bfile_open
+        self.assertEqual(encode_o7_bfile_open(0, self._locator()), self.FOPEN_REQ)
+
+    def test_opened_locator_then_getlen_read_close(self):
+        from oracle.tns import (decode_fv2_opened_locator, encode_o7_lob_getlen,
+                                decode_fv2_lob_getlen, encode_o7_lob_read,
+                                encode_o7_bfile_close)
+        opened = decode_fv2_opened_locator(self.FOPEN_RESP)
+        self.assertEqual(encode_o7_lob_getlen(0, opened), self.GETLEN_REQ)
+        self.assertEqual(decode_fv2_lob_getlen(self.GETLEN_RESP), 20)
+        self.assertEqual(encode_o7_lob_read(0, opened, 20), self.READ_REQ)
+        self.assertEqual(encode_o7_bfile_close(0, opened), self.FCLOSE_REQ)
+
+    def test_read_response_content(self):
+        from oracle.tns import decode_fv2_lob_chunks
+        content, done = decode_fv2_lob_chunks(self.READ_RESP)
+        self.assertTrue(done)
+        self.assertEqual(content,
+                         b"BFILE-9i-content" + bytes.fromhex("cafebabe"))
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -1766,25 +1766,56 @@ def encode_o7_close(Seq: int) -> bytes:
 # issues it as a *pair* per LOB cell: first GETLEN to learn the content length,
 # then READ to pull exactly that many chars (CLOB) / bytes (BLOB). The modern
 # single-shot READ returns empty on 9i. The locator is `_read_lob_column`'s
-# output (`00 54 <84-byte locator>`); its leading byte is dropped and the rest
-# (a ub1-length-prefixed block: `54 <84 bytes>`) is sent verbatim. The two
-# fixed framing blocks and the amount encoding were validated byte-for-byte
-# against cap_9i_lobread.log for both a CLOB and a BLOB. (#102)
-_O7_LOB_GETLEN_FIXED = bytes.fromhex("010156000000000001000101000000")
-_O7_LOB_READ_FIXED = bytes.fromhex("01015600000101000001000102000000")
+# output (`00 <ub1 len><body>`); its leading byte is dropped and the rest
+# (`<ub1 len><body>`) is sent verbatim. Every fv2 LOBOPS request shares the
+# shape `03 60 <seq> 01 <sb4 locator-length> <op middle> <locator[1:]> <trailer>`
+# — only the op-specific middle and trailer differ. Validated byte-for-byte
+# against cap_9i_lobread.log (CLOB + BLOB GETLEN/READ) and cap_9i_bfile.log
+# (BFILE FILE_OPEN/READ/CLOSE). (#102, PROTOCOL §19.5 / §19.8)
+_LOBOP_GETLEN_MID = bytes.fromhex("000000000001000101000000")    # GETLEN
+_LOBOP_READ_MID = bytes.fromhex("00000101000001000102000000")    # READ
+_LOBOP_FOPEN_MID = bytes.fromhex("00000000000100020100000000")   # BFILE FILE_OPEN
+_LOBOP_FCLOSE_MID = bytes.fromhex("00000000000000020200000000")  # BFILE FILE_CLOSE
+
+def _encode_o7_lobop(Seq: int, Locator: bytes, Middle: bytes,
+                     Trailer: bytes) -> bytes:
+    # Build a fv2 TTI_LOBOPS request. The source-locator length counts the full
+    # `_read_lob_column` block (its leading byte plus the `<ub1 len><body>` that
+    # goes on the wire); CLOB/BLOB locators are a fixed 86 bytes, BFILE locators
+    # vary with the directory + file name, so it is computed rather than fixed.
+    return (bytes([TTI_FUN, TTI_LOBOPS, Seq, 0x01]) + encode_sb4(len(Locator))
+            + Middle + Locator[1:] + Trailer)
 
 def encode_o7_lob_getlen(Seq: int, Locator: bytes) -> bytes:
     # GETLEN: ask the server for the LOB's length. Trailer is a single 0x00
     # (no read amount). Response carries the amount — see decode_fv2_lob_getlen.
-    return (bytes([TTI_FUN, TTI_LOBOPS, Seq]) + _O7_LOB_GETLEN_FIXED
-            + Locator[1:] + bytes([0]))
+    return _encode_o7_lobop(Seq, Locator, _LOBOP_GETLEN_MID, bytes([0]))
 
 def encode_o7_lob_read(Seq: int, Locator: bytes, Amount: int) -> bytes:
     # READ: pull `Amount` chars/bytes (the value GETLEN returned) starting at
-    # offset 1. Response is `0e fe <chunks>` then an RPA + OER (read by the
-    # existing _read_lob_response loop).
-    return (bytes([TTI_FUN, TTI_LOBOPS, Seq]) + _O7_LOB_READ_FIXED
-            + Locator[1:] + encode_sb4(Amount))
+    # offset 1. Response is `0e fe <chunks>` then an RPA + OER.
+    return _encode_o7_lobop(Seq, Locator, _LOBOP_READ_MID, encode_sb4(Amount))
+
+def encode_o7_bfile_open(Seq: int, Locator: bytes) -> bytes:
+    # BFILE FILE_OPEN: open the external file read-only (trailer 01 0b = amount
+    # pointer present + open mode 0x0b). The reply's RPA carries an *updated*
+    # locator with the open flag set — GETLEN/READ/CLOSE must use that one
+    # (decode_fv2_opened_locator). (#102, PROTOCOL §19.8)
+    return _encode_o7_lobop(Seq, Locator, _LOBOP_FOPEN_MID, bytes.fromhex("010b"))
+
+def encode_o7_bfile_close(Seq: int, Locator: bytes) -> bytes:
+    # BFILE FILE_CLOSE: close the opened file (no trailer).
+    return _encode_o7_lobop(Seq, Locator, _LOBOP_FCLOSE_MID, b"")
+
+def decode_fv2_opened_locator(Packet: bytes) -> bytes | None:
+    # Pull the opened BFILE locator out of a FILE_OPEN reply: TTI_RPA (08) 00
+    # then `<ub1 len><body>` (the open-flagged locator), then `01 0b` + OER.
+    # Returned in `_read_lob_column`'s full form (a leading 0x00 + the
+    # `<ub1 len><body>`) so it feeds straight back into the LOBOPS encoders.
+    if not Packet or Packet[0] != TTI_RPA or len(Packet) < 3:
+        return None
+    Olen = Packet[2]
+    return bytes([0]) + bytes(Packet[2:3 + Olen])
 
 def decode_fv2_lob_chunks(Data: bytes) -> tuple[bytes, bool]:
     # Parse the content of a 9i (fv2) TTI_LOBOPS READ reply: TTI_LOB (0e) then
@@ -1936,15 +1967,16 @@ def decode_fv2_exec_response(Data: bytes, Columns: list) -> tuple[list, int]:
             Row = []
             for Col in Columns:
                 DataType = Col.get('data_type')
-                if DataType in (112, 113):
-                    # CLOB / BLOB. A present cell is a LOB locator (ub4 num_bytes
-                    # + DALC locator) followed by a 1-byte 0x00 indicator;
-                    # _read_lob_column extracts the locator and the connection
-                    # round-trips it via TTI_LOBOPS (_lob_read_fv2). A NULL LOB
-                    # uses the scalar empty-value form instead — `00 81 01` (an
-                    # empty DALC then the `81 01` null indicator). A present
-                    # locator's num_bytes is always >= the 86-byte minimum (first
-                    # byte 0x01), so a leading 0x00 unambiguously means NULL.
+                if DataType in (112, 113, 114):
+                    # CLOB / BLOB / BFILE. A present cell is a LOB locator (ub4
+                    # num_bytes + DALC locator) followed by a 1-byte 0x00
+                    # indicator; _read_lob_column extracts the locator and the
+                    # connection round-trips it via TTI_LOBOPS (_lob_read_fv2 for
+                    # CLOB/BLOB; _bfile_read_fv2 — FILE_OPEN/READ/CLOSE — for
+                    # BFILE). A NULL LOB uses the scalar empty-value form instead
+                    # — `00 81 01` (an empty DALC then the `81 01` null
+                    # indicator). A present locator's num_bytes is always >= its
+                    # minimum (first byte 0x01), so a leading 0x00 means NULL.
                     if Rest[:1] == b"\x00":
                         Rest = Rest[1:]                  # empty DALC
                         if Rest[:1] == b"\x81":
