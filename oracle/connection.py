@@ -10,7 +10,8 @@ from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
 from oracle.tns import set_decode_dml_rowcounts
 from oracle.exceptions import OperationalError
-from oracle.tns import CCAP_FIELD_VERSION, FIELD_VERSION_12_1, FIELD_VERSION_21_1
+from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
+                        FIELD_VERSION_12_1, FIELD_VERSION_21_1)
 from oracle.tns_consts import (
     CONN_STATE_AUTH_NEGOTIATE, CONN_STATE_AUTHENTICATED,
     CONN_STATE_CONNECTED, CONN_STATE_DISCONNECTED, DictionaryType,
@@ -270,10 +271,21 @@ class OracleConnect:
                             self.send(TNS_DATA, Data)
                         case p if p == TTI_DTY:
                             logger.debug("handle_login: recv DTY")
-                            Data = encode_dictionary(self._make_dict(DictionaryType.sess))
-                            self.send(TNS_DATA, Data)
+                            if self.field_version < FIELD_VERSION_10_2:
+                                # Pre-10g (9i, field version 2): O3LOGON thin
+                                # auth — TTI_3LOGA fetches the session key (#90).
+                                from oracle.tns import encode_o3logon_phase1
+                                self._o3_phase = 1
+                                self.send(TNS_DATA, encode_o3logon_phase1(
+                                    self._next_seq(), self.user.encode('utf-8')))
+                            else:
+                                Data = encode_dictionary(self._make_dict(DictionaryType.sess))
+                                self.send(TNS_DATA, Data)
                         case p if p == TTI_RPA:
                             logger.debug("handle_login: recv RPA")
+                            if getattr(self, "_o3_phase", 0) == 1:
+                                self._send_o3logon_phase2(Packet)
+                                continue
                             return self._handle_rpa(Packet[1:])
                         case p if p == TTI_WRN:
                             logger.debug("handle_login: recv WRN %s", Packet[1:])
@@ -284,17 +296,36 @@ class OracleConnect:
                             # Decode it and raise rather than looping forever on
                             # an empty socket.
                             logger.debug("handle_login: recv OER")
-                            from oracle.tns import decode_packet
+                            from oracle.tns import decode_packet, decode_ub4
                             from oracle.exceptions import DatabaseError, from_ora_code
-                            # Via decode_packet so the negotiated field version
-                            # is published for the (version-gated) OER decode.
-                            Result = decode_packet(Packet, (None, None, []),
-                                                   self.field_version)
-                            ErrCode = Result[1]
-                            Message = Result[5] if len(Result) > 5 else None
+                            if getattr(self, "_o3_phase", 0) == 2:
+                                # 9i's OER is shorter than the 11g+ form
+                                # decode_token_oer expects (no batch-error
+                                # arrays), so decode just the leading fields:
+                                # call_status, seq, rowcount, then the ORA code.
+                                Rest = Packet[1:]
+                                for _ in range(3):
+                                    (_, Rest) = decode_ub4(Rest)
+                                (ErrCode, _) = decode_ub4(Rest)
+                                Message = None
+                            else:
+                                # Via decode_packet so the negotiated field
+                                # version is published for the version-gated
+                                # OER decode.
+                                Result = decode_packet(Packet, (None, None, []),
+                                                       self.field_version)
+                                ErrCode = Result[1]
+                                Message = Result[5] if len(Result) > 5 else None
                             if ErrCode and ErrCode not in (0, 1403):
                                 raise from_ora_code(ErrCode)(
                                     Message or f"ORA-{ErrCode:05d}", code=ErrCode)
+                            if getattr(self, "_o3_phase", 0) == 2:
+                                # O3LOGON phase two answered with a clean OER =
+                                # authenticated (#90). No AUTH_SVR_RESPONSE to
+                                # validate on the pre-10g path.
+                                self.conn_state = CONN_STATE_AUTHENTICATED
+                                logger.debug("handle_login: authenticated (O3LOGON)")
+                                return 0
                             raise DatabaseError("authentication failed")
                         case _:
                             logger.debug("handle_login: unknown token %s", Packet[0])
@@ -393,6 +424,29 @@ class OracleConnect:
         else:
             logger.error("handle_login: unexpected RPA result %s", Result[0])
             return 1
+
+    def _send_o3logon_phase2(self, Packet: bytes) -> None:
+        # O3LOGON phase two (#90): the TTI_3LOGA response RPA carries the
+        # session key as a positional length-prefixed ASCII-hex string
+        # (TTI_RPA, ub1 count, ub1 length, <hex>). Decrypt it with the account's
+        # DES verifier to recover the plaintext session key, DES-encrypt the
+        # zero-padded password under it, and send TTI_3LOGON with AUTH_PASSWORD
+        # = upper-hex(cipher) + decimal(pad count).
+        from binascii import hexlify, unhexlify
+        from oracle.crypto import o3logon, des_verifier
+        from oracle.tns import encode_o3logon_phase2
+        Length = Packet[2]
+        SessKey = unhexlify(Packet[3:3 + Length])
+        UserB = self.user.encode('utf-8')
+        PassB = self.password.encode('utf-8')
+        Verifier = des_verifier(UserB, PassB)
+        (AuthPass, _, _) = o3logon(SessKey, Verifier, PassB)
+        PadCount = (8 - len(PassB) % 8) % 8
+        PwdField = (hexlify(AuthPass).decode('ascii').upper()
+                    + str(PadCount)).encode('ascii')
+        self._o3_phase = 2
+        self.send(TNS_DATA, encode_o3logon_phase2(
+            self._next_seq(), UserB, PwdField))
 
     def execute(self, Query: str, Bind: list | None = None, Def: list | None = None,
                 Batch: list | None = None, BatchErrors: bool = False,

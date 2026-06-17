@@ -43,6 +43,7 @@ def _json_oson_image(Token: object):
         return None
 from oracle.tns_consts import (
     AL16UTF16_CHARSET, AL32UTF8_CHARSET, CharsetDict, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_SID,
+    FIELD_VERSION_9_2, FIELD_VERSION_10_2,
     FIELD_VERSION_11_2, FIELD_VERSION_12_1, FIELD_VERSION_12_2,
     FIELD_VERSION_12_2_EXT1, FIELD_VERSION_19_1, FIELD_VERSION_21_1,
     FIELD_VERSION_23_1,
@@ -50,6 +51,7 @@ from oracle.tns_consts import (
     TTI_DCB, TTI_DTY, TTI_FETCH, TTI_FOB, TTI_FUN, TTI_IOV, TTI_LOB,
     TTI_LOGOFF, TTI_OAC, TTI_OER, TTI_PFN, TTI_PRO, TTI_RPA, TTI_RXD,
     TTI_RXH, TTI_SESS, TTI_SPFP, TTI_STA, TTI_STRT, TTI_STOP, TTI_UDS,
+    TTI_3LOGON, TTI_3LOGA,
     TTI_WRN, TNS_BIND_DIR_INPUT, TNS_AL8I4_ARRAY_DML_ROWCOUNTS,
     TNS_EXEC_OPTION_BATCH_ERRORS,
     TNS_LOB_OP_READ, TNS_LOB_OP_WRITE,
@@ -1278,10 +1280,25 @@ def capability_arrays(field_version: int = FIELD_VERSION_11_2) -> tuple[bytes, b
     (12.1 / 12.2 / 18c / 19c / 21c …)."""
     if not 0 <= field_version <= 0xFF:
         raise ValueError(f"field version out of range: {field_version}")
+    if field_version < FIELD_VERSION_10_2:
+        # Pre-10g (9i, #90): the minimal capability vector the Oracle JDBC thin
+        # driver sends — crucially LOGON_TYPES = 0 (does NOT advertise O5LOGON).
+        # The 11.2 vector advertises O5LOGON (0x6a), which makes 9i attempt a
+        # verifier the account lacks and reject the login (ORA-01017); with the
+        # minimal caps 9i falls back to the O3LOGON path. CCAP_FIELD_VERSION
+        # stays 0 (9i negotiates the field version via TTI_PRO, not the caps).
+        return _O3_COMPILE_CAPS, _O3_RUNTIME_CAPS
     Base = FIELD_VERSION_21_1 if field_version >= FIELD_VERSION_12_1 else FIELD_VERSION_11_2
     Compile = bytearray(_render_caps(_COMPILE_CAPS[Base]))
     Compile[CCAP_FIELD_VERSION] = field_version
     return bytes(Compile), _render_caps(_RUNTIME_CAPS[Base])
+
+
+# Oracle 9i (pre-10g) capability vectors, captured from the JDBC thin driver
+# (#90). Minimal by design: compile-cap index 17 = 0x03, everything else 0
+# (no O5LOGON), runtime caps = a single 0x02 byte.
+_O3_COMPILE_CAPS = bytes(17) + bytes([3]) + bytes(3)
+_O3_RUNTIME_CAPS = bytes([2])
 
 
 # 12c+ datatype table. Where the 11g table (built inline in encode_dictionary_dty
@@ -1794,6 +1811,31 @@ def encode_dictionary_sess(Dictionary: dict) -> bytes:
                 + Terminal + AppName + Hostname + Pid + SID)
 
     return bytes([TTI_FUN, TTI_SESS, Tseq, 1]) + UserLen + LogonMode + bytes([1]) + encode_sb4(4) + bytes([1, 1]) + User + AppName + Hostname + Pid + SID
+
+# Pre-10g (9i) thin authentication uses O3LOGON: TTI_3LOGA (0x52) to fetch the
+# session key, then TTI_3LOGON (0x51) to send the password (#90). The OSESSKEY
+# path above (TTI_SESS) is what 10g+ thin clients and OCI use; 9i's field
+# version 2 expects this older positional message instead. The two encoders
+# below reproduce the Oracle JDBC thin driver's 9i messages byte-for-byte
+# (verified — see tests/test_tns_encode.py). The terminal/machine/osuser/program
+# strings are session metadata the server does not authenticate on, so we send
+# the same values JDBC does; only the username and (phase two) the password vary.
+_O3_ENV = b"unknown" + b"o9i" + b"root" + b"JDBC Thin Client"
+# Fixed header skeleton between the length fields and the string blob, captured
+# from JDBC (it bakes in the env-string lengths above).
+_O3_MID1 = bytes.fromhex("00000000000001010701010301010402100000000101100000000001011001")
+_O3_MID2 = bytes.fromhex("0000000001010701010301010402100000000101100000000000011000")
+
+def encode_o3logon_phase1(Seq: int, User: bytes) -> bytes:
+    # TTI_3LOGA: request the session key. No password field.
+    return (bytes([TTI_FUN, TTI_3LOGA, Seq, 1]) + encode_sb4(len(User))
+            + _O3_MID1 + User + _O3_ENV)
+
+def encode_o3logon_phase2(Seq: int, User: bytes, PwdField: bytes) -> bytes:
+    # TTI_3LOGON: send the AUTH_PASSWORD (hex(DES blocks) + decimal pad count).
+    return (bytes([TTI_FUN, TTI_3LOGON, Seq, 1]) + encode_sb4(len(User))
+            + bytes([1]) + encode_sb4(len(PwdField)) + _O3_MID2
+            + User + PwdField + _O3_ENV)
 
 def encode_dictionary_spfp(Dictionary: dict) -> bytes:
     Tseq = Dictionary['seq']

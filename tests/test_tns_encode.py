@@ -706,3 +706,35 @@ class TestTnsBaseEncoders(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+from oracle.tns import (encode_o3logon_phase1, encode_o3logon_phase2,
+                        capability_arrays, FIELD_VERSION_9_2)
+
+class TestO3logonMessages(unittest.TestCase):
+    # Pinned against the Oracle JDBC thin driver's 9i (#90) handshake: user
+    # "pyo", and the AUTH_PASSWORD field "F18CC9AF1CE5A7E82" (hex of the DES
+    # blocks + decimal pad count). seq 0 matches the capture.
+    def test_phase1_3loga(self):
+        self.assertEqual(
+            encode_o3logon_phase1(0, b"pyo").hex(),
+            "0352000101030000000000000101070101030101040210000000"
+            "010110000000000101100170796f756e6b6e6f776e6f3969726f"
+            "6f744a444243205468696e20436c69656e74")
+
+    def test_phase2_3logon(self):
+        self.assertEqual(
+            encode_o3logon_phase2(0, b"pyo", b"F18CC9AF1CE5A7E82").hex(),
+            "035100010103010111000000000101070101030101040210000000"
+            "010110000000000001100070796f4631384343394146314345354137"
+            "453832756e6b6e6f776e6f3969726f6f744a444243205468696e2043"
+            "6c69656e74")
+
+    def test_9i_capabilities_minimal(self):
+        # Pre-10g caps must NOT advertise O5LOGON (LOGON_TYPES byte 0) or 9i
+        # rejects the login with ORA-01017.
+        Compile, Runtime = capability_arrays(FIELD_VERSION_9_2)
+        self.assertEqual(len(Compile), 21)
+        self.assertEqual(Compile[4], 0)        # CCAP_LOGON_TYPES
+        self.assertEqual(Compile[17], 3)
+        self.assertEqual(Runtime, bytes([2]))
