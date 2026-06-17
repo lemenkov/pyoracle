@@ -1854,3 +1854,30 @@ returns amount 0, so no READ is issued and the value is `""` / `b""`. CLOB conte
 arrives in the column's **DB charset** (a single-byte run on a typical 9i, **not**
 the UTF-16BE the modern path uses) and is decoded with that charset; BLOB content
 is returned as raw bytes.
+
+### 19.6 Anonymous PL/SQL blocks (#102, IN binds)
+
+A `BEGIN … END;` / `DECLARE … ;` block runs as **OOPEN + a single ALL7
+parse-execute** (no describe / fetch — structurally like §19.3 DML), but with two
+differences from a SELECT/DML parse, both essential — the server rejects a block
+sent with DML opts with **ORA-00600**:
+
+1. **Option word.** A block uses `01 21` (no binds) or `02 04 29` (with binds)
+   where a SELECT/DML uses `02 80 21` / `02 80 29`. The `0x8000` bit (set in the
+   DML form) means "bind values are inline"; a block does **not** set it.
+2. **Bind values are a separate round-trip.** The parse-execute carries the bind
+   **OAC** descriptors but **no values**. The server then replies with a bind
+   prompt (`0b 05 …`); the client sends the values as a standalone `TTI_RXD`
+   (`07` + the DALC-encoded values, exactly `encode_tokens_rxd`); the server
+   returns the final RPA + short OER. A block with **no** binds skips the prompt
+   and the parse-execute returns the RPA + OER directly.
+
+The response decodes through the same `decode_fv2_dml_response` (RPA piggyback +
+short OER); a compile error (e.g. ORA-06550) or runtime error (ORA-20001 +
+ORA-06512) surfaces from the OER via `_fv2_raise_for_error`, and the connection
+stays usable afterward. `encode_o7_block` builds the request and
+`OracleConnect._execute_fv2_block` (+ the async port) drives the sequence.
+
+**Scope:** IN binds only. OUT / IN OUT binds (the value the server returns in its
+reply) are a separate follow-up — they extend this same block exec with the
+return-bind (IOV) decode.

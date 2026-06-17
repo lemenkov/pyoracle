@@ -10,7 +10,8 @@ from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
 from oracle.tns import set_decode_dml_rowcounts
 from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe, encode_o7_exec,
-                        encode_o7_close, decode_fv2_describe,
+                        encode_o7_close, encode_o7_block, encode_tokens_rxd,
+                        decode_fv2_describe,
                         decode_fv2_exec_response, decode_fv2_dml_response,
                         decode_fv2_oer_error, encode_o7_lob_getlen,
                         encode_o7_lob_read, decode_fv2_lob_getlen,
@@ -470,11 +471,13 @@ class OracleConnect:
         if self.field_version < FIELD_VERSION_10_2:
             if Head.startswith('SELECT'):
                 return self._drain_cursor(self._execute_fv2(Query, Bind))
+            # Anonymous PL/SQL blocks (BEGIN/DECLARE) over the fv2 block path
+            # (#102, IN binds only) — they need their own ALL7 option word, not
+            # the DML one (which the server rejects with ORA-00600).
+            if Head.startswith('BEGIN') or Head.startswith('DECLARE'):
+                return self._execute_fv2_block(Query, Bind)
             # DML (INSERT/UPDATE/DELETE) over the fv2 TTI_ALL7 path (#101).
-            # PL/SQL blocks (BEGIN/DECLARE) are not yet supported on 9i (#102),
-            # so fall through to the ALL8 path (which will error) for those.
-            if not (Head.startswith('BEGIN') or Head.startswith('DECLARE')):
-                return self._execute_fv2_dml(Query, Bind)
+            return self._execute_fv2_dml(Query, Bind)
         if Head.startswith('SELECT'):
             Type = 'select'
         elif Head.startswith('BEGIN') or Head.startswith('DECLARE'):
@@ -677,6 +680,43 @@ class OracleConnect:
             raise Exception("Connection closed during 9i DML")
         (_, Packet) = Resp
         self._fv2_raise_for_error(Packet)            # e.g. ORA-00942 / constraint
+        (RowCount, ErrCode) = decode_fv2_dml_response(Packet)
+        self.send(TNS_DATA, encode_o7_close(0))
+        self._next_data_packet()                     # close STA
+        if ErrCode and ErrCode not in (0, 1403):
+            from oracle.exceptions import from_ora_code
+            raise from_ora_code(ErrCode)(f"ORA-{ErrCode:05d}", code=ErrCode)
+        if self.autocommit:
+            self.commit()
+        return (0, 0, 0, (RowCount, None), [], None, None, [], None)
+
+    def _execute_fv2_block(self, Query: str, Bind: list | None = None) -> object:
+        # Anonymous PL/SQL block over the fv2 TTI_ALL7 block path (#102,
+        # PROTOCOL §19.6; IN binds only). OOPEN, then encode_o7_block parse-
+        # executes the block. With binds the server replies with a "send the
+        # binds" prompt (it does NOT take inline values like DML); we then send
+        # the values as a standalone RXD and read the final RPA + OER. Without
+        # binds the parse-execute returns the RPA + OER directly. Commit
+        # explicitly when autocommit is on.
+        Bind = Bind or []
+        self.send(TNS_DATA, encode_o7_open(0))
+        self._next_data_packet()                     # OOPEN RPA
+        self.send(TNS_DATA, encode_o7_block(0, Query, Bind))
+        Resp = self._next_data_packet()
+        if Resp is False:
+            raise Exception("Connection closed during 9i PL/SQL block")
+        (_, Packet) = Resp
+        if Bind:
+            # A parse/compile error arrives here as an OER (e.g. ORA-06550);
+            # otherwise the packet is the bind prompt. Send the values either
+            # way — the prompt carries no data we need.
+            self._fv2_raise_for_error(Packet)
+            self.send(TNS_DATA, encode_tokens_rxd(Bind, b""))
+            Resp = self._next_data_packet()
+            if Resp is False:
+                raise Exception("Connection closed during 9i PL/SQL bind send")
+            (_, Packet) = Resp
+        self._fv2_raise_for_error(Packet)            # runtime error (ORA-06512 …)
         (RowCount, ErrCode) = decode_fv2_dml_response(Packet)
         self.send(TNS_DATA, encode_o7_close(0))
         self._next_data_packet()                     # close STA
