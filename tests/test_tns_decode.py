@@ -729,6 +729,28 @@ class TestFv2ExecResponse(unittest.TestCase):
         self.assertEqual(rows[2][1], 'carol')
 
 
+class TestFv2OerError(unittest.TestCase):
+    """fv2 OER error + message extraction (#102). Fixture is a real parse-time
+    error from a live 9.2.0.4 server (SELECT from a nonexistent table)."""
+
+    BAD_TABLE = bytes.fromhex(
+        "04000203ae00000101010e000000000000000000000000000000000000"
+        "0000284f52412d30303934323a207461626c65206f722076696577206"
+        "46f6573206e6f742065786973740a")
+
+    def test_decodes_code_and_message(self):
+        from oracle.tns import decode_fv2_oer_error
+        code, msg = decode_fv2_oer_error(self.BAD_TABLE)
+        self.assertEqual(code, 942)
+        self.assertEqual(msg, "ORA-00942: table or view does not exist")
+
+    def test_non_oer_is_no_error(self):
+        from oracle.tns import decode_fv2_oer_error
+        # An RPA (08) token is not an error.
+        self.assertEqual(decode_fv2_oer_error(bytes.fromhex("08010109")),
+                         (0, None))
+
+
 class TestFv2DmlResponse(unittest.TestCase):
     """Oracle 9i DML over TTI_ALL7 (#101): RPA piggyback + short OER whose first
     field is the affected-row count. Fixture is a real UPDATE response (2 rows)
