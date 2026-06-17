@@ -738,3 +738,28 @@ class TestO3logonMessages(unittest.TestCase):
         self.assertEqual(Compile[4], 0)        # CCAP_LOGON_TYPES
         self.assertEqual(Compile[17], 3)
         self.assertEqual(Runtime, bytes([2]))
+
+    def test_9i_parse_no_binds(self):
+        # fv2 TTI_ALL7 parse, no binds: option word 0x21, no bind section.
+        # Exact bytes from a live 9.2.0.4 JDBC-thin capture.
+        from oracle.tns import encode_o7_parse
+        self.assertEqual(
+            encode_o7_parse(0, "select 42 as n from dual").hex(),
+            "03470002802101010101180000010107010102000000000073656c"
+            "656374203432206173206e2066726f6d206475616c0101010100000000"
+            "00")
+
+    def test_9i_parse_with_binds(self):
+        # fv2 TTI_ALL7 parse with a string + number bind: option word 0x29, a
+        # bind-count field before the SQL, per-bind OAC + one RXD of values
+        # after it. Exact bytes from a live 9.2.0.4 JDBC-thin capture (#100).
+        from oracle.tns import encode_o7_parse
+        self.assertEqual(
+            encode_o7_parse(
+                0, "select id from t97 where name = :1 and id = :2",
+                ["carol", 3]).hex(),
+            "034700028029010101012e000001010701010200000001010273656c"
+            "6563742069642066726f6d20743937207768657265206e616d65203d"
+            "203a3120616e64206964203d203a3201010101000000000001010000"
+            "020fa000000000011f0106010000011600000000011f010705636172"
+            "6f6c02c104")

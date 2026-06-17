@@ -1626,15 +1626,43 @@ def encode_o7_open(Seq: int) -> bytes:
     # all carry cursor field 0). Without it the parse fails ORA-01001.
     return bytes([TTI_FUN, 0x02, Seq, 0x01, 0x00])
 
-def encode_o7_parse(Seq: int, Sql: str) -> bytes:
+def _o7_bind_oac(Value: object) -> bytes:
+    # fv2 bind descriptor (same 13/14-byte shape as a define entry): the
+    # client's declared type for an input bind. Number → VARNUM(6); str →
+    # VARCHAR sized 4000 (what JDBC declares); bytes → RAW; None defaults to a
+    # 1-byte VARCHAR. charset 31, csfrm 1 (csfrm 0 for RAW). #100.
+    if isinstance(Value, str):
+        Type, MaxSize, Csfrm = TNS_TYPE_VARCHAR, 4000, 1
+    elif isinstance(Value, (bytes, bytearray)):
+        Type, MaxSize, Csfrm = TNS_TYPE_RAW, 2000, 0
+    elif isinstance(Value, bool) or isinstance(Value, (int, float, Decimal)):
+        Type, MaxSize, Csfrm = 0x06, 22, 1          # VARNUM
+    elif Value is None:
+        Type, MaxSize, Csfrm = TNS_TYPE_VARCHAR, 1, 1
+    else:
+        Type, MaxSize, Csfrm = TNS_TYPE_VARCHAR, 4000, 1
+    return (bytes([Type, 0x01, 0, 0]) + encode_sb4(MaxSize)
+            + bytes([0, 0, 0, 0]) + encode_sb4(31) + bytes([Csfrm]))
+
+def encode_o7_parse(Seq: int, Sql: str, Binds: list | None = None) -> bytes:
     # Call 1: TTI_ALL7 parse. The SQL is carried inline, sb4-length-prefixed,
-    # between two fixed option blocks (option word 02 80 21).
+    # between two fixed option blocks. With input binds (#100) the option word
+    # flips to 0x29, a bind-count field precedes the SQL, and each bind's OAC
+    # plus the values (one RXD with all values) are appended after the SQL.
+    Binds = Binds or []
     SqlBytes = Sql.encode('utf-8')
-    return (bytes([TTI_FUN, TTI_ALL7, Seq, 0x02, 0x80, 0x21, 0x01, 0x01, 0x01])
-            + encode_sb4(len(SqlBytes))
-            + bytes([0, 0, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0, 0, 0, 0, 0])
-            + SqlBytes
-            + bytes([0x01, 0x01, 0x01, 0x01, 0, 0, 0, 0, 0]))
+    Opt = 0x29 if Binds else 0x21
+    BindCount = bytes([0x01, 0x01, len(Binds)]) if Binds else bytes([0, 0])
+    Out = (bytes([TTI_FUN, TTI_ALL7, Seq, 0x02, 0x80, Opt, 0x01, 0x01, 0x01])
+           + encode_sb4(len(SqlBytes))
+           + bytes([0, 0, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0, 0, 0])
+           + BindCount
+           + SqlBytes
+           + bytes([0x01, 0x01, 0x01, 0x01, 0, 0, 0, 0, 0]))
+    if Binds:
+        Out += b"".join(_o7_bind_oac(V) for V in Binds)
+        Out += encode_tokens_rxd(Binds, b"")
+    return Out
 
 def encode_o7_describe(Seq: int) -> bytes:
     # Call 2: fixed describe-columns request; response is the metadata RPA.
