@@ -12,14 +12,19 @@ from hashlib import sha512
 from secrets import token_bytes
 import sys
 
-# O3LOGON (DES) is the *pre-10g* authenticator — the old 8-byte DES session-key
-# handshake used by Oracle 8i/9i. 10g already uses O5LOGON (AES session key),
-# just with the legacy DES verifier and no salt (see the unsalted branch in
-# o5logon below), so 10g is the oldest protocol we actually exercise. This pure
-# O3LOGON path therefore has NO testbed and is UNTESTED — and is likely to stay
-# that way for a long while (standing up a 9i/8i server is far harder than the
-# 10g one, and there's little demand). Kept for completeness / if a 9i box ever
-# turns up; do not assume it is correct without a capture to validate against.
+# O3LOGON (DES): the pre-10g thin authenticator (TTI_3LOGA 0x52 -> TTI_3LOGON
+# 0x51). This is the path the Oracle JDBC thin driver uses against Oracle 9i —
+# and now pyoracle, gated on the negotiated field version (#90). (10g+ thin
+# clients instead use OSESSKEY/0x76 with an AES session key over the same DES
+# verifier; that's the o5logon path below. OCI/sqlplus uses OSESSKEY even on
+# 9i, which is why the OCI capture first misled us — the *thin* 9i path is
+# O3LOGON.) The flow: the server returns AUTH_SESSKEY (an 8-byte session key
+# DES-encrypted under the account's DES verifier); we decrypt it with the
+# verifier (`KeySess`, from des_verifier) to recover the plaintext session key,
+# then DES-encrypt the zero-padded password under it to get AUTH_PASSWORD.
+# VALIDATED 2026-06-17 against a real JDBC-thin -> 9.2.0.4 capture: verifier
+# E242A414206906CB + sesskey 83B9CF7F17B84F76 reproduces AUTH_PASSWORD
+# F18CC9AF1CE5A7E8 byte-for-byte (see tests/test_crypto.py).
 def o3logon(Sess: bytes, KeySess: bytes, Password: bytes) -> tuple[bytes, bytes, bytes]:
     IVec = bytes(8)
 
