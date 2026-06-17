@@ -38,7 +38,7 @@ from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
                         FIELD_VERSION_12_1, FIELD_VERSION_21_1)
 from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe,
                         encode_o7_exec, encode_o7_close, decode_fv2_describe,
-                        decode_fv2_exec_response)
+                        decode_fv2_exec_response, decode_fv2_dml_response)
 from oracle.connection import _format_version, _MAX_REDIRECTS
 from oracle.tns_consts import (
     CONN_STATE_AUTHENTICATED, CONN_STATE_AUTH_NEGOTIATE,
@@ -470,8 +470,12 @@ class AsyncOracleConnect:
         Head = Query.strip().upper()
         # Oracle 9i (field version < 10g) speaks the old TTI_ALL7 query dialect
         # (#97, PROTOCOL.md §19); route SELECTs through the fv2 path.
-        if Head.startswith('SELECT') and self.field_version < FIELD_VERSION_10_2:
-            return await self._drain_cursor(await self._execute_fv2(Query, Bind))
+        if self.field_version < FIELD_VERSION_10_2:
+            if Head.startswith('SELECT'):
+                return await self._drain_cursor(
+                    await self._execute_fv2(Query, Bind))
+            if not (Head.startswith('BEGIN') or Head.startswith('DECLARE')):
+                return await self._execute_fv2_dml(Query, Bind)
         if Head.startswith('SELECT'):
             Type = 'select'
         elif Head.startswith('BEGIN') or Head.startswith('DECLARE'):
@@ -550,6 +554,26 @@ class AsyncOracleConnect:
         self._o3_phase = 2
         await self.send(TNS_DATA, encode_o3logon_phase2(
             self._next_seq(), UserB, PwdField))
+
+    async def _execute_fv2_dml(self, Query: str,
+                               Bind: list | None = None) -> object:
+        # Async port of OracleConnect._execute_fv2_dml (#101).
+        await self.send(TNS_DATA, encode_o7_open(0))
+        await self._next_data_packet()
+        await self.send(TNS_DATA, encode_o7_parse(0, Query, Bind))
+        Resp = await self._next_data_packet()
+        if Resp is False:
+            raise Exception("Connection closed during 9i DML")
+        (_, Packet) = Resp
+        (RowCount, ErrCode) = decode_fv2_dml_response(Packet)
+        await self.send(TNS_DATA, encode_o7_close(0))
+        await self._next_data_packet()
+        if ErrCode and ErrCode not in (0, 1403):
+            from oracle.exceptions import from_ora_code
+            raise from_ora_code(ErrCode)(f"ORA-{ErrCode:05d}", code=ErrCode)
+        if self.autocommit:
+            await self.commit()
+        return (0, 0, 0, (RowCount, None), [], None, None, [], None)
 
     async def _execute_fv2(self, Query: str, Bind: list | None = None) -> object:
         # Async port of OracleConnect._execute_fv2: the four-call (plus OOPEN)
