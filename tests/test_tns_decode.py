@@ -729,5 +729,21 @@ class TestFv2ExecResponse(unittest.TestCase):
         self.assertEqual(rows[2][1], 'carol')
 
 
+class TestFv2DmlResponse(unittest.TestCase):
+    """Oracle 9i DML over TTI_ALL7 (#101): RPA piggyback + short OER whose first
+    field is the affected-row count. Fixture is a real UPDATE response (2 rows)
+    from a live 9.2.0.4 server."""
+
+    UPDATE_2ROWS = bytes.fromhex(
+        "0801020306bbe00004010200000001010107060000000000027bdb0101"
+        "0002b89201050000000001")
+
+    def test_rowcount_and_success(self):
+        from oracle.tns import decode_fv2_dml_response
+        rowcount, ora_code = decode_fv2_dml_response(self.UPDATE_2ROWS)
+        self.assertEqual(rowcount, 2)
+        self.assertEqual(ora_code, 0)
+
+
 if __name__ == '__main__':
     unittest.main()
