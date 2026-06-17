@@ -100,12 +100,10 @@ What works so far:
   content from the server. NULL LOBs come back as `None`;
   `EMPTY_CLOB()` / `EMPTY_BLOB()` as `""` / `b""`
 - BFILE read: SELECT of a `BFILENAME(...)` / BFILE column round-trips
-  the file contents as `bytes`. The driver auto-installs a small
-  server-side helper (`pyoracle_bfile_read`) on first use that does
-  the `DBMS_LOB.FILEOPEN` / `READ` / `FILECLOSE` dance and returns
-  the result as a temporary BLOB. The test user needs EXECUTE on
-  `DBMS_LOB`, CREATE PROCEDURE, and READ on the relevant DIRECTORY
-  object
+  the external file contents as `bytes`, read natively over
+  `TTI_LOBOPS` (`FILE_OPEN` → `READ` → `FILE_CLOSE`). The only
+  privilege the user needs is READ on the relevant DIRECTORY object —
+  no server-side PL/SQL helper or CREATE PROCEDURE is installed
 - Transaction control (commit, rollback, ping)
 - Multiple character set support
 - Cursor caching for DML: repeat `execute()` of the same INSERT /
@@ -128,6 +126,51 @@ What works so far:
   `acquire/release/idle health-check` semantics as the sync `Pool`.
   Shares the protocol code with the sync APIs; the duplication is
   just the I/O layer
+
+## Compatibility
+
+The driver negotiates the TTC field version per connection, so a single build
+speaks to every supported server:
+
+| Oracle Database | Status | Notes |
+| --- | --- | --- |
+| 23ai | ✅ supported | JSON / OSON, native `BOOLEAN`, `VECTOR` (dense + sparse) |
+| 21c | ✅ supported | |
+| 19c · 18c · 12c | ✅ supported | same 12c+ wire protocol as 21c |
+| 11g (11.2) | ✅ supported | primary reference tier |
+| 10g (10.2) | ✅ supported | |
+| 9i (9.2) | ✅ common surface | the legacy field-version-2 (`TTI_ALL7`) dialect — see the matrix note |
+
+CI runs the offline suite on Python 3.10–3.13 and the integration suite against
+live 11g, 21c and 23ai; 10g and 9i are validated locally, and 12c–19c share the
+12c+ protocol the 21c tier exercises.
+
+## Feature matrix
+
+| Area | Support |
+| --- | --- |
+| **DB-API 2.0** — `connect`, cursors, `execute` / `executemany`, `fetchone` / `fetchmany` / `fetchall`, `description`, `rowcount`, iteration, context managers, PEP 249 exception hierarchy | ✅ |
+| **Bind variables** — positional & named (`:name`), all scalar types, `None` | ✅ |
+| **Scalar types** — NUMBER, VARCHAR2 / CHAR / NVARCHAR2 / NCHAR, DATE, TIMESTAMP [WITH [LOCAL] TIME ZONE], INTERVAL DAY-SECOND / YEAR-MONTH, RAW, BINARY_FLOAT / BINARY_DOUBLE, ROWID / UROWID | ✅ |
+| **LONG / LONG RAW** | ✅ |
+| **LOBs** — CLOB, NCLOB, BLOB, BFILE read; large `str` / `bytes` → CLOB / BLOB binds (streamed past the ~32 KiB inline limit) | ✅ |
+| **23ai types** — JSON / OSON, `BOOLEAN`, `VECTOR` (dense + sparse) | ✅ |
+| **PL/SQL** — anonymous blocks, `callproc`, `callfunc`, OUT / IN OUT binds, REF CURSOR OUT | ✅ |
+| **Transactions** — commit, rollback, autocommit, ping | ✅ |
+| **Array DML** — `executemany`, `getbatcherrors`, `getarraydmlrowcounts` (12.1+) | ✅ |
+| **Result handling** — large-result `TTI_FETCH` drain, scrollable cursor (client-buffered), `rowfactory`, `lastrowid` | ✅ |
+| **Connection** — pool (warm sessions + idle health-check), statement cache, `changepassword`, TLS | ✅ |
+| **Authentication** — O3LOGON (8i / 9i) and O5LOGON (10g+, 128 / 192 / 256-bit) | ✅ |
+| **Async** — full `asyncio` API (connection, cursor, pool) at parity with the sync API | ✅ |
+| **Character sets** — AL32UTF8 and others | ✅ |
+| Advanced Queuing (AQ), Continuous Query Notification (CQN), implicit results, DRCP, sharding, SODA, XA / distributed transactions | ❌ not implemented |
+
+Everything above works across all supported server versions, with two
+version-scoped exceptions: the **23ai types** need 23ai (`VECTOR` / `BOOLEAN`) or
+21c+ (JSON); and on **Oracle 9i** the advanced features behind the modern
+`TTI_ALL8` path aren't available — but the full common surface (every scalar
+type, LOBs incl. BFILE, PL/SQL with IN / OUT / IN OUT binds, LONG, DML and
+transactions) runs on 9i through the legacy dialect.
 
 ## Requirements
 
