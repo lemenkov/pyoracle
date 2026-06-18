@@ -74,7 +74,9 @@ class AsyncOracleConnect:
                  field_version: int = FIELD_VERSION_23_4):
         self.host = host
         self.port = port
-        self.user = user
+        # Proxy auth (#126): split proxy_user[schema] (see OracleConnect).
+        from oracle.connection import _split_proxy_user
+        (self.user, self.proxy_user) = _split_proxy_user(user)
         self.password = password
         self.sid = sid
         self.service_name = service_name
@@ -156,6 +158,7 @@ class AsyncOracleConnect:
                 'host': self.host,
                 'port': self.port,
                 'user': self.user,
+                'proxy_user': self.proxy_user,
                 'password': self.password,
                 'sid': self.sid,
                 'service_name': self.service_name,

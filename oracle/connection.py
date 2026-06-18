@@ -59,6 +59,17 @@ def _format_version(Packed: int) -> str | None:
         (Packed >> 8) & 0x0F, Packed & 0xFF)
 
 
+def _split_proxy_user(user: str) -> tuple[str, str | None]:
+    # Proxy auth (#126): `proxy_user[schema]` -> (proxy_user, schema). A plain
+    # user name (or None) returns (user, None). Mirrors python-oracledb
+    # parse_user: only a trailing [...] after a non-empty name counts.
+    if user:
+        Start = user.find("[")
+        if Start > 0 and user.endswith("]"):
+            return (user[:Start], user[Start + 1:-1])
+    return (user, None)
+
+
 class OracleConnect:
     def __init__(self, host: str = "localhost", port: int = 1521, user: str = "", password: str = "", sid: str = "", service_name: str = "", ssl: object = None, socket_options: object = None, timeout: int = 15000, autocommit: bool = True, fetch: int = 15, role: int = 0, prelim: int = 0, sdu: int = 8192, charset: str = "utf-8", app_name: str = "pyoracle", field_version: int = FIELD_VERSION_23_4):
         # field_version is the highest TTC field version pyoracle advertises;
@@ -67,7 +78,11 @@ class OracleConnect:
         # their own version and take the legacy handshake unchanged.
         self.host = host
         self.port = port
-        self.user = user
+        # Proxy authentication (#126): a `proxy_user[schema]` user name means
+        # authenticate as proxy_user but operate in `schema`'s context. Split it
+        # here so the whole auth flow uses the real (proxy) user and the bracketed
+        # schema is sent as the PROXY_CLIENT_NAME auth pair.
+        (self.user, self.proxy_user) = _split_proxy_user(user)
         self.password = password
         self.sid = sid
         self.service_name = service_name
@@ -159,6 +174,7 @@ class OracleConnect:
                 'host': self.host,
                 'port': self.port,
                 'user': self.user,
+                'proxy_user': self.proxy_user,
                 'password': self.password,
                 'sid': self.sid,
                 'service_name': self.service_name,
