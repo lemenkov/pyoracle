@@ -25,7 +25,7 @@ import socket
 import struct
 
 from oracle.crypto import validate
-from oracle.exceptions import InterfaceError
+from oracle.exceptions import InterfaceError, OperationalError
 from oracle.tns import assemble_packet
 from oracle.tns import decode_packet
 from oracle.tns import decode_token_pro
@@ -99,6 +99,10 @@ class AsyncOracleConnect:
         # with exactly one reset then drain the rest silently (2:1 ratio).
         self._pending = b""
         self._in_break = False
+        # Query cancellation / call_timeout (#123), mirrors OracleConnect.
+        self._break_in_progress = False
+        self._call_timeout = 0
+        self._timed_out = False
         self.conn_key = None
         self.server_version = 0
         self.session_id = None
@@ -553,14 +557,31 @@ class AsyncOracleConnect:
         set_decode_dml_rowcounts(ArrayDmlRowCounts)
         # Arm RETURNING out-bind decoding for this response only (#120).
         set_decode_return_binds(ReturnBinds)
+        # call_timeout (#123): schedule a break if the call runs too long; the
+        # read coroutine then receives the server's interrupt (ORA-01013), which
+        # we remap to a call-timeout error.
+        Timer = None
+        if self._call_timeout:
+            self._timed_out = False
+            Timer = asyncio.get_running_loop().call_later(
+                self._call_timeout / 1000.0, self._on_call_timeout)
         try:
             # Seed the decoder with the binds so the IOV decoder can tell a
             # REF CURSOR OUT bind from a scalar one.
             Result = await self._handle_response((None, None, [], Bind))
-        except Exception:
+        except Exception as exc:
             if CachedCursor:
                 self._cursor_cache.pop(CacheKey, None)
+            if self._timed_out:
+                raise OperationalError(
+                    f"call timeout of {self._call_timeout} ms exceeded "
+                    f"(ORA-03136)") from exc
             raise
+        finally:
+            if Timer is not None:
+                Timer.cancel()
+            self._break_in_progress = False
+            self._timed_out = False
         if (CacheKey is not None and Type == 'change' and not Def
                 and isinstance(Result, tuple) and len(Result) >= 3
                 and isinstance(Result[2], int) and Result[2] > 0
@@ -1146,6 +1167,44 @@ class AsyncOracleConnect:
         self.password = new_password
 
     # ----- teardown -----
+
+    @property
+    def call_timeout(self) -> int:
+        """Per-call timeout in milliseconds (0 = none); see OracleConnect (#123)."""
+        return self._call_timeout
+
+    @call_timeout.setter
+    def call_timeout(self, value: int) -> None:
+        self._call_timeout = max(0, int(value or 0))
+
+    def cancel(self) -> None:
+        """Interrupt the call currently executing on this connection (#123).
+        Async port of OracleConnect.cancel(); a plain (non-coroutine) method so
+        it can fire from a timer/callback. Sends an out-of-band break."""
+        self._send_break()
+
+    def _on_call_timeout(self) -> None:
+        self._timed_out = True
+        self._send_break()
+
+    def _send_break(self) -> None:
+        # OOB break via the StreamWriter's underlying socket (see OracleConnect
+        # for why OOB only). asyncio wraps the socket in a TransportSocket that
+        # forbids direct send(), so reach the real socket via its private _sock;
+        # if that's unavailable the break is a best-effort no-op (no protocol
+        # residue). Relies on the network path carrying urgent data. #123,
+        # untested locally (the container port-forward does not deliver OOB).
+        if self._break_in_progress or self._writer is None:
+            return
+        self._break_in_progress = True
+        Sock = self._writer.get_extra_info('socket')
+        Raw = getattr(Sock, '_sock', None) if Sock is not None else None
+        Target = Raw if Raw is not None and hasattr(Raw, 'send') else Sock
+        if Target is not None and hasattr(Target, 'send'):
+            try:
+                Target.send(b"!", socket.MSG_OOB)
+            except OSError:
+                pass
 
     async def close(self) -> None:
         """Send TNS logoff, then close the underlying writer."""

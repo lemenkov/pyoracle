@@ -33,6 +33,7 @@ from oracle.tns_consts import (
 import logging
 import socket
 import struct
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,12 @@ class OracleConnect:
         # marker — the old behaviour — ping-pongs into a reset storm that
         # discards real data (#45). Cleared when a real DATA packet arrives.
         self._in_break = False
+        # Query cancellation / call_timeout (#123). _break_in_progress latches
+        # while a client-initiated break (cancel/timeout) is outstanding so the
+        # reader drains the server's interrupt response exactly once.
+        self._break_in_progress = False
+        self._call_timeout = 0          # ms; 0 = no timeout
+        self._timed_out = False
         self.conn_key = None
         self.server_version = 0
         self.session_id = None
@@ -572,16 +579,34 @@ class OracleConnect:
         set_decode_dml_rowcounts(ArrayDmlRowCounts)
         # Arm RETURNING out-bind decoding for this response only (#120).
         set_decode_return_binds(ReturnBinds)
+        # call_timeout (#123): a timer fires an out-of-band break if the call
+        # runs too long; the server interrupts it (ORA-01013), which we remap to
+        # a call-timeout error below.
+        Timer = None
+        if self._call_timeout:
+            self._timed_out = False
+            Timer = threading.Timer(self._call_timeout / 1000.0,
+                                    self._on_call_timeout)
+            Timer.start()
         try:
             # Seed the decoder with the bind list so the IOV decoder can tell a
             # REF CURSOR OUT bind from a scalar one.
             Result = self._handle_response((None, None, [], Bind))
-        except Exception:
+        except Exception as exc:
             # If reusing a cached cursor blew up, drop it from the cache
             # so the next attempt re-parses from scratch.
             if CachedCursor:
                 self._cursor_cache.pop(CacheKey, None)
+            if self._timed_out:
+                raise OperationalError(
+                    f"call timeout of {self._call_timeout} ms exceeded "
+                    f"(ORA-03136)") from exc
             raise
+        finally:
+            if Timer is not None:
+                Timer.cancel()
+            self._break_in_progress = False
+            self._timed_out = False
         # Stash the cursor id the server returned so the next execute of
         # the same SQL can skip parsing. Same scoping as the lookup:
         # DML only, no Def overrides.
@@ -1315,6 +1340,47 @@ class OracleConnect:
         return OperationalError(
             f"network {op} timed out after {self.timeout} ms "
             f"(connection timeout)")
+
+    @property
+    def call_timeout(self) -> int:
+        """Per-call timeout in milliseconds (0 = none). A call that runs longer
+        is interrupted with an out-of-band break and raises a timeout error
+        (#123, oracledb-compatible)."""
+        return self._call_timeout
+
+    @call_timeout.setter
+    def call_timeout(self, value: int) -> None:
+        self._call_timeout = max(0, int(value or 0))
+
+    def cancel(self) -> None:
+        """Interrupt the call currently executing on this connection (#123).
+
+        Sends an out-of-band break; the thread blocked in the call drains the
+        server's interrupt response and raises ORA-01013. Safe to call from
+        another thread (e.g. a timer or signal handler)."""
+        self._send_break()
+
+    def _on_call_timeout(self) -> None:
+        # call_timeout timer callback: flag the timeout and break the call.
+        self._timed_out = True
+        self._send_break()
+
+    def _send_break(self) -> None:
+        # Out-of-band break (urgent data) so the server's attention handler sees
+        # it mid-call -- an in-band marker would only be read after the call
+        # ends, and (worse) could linger on the wire and desync the next call,
+        # so we send OOB only. When the server honours it, it interrupts the
+        # call and replies with markers + ORA-01013, which the reader drains via
+        # the existing reset handshake (#45). NOTE: relies on the server (and
+        # the network path) carrying TCP urgent data; if OOB is not delivered
+        # the break is simply a no-op (no protocol residue) -- see #123.
+        if self._break_in_progress or self.sock is None:
+            return
+        self._break_in_progress = True
+        try:
+            self.sock.send(b"!", socket.MSG_OOB)
+        except OSError:
+            pass
 
     def recv(self, Acc: bytes, Data: bytes) -> tuple[int, bytes] | bool:
         # Iterative receive + reassemble. Was previously recursive — for a
