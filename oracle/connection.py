@@ -20,12 +20,12 @@ from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe, enc
                         encode_o7_bfile_close, decode_fv2_opened_locator)
 from oracle.exceptions import OperationalError
 from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
-                        FIELD_VERSION_12_1, FIELD_VERSION_21_1,
+                        FIELD_VERSION_12_1,
                         encode_fast_auth, find_fast_auth_rpa)
 from oracle.tns_consts import (
     CONN_STATE_AUTH_NEGOTIATE, CONN_STATE_AUTHENTICATED,
     CONN_STATE_CONNECTED, CONN_STATE_DISCONNECTED, DictionaryType,
-    FIELD_VERSION_23_1, MAX_SEQ_NUM,
+    FIELD_VERSION_23_1, FIELD_VERSION_23_4, MAX_SEQ_NUM,
     TNS_ACCEPT, TNS_CONNECT, TNS_DATA, TNS_MARKER,
     TNS_REDIRECT, TNS_REFUSE, TNS_RESEND, TTI_AUTH, TTI_DTY, TTI_PRO,
     TTI_OER, TTI_RPA, TTI_SESS, TTI_WRN,
@@ -59,7 +59,11 @@ def _format_version(Packed: int) -> str | None:
 
 
 class OracleConnect:
-    def __init__(self, host: str = "localhost", port: int = 1521, user: str = "", password: str = "", sid: str = "", service_name: str = "", ssl: object = None, socket_options: object = None, timeout: int = 15000, autocommit: bool = True, fetch: int = 15, role: int = 0, prelim: int = 0, sdu: int = 8192, charset: str = "utf-8", app_name: str = "pyoracle", field_version: int = FIELD_VERSION_21_1):
+    def __init__(self, host: str = "localhost", port: int = 1521, user: str = "", password: str = "", sid: str = "", service_name: str = "", ssl: object = None, socket_options: object = None, timeout: int = 15000, autocommit: bool = True, fetch: int = 15, role: int = 0, prelim: int = 0, sdu: int = 8192, charset: str = "utf-8", app_name: str = "pyoracle", field_version: int = FIELD_VERSION_23_4):
+        # field_version is the highest TTC field version pyoracle advertises;
+        # the server negotiates it down (min(client, server)). The default is the
+        # 23ai max (24), reached via fast-auth (#89) — older servers settle at
+        # their own version and take the legacy handshake unchanged.
         self.host = host
         self.port = port
         self.user = user

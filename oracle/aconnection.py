@@ -35,7 +35,7 @@ from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
 from oracle.tns import set_decode_dml_rowcounts
 from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
-                        FIELD_VERSION_12_1, FIELD_VERSION_21_1,
+                        FIELD_VERSION_12_1,
                         encode_fast_auth, find_fast_auth_rpa)
 from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe,
                         encode_o7_exec, encode_o7_close, encode_o7_block,
@@ -50,9 +50,9 @@ from oracle.connection import _format_version, _MAX_REDIRECTS
 from oracle.tns_consts import (
     CONN_STATE_AUTHENTICATED, CONN_STATE_AUTH_NEGOTIATE,
     CONN_STATE_CONNECTED, CONN_STATE_DISCONNECTED,
-    DictionaryType, FIELD_VERSION_23_1, TNS_ACCEPT, TNS_CONNECT, TNS_DATA,
-    TNS_MARKER, TNS_REDIRECT, TNS_REFUSE, TNS_RESEND, TTI_DTY, TTI_OER,
-    TTI_PRO, TTI_RPA, TTI_SESS, TTI_WRN,
+    DictionaryType, FIELD_VERSION_23_1, FIELD_VERSION_23_4, TNS_ACCEPT,
+    TNS_CONNECT, TNS_DATA, TNS_MARKER, TNS_REDIRECT, TNS_REFUSE, TNS_RESEND,
+    TTI_DTY, TTI_OER, TTI_PRO, TTI_RPA, TTI_SESS, TTI_WRN,
 )
 
 
@@ -71,7 +71,7 @@ class AsyncOracleConnect:
                  autocommit: bool = True, fetch: int = 15, role: int = 0,
                  prelim: int = 0, sdu: int = 8192, charset: str = "utf-8",
                  app_name: str = "pyoracle",
-                 field_version: int = FIELD_VERSION_21_1):
+                 field_version: int = FIELD_VERSION_23_4):
         self.host = host
         self.port = port
         self.user = user
