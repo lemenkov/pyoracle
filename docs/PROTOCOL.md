@@ -2161,4 +2161,9 @@ A fetched collection surfaces as an `oracle.DbObject` with **list semantics**
 (`iter` / index / `len` / `append` / `extend` / `aslist()`), carrying its type so
 it can be re-bound; build one with `typ.newobject([...])`. Decode works on every
 tier (verified 10g/11g read), bind is 12c+ (round-trip 21c/23ai, sync + async).
-Nested table (#118) is the same image with `collection_type` 2; REF is #119.
+
+**Both VARRAY (#117) and nested table (#118) go through this one path** — they
+share the image and bind framing exactly, differing only in `collection_type`
+(VARRAY 3 vs nested table 2), so nested-table support needed no new wire code
+(verified read 10g/11g/21c/23ai, bind round-trip 21c/23ai). REF is #119; PL/SQL
+associative-array element keys are #122.

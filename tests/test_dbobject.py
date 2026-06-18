@@ -13,8 +13,8 @@
 import unittest
 
 from oracle.dbobject import (
-    COLLECTION_VARRAY, DbObject, DbObjectType, ObjectImage,
-    decode_collection_image, decode_object_image, type_name_to_tns,
+    COLLECTION_NESTED_TABLE, COLLECTION_VARRAY, DbObject, DbObjectType,
+    ObjectImage, decode_collection_image, decode_object_image, type_name_to_tns,
 )
 from oracle.tns import (
     _encode_object_bind_value, _read_object_column, encode_object_image,
@@ -230,6 +230,34 @@ class TestVarrayCollection(unittest.TestCase):
     def test_asdict_rejected_on_collection(self):
         with self.assertRaises(TypeError):
             _NUM_VA.newobject([1]).asdict()
+
+
+class TestNestedTableCollection(unittest.TestCase):
+    # A nested table (#118) shares the VARRAY image and bind framing exactly;
+    # only collection_type differs (2 vs 3). These lock that in offline.
+    _NT = DbObjectType(
+        "PYO", "NUM_NT", bytes.fromhex("0102030405060708090a0b0c0d0e0f10"), 1,
+        [], is_collection=True, collection_type=COLLECTION_NESTED_TABLE,
+        element={"name": "element", "data_type": TNS_TYPE_NUMBER,
+                 "charset": None})
+
+    def test_collection_type_is_nested_table(self):
+        self.assertEqual(self._NT.collection_type, COLLECTION_NESTED_TABLE)
+        self.assertNotEqual(COLLECTION_NESTED_TABLE, COLLECTION_VARRAY)
+
+    def test_image_encode_decode_roundtrip(self):
+        v = self._NT.newobject([10, 20, 30])
+        self.assertEqual(
+            decode_collection_image(encode_object_image(v), self._NT.element),
+            [10, 20, 30])
+
+    def test_bind_value_framing_roundtrips(self):
+        v = self._NT.newobject([1, None, 3])
+        Wire = _encode_object_bind_value(v) + _SENTINEL
+        (Val, Rest) = _read_object_column(Wire, {"charset": 0})
+        self.assertEqual(Rest, _SENTINEL)
+        self.assertEqual(decode_collection_image(Val.image, self._NT.element),
+                         [1, None, 3])
 
 
 class TestTypeNameMap(unittest.TestCase):
