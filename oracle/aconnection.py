@@ -35,7 +35,8 @@ from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
 from oracle.tns import set_decode_dml_rowcounts
 from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
-                        FIELD_VERSION_12_1, FIELD_VERSION_21_1)
+                        FIELD_VERSION_12_1, FIELD_VERSION_21_1,
+                        encode_fast_auth, find_fast_auth_rpa)
 from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe,
                         encode_o7_exec, encode_o7_close, encode_o7_block,
                         encode_tokens_rxd, decode_fv2_describe,
@@ -49,9 +50,9 @@ from oracle.connection import _format_version, _MAX_REDIRECTS
 from oracle.tns_consts import (
     CONN_STATE_AUTHENTICATED, CONN_STATE_AUTH_NEGOTIATE,
     CONN_STATE_CONNECTED, CONN_STATE_DISCONNECTED,
-    DictionaryType, TNS_ACCEPT, TNS_CONNECT, TNS_DATA, TNS_MARKER,
-    TNS_REDIRECT, TNS_REFUSE, TNS_RESEND, TTI_DTY, TTI_OER, TTI_PRO, TTI_RPA,
-    TTI_SESS, TTI_WRN,
+    DictionaryType, FIELD_VERSION_23_1, TNS_ACCEPT, TNS_CONNECT, TNS_DATA,
+    TNS_MARKER, TNS_REDIRECT, TNS_REFUSE, TNS_RESEND, TTI_DTY, TTI_OER,
+    TTI_PRO, TTI_RPA, TTI_SESS, TTI_WRN,
 )
 
 
@@ -318,6 +319,11 @@ class AsyncOracleConnect:
                     match Packet[0]:
                         case p if p == TTI_PRO:
                             self._negotiate_capabilities(Packet)
+                            if self.field_version > FIELD_VERSION_23_1:
+                                # 23ai (#89): fv >= 18 needs the fast-auth bundle
+                                # (the legacy OSESSKEY is rejected). See the sync
+                                # OracleConnect._fast_auth_login.
+                                return await self._fast_auth_login()
                             Data = encode_dictionary(self._make_dict(DictionaryType.dty))
                             await self.send(TNS_DATA, Data)
                         case p if p == TTI_DTY:
@@ -397,6 +403,26 @@ class AsyncOracleConnect:
                 case _:
                     logger.debug("handle_login (async): unexpected %s", Type)
                     return 1
+
+    async def _fast_auth_login(self) -> int | None:
+        # Async port of OracleConnect._fast_auth_login (23ai fast-auth, #89):
+        # send PRO + DTY + OSESSKEY bundled in one FAST_AUTH packet, then hand the
+        # auth-challenge RPA out of the bundled reply to the phase-two path.
+        Pro = encode_dictionary(self._make_dict(DictionaryType.pro))
+        Dty = encode_dictionary(self._make_dict(DictionaryType.dty))
+        Sess = encode_dictionary(self._make_dict(DictionaryType.sess))
+        await self.send(TNS_DATA, encode_fast_auth(Pro, Dty, Sess))
+        Received = await self._next_data_packet()
+        if Received is False:
+            logger.debug("fast_auth (async): connection closed by peer")
+            return 1
+        (Type, Packet) = Received
+        Off = find_fast_auth_rpa(Packet) if Type == TNS_DATA else -1
+        if Off < 0:
+            from oracle.exceptions import OperationalError
+            logger.error("fast_auth (async): no auth challenge in bundled reply")
+            raise OperationalError("fast-auth handshake failed")
+        return await self._handle_rpa(Packet[Off + 1:])
 
     def _negotiate_capabilities(self, Packet: bytes) -> None:
         # Parse the server's PRO response and lower the field version to the
