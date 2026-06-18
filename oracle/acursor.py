@@ -6,11 +6,13 @@
 
 from oracle.cursor import (
     _assign_out_binds,
+    _assign_return_binds,
     _col_annotations,
     _check_object_bind_support,
     _column_description,
     _is_plsql,
     _resolve_parameters,
+    _returning_bind_positions,
 )
 from oracle.datatypes import TempLob, Var
 from oracle.exceptions import (
@@ -123,9 +125,12 @@ class AsyncCursor:
                    Batch: list | None = None, BatchErrors: bool = False,
                    ArrayDmlRowCounts: bool = False) -> 'AsyncCursor':
         _check_object_bind_support(self._connection, Bind, Batch)
-        Result = await self._connection.execute(
-            operation, Bind=Bind, Batch=Batch, BatchErrors=BatchErrors,
-            ArrayDmlRowCounts=ArrayDmlRowCounts)
+        Kw = {'Bind': Bind, 'Batch': Batch, 'BatchErrors': BatchErrors,
+              'ArrayDmlRowCounts': ArrayDmlRowCounts}
+        ReturnBinds = _returning_bind_positions(operation, len(Bind or []))
+        if ReturnBinds:                       # DML RETURNING ... INTO (#120)
+            Kw['ReturnBinds'] = ReturnBinds
+        Result = await self._connection.execute(operation, **Kw)
         try:
             OraCode = Result[1]
             RetFormat = Result[3]
@@ -155,6 +160,9 @@ class AsyncCursor:
             Rows = await self._connection.fetch_all_rows(
                 Marker['cursor_id'], Marker['row_format'])
             Variable._value = await self._build_refcursor(Rows, Marker)
+
+        # DML RETURNING ... INTO: write the returned value list onto each Var.
+        _assign_return_binds(Bind, Result)
 
         ServerRowCount = None
         ColMeta = None

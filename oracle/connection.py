@@ -8,7 +8,7 @@ from oracle.tns import decode_token_rpa
 from oracle.tns import encode_dictionary
 from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
-from oracle.tns import set_decode_dml_rowcounts
+from oracle.tns import set_decode_dml_rowcounts, set_decode_return_binds
 from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe, encode_o7_exec,
                         encode_o7_close, encode_o7_block, encode_tokens_rxd,
                         decode_fv2_describe,
@@ -502,7 +502,7 @@ class OracleConnect:
 
     def execute(self, Query: str, Bind: list | None = None, Def: list | None = None,
                 Batch: list | None = None, BatchErrors: bool = False,
-                ArrayDmlRowCounts: bool = False) -> object:
+                ArrayDmlRowCounts: bool = False, ReturnBinds=None) -> object:
         if Bind is None:
             Bind = []
         if Def is None:
@@ -564,11 +564,14 @@ class OracleConnect:
             'def': Def,
             'batcherrors': BatchErrors,
             'arraydmlrowcounts': ArrayDmlRowCounts,
+            'return_binds': ReturnBinds or None,
         }
         Data = encode_dictionary(self._make_dict(DictionaryType.exec, query=QueryDict))
         self.send(TNS_DATA, Data)
         # Arm row-count extraction for this response only (#18).
         set_decode_dml_rowcounts(ArrayDmlRowCounts)
+        # Arm RETURNING out-bind decoding for this response only (#120).
+        set_decode_return_binds(ReturnBinds)
         try:
             # Seed the decoder with the bind list so the IOV decoder can tell a
             # REF CURSOR OUT bind from a scalar one.

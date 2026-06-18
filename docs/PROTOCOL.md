@@ -2185,3 +2185,34 @@ fields an ADT column uses, §21.1). Note python-oracledb has **no** REF type at
 all, so there is no thin-mode reference for this; the locator structure above
 was read from live captures (10g/11g/21c/23ai). **Read-only** here — binding a
 REF back (a type-111 bind OAC, no reference; capture-based) is a follow-up.
+
+## 22. DML RETURNING ... INTO (#120)
+
+`INSERT/UPDATE/DELETE ... RETURNING col[, ...] INTO :b[, ...]` returns the
+affected row(s)' column values into OUT binds. It is an ordinary `TTI_ALL8` DML
+execute — **no special al8i4 flag or exec option**; the server infers RETURNING
+from the SQL. Two framing differences from a plain DML:
+
+1. **Request**: an OAC (bind descriptor) is written for **every** bind, but the
+   `TTI_RXD` row carries values for the **input** binds only — the return (OUT)
+   binds are skipped (if every bind is a return bind, the row is omitted). The
+   return-bind OAC is just the Var's declared type/size.
+2. **Response**: the server sends a `TTI_RXD` (token 7) carrying the out-bind
+   return data — **not** query rows. For each return bind, in bind order:
+   ```
+   ub4  num_rows                         # rows the DML affected
+   per row:
+       <value>        (length-prefixed, the normal per-type encoding)
+       sb4 actual_len (truncation check; 0 = ok, discarded)
+   ```
+   So each return bind yields a **list** of values (one per affected row);
+   multi-row UPDATE/DELETE RETURNING returns several, a zero-row DML returns an
+   empty list.
+
+pyoracle detects the return-bind positions by parsing the `RETURNING ... INTO`
+clause (the trailing K binds), arms the RXD decoder for that one response (a
+ContextVar, like the array-DML row counts), keeps the raw return-value bytes,
+and the cursor decodes each by its `Var`'s type. `var.getvalue()` returns the
+list of returned values (python-oracledb-compatible). Sync + async; verified on
+10g/11g/21c/23ai (INSERT / multi-row UPDATE / multi-row DELETE / zero-row /
+all-return-no-input). Array (`executemany`) RETURNING is out of scope here.
