@@ -8,6 +8,7 @@ from oracle.cursor import (
     _assign_out_binds,
     _assign_return_binds,
     _col_annotations,
+    _extract_implicit_results,
     _check_object_bind_support,
     _column_description,
     _is_plsql,
@@ -43,6 +44,7 @@ class AsyncCursor:
         self._closed: bool = False
         self._lastrowid = None
         self._rowfactory = None
+        self._implicit_results: list = []     # #121, consumed via nextset()
 
     def _check_open(self) -> None:
         if self._closed:
@@ -176,39 +178,7 @@ class AsyncCursor:
             self._lastrowid = None
             self._description = [_column_description(C) for C in ColMeta]
             self._annotations = [_col_annotations(C) for C in ColMeta]
-            # Async LOB auto-resolve: same shape as sync `_resolve_lobs`
-            # but each `LOB.aread()` is awaited individually. CLOB → str,
-            # BLOB / BFILE → bytes, NULL LOBs stay as None (already
-            # filtered out at the row-decoder level).
-            from oracle.lob import LOB
-            from oracle.dbobject import (ObjectImage, DbObject,
-                                         decode_object_image,
-                                         decode_collection_image)
-            ResolvedRows = []
-            for Row in (Rows or []):
-                NewRow = list(Row)
-                for I, Val in enumerate(NewRow):
-                    if isinstance(Val, LOB):
-                        Val._connection = self._connection
-                        NewRow[I] = await Val.aread()
-                    elif isinstance(Val, ObjectImage):
-                        # Object / collection auto-resolve (#115/#117): fetch the
-                        # type (awaited; cached on the connection) and walk the
-                        # packed image into a DbObject or a list-collection.
-                        Typ = await self._connection._describe_object_type(
-                            Val.type_schema, Val.type_name)
-                        Charset = Val.charset or AL32UTF8_CHARSET
-                        if Typ is not None and Typ.is_collection:
-                            Elements = decode_collection_image(
-                                Val.image, Typ.element or {}, Charset)
-                            NewRow[I] = DbObject(Val.type_name,
-                                                 elements=Elements, dbtype=Typ)
-                        else:
-                            Layout = Typ.attrs if Typ is not None else []
-                            Attrs = decode_object_image(Val.image, Layout, Charset)
-                            NewRow[I] = DbObject(Val.type_name, Attrs, dbtype=Typ)
-                ResolvedRows.append(NewRow)
-            self._rows = ResolvedRows
+            self._rows = await self._resolve_rows(Rows)
             self._rowcount = len(self._rows)
         else:
             self._lastrowid = LastRowid
@@ -217,8 +187,57 @@ class AsyncCursor:
             self._rows = []
             self._rowcount = ServerRowCount if isinstance(ServerRowCount, int) else -1
 
+        # Implicit result sets (#121): queue DBMS_SQL.RETURN_RESULT cursors.
+        self._implicit_results = _extract_implicit_results(Result)
+
         self._row_index = 0
         return self
+
+    async def _resolve_rows(self, Rows) -> list:
+        # Async row resolution shared by execute and nextset: LOB cells via
+        # await aread(), object/collection cells via the awaited type describe
+        # (mirrors the sync _resolve_lobs + _resolve_objects).
+        from oracle.lob import LOB
+        from oracle.dbobject import (ObjectImage, DbObject,
+                                     decode_object_image,
+                                     decode_collection_image)
+        ResolvedRows = []
+        for Row in (Rows or []):
+            NewRow = list(Row)
+            for I, Val in enumerate(NewRow):
+                if isinstance(Val, LOB):
+                    Val._connection = self._connection
+                    NewRow[I] = await Val.aread()
+                elif isinstance(Val, ObjectImage):
+                    Typ = await self._connection._describe_object_type(
+                        Val.type_schema, Val.type_name)
+                    Charset = Val.charset or AL32UTF8_CHARSET
+                    if Typ is not None and Typ.is_collection:
+                        Elements = decode_collection_image(
+                            Val.image, Typ.element or {}, Charset)
+                        NewRow[I] = DbObject(Val.type_name,
+                                             elements=Elements, dbtype=Typ)
+                    else:
+                        Layout = Typ.attrs if Typ is not None else []
+                        Attrs = decode_object_image(Val.image, Layout, Charset)
+                        NewRow[I] = DbObject(Val.type_name, Attrs, dbtype=Typ)
+            ResolvedRows.append(NewRow)
+        return ResolvedRows
+
+    async def nextset(self) -> bool | None:
+        """Advance to the next implicit result set (#121); async port of
+        Cursor.nextset(). Returns True if a set became current, else None."""
+        self._check_open()
+        if not self._implicit_results:
+            return None
+        RowFormat, CursorId = self._implicit_results.pop(0)
+        Rows = await self._connection.fetch_all_rows(CursorId, RowFormat)
+        self._description = [_column_description(C) for C in RowFormat]
+        self._annotations = [_col_annotations(C) for C in RowFormat]
+        self._rows = await self._resolve_rows(Rows)
+        self._rowcount = len(self._rows)
+        self._row_index = 0
+        return True
 
     async def _build_refcursor(self, Rows, Marker) -> 'AsyncCursor':
         # Wrap an already-fetched REF CURSOR result set in a nested AsyncCursor,
