@@ -1193,9 +1193,22 @@ def encode_dictionary_chgpwd(Dictionary: dict) -> bytes:
         LogonMode + bytes([1]) + encode_sb4(2) + bytes([1, 1]) + UserField + \
         AuthPass + AuthNewPass
 
+def _fun_header(Token: int, Seq: int, FieldVersion: int) -> bytes:
+    # Header for a TTI function-call message. 23ai (fv > 17, #89) appends one
+    # extra pointer byte after the sequence number (oracledb's
+    # _write_function_code at fv24) — present on every function message
+    # (execute, fetch, commit/rollback, LOB ops, logoff, ...). Omitting it
+    # desyncs the call: the server either rejects it (ORA-03146 / ORA-03120) or
+    # never replies (read timeout).
+    if FieldVersion > FIELD_VERSION_23_1:
+        return bytes([TTI_FUN, Token, Seq, 0])
+    return bytes([TTI_FUN, Token, Seq])
+
+
 def encode_dictionary_close(Dictionary: dict) -> bytes:
     Tseq = Dictionary['seq']
-    return bytes([TTI_FUN, TTI_LOGOFF, Tseq])
+    FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
+    return _fun_header(TTI_LOGOFF, Tseq, FieldVersion)
 
 # Env keys safe to include in a debug log. Deliberately an allow-list, NOT a
 # deny-list: the connection `password` (and the changepassword `new_password`)
@@ -1688,10 +1701,7 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
     else:
         raise Exception("Unhandled tokens combination", Bind, Batch, Def, Query)
 
-    # 23ai (fv > 17, #89) writes one extra pointer byte between the sequence
-    # number and the options word (oracledb's _write_function_code at fv24).
-    FunHead = bytes([TTI_FUN, TTI_ALL8, Tseq, 0]) if FieldVersion > FIELD_VERSION_23_1 else bytes([TTI_FUN, TTI_ALL8, Tseq])
-    Head = FunHead + encode_sb4(Opt) + encode_sb4(Cursor) + bytes([QueryFlag]) + encode_sb4(QueryLen) + bytes([All8Flag]) + \
+    Head = _fun_header(TTI_ALL8, Tseq, FieldVersion) + encode_sb4(Opt) + encode_sb4(Cursor) + bytes([QueryFlag]) + encode_sb4(QueryLen) + bytes([All8Flag]) + \
             encode_sb4(All8Len) + bytes([0,0]) + encode_sb4(LMax) + encode_sb4(Fetch) + encode_sb4(Max) + bytes([BindFlag]) + encode_sb4(BindLen) + \
             bytes([0,0,0,0,0]) + bytes([DefFlag]) + encode_sb4(DefLen)
 
@@ -1723,13 +1733,8 @@ def encode_dictionary_fetch(Dictionary: dict) -> bytes:
     Tseq = Dictionary['seq']
     Cursor = encode_sb4(Dictionary['cursor'])
     Fetch = encode_sb4(Dictionary['fetch'])
-    # 23ai (fv > 17, #89): the same extra pointer byte after the sequence number
-    # the execute carries (oracledb's fv24 _write_function_code); without it the
-    # continuation FETCH desyncs and the server never replies (read timeout).
     FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
-    Head = (bytes([TTI_FUN, TTI_FETCH, Tseq, 0]) if FieldVersion > FIELD_VERSION_23_1
-            else bytes([TTI_FUN, TTI_FETCH, Tseq]))
-    return Head + Cursor + Fetch
+    return _fun_header(TTI_FETCH, Tseq, FieldVersion) + Cursor + Fetch
 
 # ---------------------------------------------------------------------------
 # Oracle 9i (pre-10g, field version 2) query/fetch — the TTI_ALL7 dialect.
@@ -2214,6 +2219,8 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
     # that's all the driver currently issues; other opcodes plug into the
     # same shape by varying `operation` and the pointer flags.
     Tseq = Dictionary['seq']
+    FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
+    LobHead = _fun_header(TTI_LOBOPS, Tseq, FieldVersion)
     if Dictionary.get('create_temp'):
         # CREATE_TEMP (op 0x0110, #91): allocate a session-duration temporary
         # LOB; the server returns the new locator in the response RPA. The body
@@ -2227,7 +2234,7 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
         else:
             Body = (bytes.fromhex("01012800010a0000010001020110000001010170")
                     + bytes(47) + bytes.fromhex("020369"))
-        return bytes([TTI_FUN, TTI_LOBOPS, Tseq]) + Body
+        return LobHead + Body
     if Dictionary.get('operation') == TNS_LOB_OP_WRITE:
         # WRITE (op 0x0040, #91): push `data` into the LOB at `source_offset`.
         # Reverse-engineered from python-oracledb on 21c (small + 60 KB CLOB
@@ -2244,7 +2251,7 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
         Locator = Dictionary['locator']
         Data = Dictionary['data']
         SourceOffset = Dictionary.get('source_offset', 1)
-        Out = bytes([TTI_FUN, TTI_LOBOPS, Tseq])
+        Out = LobHead
         Out += bytes([1])                       # source pointer present
         Out += encode_sb4(len(Locator) + 2)     # source locator length (+ub2)
         Out += bytes([0])                       # dest pointer absent
@@ -2284,7 +2291,7 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
         Locator = Dictionary['locator']
         Operation = Dictionary['operation']
         IsOpen = Operation == TNS_LOB_OP_FILE_OPEN
-        Out = bytes([TTI_FUN, TTI_LOBOPS, Tseq])
+        Out = LobHead
         Out += bytes([1])                       # source pointer present
         Out += encode_sb4(len(Locator) + 2)     # source locator length (+ub2)
         Out += bytes([0])                       # dest pointer absent
@@ -2319,7 +2326,7 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
     SourceOffset = Dictionary.get('source_offset', 1)    # 1-based: start
     LocatorLen = len(Locator)
 
-    Out = bytes([TTI_FUN, TTI_LOBOPS, Tseq])
+    Out = LobHead
     Out += bytes([1])                       # source pointer present
     # Persistent-LOB locators read back correctly with the bare length + raw
     # locator. Temporary LOBs (#91) instead need the locator sent as a
@@ -2495,7 +2502,8 @@ def encode_dictionary_stop(Dictionary: dict) -> bytes:
 def encode_dictionary_tran(Dictionary: dict) -> bytes:
     Request = Dictionary['req']
     Tseq = Dictionary['seq']
-    return bytes([TTI_FUN, Request, Tseq])
+    FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
+    return _fun_header(Request, Tseq, FieldVersion)
 
 ##
 ## Decoders/Encoders for base types
