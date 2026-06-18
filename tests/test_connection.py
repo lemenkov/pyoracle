@@ -5,8 +5,35 @@ import socket
 import threading
 import time
 import unittest
-from oracle.connection import OracleConnect
+from oracle.connection import OracleConnect, _split_proxy_user
 from oracle.exceptions import DatabaseError, OperationalError
+
+
+class TestProxyUser(unittest.TestCase):
+    # Proxy authentication (#126): user "proxy[schema]" -> authenticate as
+    # proxy, operate in schema. The wire side (PROXY_CLIENT_NAME auth pair) is
+    # covered by the live tests on 10g/11g/21c/23ai.
+    def test_split(self):
+        self.assertEqual(_split_proxy_user("pyo[hr]"), ("pyo", "hr"))
+        self.assertEqual(_split_proxy_user("PROXY[TARGET]"), ("PROXY", "TARGET"))
+
+    def test_plain_user_unchanged(self):
+        self.assertEqual(_split_proxy_user("pyo"), ("pyo", None))
+        self.assertEqual(_split_proxy_user(""), ("", None))
+        self.assertEqual(_split_proxy_user(None), (None, None))
+
+    def test_only_trailing_brackets_after_name(self):
+        # a leading bracket or a missing closing bracket is not a proxy form
+        self.assertEqual(_split_proxy_user("[hr]"), ("[hr]", None))
+        self.assertEqual(_split_proxy_user("pyo[hr"), ("pyo[hr", None))
+
+    def test_connection_init_parses_user(self):
+        c = OracleConnect(host="x", port=1, user="pyo[hr]", password="p")
+        self.assertEqual(c.user, "pyo")
+        self.assertEqual(c.proxy_user, "hr")
+        env = c._make_dict(None)['env']
+        self.assertEqual(env['user'], "pyo")
+        self.assertEqual(env['proxy_user'], "hr")
 
 
 class TestConnection(unittest.TestCase):

@@ -2354,3 +2354,23 @@ gates array binds on field version ≥ 12.1 with a clear `NotSupportedError`
 wire. Verified on 21c/23ai (IN / OUT / IN OUT, NUMBER + VARCHAR2 elements);
 clean gate on 10g/11g. Scalar element types only (nested object/collection
 elements are out of scope).
+
+## 27. Proxy authentication (#126)
+
+Connecting as `proxy_user[schema]` authenticates as `proxy_user` (with its own
+password) but runs the session in `schema`'s context — the `SESSION_USER` /
+current schema becomes `schema` while `SYS_CONTEXT('USERENV','PROXY_USER')`
+reports `proxy_user`. The target must have granted it
+(`ALTER USER schema GRANT CONNECT THROUGH proxy_user`).
+
+It's almost free on the wire: pyoracle splits the user name (`_split_proxy_user`:
+`proxy_user[schema]` → real user `proxy_user` + bracketed `schema`), performs the
+**normal** O5LOGON/O3LOGON as `proxy_user`, and adds **one auth key/value pair**
+to the final auth message — `PROXY_CLIENT_NAME = schema` — bumping the pair
+count by one. No auth-mode bit changes. The pair is appended after the existing
+`AUTH_PASSWORD` / `AUTH_SESSKEY` (and 23ai session) pairs in both the fv ≤ 17 and
+the fv24 fast-auth phase-two layouts.
+
+Verified on 10g/11g/21c/23ai (sync + async): `proxy_user[schema]` runs as the
+target schema; a plain user name is unchanged. Works on every tier (it predates
+the 12c+ features and needs no version-specific framing).

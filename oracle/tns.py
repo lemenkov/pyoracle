@@ -1234,6 +1234,14 @@ def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
 
     AuthSess = encode_kv(b"AUTH_SESSKEY", AuthSess.hex().upper().encode('utf-8'), 1)
 
+    # Proxy authentication (#126): a `proxy_user[schema]` connect adds one auth
+    # pair naming the target schema; the proxy user authenticates normally and
+    # the server switches the session into the schema's context.
+    ProxyUser = Dictionary['env'].get('proxy_user')
+    ProxyKv = (encode_kv(b"PROXY_CLIENT_NAME", ProxyUser.encode('utf-8'))
+               if ProxyUser else b"")
+    ProxyInd = 1 if ProxyUser else 0
+
     # 12c+ length-prefixes the username (write_bytes_with_length), same as the
     # OSESSKEY phase; 11g sends it raw (read via the UserLen field). Sending the
     # raw form to 21c makes it read the first username byte as a length and
@@ -1257,7 +1265,7 @@ def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
         Mode = encode_sb4((Role * 32) | (Prelim * 128) | 1 | 256 | 0x20000)
         UserField = bytes([len(User)]) + User
         SessionKvs = _auth_session_kvs(Dictionary)
-        NumPairs = 2 + SpeedyKeyInd + 5
+        NumPairs = 2 + SpeedyKeyInd + 5 + ProxyInd
     else:
         # 12c+ length-prefixes the username (write_bytes_with_length); 11g sends
         # it raw (read via the UserLen field). Sending the raw form to 21c makes
@@ -1266,9 +1274,9 @@ def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
         Mode = LogonMode
         UserField = bytes([len(User)]) + User if FieldVersion >= FIELD_VERSION_12_1 else User
         SessionKvs = b""
-        NumPairs = 2 + SpeedyKeyInd
+        NumPairs = 2 + SpeedyKeyInd + ProxyInd
 
-    Data = Header + encode_sb4(len(User)) + Mode + bytes([1]) + encode_sb4(NumPairs) + bytes([1, 1]) + UserField + AuthPass + PBKDF2 + AuthSess + SessionKvs
+    Data = Header + encode_sb4(len(User)) + Mode + bytes([1]) + encode_sb4(NumPairs) + bytes([1, 1]) + UserField + AuthPass + PBKDF2 + AuthSess + SessionKvs + ProxyKv
 
     return (Data, ConnKey)
 
