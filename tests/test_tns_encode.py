@@ -271,6 +271,34 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
         Dict21 = dict(Dict, field_version=FIELD_VERSION_21_1)
         self.assertEqual(encode_dictionary_dty(Dict21)[5], 3)
 
+    def test_exec_select_fv24_vs_legacy(self):
+        # Full execute message for `SELECT 1 FROM dual` (no binds). The fv24 form
+        # was captured byte-for-byte from a live 23ai server (and the server
+        # accepts it). It differs from the legacy 12c+ form in exactly the four
+        # fv24 spots (#89): the extra pointer byte after the seq, options
+        # 0x8021->0x8061, the prefetch-buffer-size 0xffffffff->0, and
+        # al8i4[9] 0->0x8000.
+        from oracle.tns_consts import FIELD_VERSION_21_1, FIELD_VERSION_23_4
+
+        def gen(fv):
+            Dict = {'type': DictionaryType.exec, 'seq': 7, 'field_version': fv,
+                    'env': {'user': 'pyo'},
+                    'query': {'type': 'select', 'auto': 0, 'fetch': 15,
+                              'server_version': 0, 'cursor': 0,
+                              'query': 'SELECT 1 FROM dual', 'bind': [],
+                              'batch': [], 'def': [], 'batcherrors': False,
+                              'arraydmlrowcounts': False}}
+            return encode_dictionary(Dict)
+
+        Fv24 = "035e07000280610001011201010d000000010f047fffffff0000000000000000000000010000000000000000000000000000001253454c45435420312046524f4d206475616c0101000000000000010100028000000000"
+        Fv16 = "035e070280210001011201010d000004ffffffff010f047fffffff0000000000000000000000010000000000000000000000000000001253454c45435420312046524f4d206475616c010100000000000001010000000000"
+        self.assertEqual(gen(FIELD_VERSION_23_4).hex(), Fv24)
+        self.assertEqual(gen(FIELD_VERSION_21_1).hex(), Fv16)
+        # fv24 inserts the pointer byte (0) right after the sequence number;
+        # legacy has the options word there instead.
+        self.assertEqual(gen(FIELD_VERSION_23_4)[3], 0)
+        self.assertNotEqual(gen(FIELD_VERSION_21_1)[3], 0)
+
     def test_fun_header_fv24_extra_pointer(self):
         # 23ai (fv > 17, #89) appends one extra pointer byte after the sequence
         # number on every function message; the legacy form (fv <= 17) does not.
