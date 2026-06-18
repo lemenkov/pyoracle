@@ -34,6 +34,16 @@ from oracle.tns import encode_dictionary
 from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
 from oracle.tns import set_decode_dml_rowcounts, set_decode_return_binds
+from oracle.tns import encode_tpc_switch, encode_tpc_change_state
+from oracle.connection import (
+    Xid, _decode_tpc_context, _decode_tpc_state)
+from oracle.tns_consts import (
+    TNS_TPC_TXN_START, TNS_TPC_TXN_DETACH, TNS_TPC_TXN_COMMIT,
+    TNS_TPC_TXN_ABORT, TNS_TPC_TXN_PREPARE,
+    TNS_TPC_TXN_STATE_REQUIRES_COMMIT, TNS_TPC_TXN_STATE_COMMITTED,
+    TNS_TPC_TXN_STATE_ABORTED, TNS_TPC_TXN_STATE_READ_ONLY,
+    TNS_TPC_TXN_STATE_FORGOTTEN, TPC_BEGIN_NEW, TPC_END_NORMAL)
+from oracle.exceptions import DatabaseError
 from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
                         FIELD_VERSION_12_1,
                         encode_fast_auth, find_fast_auth_rpa)
@@ -105,6 +115,7 @@ class AsyncOracleConnect:
         self._break_in_progress = False
         self._call_timeout = 0
         self._timed_out = False
+        self._transaction_context = None        # two-phase commit (#131)
         self.conn_key = None
         self.server_version = 0
         self.session_id = None
@@ -1208,6 +1219,72 @@ class AsyncOracleConnect:
                 Target.send(b"!", socket.MSG_OOB)
             except OSError:
                 pass
+
+    # --- Two-phase commit / XA (#131), async port of OracleConnect ---
+
+    def xid(self, format_id: int, global_transaction_id, branch_qualifier) -> Xid:
+        return Xid(format_id, global_transaction_id, branch_qualifier)
+
+    async def _tpc_request(self, Data: bytes) -> bytes:
+        await self.send(TNS_DATA, Data)
+        Received = await self._next_data_packet(b"", b"")
+        if Received is False:
+            raise OperationalError("connection closed during TPC operation")
+        (_, Packet) = Received
+        return Packet
+
+    async def tpc_begin(self, xid: Xid, flags: int = TPC_BEGIN_NEW,
+                        timeout: int = 0) -> None:
+        if self.field_version < FIELD_VERSION_12_1:
+            from oracle.exceptions import NotSupportedError
+            raise NotSupportedError(
+                "two-phase commit (TPC/XA) requires an Oracle 12.1+ server")
+        Data = encode_tpc_switch(self._next_seq(), self.field_version,
+                                 TNS_TPC_TXN_START, xid, flags, timeout, None)
+        self._transaction_context = _decode_tpc_context(
+            await self._tpc_request(Data))
+
+    async def tpc_end(self, xid: Xid, flags: int = TPC_END_NORMAL) -> None:
+        Data = encode_tpc_switch(self._next_seq(), self.field_version,
+                                 TNS_TPC_TXN_DETACH, xid, flags, 0,
+                                 self._transaction_context)
+        await self._tpc_request(Data)
+        self._transaction_context = None
+
+    async def tpc_prepare(self, xid: Xid) -> bool:
+        Data = encode_tpc_change_state(self._next_seq(), self.field_version,
+                                       TNS_TPC_TXN_PREPARE, 0, xid, 0,
+                                       self._transaction_context)
+        State = _decode_tpc_state(await self._tpc_request(Data))
+        if State == TNS_TPC_TXN_STATE_REQUIRES_COMMIT:
+            return True
+        if State == TNS_TPC_TXN_STATE_READ_ONLY:
+            return False
+        raise DatabaseError(f"unknown TPC transaction state {State}")
+
+    async def tpc_commit(self, xid: Xid, one_phase: bool = False) -> None:
+        State = (TNS_TPC_TXN_STATE_READ_ONLY if one_phase
+                 else TNS_TPC_TXN_STATE_COMMITTED)
+        Data = encode_tpc_change_state(self._next_seq(), self.field_version,
+                                       TNS_TPC_TXN_COMMIT, State, xid, 0,
+                                       self._transaction_context)
+        Result = _decode_tpc_state(await self._tpc_request(Data))
+        self._transaction_context = None
+        Ok = (Result in (TNS_TPC_TXN_STATE_READ_ONLY,
+                         TNS_TPC_TXN_STATE_COMMITTED) if one_phase
+              else Result == TNS_TPC_TXN_STATE_FORGOTTEN)
+        if not Ok:
+            raise DatabaseError(f"unexpected TPC commit state {Result}")
+
+    async def tpc_rollback(self, xid: Xid) -> None:
+        Data = encode_tpc_change_state(self._next_seq(), self.field_version,
+                                       TNS_TPC_TXN_ABORT,
+                                       TNS_TPC_TXN_STATE_ABORTED, xid, 0,
+                                       self._transaction_context)
+        Result = _decode_tpc_state(await self._tpc_request(Data))
+        self._transaction_context = None
+        if Result != TNS_TPC_TXN_STATE_ABORTED:
+            raise DatabaseError(f"unexpected TPC rollback state {Result}")
 
     async def close(self) -> None:
         """Send TNS logoff, then close the underlying writer."""

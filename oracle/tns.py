@@ -55,6 +55,7 @@ from oracle.tns_consts import (
     TTI_RXH, TTI_SESS, TTI_SPFP, TTI_STA, TTI_STRT, TTI_STOP, TTI_UDS,
     TTI_3LOGON, TTI_3LOGA,
     TTI_WRN, TNS_BIND_DIR_INPUT, TNS_AL8I4_ARRAY_DML_ROWCOUNTS,
+    TNS_FUNC_TPC_TXN_SWITCH, TNS_FUNC_TPC_TXN_CHANGE_STATE,
     TNS_EXEC_OPTION_BATCH_ERRORS,
     TNS_LOB_OP_READ, TNS_LOB_OP_WRITE,
     TNS_LOB_OP_FILE_OPEN, TNS_LOB_OP_FILE_CLOSE,
@@ -1397,6 +1398,80 @@ def _redacted(Dictionary: dict) -> dict:
     if 'auth' in Dictionary:
         Safe['auth'] = '<redacted>'
     return Safe
+
+def _tpc_xid_bytes(Xid) -> tuple:
+    # (format_id, gtrid, bqual, xid_bytes) for a TPC Xid, or None. The wire xid
+    # is gtrid + bqual zero-padded to a fixed 128 bytes (oracledb _write_message).
+    if Xid is None:
+        return None
+    FormatId = Xid[0]
+    Gtrid = Xid[1] if isinstance(Xid[1], (bytes, bytearray)) else Xid[1].encode()
+    Bqual = Xid[2] if isinstance(Xid[2], (bytes, bytearray)) else Xid[2].encode()
+    XidBytes = bytes(Gtrid) + bytes(Bqual) + bytes(128 - len(Gtrid) - len(Bqual))
+    return (FormatId, bytes(Gtrid), bytes(Bqual), XidBytes)
+
+def _tpc_xid_descriptor(Parts) -> bytes:
+    # The format-id / gtrid-len / bqual-len / xid-pointer block shared by both
+    # TPC messages (after the operation + context-pointer block).
+    if Parts is not None:
+        (FormatId, Gtrid, Bqual, XidBytes) = Parts
+        return (encode_sb4(FormatId) + encode_sb4(len(Gtrid))
+                + encode_sb4(len(Bqual)) + bytes([1]) + encode_sb4(len(XidBytes)))
+    return encode_sb4(0) + encode_sb4(0) + encode_sb4(0) + bytes([0]) + encode_sb4(0)
+
+def encode_tpc_switch(Seq: int, FieldVersion: int, Operation: int, Xid,
+                      Flags: int, Timeout: int, Context: bytes | None,
+                      AppValue: int = 0, InternalName: bytes | None = None,
+                      ExternalName: bytes | None = None) -> bytes:
+    # TPC start (tpc_begin) / detach (tpc_end). Mirrors oracledb
+    # TransactionSwitchMessage._write_message (#131).
+    Parts = _tpc_xid_bytes(Xid)
+    Out = _fun_header(TNS_FUNC_TPC_TXN_SWITCH, Seq, FieldVersion)
+    Out += encode_sb4(Operation)
+    if Context is not None:
+        Out += bytes([1]) + encode_sb4(len(Context))
+    else:
+        Out += bytes([0]) + encode_sb4(0)
+    Out += _tpc_xid_descriptor(Parts)
+    Out += encode_sb4(Flags) + encode_sb4(Timeout)
+    Out += bytes([1, 1, 1])             # ptrs: app value, return context, len
+    Out += (bytes([1]) + encode_sb4(len(InternalName)) if InternalName
+            else bytes([0]) + encode_sb4(0))
+    Out += (bytes([1]) + encode_sb4(len(ExternalName)) if ExternalName
+            else bytes([0]) + encode_sb4(0))
+    if Context is not None:
+        Out += Context
+    if Parts is not None:
+        Out += Parts[3]
+    Out += encode_sb4(AppValue)
+    if InternalName:
+        Out += InternalName
+    if ExternalName:
+        Out += ExternalName
+    return Out
+
+def encode_tpc_change_state(Seq: int, FieldVersion: int, Operation: int,
+                            State: int, Xid, Flags: int,
+                            Context: bytes | None) -> bytes:
+    # TPC prepare / commit / rollback / forget. Mirrors oracledb
+    # TransactionChangeStateMessage._write_message (#131).
+    Parts = _tpc_xid_bytes(Xid)
+    Out = _fun_header(TNS_FUNC_TPC_TXN_CHANGE_STATE, Seq, FieldVersion)
+    Out += encode_sb4(Operation)
+    if Context is not None:
+        Out += bytes([1]) + encode_sb4(len(Context))
+    else:
+        Out += bytes([0]) + encode_sb4(0)
+    Out += _tpc_xid_descriptor(Parts)
+    Out += encode_sb4(0)               # timeout
+    Out += encode_sb4(State)
+    Out += bytes([1])                  # ptr (out state)
+    Out += encode_sb4(Flags)
+    if Context is not None:
+        Out += Context
+    if Parts is not None:
+        Out += Parts[3]
+    return Out
 
 def encode_dictionary_description(Dictionary: dict) -> bytes:
     logger.debug("encode_dictionary_description: %s", _redacted(Dictionary))

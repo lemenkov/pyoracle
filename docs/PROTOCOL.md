@@ -2374,3 +2374,35 @@ the fv24 fast-auth phase-two layouts.
 Verified on 10g/11g/21c/23ai (sync + async): `proxy_user[schema]` runs as the
 target schema; a plain user name is unchanged. Works on every tier (it predates
 the 12c+ features and needs no version-specific framing).
+
+## 28. Two-phase commit / XA (#131)
+
+Distributed transactions via `connection.xid(format_id, gtrid, bqual)` +
+`tpc_begin` / `tpc_end` / `tpc_prepare` / `tpc_commit` / `tpc_rollback`. Two TTI
+function messages carry it:
+
+- **TransactionSwitch** (`TNS_FUNC_TPC_TXN_SWITCH` = 103) — `tpc_begin` (op
+  `START`) and `tpc_end` (op `DETACH`). Body: operation, a context pointer +
+  length, the xid descriptor (`format_id`, `len(gtrid)`, `len(bqual)`, xid
+  pointer + length), flags, timeout, three return pointers, internal/external
+  name pointers, then the data: the context bytes (on detach), the **xid
+  zero-padded to 128 bytes** (`gtrid + bqual + pad`), the application value, and
+  the names. The response (an RPA return-parameter token, `0x08`) carries an
+  application value (ub4), a context length (ub2), and the opaque **transaction
+  context** — held and replayed on the later calls.
+- **TransactionChangeState** (`TNS_FUNC_TPC_TXN_CHANGE_STATE` = 104) —
+  `tpc_prepare` (op `PREPARE`), `tpc_commit` (op `COMMIT`), `tpc_rollback` (op
+  `ABORT`). Body: operation, context pointer+len, xid descriptor, timeout, the
+  requested state, an out-state pointer, flags, then context + padded xid. The
+  response (RPA) carries a `ub4` final **state**: `tpc_prepare` returns True for
+  `REQUIRES_COMMIT` / False for `READ_ONLY`; `tpc_commit` expects
+  `COMMITTED`/`READ_ONLY` (one-phase) or `FORGOTTEN` (after prepare);
+  `tpc_rollback` expects `ABORTED`.
+
+Use `autocommit=False` so the DML between `tpc_begin` and `tpc_end` is part of
+the branch. Sync + async. **12c+ only:** python-oracledb requires 12.1+ and
+there's no pre-12c reference; pre-12c the global-transaction DML response is
+framed differently and desyncs, so `tpc_begin` raises `NotSupportedError` on
+field version < 12.1 (before any wire activity — the connection stays usable).
+Verified on 21c/23ai (two-phase commit, one-phase commit, rollback, read-only
+prepare), sync + async.
