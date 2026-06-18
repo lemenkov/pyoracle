@@ -98,13 +98,19 @@ class Var:
     result afterwards with `getvalue()`.
     """
 
-    __slots__ = ("dbtype", "size", "_value", "has_value")
+    __slots__ = ("dbtype", "size", "_value", "has_value",
+                 "is_array", "num_elements")
 
-    def __init__(self, typ: object, size: int | None = None):
+    def __init__(self, typ: object, size: int | None = None,
+                 is_array: bool = False, num_elements: int = 0):
         self.dbtype = _resolve_dbtype(typ)
         self.size = size if size is not None else self.dbtype.default_size
-        self._value = None
+        self._value = [] if is_array else None
         self.has_value = False
+        # PL/SQL associative-array (index-by table) bind (#122): is_array marks
+        # the bulk-array form; num_elements is the declared maximum capacity.
+        self.is_array = is_array
+        self.num_elements = num_elements
 
     def setvalue(self, pos: int, value: object) -> None:
         self._value = value
@@ -114,6 +120,9 @@ class Var:
         return self._value
 
     def __repr__(self) -> str:
+        if self.is_array:
+            return (f"Var({self.dbtype}[{self.num_elements}], "
+                    f"value={self._value!r})")
         return f"Var({self.dbtype}, size={self.size}, value={self._value!r})"
 
 

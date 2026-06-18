@@ -543,6 +543,17 @@ def _read_iov(Data: bytes, Binds: list | None = None
             if _is_refcursor_bind(Bind):
                 (Value, Rest) = _read_refcursor_out(Rest)
                 OutValues.append(Value)
+            elif Bind is not None and getattr(Bind, 'is_array', False):
+                # Associative-array OUT (#122): a ub4 element count, then each
+                # element as a DALC value + indicator. Kept as a list of raw
+                # element bytes; the cursor decodes them by the Var's type.
+                (Count, Rest) = decode_ub4(Rest)
+                Elements = []
+                for _ in range(Count):
+                    (Val, Rest) = decode_dalc(Rest)
+                    Rest = Rest[1:]              # per-element indicator byte
+                    Elements.append(b"" if Val == [] else bytes(Val))
+                OutValues.append({'_array': True, 'values': Elements})
             else:
                 (Val, Rest) = decode_dalc(Rest)
                 Rest = Rest[1:]                  # per-value indicator byte
@@ -2879,6 +2890,14 @@ def encode_token_rxd(Token: object) -> bytes:
     if isinstance(Token, Var):
         # OUT / IN OUT bind: send the current value (NULL for an unseeded pure
         # OUT). The server writes the result back in the IOV response.
+        if Token.is_array:
+            # Associative-array bind (#122): a ub4 element count then each
+            # element value, in order. Empty (count 0) for a pure-OUT array.
+            Elements = Token._value or []
+            Out = encode_sb4(len(Elements))
+            for Element in Elements:
+                Out += encode_token_rxd(Element)
+            return Out
         if Token.dbtype.tns_type == TNS_TYPE_REFCURSOR:
             return bytes([1, 0])            # REF CURSOR slot placeholder
         if Token._value is None:
@@ -2983,27 +3002,30 @@ def encode_token_oac(Token: object) -> bytes:
         # value, so a pure-OUT bind still announces the right type and a buffer
         # large enough for the server to return into.
         DT = Token.dbtype.tns_type
+        # Associative-array bind (#122): the OAC declares the array capacity in
+        # the max-num-elements field and sets the ARRAY flag (handled by A).
+        A = Token.num_elements if Token.is_array else 0
         if DT == TNS_TYPE_NUMBER:
-            return encode_token_raw(TNS_TYPE_NUMBER, 22, 0, 0, 0)
+            return encode_token_raw(TNS_TYPE_NUMBER, 22, 0, 0, 0, A)
         if DT == TNS_TYPE_VARCHAR:
             return encode_token_raw(TNS_TYPE_VARCHAR, Token.size, 16,
-                                    AL32UTF8_CHARSET, 0)
+                                    AL32UTF8_CHARSET, 0, A)
         if DT == TNS_TYPE_RAW:
-            return encode_token_raw(TNS_TYPE_RAW, Token.size, 16, 0, 0)
+            return encode_token_raw(TNS_TYPE_RAW, Token.size, 16, 0, 0, A)
         if DT == TNS_TYPE_DATE:
-            return encode_token_raw(TNS_TYPE_DATE, 7, 0, 0, 0)
+            return encode_token_raw(TNS_TYPE_DATE, 7, 0, 0, 0, A)
         if DT == TNS_TYPE_TIMESTAMP:
-            return encode_token_raw(TNS_TYPE_TIMESTAMP, 11, 0, 0, 0)
+            return encode_token_raw(TNS_TYPE_TIMESTAMP, 11, 0, 0, 0, A)
         if DT == TNS_TYPE_TIMESTAMPTZ:
-            return encode_token_raw(TNS_TYPE_TIMESTAMPTZ, 13, 0, 0, 0)
+            return encode_token_raw(TNS_TYPE_TIMESTAMPTZ, 13, 0, 0, 0, A)
         if DT == TNS_TYPE_BFLOAT:
-            return encode_token_raw(TNS_TYPE_BFLOAT, 4, 0, 0, 0)
+            return encode_token_raw(TNS_TYPE_BFLOAT, 4, 0, 0, 0, A)
         if DT == TNS_TYPE_BDOUBLE:
-            return encode_token_raw(TNS_TYPE_BDOUBLE, 8, 0, 0, 0)
+            return encode_token_raw(TNS_TYPE_BDOUBLE, 8, 0, 0, 0, A)
         if DT == TNS_TYPE_INTERVALDS:
-            return encode_token_raw(TNS_TYPE_INTERVALDS, 11, 0, 0, 0)
+            return encode_token_raw(TNS_TYPE_INTERVALDS, 11, 0, 0, 0, A)
         if DT == TNS_TYPE_INTERVALYM:
-            return encode_token_raw(TNS_TYPE_INTERVALYM, 5, 0, 0, 0)
+            return encode_token_raw(TNS_TYPE_INTERVALYM, 5, 0, 0, 0, A)
         if DT == TNS_TYPE_REFCURSOR:
             return encode_token_raw(TNS_TYPE_REFCURSOR, 1, 0, UTF8_CHARSET, 0)
         raise Exception("Unsupported Var OAC type", DT)
@@ -3335,7 +3357,11 @@ def encode_token_interval_ym(IV: IntervalYM) -> bytes:
     # sign with abs(months) < 12.
     return (IV.years + 2**31).to_bytes(4, "big") + bytes([IV.months + 60])
 
-def encode_token_raw(DataType: int, Length: int, Flag: int, Charset: int, Max: int) -> bytes:
+def encode_token_raw(DataType: int, Length: int, Flag: int, Charset: int,
+                     Max: int, Array: int = 0) -> bytes:
+    # Array > 0 marks a PL/SQL associative-array bind (#122): the flag gains
+    # TNS_BIND_ARRAY (0x40) and the max-number-of-array-elements field carries
+    # the array's declared capacity (0 for a scalar bind).
     FormOfUse = 2 if Charset == AL16UTF16_CHARSET else 1
     if _ENCODE_FIELD_VERSION.get() >= 8:        # FIELD_VERSION_12_2
         # 12c+ bind OAC (oracledb _write_column_metadata): a fixed flag byte
@@ -3350,8 +3376,9 @@ def encode_token_raw(DataType: int, Length: int, Flag: int, Charset: int, Max: i
             BindCharset, Csfrm = AL16UTF16_CHARSET, 2
         else:
             BindCharset, Csfrm = AL32UTF8_CHARSET, 1
-        return (bytes([DataType, 1, 0, 0]) + encode_sb4(Length)
-                + encode_sb4(0)                # max number of array elements
+        FlagByte = 0x41 if Array else 1        # USE_INDICATORS | ARRAY
+        return (bytes([DataType, FlagByte, 0, 0]) + encode_sb4(Length)
+                + encode_sb4(Array)            # max number of array elements
                 + encode_sb4(0)                # cont flag (ub8)
                 + encode_sb4(0)                # OID
                 + encode_sb4(0)                # version
@@ -3359,7 +3386,9 @@ def encode_token_raw(DataType: int, Length: int, Flag: int, Charset: int, Max: i
                 + bytes([Csfrm])               # character set form
                 + encode_sb4(0)                # LOB prefetch length
                 + encode_sb4(0))               # oaccolid (12.2+)
-    return bytes([DataType, 3, 0, 0]) + encode_sb4(Length) + bytes([0]) + encode_sb4(Flag) + bytes([0,0]) + encode_sb4(Charset) + bytes([FormOfUse]) + encode_sb4(Max)
+    FlagOut = (Flag | 0x40) if Array else Flag
+    MaxOut = Array if Array else Max
+    return bytes([DataType, 3, 0, 0]) + encode_sb4(Length) + bytes([0]) + encode_sb4(FlagOut) + bytes([0,0]) + encode_sb4(Charset) + bytes([FormOfUse]) + encode_sb4(MaxOut)
 
 ##
 ## Some other specific transformation functions
