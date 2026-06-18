@@ -63,8 +63,8 @@ from oracle.tns_consts import (
     TNS_TYPE_ADT,
     TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_JSON, TNS_TYPE_LONG,
     TNS_TYPE_LONGRAW, TNS_TYPE_VECTOR,
-    TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_REFCURSOR, TNS_TYPE_RID,
-    TNS_TYPE_ROWID,
+    TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_REF, TNS_TYPE_REFCURSOR,
+    TNS_TYPE_RID, TNS_TYPE_ROWID,
     TNS_TYPE_CHAR,
     TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPLTZ, TNS_TYPE_TIMESTAMPTZ,
     TNS_TYPE_UROWID, TNS_TYPE_VARCHAR,
@@ -412,9 +412,10 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
         'domain_name': DomainName or None,
         'annotations': Annotations or None,
     }
-    if DataType == TNS_TYPE_ADT:
-        # Object (ADT) column: keep the type identity so the row decoder can
-        # look up the attribute layout (#115). Names are plain ASCII identifiers.
+    if DataType in (TNS_TYPE_ADT, TNS_TYPE_REF):
+        # Object (ADT, #115) and REF (#119) columns carry the (referenced) type
+        # identity here; keep it so the row decoder can look up the attribute
+        # layout / label the REF. Names are plain ASCII identifiers.
         Col['type_oid'] = TypeOid
         Col['type_schema'] = TypeSchema.decode('ascii', 'replace') or None \
             if TypeSchema else None

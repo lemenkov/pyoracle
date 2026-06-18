@@ -96,6 +96,50 @@ class ObjectImage:
         self.image = image
 
 
+class DbRef:
+    """A REF — an opaque reference to a row object (#119).
+
+    A REF is a pointer to an object instance, not the object itself; to read the
+    object, dereference it in SQL (``SELECT DEREF(ref_col) ...``), which yields a
+    DbObject (#115). The raw locator bytes are exposed for inspection / equality
+    (and for a future REF bind); ``type_name`` is the referenced object type when
+    the describe carried it. Read-only here -- binding a REF is a follow-up.
+    """
+
+    __slots__ = ('_locator', '_type_name')
+
+    def __init__(self, locator: bytes, type_name: str | None = None):
+        self._locator = bytes(locator)
+        self._type_name = type_name
+
+    @property
+    def bytes(self) -> bytes:
+        """The raw REF locator bytes."""
+        return self._locator
+
+    @property
+    def hex(self) -> str:
+        """The locator as a hex string."""
+        return self._locator.hex()
+
+    @property
+    def type_name(self) -> str | None:
+        """The referenced object type name, if known."""
+        return self._type_name
+
+    def __eq__(self, other):
+        if not isinstance(other, DbRef):
+            return NotImplemented
+        return self._locator == other._locator
+
+    def __hash__(self):
+        return hash(self._locator)
+
+    def __repr__(self):
+        Label = f" {self._type_name}" if self._type_name else ""
+        return f"<oracle.DbRef{Label} {self._locator.hex()}>"
+
+
 class DbObjectType:
     """A SQL object type handle, returned by ``connection.gettype(name)``.
 

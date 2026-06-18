@@ -2165,5 +2165,23 @@ tier (verified 10g/11g read), bind is 12c+ (round-trip 21c/23ai, sync + async).
 **Both VARRAY (#117) and nested table (#118) go through this one path** — they
 share the image and bind framing exactly, differing only in `collection_type`
 (VARRAY 3 vs nested table 2), so nested-table support needed no new wire code
-(verified read 10g/11g/21c/23ai, bind round-trip 21c/23ai). REF is #119; PL/SQL
+(verified read 10g/11g/21c/23ai, bind round-trip 21c/23ai). PL/SQL
 associative-array element keys are #122.
+
+### 21.7 REF — object references (#119)
+
+A REF column has TNS data type **111**. Its value is **not** the object — it is
+an opaque locator (a structured pointer: `00 28 02 09` + the object-table OID +
+the target row's OID/rowid, e.g.
+`00280209 <16B> <16B> 0300223e0000`). It arrives in the RXD as a plain
+length-prefixed value (no special framing), so it reads on every tier without
+desync. To read the referenced object, dereference in SQL —
+`SELECT DEREF(ref_col) ...` returns a normal object that decodes via §21.1–21.4.
+
+pyoracle surfaces a REF as a read-only `oracle.DbRef` exposing `.bytes` / `.hex`
+and the referenced type name (`.type_name`, captured from the per-column
+describe, which carries the referenced type's OID + owner/name in the same
+fields an ADT column uses, §21.1). Note python-oracledb has **no** REF type at
+all, so there is no thin-mode reference for this; the locator structure above
+was read from live captures (10g/11g/21c/23ai). **Read-only** here — binding a
+REF back (a type-111 bind OAC, no reference; capture-based) is a follow-up.
