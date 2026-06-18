@@ -173,7 +173,9 @@ class AsyncCursor:
             # BLOB / BFILE → bytes, NULL LOBs stay as None (already
             # filtered out at the row-decoder level).
             from oracle.lob import LOB
-            from oracle.dbobject import ObjectImage, DbObject, decode_object_image
+            from oracle.dbobject import (ObjectImage, DbObject,
+                                         decode_object_image,
+                                         decode_collection_image)
             ResolvedRows = []
             for Row in (Rows or []):
                 NewRow = list(Row)
@@ -182,14 +184,21 @@ class AsyncCursor:
                         Val._connection = self._connection
                         NewRow[I] = await Val.aread()
                     elif isinstance(Val, ObjectImage):
-                        # Object (ADT) auto-resolve (#115): fetch the type's
-                        # attribute layout (awaited; cached on the connection)
-                        # and walk the packed image into a DbObject.
-                        Layout = await self._connection._object_type_layout(
+                        # Object / collection auto-resolve (#115/#117): fetch the
+                        # type (awaited; cached on the connection) and walk the
+                        # packed image into a DbObject or a list-collection.
+                        Typ = await self._connection._describe_object_type(
                             Val.type_schema, Val.type_name)
-                        Attrs = decode_object_image(
-                            Val.image, Layout, Val.charset or AL32UTF8_CHARSET)
-                        NewRow[I] = DbObject(Val.type_name, Attrs)
+                        Charset = Val.charset or AL32UTF8_CHARSET
+                        if Typ is not None and Typ.is_collection:
+                            Elements = decode_collection_image(
+                                Val.image, Typ.element or {}, Charset)
+                            NewRow[I] = DbObject(Val.type_name,
+                                                 elements=Elements, dbtype=Typ)
+                        else:
+                            Layout = Typ.attrs if Typ is not None else []
+                            Attrs = decode_object_image(Val.image, Layout, Charset)
+                            NewRow[I] = DbObject(Val.type_name, Attrs, dbtype=Typ)
                 ResolvedRows.append(NewRow)
             self._rows = ResolvedRows
             self._rowcount = len(self._rows)

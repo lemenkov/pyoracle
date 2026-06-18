@@ -3025,6 +3025,7 @@ def encode_token_decimal(Value: Decimal) -> bytes:
 # _get_packed_data / _pack_value / create_new_object.
 
 _OBJ_IMAGE_FLAGS = 0x84             # IS_VERSION_81 (0x80) | NO_PREFIX_SEG (0x04)
+_OBJ_IMAGE_FLAGS_COLLECTION = 0x88  # IS_VERSION_81 (0x80) | IS_COLLECTION (0x08)
 _OBJ_IMAGE_VERSION = 1
 _OBJ_TOP_LEVEL = 0x01
 _OBJ_NULL_ATTR = 255               # TNS_NULL_LENGTH_INDICATOR
@@ -3079,21 +3080,40 @@ def _encode_object_attr(DataType: int, Charset: int, Value: object) -> bytes:
         return bytes(Value)
     return str(Value).encode('utf-8')
 
+def _encode_object_attr_field(DataType: int, Charset: int, Value: object) -> bytes:
+    # One image field: a single 0xFF for NULL, else the write_length-prefixed
+    # raw scalar bytes.
+    if Value is None:
+        return bytes([_OBJ_NULL_ATTR])
+    Raw = _encode_object_attr(DataType, Charset or AL32UTF8_CHARSET, Value)
+    return _obj_write_length(len(Raw)) + Raw
+
 def encode_object_image(Obj: object) -> bytes:
-    # Pack a DbObject into its image: header (flags, version, long-form length
-    # backpatched) then each attribute length-prefixed in declaration order. A
-    # NULL attribute is a single 0xFF. Mirrors _get_packed_data / _pack_value
-    # for a non-collection object (collections are #117/#118).
+    # Pack a DbObject into its image. For an object: header (flags, version,
+    # long-form length backpatched) then each attribute length-prefixed in
+    # declaration order. For a collection (#117/#118): the header also carries a
+    # prefix segment (01 01), then a collection-flags byte, the element count,
+    # and each element. A NULL field is a single 0xFF. Mirrors python-oracledb
+    # _get_packed_data / write_header / _pack_data / _pack_value.
     Typ = Obj._dbtype
+    if Typ is not None and Typ.is_collection:
+        Element = Typ.element or {}
+        Charset = Element.get('charset') or AL32UTF8_CHARSET
+        DataType = Element.get('data_type')
+        Body = bytes([0])                         # collection flags
+        Body += _obj_write_length(len(Obj._elements))
+        for Value in Obj._elements:
+            Body += _encode_object_attr_field(DataType, Charset, Value)
+        # Collection header = flags, version, long-form length, prefix seg (01 01).
+        Total = 9 + len(Body)
+        return (bytes([_OBJ_IMAGE_FLAGS_COLLECTION, _OBJ_IMAGE_VERSION,
+                       _OBJ_LONG_LEN]) + struct.pack('>I', Total)
+                + bytes([1, 1]) + Body)
     Body = b""
     for Attr in Typ.attrs:
-        Value = Obj._attrs.get(Attr['name'])
-        if Value is None:
-            Body += bytes([_OBJ_NULL_ATTR])
-            continue
-        Raw = _encode_object_attr(Attr.get('data_type'),
-                                  Attr.get('charset') or AL32UTF8_CHARSET, Value)
-        Body += _obj_write_length(len(Raw)) + Raw
+        Body += _encode_object_attr_field(
+            Attr.get('data_type'), Attr.get('charset') or AL32UTF8_CHARSET,
+            Obj._attrs.get(Attr['name']))
     # Header length is written long-form (0xFE + ub4) and covers the whole image
     # (the 7-byte header included), matching python-oracledb write_header.
     Total = 7 + len(Body)

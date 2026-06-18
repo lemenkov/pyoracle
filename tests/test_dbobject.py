@@ -13,7 +13,8 @@
 import unittest
 
 from oracle.dbobject import (
-    DbObject, DbObjectType, ObjectImage, decode_object_image, type_name_to_tns,
+    COLLECTION_VARRAY, DbObject, DbObjectType, ObjectImage,
+    decode_collection_image, decode_object_image, type_name_to_tns,
 )
 from oracle.tns import (
     _encode_object_bind_value, _read_object_column, encode_object_image,
@@ -176,6 +177,59 @@ class TestDbObjectTypeApi(unittest.TestCase):
     def test_type_repr_and_names(self):
         self.assertEqual(_ADDR_TYPE.full_name, "PYO.ADDR_T")
         self.assertEqual(_ADDR_TYPE.attr_names, ["STREET", "ZIP", "CODE"])
+
+
+_NUM_VA = DbObjectType(
+    "PYO", "NUM_VA", bytes.fromhex("ffeeddccbbaa99887766554433221100"), 1, [],
+    is_collection=True, collection_type=COLLECTION_VARRAY,
+    element={"name": "element", "data_type": TNS_TYPE_NUMBER, "charset": None},
+    max_elements=5)
+
+
+class TestVarrayCollection(unittest.TestCase):
+    def test_newobject_list_semantics(self):
+        v = _NUM_VA.newobject([10, 20, 30])
+        self.assertTrue(v.is_collection)
+        self.assertEqual(list(v), [10, 20, 30])
+        self.assertEqual(v[1], 20)
+        self.assertEqual(len(v), 3)
+        v.append(40)
+        v.extend([50, 60])
+        self.assertEqual(v.aslist(), [10, 20, 30, 40, 50, 60])
+        v[0] = 99
+        self.assertEqual(v[0], 99)
+
+    def test_empty_and_default(self):
+        self.assertEqual(_NUM_VA.newobject().aslist(), [])
+        self.assertEqual(_NUM_VA.newobject([]).aslist(), [])
+
+    def test_image_encode_decode_roundtrip(self):
+        v = _NUM_VA.newobject([10, 20, 30])
+        Image = encode_object_image(v)
+        self.assertEqual(decode_collection_image(Image, _NUM_VA.element),
+                         [10, 20, 30])
+
+    def test_image_roundtrip_empty_and_null_element(self):
+        self.assertEqual(
+            decode_collection_image(encode_object_image(_NUM_VA.newobject([])),
+                                    _NUM_VA.element), [])
+        v = _NUM_VA.newobject([1, None, 3])
+        self.assertEqual(
+            decode_collection_image(encode_object_image(v), _NUM_VA.element),
+            [1, None, 3])
+
+    def test_bind_value_framing_roundtrips(self):
+        v = _NUM_VA.newobject([7, 8, 9])
+        Wire = _encode_object_bind_value(v) + _SENTINEL
+        (Val, Rest) = _read_object_column(Wire, {"charset": 0})
+        self.assertIsInstance(Val, ObjectImage)
+        self.assertEqual(Rest, _SENTINEL)
+        self.assertEqual(decode_collection_image(Val.image, _NUM_VA.element),
+                         [7, 8, 9])
+
+    def test_asdict_rejected_on_collection(self):
+        with self.assertRaises(TypeError):
+            _NUM_VA.newobject([1]).asdict()
 
 
 class TestTypeNameMap(unittest.TestCase):

@@ -468,13 +468,21 @@ def _resolve_objects(Connection, Row: list) -> list:
     # kept the packed image without decoding it (the attribute layout isn't
     # known at decode time); fetch the layout for the type now (cached on the
     # connection) and walk the image. NULL objects already came back as None.
-    from oracle.dbobject import ObjectImage, DbObject, decode_object_image
+    from oracle.dbobject import (ObjectImage, DbObject, decode_object_image,
+                                 decode_collection_image)
     Out = list(Row)
     for I, Val in enumerate(Out):
         if isinstance(Val, ObjectImage):
-            Layout = Connection._object_type_layout(Val.type_schema, Val.type_name)
-            Attrs = decode_object_image(Val.image, Layout, Val.charset or AL32UTF8_CHARSET)
-            Out[I] = DbObject(Val.type_name, Attrs)
+            Typ = Connection._describe_object_type(Val.type_schema, Val.type_name)
+            Charset = Val.charset or AL32UTF8_CHARSET
+            if Typ is not None and Typ.is_collection:
+                Elements = decode_collection_image(Val.image, Typ.element or {},
+                                                   Charset)
+                Out[I] = DbObject(Val.type_name, elements=Elements, dbtype=Typ)
+            else:
+                Layout = Typ.attrs if Typ is not None else []
+                Attrs = decode_object_image(Val.image, Layout, Charset)
+                Out[I] = DbObject(Val.type_name, Attrs, dbtype=Typ)
     return Out
 
 
