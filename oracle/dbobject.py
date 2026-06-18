@@ -31,6 +31,11 @@ from oracle.tns_consts import (
 _OBJ_IS_DEGENERATE = 0x10       # object stored in a LOB -- not supported here
 _OBJ_NO_PREFIX_SEG = 0x04       # no prefix segment precedes the attributes
 
+# Collection kinds (python-oracledb "database object collection types").
+COLLECTION_PLSQL_INDEX_TABLE = 1
+COLLECTION_NESTED_TABLE = 2
+COLLECTION_VARRAY = 3
+
 # Length markers inside the image (python-oracledb base_impl.pxd).
 _LONG_LENGTH_INDICATOR = 254    # next 4 bytes are a big-endian length
 _NULL_LENGTH_INDICATOR = 255    # NULL attribute (no bytes follow)
@@ -100,12 +105,20 @@ class DbObjectType:
     a fresh, settable DbObject of this type ready to bind (#116).
     """
 
-    def __init__(self, schema, name, oid, version, attrs):
+    def __init__(self, schema, name, oid, version, attrs,
+                 is_collection=False, collection_type=None, element=None,
+                 max_elements=0):
         self.schema = schema
         self.name = name
         self.oid = oid                       # 16-byte type OID (bytes)
         self.version = version
         self.attrs = attrs                   # ordered layout (list of dict)
+        # Collection types (#117/#118): a single element type instead of named
+        # attributes. collection_type is VARRAY (3) / NESTED_TABLE (2).
+        self.is_collection = is_collection
+        self.collection_type = collection_type
+        self.element = element               # one layout dict, or None
+        self.max_elements = max_elements
 
     @property
     def full_name(self) -> str:
@@ -116,11 +129,17 @@ class DbObjectType:
         return [A['name'] for A in self.attrs]
 
     def newobject(self, values=None) -> 'DbObject':
-        """A new DbObject of this type with every attribute set to NULL.
+        """A new DbObject of this type, ready to bind (#116/#117).
 
-        Optionally seed from ``values`` (a dict or a sequence in declaration
-        order). Set attributes by name (``obj.STREET = '...'``) before binding.
+        For an object type every attribute starts NULL; seed from ``values`` (a
+        dict, or a sequence in declaration order). For a collection type
+        ``values`` is the element sequence (default empty). Set object
+        attributes by name (``obj.STREET = '...'``) or collection elements by
+        index / ``append`` before binding.
         """
+        if self.is_collection:
+            return DbObject(self.full_name, elements=list(values or []),
+                            dbtype=self)
         Obj = DbObject(self.full_name, [(A['name'], None) for A in self.attrs],
                        dbtype=self)
         if isinstance(values, dict):
@@ -135,7 +154,8 @@ class DbObjectType:
         return Obj
 
     def __repr__(self):
-        return f"<oracle.DbObjectType {self.full_name}>"
+        Kind = 'collection ' if self.is_collection else ''
+        return f"<oracle.DbObjectType {Kind}{self.full_name}>"
 
 
 class DbObject:
@@ -148,18 +168,30 @@ class DbObject:
     common ``cursor.fetchone()`` / bind use.
     """
 
-    def __init__(self, type_name: str | None, attrs: list[tuple[str, object]],
+    def __init__(self, type_name: str | None,
+                 attrs: list[tuple[str, object]] | None = None,
+                 elements: list | None = None,
                  dbtype: 'DbObjectType | None' = None):
         # _ prefixes keep the namespace clear of attribute names; __setattr__
-        # routes any non-underscore name into _attrs.
+        # routes any non-underscore name into _attrs. A collection object holds
+        # an ordered element list instead of named attributes (#117/#118).
+        IsCollection = elements is not None or (
+            dbtype is not None and dbtype.is_collection)
         object.__setattr__(self, '_type_name', type_name)
-        object.__setattr__(self, '_attrs', dict(attrs))
-        object.__setattr__(self, '_order', [Name for Name, _ in attrs])
         object.__setattr__(self, '_dbtype', dbtype)
+        object.__setattr__(self, '_is_collection', IsCollection)
+        object.__setattr__(self, '_elements', list(elements) if IsCollection else None)
+        object.__setattr__(self, '_attrs', {} if IsCollection else dict(attrs or []))
+        object.__setattr__(self, '_order',
+                           [] if IsCollection else [Name for Name, _ in (attrs or [])])
 
     @property
     def type_name(self) -> str | None:
         return self._type_name
+
+    @property
+    def is_collection(self) -> bool:
+        return self._is_collection
 
     def __getattr__(self, name: str):
         try:
@@ -177,31 +209,64 @@ class DbObject:
                 f"{self._type_name or 'object'} has no attribute {name!r}")
         Attrs[name] = value
 
-    def __getitem__(self, name: str):
-        return self._attrs[name]
+    def __getitem__(self, key):
+        if self._is_collection:
+            return self._elements[key]
+        return self._attrs[key]
 
-    def __setitem__(self, name: str, value):
-        if name not in self._attrs:
-            raise KeyError(name)
-        self._attrs[name] = value
+    def __setitem__(self, key, value):
+        if self._is_collection:
+            self._elements[key] = value
+            return
+        if key not in self._attrs:
+            raise KeyError(key)
+        self._attrs[key] = value
+
+    def __len__(self):
+        return len(self._elements) if self._is_collection else len(self._order)
+
+    def __iter__(self):
+        return iter(self._elements if self._is_collection else self._order)
+
+    def append(self, value) -> None:
+        """Append an element (collection types only)."""
+        if not self._is_collection:
+            raise TypeError("append is only valid on a collection object")
+        self._elements.append(value)
+
+    def extend(self, values) -> None:
+        """Append several elements (collection types only)."""
+        if not self._is_collection:
+            raise TypeError("extend is only valid on a collection object")
+        self._elements.extend(values)
 
     def aslist(self) -> list:
-        """The attribute values in declaration order."""
+        """The collection elements, or an object's attribute values in order."""
+        if self._is_collection:
+            return list(self._elements)
         return [self._attrs[Name] for Name in self._order]
 
     def asdict(self) -> dict:
-        """A name -> value mapping of the attributes."""
+        """A name -> value mapping of the attributes (object types only)."""
+        if self._is_collection:
+            raise TypeError("asdict is not valid on a collection object")
         return dict(self._attrs)
 
     def __eq__(self, other):
         if not isinstance(other, DbObject):
             return NotImplemented
+        if self._is_collection or other._is_collection:
+            return (self._type_name == other._type_name
+                    and self._is_collection == other._is_collection
+                    and self._elements == other._elements)
         return (self._type_name == other._type_name
                 and self._attrs == other._attrs)
 
     def __repr__(self):
-        Body = ', '.join(f"{Name}={self._attrs[Name]!r}" for Name in self._order)
         Name = self._type_name or 'OBJECT'
+        if self._is_collection:
+            return f"<oracle.DbObject {Name}{self._elements!r}>"
+        Body = ', '.join(f"{N}={self._attrs[N]!r}" for N in self._order)
         return f"<oracle.DbObject {Name}({Body})>"
 
 
@@ -257,3 +322,33 @@ def decode_object_image(Image: bytes, Layout: list[dict],
         }
         Attrs.append((Attr['name'], decode_value(Col, Raw)))
     return Attrs
+
+
+def decode_collection_image(Image: bytes, Element: dict,
+                            Charset: int = AL32UTF8_CHARSET) -> list:
+    """Walk a collection (VARRAY / nested table) image into a list of elements.
+
+    The header (incl. the prefix segment a collection carries) is consumed by
+    the shared ``_read_image_header``; then a 1-byte collection-flags marker, a
+    length-prefixed element count, and that many length-prefixed element values
+    decoded with the single element type. A NULL element is ``None``. (PL/SQL
+    associative arrays prefix each element with an int32 key -- that is #122.)
+    """
+    from oracle.types import decode_value
+    Pos = _read_image_header(Image)
+    Pos += 1                                     # collection flags (skip)
+    (Count, Pos) = _read_length(Image, Pos)
+    Col = {
+        'data_type': Element.get('data_type'),
+        'charset': Element.get('charset') or Charset,
+    }
+    Out = []
+    for _ in range(Count or 0):
+        (Length, Pos) = _read_length(Image, Pos)
+        if Length is None or Length == 0:
+            Out.append(None)
+            continue
+        Raw = bytes(Image[Pos:Pos + Length])
+        Pos += Length
+        Out.append(decode_value(Col, Raw))
+    return Out

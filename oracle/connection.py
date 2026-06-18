@@ -911,7 +911,7 @@ class OracleConnect:
             Schema, TypeName = None, name
         TypeName = TypeName.strip('"') if '"' in TypeName else TypeName.upper()
         Typ = self._describe_object_type(Schema, TypeName)
-        if Typ is None or not Typ.attrs:
+        if Typ is None or (not Typ.attrs and not Typ.is_collection):
             from oracle.exceptions import DatabaseError
             raise DatabaseError(f"object type {name!r} not found")
         return Typ
@@ -943,6 +943,7 @@ class OracleConnect:
         OidRes = self.execute(OidSQL, Bind=[Owner, name])
         OidRows = OidRes[4] if len(OidRes) > 4 and OidRes[4] else []
         Oid = bytes(OidRows[0][0]) if OidRows and OidRows[0][0] else b""
+        TypeCode = OidRows[0][1] if OidRows else None
         SQL = ("SELECT attr_name, attr_type_name, length, precision, scale "
                "FROM all_type_attrs "
                "WHERE owner = :1 AND type_name = :2 "
@@ -958,11 +959,37 @@ class OracleConnect:
                 'data_type': type_name_to_tns(TypeName),
                 'charset': None,
             })
+        CollKW = self._collection_describe(Owner, name, TypeCode)
         # The OAC type version: the freshly-created/common case is 1; the server
         # validated this across 10g..23ai in the round-trip tests.
-        Typ = DbObjectType(Owner, name, Oid, 1, Attrs)
+        Typ = DbObjectType(Owner, name, Oid, 1, Attrs, **CollKW)
         self._object_type_cache[Key] = Typ
         return Typ
+
+    def _collection_describe(self, owner, name, typecode) -> dict:
+        # For a collection type (#117/#118) read the single element type + kind
+        # from ALL_COLL_TYPES. Returns the DbObjectType collection kwargs (empty
+        # for a non-collection object type).
+        if typecode != 'COLLECTION':
+            return {}
+        from oracle.dbobject import (
+            type_name_to_tns, COLLECTION_VARRAY, COLLECTION_NESTED_TABLE)
+        Res = self.execute(
+            "SELECT coll_type, elem_type_name, length, precision, scale, "
+            "upper_bound FROM all_coll_types WHERE owner = :1 AND type_name = :2",
+            Bind=[owner, name])
+        Rows = Res[4] if len(Res) > 4 and Res[4] else []
+        if not Rows:
+            return {'is_collection': True}
+        (CollType, ElemType, _Len, _Prec, _Scale, Upper) = Rows[0][:6]
+        return {
+            'is_collection': True,
+            'collection_type': (COLLECTION_VARRAY if CollType == 'VARYING ARRAY'
+                                else COLLECTION_NESTED_TABLE),
+            'element': {'name': 'element', 'type_name': ElemType,
+                        'data_type': type_name_to_tns(ElemType), 'charset': None},
+            'max_elements': int(Upper) if Upper else 0,
+        }
 
     def _object_type_layout(self, schema: str | None, name: str | None) -> list:
         # The ordered attribute layout (#115 read path). Delegates to the type

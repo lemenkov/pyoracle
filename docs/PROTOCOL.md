@@ -2134,4 +2134,31 @@ the exact inverse of the read path (python-oracledb `write_dbobject` /
 Verified by round-trip (bind via pyoracle, read back via §21.1–21.4) on 21c and
 23ai, scalar attribute types + NULL attributes, sync + async. Binding a bare
 Python `None` to an object column is unsupported (an untyped `None` carries no
-type identity); use a typed value. Collections / REF binds are #117 / #118 / #119.
+type identity); use a typed value. REF binds are #119.
+
+### 21.6 Collections — VARRAY / nested table (#117 / #118)
+
+A collection is the same TNS type 109 with the same value framing (§21.2) and
+the same bind OAC (§21.5) — only the *type metadata* and the *image body* differ.
+
+- **Type metadata**: a collection (`ALL_TYPES.TYPECODE = 'COLLECTION'`) has a
+  single **element type** instead of named attributes, read from
+  `ALL_COLL_TYPES` (`elem_type_name`, length/precision/scale, `coll_type`
+  `'VARYING ARRAY'` = VARRAY vs `'TABLE'` = nested table, `upper_bound`). The
+  `DbObjectType` gains `is_collection` / `collection_type` (VARRAY 3 /
+  NESTED_TABLE 2) / `element` / `max_elements`.
+- **Image**: the header carries a **prefix segment** (`image_flags` =
+  `IS_VERSION_81|IS_COLLECTION` = `0x88`; the shared `read_header` already reads
+  and skips it). Then a `ub1` collection-flags marker (`0` for VARRAY / nested
+  table), a length-prefixed **element count**, and that many length-prefixed
+  element values (decoded / encoded with the single element type, NULL element =
+  `0xFF`). PL/SQL associative arrays additionally prefix each element with an
+  int32 key — that is #122.
+- **Value framing + OAC**: unchanged from §21.2 / §21.5; only the image body is
+  collection-shaped. The 12c+ bind gate applies identically.
+
+A fetched collection surfaces as an `oracle.DbObject` with **list semantics**
+(`iter` / index / `len` / `append` / `extend` / `aslist()`), carrying its type so
+it can be re-bound; build one with `typ.newobject([...])`. Decode works on every
+tier (verified 10g/11g read), bind is 12c+ (round-trip 21c/23ai, sync + async).
+Nested table (#118) is the same image with `collection_type` 2; REF is #119.
