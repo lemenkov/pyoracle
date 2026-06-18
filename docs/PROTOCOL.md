@@ -2027,3 +2027,79 @@ Both must be consumed or the row stream desyncs (it surfaces as an unknown token
 `cursor.annotations` — a list aligned with `cursor.description`, one `{name:
 value}` dict per annotated column (`''` value for a name-only annotation) or
 `None` for an unannotated column.
+
+## 21. SQL OBJECT / ADT decode (#115)
+
+A SQL object (ADT) column has TNS data type **109** (`TNS_TYPE_ADT`). Decoding a
+value is **two-phase** (mirrors python-oracledb `base.pyx _process_column_data`
+→ `read_dbobject`): the row carries the object's serialised *image*, but the
+*attribute layout* needed to walk it lives in the type, not the row. The framing
+and image below are identical across 10g/11g/21c/23ai (fv 4/6/16/24) — verified
+live; there is no field-version-specific variation.
+
+### 21.1 Describe — the type identity
+
+In the per-column `TTI_DCB` (§6.4) an object column carries the type's **16-byte
+OID** (the `OidLen > 0` branch, previously skipped) and, in the trailing
+schema / type-name fields, the type's **owner** and **name** (e.g. `PYO` /
+`ADDR_T`). pyoracle stashes these on the column metadata (`type_oid`,
+`type_schema`, `type_name`) so the row decoder can find the attribute layout.
+
+### 21.2 Row value framing (`read_dbobject`)
+
+The object value in the `TTI_RXD` is **not** a plain DALC; it is:
+
+```
+bytes_with_length   type OID
+bytes_with_length   object OID
+bytes_with_length   snapshot                 (skipped)
+ub2                 version                  (skipped)
+ub4                 image-present gate        (0 ⇒ NULL object, no image)
+ub2                 flags                    (skipped)
+bytes               packed image             (its own length prefix)
+```
+
+The image is a **self-delimiting blob** — a 1-byte length (or the `0xFE` chunked
+form), *not* `gate` raw bytes; the `ub4` gate only signals whether an image
+follows (a NULL object stops after the flags). Reading the gate count as the
+image length is off by the blob's own length prefix and desyncs the next row.
+This framing needs no attribute layout, so pyoracle reads it into an
+`ObjectImage` placeholder during row decode (keeping the stream in sync) and
+resolves it after the fetch.
+
+### 21.3 The packed image
+
+The image is the attributes serialised length-prefixed in declaration order
+behind a short header (python-oracledb `DbObjectPickleBuffer.read_header`):
+
+```
+ub1   flags          (0x80 IS_VERSION_81 | 0x04 NO_PREFIX_SEG | 0x10 IS_DEGENERATE)
+ub1   version
+len   image length    (1 byte, or 0xFE + 4-byte BE; skipped)
+[ if not NO_PREFIX_SEG: len prefix_seg_length + that many bytes  (skipped) ]
+per attribute, in declaration order:
+    len  value length  (0x00/0xFF ⇒ NULL, 0xFE ⇒ 4-byte BE length, else the byte)
+    <value bytes>      (the scalar's normal on-wire encoding — §11 decoders)
+```
+
+For `ADDR_T(street VARCHAR2, zip NUMBER, code CHAR)` = `('Main St', 12345, 'US')`
+the image is `84 01 13 | 07 "Main St" | 04 c3 02 18 2e | 02 "US"` (flags `0x84`,
+version 1, length `0x13`; then a length-prefixed VARCHAR2, NUMBER and CHAR). Each
+attribute value is the same encoding the column form uses, so the existing
+scalar decoders (§11) apply unchanged. `IS_DEGENERATE` (object stored in a LOB)
+raises `NotSupportedError`.
+
+### 21.4 Attribute layout (data-dictionary)
+
+The ordered layout is fetched from `ALL_TYPE_ATTRS` (`attr_name`,
+`attr_type_name`, `length`, `precision`, `scale` `ORDER BY attr_no`) keyed by
+`(owner, type_name)` and **cached per connection** — pyoracle buffers the whole
+result set on execute (the server cursor is drained), so this extra query runs
+safely during row resolution. The SQL type name maps to a TNS type code for the
+scalar decoder; a name we don't map (e.g. a nested object type — #117/#118)
+leaves the attribute as raw bytes rather than desyncing.
+
+Decoded values surface as a read-only `oracle.DbObject` exposing attributes by
+name (`obj.STREET`) / item (`obj['STREET']`), plus `aslist()` / `asdict()`. A
+NULL object is `None`. Binding an object is #116; VARRAY / nested table / REF are
+#117 / #118 / #119; XMLType (type 109 with no object type) is #124.

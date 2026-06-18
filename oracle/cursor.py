@@ -8,7 +8,7 @@ from oracle.exceptions import (
     DatabaseError, InterfaceError, NotSupportedError, ProgrammingError,
     from_ora_code,
 )
-from oracle.tns_consts import FIELD_VERSION_12_1, UTF8_CHARSET
+from oracle.tns_consts import AL32UTF8_CHARSET, FIELD_VERSION_12_1, UTF8_CHARSET
 
 
 # `:name` placeholder. Names are case-insensitive and follow normal SQL
@@ -183,7 +183,8 @@ class Cursor:
             self._lastrowid = None
             self._description = [_column_description(C) for C in ColMeta]
             self._annotations = [_col_annotations(C) for C in ColMeta]
-            self._rows = [_resolve_lobs(self._connection, row)
+            self._rows = [_resolve_objects(self._connection,
+                                           _resolve_lobs(self._connection, row))
                           for row in (Rows or [])]
             # For SELECT, the OER's success-iters value is the per-call fetch
             # count, not the total result set size; len(rows) is the answer
@@ -423,7 +424,8 @@ def _build_refcursor_cursor(Connection, Rows, Marker) -> 'Cursor':
     Nested = Cursor(Connection)
     Nested._description = [_column_description(C) for C in Marker['row_format']]
     Nested._annotations = [_col_annotations(C) for C in Marker['row_format']]
-    Nested._rows = [_resolve_lobs(Connection, Row) for Row in Rows]
+    Nested._rows = [_resolve_objects(Connection, _resolve_lobs(Connection, Row))
+                    for Row in Rows]
     Nested._rowcount = len(Nested._rows)
     Nested._row_index = 0
     return Nested
@@ -440,6 +442,21 @@ def _resolve_lobs(Connection, Row: list) -> list:
         if isinstance(Val, LOB):
             Val._connection = Connection
             Out[I] = Val.read()
+    return Out
+
+
+def _resolve_objects(Connection, Row: list) -> list:
+    # Turn any object (ADT) placeholders into DbObjects (#115). The row decoder
+    # kept the packed image without decoding it (the attribute layout isn't
+    # known at decode time); fetch the layout for the type now (cached on the
+    # connection) and walk the image. NULL objects already came back as None.
+    from oracle.dbobject import ObjectImage, DbObject, decode_object_image
+    Out = list(Row)
+    for I, Val in enumerate(Out):
+        if isinstance(Val, ObjectImage):
+            Layout = Connection._object_type_layout(Val.type_schema, Val.type_name)
+            Attrs = decode_object_image(Val.image, Layout, Val.charset or AL32UTF8_CHARSET)
+            Out[I] = DbObject(Val.type_name, Attrs)
     return Out
 
 

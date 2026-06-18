@@ -110,6 +110,9 @@ class AsyncOracleConnect:
         # bind signature has to be part of the key.
         self._cursor_cache: dict[tuple[str, bytes], int] = {}
         self._cursor_cache_max = 32
+        # Ordered attribute layout per SQL object type (#115), keyed by
+        # (owner, type_name); see OracleConnect._object_type_layout.
+        self._object_type_cache: dict[tuple[str, str], list] = {}
 
     @property
     def stmtcachesize(self) -> int:
@@ -838,6 +841,35 @@ class AsyncOracleConnect:
         if DataType == TNS_TYPE_CLOB:
             return Content.decode('utf-16-be', errors='replace')
         return Content
+
+    async def _object_type_layout(self, schema: str | None, name: str | None) -> list:
+        """Async port of `OracleConnect._object_type_layout` (#115): the ordered
+        attribute layout for a SQL object type, fetched from ALL_TYPE_ATTRS and
+        cached per connection."""
+        if not schema or not name:
+            return []
+        Key = (schema, name)
+        Cached = self._object_type_cache.get(Key)
+        if Cached is not None:
+            return Cached
+        from oracle.dbobject import type_name_to_tns
+        SQL = ("SELECT attr_name, attr_type_name, length, precision, scale "
+               "FROM all_type_attrs "
+               "WHERE owner = :1 AND type_name = :2 "
+               "ORDER BY attr_no")
+        Result = await self.execute(SQL, Bind=[schema, name])
+        Rows = Result[4] if len(Result) > 4 and Result[4] else []
+        Layout = []
+        for Row in Rows:
+            TypeName = Row[1]
+            Layout.append({
+                'name': Row[0],
+                'type_name': TypeName,
+                'data_type': type_name_to_tns(TypeName),
+                'charset': None,
+            })
+        self._object_type_cache[Key] = Layout
+        return Layout
 
     async def create_temp_lob(self, is_blob: bool = False) -> bytes:
         """Async port of the sync `create_temp_lob` (#91). Allocates a

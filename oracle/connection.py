@@ -115,6 +115,10 @@ class OracleConnect:
         # via insertion order (Python's regular dict).
         self._cursor_cache: dict[tuple[str, bytes], int] = {}
         self._cursor_cache_max = 32
+        # Ordered attribute layout per SQL object type (#115), keyed by
+        # (owner, type_name). Populated on demand from ALL_TYPE_ATTRS the first
+        # time an object of that type is fetched.
+        self._object_type_cache: dict[tuple[str, str], list] = {}
 
     @property
     def stmtcachesize(self) -> int:
@@ -891,6 +895,38 @@ class OracleConnect:
         if DataType == TNS_TYPE_CLOB:
             return Content.decode('utf-16-be', errors='replace')
         return Content
+
+    def _object_type_layout(self, schema: str | None, name: str | None) -> list:
+        # Ordered attribute layout for a SQL object type, used to walk an object
+        # image into a DbObject (#115). Fetched from the data dictionary
+        # (ALL_TYPE_ATTRS) and cached per connection keyed by (owner, name).
+        # A type the session can't see (no row) yields an empty layout, so the
+        # object decodes to a DbObject with no attributes rather than raising.
+        if not schema or not name:
+            return []
+        Key = (schema, name)
+        Cached = self._object_type_cache.get(Key)
+        if Cached is not None:
+            return Cached
+        from oracle.dbobject import type_name_to_tns
+        SQL = ("SELECT attr_name, attr_type_name, length, precision, scale "
+               "FROM all_type_attrs "
+               "WHERE owner = :1 AND type_name = :2 "
+               "ORDER BY attr_no")
+        Result = self.execute(SQL, Bind=[schema, name])
+        Rows = Result[4] if len(Result) > 4 and Result[4] else []
+        Layout = []
+        for Row in Rows:
+            AttrName = Row[0]
+            TypeName = Row[1]
+            Layout.append({
+                'name': AttrName,
+                'type_name': TypeName,
+                'data_type': type_name_to_tns(TypeName),
+                'charset': None,
+            })
+        self._object_type_cache[Key] = Layout
+        return Layout
 
     def create_temp_lob(self, is_blob: bool = False) -> bytes:
         # Create a session-duration temporary LOB on the server (TTI_LOBOPS

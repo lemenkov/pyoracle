@@ -16,7 +16,7 @@ from oracle.exceptions import (
     DatabaseError, InterfaceError, NotSupportedError, ProgrammingError,
     from_ora_code,
 )
-from oracle.tns_consts import FIELD_VERSION_12_1
+from oracle.tns_consts import AL32UTF8_CHARSET, FIELD_VERSION_12_1
 
 
 class AsyncCursor:
@@ -171,6 +171,7 @@ class AsyncCursor:
             # BLOB / BFILE → bytes, NULL LOBs stay as None (already
             # filtered out at the row-decoder level).
             from oracle.lob import LOB
+            from oracle.dbobject import ObjectImage, DbObject, decode_object_image
             ResolvedRows = []
             for Row in (Rows or []):
                 NewRow = list(Row)
@@ -178,6 +179,15 @@ class AsyncCursor:
                     if isinstance(Val, LOB):
                         Val._connection = self._connection
                         NewRow[I] = await Val.aread()
+                    elif isinstance(Val, ObjectImage):
+                        # Object (ADT) auto-resolve (#115): fetch the type's
+                        # attribute layout (awaited; cached on the connection)
+                        # and walk the packed image into a DbObject.
+                        Layout = await self._connection._object_type_layout(
+                            Val.type_schema, Val.type_name)
+                        Attrs = decode_object_image(
+                            Val.image, Layout, Val.charset or AL32UTF8_CHARSET)
+                        NewRow[I] = DbObject(Val.type_name, Attrs)
                 ResolvedRows.append(NewRow)
             self._rows = ResolvedRows
             self._rowcount = len(self._rows)
