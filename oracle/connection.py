@@ -9,6 +9,7 @@ from oracle.tns import encode_dictionary
 from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
 from oracle.tns import set_decode_dml_rowcounts, set_decode_return_binds
+from oracle.tns import encode_tpc_switch, encode_tpc_change_state
 from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe, encode_o7_exec,
                         encode_o7_close, encode_o7_block, encode_tokens_rxd,
                         decode_fv2_describe,
@@ -29,7 +30,13 @@ from oracle.tns_consts import (
     TNS_ACCEPT, TNS_CONNECT, TNS_DATA, TNS_MARKER,
     TNS_REDIRECT, TNS_REFUSE, TNS_RESEND, TTI_AUTH, TTI_DTY, TTI_PRO,
     TTI_OER, TTI_RPA, TTI_SESS, TTI_WRN,
+    TNS_TPC_TXN_START, TNS_TPC_TXN_DETACH, TNS_TPC_TXN_COMMIT,
+    TNS_TPC_TXN_ABORT, TNS_TPC_TXN_PREPARE,
+    TNS_TPC_TXN_STATE_REQUIRES_COMMIT, TNS_TPC_TXN_STATE_COMMITTED,
+    TNS_TPC_TXN_STATE_ABORTED, TNS_TPC_TXN_STATE_READ_ONLY,
+    TNS_TPC_TXN_STATE_FORGOTTEN, TPC_BEGIN_NEW, TPC_END_NORMAL,
 )
+from oracle.exceptions import DatabaseError
 import logging
 import socket
 import struct
@@ -57,6 +64,57 @@ def _format_version(Packed: int) -> str | None:
     return "%d.%d.%d.%d.%d" % (
         (Packed >> 24) & 0xFF, (Packed >> 20) & 0x0F, (Packed >> 12) & 0xFF,
         (Packed >> 8) & 0x0F, Packed & 0xFF)
+
+
+import collections
+
+# Global transaction identifier for two-phase commit (#131): a (format_id,
+# global_transaction_id, branch_qualifier) triple, matching oracledb's Xid.
+Xid = collections.namedtuple(
+    "Xid", ["format_id", "global_transaction_id", "branch_qualifier"])
+
+
+def _raise_tpc_error(Packet: bytes) -> None:
+    # A TPC op that failed comes back as a TTI_OER (not the RPA return params).
+    # Pull the ORA code + message out of it and raise the matching exception.
+    from oracle.tns import decode_packet
+    from oracle.exceptions import from_ora_code
+    try:
+        Result = decode_packet(Packet, (None, None, []))
+        Code = Result[1] if isinstance(Result, tuple) and len(Result) > 1 else 0
+        Msg = Result[5] if isinstance(Result, tuple) and len(Result) > 5 else None
+    except Exception:
+        Code, Msg = 0, None
+    if Code:
+        raise from_ora_code(Code)(Msg or f"ORA-{Code:05d}", code=Code)
+    raise DatabaseError(f"unexpected TPC response 0x{Packet[:1].hex()}")
+
+
+def _decode_tpc_context(Packet: bytes) -> bytes:
+    # TPC switch (begin) return parameters (#131): leads with the RPA token
+    # (TTI_RPA = TNS_MSG_TYPE_PARAMETER), then an application value (ub4), a
+    # context length (ub2), and the opaque transaction context bytes. RE'd from
+    # a live 21c tpc_begin capture; the context is replayed on prepare/commit.
+    from oracle.tns import decode_ub4
+    if not Packet:
+        raise OperationalError("empty TPC response")
+    if Packet[0] != TTI_RPA:
+        _raise_tpc_error(Packet)
+    Rest = Packet[1:]
+    (_AppValue, Rest) = decode_ub4(Rest)
+    (CtxLen, Rest) = decode_ub4(Rest)              # context length (ub2)
+    return bytes(Rest[:CtxLen])
+
+
+def _decode_tpc_state(Packet: bytes) -> int:
+    # TPC change-state return (#131): the RPA token then a ub4 transaction state.
+    from oracle.tns import decode_ub4
+    if not Packet:
+        raise OperationalError("empty TPC response")
+    if Packet[0] != TTI_RPA:
+        _raise_tpc_error(Packet)
+    (State, _) = decode_ub4(Packet[1:])
+    return State
 
 
 def _split_proxy_user(user: str) -> tuple[str, str | None]:
@@ -116,6 +174,9 @@ class OracleConnect:
         self._break_in_progress = False
         self._call_timeout = 0          # ms; 0 = no timeout
         self._timed_out = False
+        # Two-phase commit (#131): the opaque transaction context the server
+        # returns from tpc_begin, replayed on prepare/commit/rollback/end.
+        self._transaction_context = None
         self.conn_key = None
         self.server_version = 0
         self.session_id = None
@@ -1356,6 +1417,81 @@ class OracleConnect:
         return OperationalError(
             f"network {op} timed out after {self.timeout} ms "
             f"(connection timeout)")
+
+    # --- Two-phase commit / XA (#131) ---
+
+    def xid(self, format_id: int, global_transaction_id, branch_qualifier) -> Xid:
+        """Build a global transaction id (Xid) for the TPC methods."""
+        return Xid(format_id, global_transaction_id, branch_qualifier)
+
+    def _tpc_request(self, Data: bytes) -> bytes:
+        # Send a TPC function message and return the assembled response body
+        # (the bytes after the leading token). The return parameters (context /
+        # state) sit at the front, followed by the call-status OER.
+        self.send(TNS_DATA, Data)
+        Received = self._next_data_packet(b"", b"")
+        if Received is False:
+            raise OperationalError("connection closed during TPC operation")
+        (_, Packet) = Received
+        return Packet
+
+    def tpc_begin(self, xid: Xid, flags: int = TPC_BEGIN_NEW,
+                  timeout: int = 0) -> None:
+        """Begin a TPC (global) transaction branch identified by `xid`."""
+        if self.field_version < FIELD_VERSION_12_1:
+            from oracle.exceptions import NotSupportedError
+            raise NotSupportedError(
+                "two-phase commit (TPC/XA) requires an Oracle 12.1+ server")
+        Data = encode_tpc_switch(self._next_seq(), self.field_version,
+                                 TNS_TPC_TXN_START, xid, flags, timeout, None)
+        self._transaction_context = _decode_tpc_context(self._tpc_request(Data))
+
+    def tpc_end(self, xid: Xid, flags: int = TPC_END_NORMAL) -> None:
+        """Detach from the TPC transaction branch (end the local work)."""
+        Data = encode_tpc_switch(self._next_seq(), self.field_version,
+                                 TNS_TPC_TXN_DETACH, xid, flags, 0,
+                                 self._transaction_context)
+        self._tpc_request(Data)
+        self._transaction_context = None
+
+    def tpc_prepare(self, xid: Xid) -> bool:
+        """Prepare the branch. Returns True if a commit is needed, False if the
+        branch was read-only (nothing to commit)."""
+        Data = encode_tpc_change_state(self._next_seq(), self.field_version,
+                                       TNS_TPC_TXN_PREPARE, 0, xid, 0,
+                                       self._transaction_context)
+        State = _decode_tpc_state(self._tpc_request(Data))
+        if State == TNS_TPC_TXN_STATE_REQUIRES_COMMIT:
+            return True
+        if State == TNS_TPC_TXN_STATE_READ_ONLY:
+            return False
+        raise DatabaseError(f"unknown TPC transaction state {State}")
+
+    def tpc_commit(self, xid: Xid, one_phase: bool = False) -> None:
+        """Commit the branch. `one_phase` commits without a prior prepare."""
+        State = (TNS_TPC_TXN_STATE_READ_ONLY if one_phase
+                 else TNS_TPC_TXN_STATE_COMMITTED)
+        Data = encode_tpc_change_state(self._next_seq(), self.field_version,
+                                       TNS_TPC_TXN_COMMIT, State, xid, 0,
+                                       self._transaction_context)
+        Result = _decode_tpc_state(self._tpc_request(Data))
+        self._transaction_context = None
+        Ok = (Result in (TNS_TPC_TXN_STATE_READ_ONLY,
+                         TNS_TPC_TXN_STATE_COMMITTED) if one_phase
+              else Result == TNS_TPC_TXN_STATE_FORGOTTEN)
+        if not Ok:
+            raise DatabaseError(f"unexpected TPC commit state {Result}")
+
+    def tpc_rollback(self, xid: Xid) -> None:
+        """Roll back the branch."""
+        Data = encode_tpc_change_state(self._next_seq(), self.field_version,
+                                       TNS_TPC_TXN_ABORT,
+                                       TNS_TPC_TXN_STATE_ABORTED, xid, 0,
+                                       self._transaction_context)
+        Result = _decode_tpc_state(self._tpc_request(Data))
+        self._transaction_context = None
+        if Result != TNS_TPC_TXN_STATE_ABORTED:
+            raise DatabaseError(f"unexpected TPC rollback state {Result}")
 
     @property
     def call_timeout(self) -> int:
