@@ -130,6 +130,7 @@ class Cursor:
     def _run(self, operation: str, Bind: list, Batch: list | None = None,
              BatchErrors: bool = False,
              ArrayDmlRowCounts: bool = False) -> 'Cursor':
+        _check_object_bind_support(self._connection, Bind, Batch)
         Result = self._connection.execute(operation, Bind=Bind, Batch=Batch,
                                           BatchErrors=BatchErrors,
                                           ArrayDmlRowCounts=ArrayDmlRowCounts)
@@ -443,6 +444,23 @@ def _resolve_lobs(Connection, Row: list) -> list:
             Val._connection = Connection
             Out[I] = Val.read()
     return Out
+
+
+def _check_object_bind_support(Connection, Bind, Batch=None) -> None:
+    # Binding a SQL OBJECT (ADT) value needs the 12c+ bind-OAC layout (#116);
+    # pre-12c servers reject it with a fatal ORA-03106 that desyncs the
+    # connection, so refuse it up front with a clear error. (Object *decode*
+    # works on all tiers — only the bind is 12c+.)
+    from oracle.dbobject import DbObject
+    if getattr(Connection, 'field_version', 0) >= FIELD_VERSION_12_1:
+        return
+    Rows = [Bind] + (Batch or []) if Bind else (Batch or [])
+    for Row in Rows:
+        if isinstance(Row, DbObject) or (
+                isinstance(Row, (list, tuple))
+                and any(isinstance(V, DbObject) for V in Row)):
+            raise NotSupportedError(
+                "binding a SQL OBJECT value requires an Oracle 12.1+ server")
 
 
 def _resolve_objects(Connection, Row: list) -> list:

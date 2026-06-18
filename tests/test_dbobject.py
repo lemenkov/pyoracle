@@ -13,9 +13,11 @@
 import unittest
 
 from oracle.dbobject import (
-    DbObject, ObjectImage, decode_object_image, type_name_to_tns,
+    DbObject, DbObjectType, ObjectImage, decode_object_image, type_name_to_tns,
 )
-from oracle.tns import _read_object_column
+from oracle.tns import (
+    _encode_object_bind_value, _read_object_column, encode_object_image,
+)
 from oracle.tns_consts import (
     AL32UTF8_CHARSET, TNS_TYPE_CHAR, TNS_TYPE_NUMBER, TNS_TYPE_TIMESTAMP,
     TNS_TYPE_VARCHAR,
@@ -102,6 +104,78 @@ class TestDbObjectApi(unittest.TestCase):
         Twin = DbObject("PYO.ADDR_T", decode_object_image(_IMAGE, _ADDR_LAYOUT))
         self.assertEqual(self.obj, Twin)
         self.assertIn("STREET='Main St'", repr(self.obj))
+
+
+_ADDR_TYPE = DbObjectType(
+    "PYO", "ADDR_T", bytes.fromhex("00112233445566778899aabbccddeeff"), 1,
+    _ADDR_LAYOUT)
+
+
+class TestObjectBindEncode(unittest.TestCase):
+    # The bind encode writes the image length long-form (0xFE + ub4), while the
+    # server sends it short-form, so the encoder isn't byte-equal to a captured
+    # image; the contract is that it round-trips back through the #115 decoders.
+
+    def test_image_encode_decode_roundtrip(self):
+        Obj = _ADDR_TYPE.newobject({"STREET": "Main St", "ZIP": 12345,
+                                    "CODE": "US"})
+        Image = encode_object_image(Obj)
+        self.assertEqual(decode_object_image(Image, _ADDR_LAYOUT),
+                         [("STREET", "Main St"), ("ZIP", 12345), ("CODE", "US")])
+
+    def test_image_encode_null_attribute(self):
+        Obj = _ADDR_TYPE.newobject({"STREET": None, "ZIP": 7, "CODE": None})
+        Attrs = decode_object_image(encode_object_image(Obj), _ADDR_LAYOUT)
+        self.assertEqual(Attrs, [("STREET", None), ("ZIP", 7), ("CODE", None)])
+
+    def test_bind_value_framing_roundtrips(self):
+        # The full write_dbobject framing must parse back through the row
+        # decoder (with the next-row sentinel preserved).
+        Obj = _ADDR_TYPE.newobject({"STREET": "Main St", "ZIP": 12345,
+                                    "CODE": "US"})
+        Wire = _encode_object_bind_value(Obj) + _SENTINEL
+        Col = {"type_schema": "PYO", "type_name": "ADDR_T", "charset": 0}
+        (Val, Rest) = _read_object_column(Wire, Col)
+        self.assertIsInstance(Val, ObjectImage)
+        self.assertEqual(Rest, _SENTINEL)
+        self.assertEqual(decode_object_image(Val.image, _ADDR_LAYOUT),
+                         [("STREET", "Main St"), ("ZIP", 12345), ("CODE", "US")])
+
+    def test_bind_value_carries_type_oid(self):
+        # The bind toid wraps the type's 16-byte OID (00 22 02 08 + oid + extent).
+        Obj = _ADDR_TYPE.newobject()
+        Wire = _encode_object_bind_value(Obj)
+        # toid = 00 22 02 08 + the 16-byte type OID + the fixed extent OID.
+        self.assertIn(b"\x00\x22\x02\x08" + _ADDR_TYPE.oid, Wire)
+
+
+class TestDbObjectTypeApi(unittest.TestCase):
+    def test_newobject_defaults_null(self):
+        Obj = _ADDR_TYPE.newobject()
+        self.assertEqual(Obj.aslist(), [None, None, None])
+        self.assertIs(Obj._dbtype, _ADDR_TYPE)
+
+    def test_newobject_seed_case_insensitive(self):
+        Obj = _ADDR_TYPE.newobject({"street": "X", "Zip": 1, "CODE": "US"})
+        self.assertEqual(Obj.STREET, "X")
+        self.assertEqual(Obj.ZIP, 1)
+
+    def test_set_and_reject_unknown(self):
+        Obj = _ADDR_TYPE.newobject()
+        Obj.STREET = "Main"
+        self.assertEqual(Obj.STREET, "Main")
+        with self.assertRaises(AttributeError):
+            Obj.NOPE = 1
+        with self.assertRaises(KeyError):
+            Obj["NOPE"] = 1
+
+    def test_seed_from_sequence(self):
+        Obj = _ADDR_TYPE.newobject(["Main St", 12345, "US"])
+        self.assertEqual(Obj.aslist(), ["Main St", 12345, "US"])
+
+    def test_type_repr_and_names(self):
+        self.assertEqual(_ADDR_TYPE.full_name, "PYO.ADDR_T")
+        self.assertEqual(_ADDR_TYPE.attr_names, ["STREET", "ZIP", "CODE"])
 
 
 class TestTypeNameMap(unittest.TestCase):

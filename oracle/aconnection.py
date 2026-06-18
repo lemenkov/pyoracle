@@ -842,34 +842,66 @@ class AsyncOracleConnect:
             return Content.decode('utf-16-be', errors='replace')
         return Content
 
-    async def _object_type_layout(self, schema: str | None, name: str | None) -> list:
-        """Async port of `OracleConnect._object_type_layout` (#115): the ordered
-        attribute layout for a SQL object type, fetched from ALL_TYPE_ATTRS and
-        cached per connection."""
-        if not schema or not name:
-            return []
-        Key = (schema, name)
+    async def gettype(self, name: str) -> 'DbObjectType':
+        """Async port of `OracleConnect.gettype` (#116): look up a SQL object
+        type by (optionally schema-qualified) name and return a DbObjectType."""
+        if '.' in name:
+            Schema, _, TypeName = name.partition('.')
+            Schema = Schema.strip('"') if '"' in Schema else Schema.upper()
+        else:
+            Schema, TypeName = None, name
+        TypeName = TypeName.strip('"') if '"' in TypeName else TypeName.upper()
+        Typ = await self._describe_object_type(Schema, TypeName)
+        if Typ is None or not Typ.attrs:
+            from oracle.exceptions import DatabaseError
+            raise DatabaseError(f"object type {name!r} not found")
+        return Typ
+
+    async def _describe_object_type(self, schema: str | None,
+                                    name: str | None) -> 'DbObjectType | None':
+        """Async port of `OracleConnect._describe_object_type` (#115/#116):
+        the type's 16-byte OID + version + ordered attribute layout, cached."""
+        if not name:
+            return None
+        from oracle.dbobject import DbObjectType, type_name_to_tns
+        Owner = schema
+        if Owner is None:
+            Result = await self.execute("SELECT USER FROM dual")
+            Rows = Result[4] if len(Result) > 4 and Result[4] else []
+            Owner = Rows[0][0] if Rows else None
+        if not Owner:
+            return None
+        Key = (Owner, name)
         Cached = self._object_type_cache.get(Key)
         if Cached is not None:
             return Cached
-        from oracle.dbobject import type_name_to_tns
-        SQL = ("SELECT attr_name, attr_type_name, length, precision, scale "
-               "FROM all_type_attrs "
-               "WHERE owner = :1 AND type_name = :2 "
-               "ORDER BY attr_no")
-        Result = await self.execute(SQL, Bind=[schema, name])
+        OidRes = await self.execute(
+            "SELECT type_oid, typecode FROM all_types "
+            "WHERE owner = :1 AND type_name = :2", Bind=[Owner, name])
+        OidRows = OidRes[4] if len(OidRes) > 4 and OidRes[4] else []
+        Oid = bytes(OidRows[0][0]) if OidRows and OidRows[0][0] else b""
+        Result = await self.execute(
+            "SELECT attr_name, attr_type_name, length, precision, scale "
+            "FROM all_type_attrs WHERE owner = :1 AND type_name = :2 "
+            "ORDER BY attr_no", Bind=[Owner, name])
         Rows = Result[4] if len(Result) > 4 and Result[4] else []
-        Layout = []
+        Attrs = []
         for Row in Rows:
             TypeName = Row[1]
-            Layout.append({
+            Attrs.append({
                 'name': Row[0],
                 'type_name': TypeName,
                 'data_type': type_name_to_tns(TypeName),
                 'charset': None,
             })
-        self._object_type_cache[Key] = Layout
-        return Layout
+        Typ = DbObjectType(Owner, name, Oid, 1, Attrs)
+        self._object_type_cache[Key] = Typ
+        return Typ
+
+    async def _object_type_layout(self, schema: str | None, name: str | None) -> list:
+        """The ordered attribute layout (#115 read path), via the type describe."""
+        Typ = await self._describe_object_type(schema, name)
+        return Typ.attrs if Typ is not None else []
 
     async def create_temp_lob(self, is_blob: bool = False) -> bytes:
         """Async port of the sync `create_temp_lob` (#91). Allocates a

@@ -2099,7 +2099,39 @@ safely during row resolution. The SQL type name maps to a TNS type code for the
 scalar decoder; a name we don't map (e.g. a nested object type — #117/#118)
 leaves the attribute as raw bytes rather than desyncing.
 
-Decoded values surface as a read-only `oracle.DbObject` exposing attributes by
-name (`obj.STREET`) / item (`obj['STREET']`), plus `aslist()` / `asdict()`. A
-NULL object is `None`. Binding an object is #116; VARRAY / nested table / REF are
-#117 / #118 / #119; XMLType (type 109 with no object type) is #124.
+Decoded values surface as an `oracle.DbObject` exposing attributes by name
+(`obj.STREET`) / item (`obj['STREET']`), plus `aslist()` / `asdict()`. A NULL
+object is `None`. VARRAY / nested table / REF are #117 / #118 / #119; XMLType
+(type 109 with no object type) is #124.
+
+### 21.5 Binding an object (#116)
+
+`connection.gettype(name)` returns a `DbObjectType` (the type's 16-byte OID +
+version + layout, fetched via `_describe_object_type` and cached);
+`typ.newobject(values=None)` builds a settable `DbObject` to bind. The bind is
+the exact inverse of the read path (python-oracledb `write_dbobject` /
+`_get_packed_data` / `create_new_object`):
+
+- **Bind value** (`_encode_object_bind_value`): `two_lengths(toid)` +
+  `two_lengths(b"")` (empty object OID) + `ub4 0` snapshot + `ub4 0` version +
+  `ub4 len(image)` + `ub4 TNS_OBJ_TOP_LEVEL` flags + `bytes_with_length(image)`.
+  The bind **toid** is constructed: `00 22` + `02 08`
+  (`NON_NULL_OID|HAS_EXTENT_OID`) + the 16-byte type OID +
+  `TNS_EXTENT_OID` (`00…00010001`) — the same structure seen on read.
+- **Image** (`encode_object_image`): `flags 0x84` + `version 1` + the length
+  written long-form (`0xFE` + ub4, covering the 7-byte header) + each attribute
+  length-prefixed in declaration order (`write_length`: ≤245 a single byte, else
+  `0xFE` + ub4). A NULL attribute is a single `0xFF`. Each scalar uses the same
+  encoder as its column-form bind.
+- **OAC** (`_encode_object_oac`): the 12c+ bind-metadata layout — `type 109`,
+  flag `TNS_BIND_USE_INDICATORS`, precision/scale `0`, buffer size, the type OID
+  via `two_lengths`, and the type version (no charset). This is the **12c+** OAC;
+  there is no python-oracledb reference for a pre-12c object-bind OAC (thin needs
+  12.1+) and a 12c+ OAC sent to 10g/11g is rejected with a fatal ORA-03106, so
+  pyoracle **gates object binds on field version ≥ 12.1** (`NotSupportedError`)
+  before anything goes on the wire. Object *decode* still works on every tier.
+
+Verified by round-trip (bind via pyoracle, read back via §21.1–21.4) on 21c and
+23ai, scalar attribute types + NULL attributes, sync + async. Binding a bare
+Python `None` to an object column is unsupported (an untyped `None` carries no
+type identity); use a typed value. Collections / REF binds are #117 / #118 / #119.

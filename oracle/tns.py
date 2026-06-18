@@ -66,7 +66,8 @@ from oracle.tns_consts import (
     TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_REFCURSOR, TNS_TYPE_RID,
     TNS_TYPE_ROWID,
     TNS_TYPE_CHAR,
-    TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_UROWID, TNS_TYPE_VARCHAR,
+    TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPLTZ, TNS_TYPE_TIMESTAMPTZ,
+    TNS_TYPE_UROWID, TNS_TYPE_VARCHAR,
     TTI_LOBOPS,
     UTF8_CHARSET,
 )
@@ -2803,6 +2804,10 @@ def encode_token_rxd(Token: object) -> bytes:
                 + Token.locator)
     if Token is None:
         return bytes([0])
+    from oracle.dbobject import DbObject
+    if isinstance(Token, DbObject):
+        # SQL OBJECT (ADT) bind (#116): the write_dbobject framing + image.
+        return _encode_object_bind_value(Token)
     if isinstance(Token, (dict, JSON)):
         # JSON bind: native OSON image (#70) when encodable, else the text cast
         # (#50). The OAC path in encode_token_oac makes the same choice.
@@ -2935,6 +2940,10 @@ def encode_token_oac(Token: object) -> bytes:
         # NULL value (0 bytes): a minimal VARCHAR OAC, again avoiding the
         # 32767 LONG-reorder swap when a NULL bind precedes another bind.
         return encode_token_raw(TNS_TYPE_VARCHAR, 1, 16, AL32UTF8_CHARSET, 0)
+    from oracle.dbobject import DbObject
+    if isinstance(Token, DbObject):
+        # SQL OBJECT (ADT) bind OAC (#116): type 109 + the type's OID + version.
+        return _encode_object_oac(Token)
     if isinstance(Token, (dict, JSON)):
         # JSON bind: a native JSON OAC (#70) when the value is OSON-encodable,
         # else the VARCHAR OAC for the text cast (#50). Must match the choice in
@@ -3010,6 +3019,119 @@ def encode_token_decimal(Value: Decimal) -> bytes:
     if Value == Value.to_integral_value():
         return encode_token_num(int(Value))
     return encode_token_num(float(Value))
+
+# --- SQL OBJECT (ADT) bind encode (#116) — the inverse of _read_object_column
+# and the #115 image walk. Mirrors python-oracledb's write_dbobject /
+# _get_packed_data / _pack_value / create_new_object.
+
+_OBJ_IMAGE_FLAGS = 0x84             # IS_VERSION_81 (0x80) | NO_PREFIX_SEG (0x04)
+_OBJ_IMAGE_VERSION = 1
+_OBJ_TOP_LEVEL = 0x01
+_OBJ_NULL_ATTR = 255               # TNS_NULL_LENGTH_INDICATOR
+_OBJ_LONG_LEN = 254                # TNS_LONG_LENGTH_INDICATOR
+_OBJ_MAX_SHORT_LEN = 245           # TNS_OBJ_MAX_SHORT_LENGTH
+# toid wrapper for a new object: 00 22 (NON_NULL_OID | HAS_EXTENT_OID) + oid +
+# the fixed extent OID (python-oracledb create_new_object).
+_OBJ_TOID_PREFIX = bytes([0x00, 0x22, 0x02, 0x08])
+_OBJ_EXTENT_OID = bytes.fromhex('00000000000000000000000000010001')
+
+def _obj_write_length(Length: int) -> bytes:
+    # python-oracledb DbObjectPickleBuffer.write_length.
+    if Length <= _OBJ_MAX_SHORT_LEN:
+        return bytes([Length])
+    return bytes([_OBJ_LONG_LEN]) + struct.pack('>I', Length)
+
+def _obj_two_lengths(Value: bytes) -> bytes:
+    # write_bytes_with_two_lengths: a ub4 count, then (for a non-empty value)
+    # the length-prefixed bytes. An empty value is just the zero count.
+    if not Value:
+        return encode_sb4(0)
+    return encode_sb4(len(Value)) + _bytes_with_length(Value)
+
+def _encode_object_attr(DataType: int, Charset: int, Value: object) -> bytes:
+    # The raw scalar bytes for one attribute — the same on-wire encoding the
+    # column form uses, so the #115 decoders read it back. (No length prefix;
+    # the caller adds the image write_length.)
+    if DataType in (TNS_TYPE_VARCHAR, TNS_TYPE_CHAR, TNS_TYPE_LONG):
+        if isinstance(Value, (bytes, bytearray)):
+            return bytes(Value)
+        return str(Value).encode(CharsetDict.get(Charset, 'utf-8'))
+    if DataType == TNS_TYPE_NUMBER:
+        if isinstance(Value, Decimal):
+            return encode_token_decimal(Value)
+        return encode_token_num(Value)
+    if DataType in (TNS_TYPE_RAW, TNS_TYPE_LONGRAW):
+        return bytes(Value)
+    if DataType in (TNS_TYPE_DATE, TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ,
+                    TNS_TYPE_TIMESTAMPLTZ):
+        if isinstance(Value, date):
+            return encode_token_date(Value)
+        return encode_token_datetime(Value)
+    if DataType == TNS_TYPE_BFLOAT:
+        return encode_token_binary_float(Value)
+    if DataType == TNS_TYPE_BDOUBLE:
+        return encode_token_binary_double(Value)
+    if DataType == TNS_TYPE_INTERVALDS:
+        return encode_token_interval_ds(Value)
+    if DataType == TNS_TYPE_INTERVALYM:
+        return encode_token_interval_ym(Value)
+    if isinstance(Value, (bytes, bytearray)):
+        return bytes(Value)
+    return str(Value).encode('utf-8')
+
+def encode_object_image(Obj: object) -> bytes:
+    # Pack a DbObject into its image: header (flags, version, long-form length
+    # backpatched) then each attribute length-prefixed in declaration order. A
+    # NULL attribute is a single 0xFF. Mirrors _get_packed_data / _pack_value
+    # for a non-collection object (collections are #117/#118).
+    Typ = Obj._dbtype
+    Body = b""
+    for Attr in Typ.attrs:
+        Value = Obj._attrs.get(Attr['name'])
+        if Value is None:
+            Body += bytes([_OBJ_NULL_ATTR])
+            continue
+        Raw = _encode_object_attr(Attr.get('data_type'),
+                                  Attr.get('charset') or AL32UTF8_CHARSET, Value)
+        Body += _obj_write_length(len(Raw)) + Raw
+    # Header length is written long-form (0xFE + ub4) and covers the whole image
+    # (the 7-byte header included), matching python-oracledb write_header.
+    Total = 7 + len(Body)
+    return (bytes([_OBJ_IMAGE_FLAGS, _OBJ_IMAGE_VERSION, _OBJ_LONG_LEN])
+            + struct.pack('>I', Total) + Body)
+
+def _encode_object_bind_value(Obj: object) -> bytes:
+    # The bind value framing (python-oracledb write_dbobject): the constructed
+    # toid, an empty object OID, zero snapshot/version, the image length, the
+    # TOP_LEVEL flags, then the image.
+    Typ = Obj._dbtype
+    Toid = _OBJ_TOID_PREFIX + Typ.oid + _OBJ_EXTENT_OID
+    Image = encode_object_image(Obj)
+    return (_obj_two_lengths(Toid)
+            + _obj_two_lengths(b"")              # object OID (empty for new)
+            + encode_sb4(0)                       # snapshot
+            + encode_sb4(0)                       # version
+            + encode_sb4(len(Image))              # image length
+            + encode_sb4(_OBJ_TOP_LEVEL)          # flags
+            + _bytes_with_length(Image))          # the image
+
+def _encode_object_oac(Obj: object) -> bytes:
+    # The bind OAC for an object (type 109): the 12c+ metadata layout injecting
+    # the type's 16-byte OID + version (precision/scale 0, no charset). Mirrors
+    # python-oracledb _write_column_metadata's object branch. 12c+ only — pre-12c
+    # object binds are gated in the cursor (no thin reference for that OAC).
+    Typ = Obj._dbtype
+    Image = encode_object_image(Obj)
+    return (bytes([TNS_TYPE_ADT, 1, 0, 0])        # type, flag (USE_INDICATORS), p, s
+            + encode_sb4(len(Image))              # buffer size
+            + encode_sb4(0)                       # max number of array elements
+            + encode_sb4(0)                       # cont flag (ub8)
+            + _obj_two_lengths(Typ.oid)           # type OID (16 bytes)
+            + encode_sb4(Typ.version)             # type version
+            + encode_sb4(0)                       # charset id (ub2)
+            + bytes([0])                          # character set form
+            + encode_sb4(0)                       # LOB prefetch length
+            + encode_sb4(0))                      # oaccolid (12.2+)
 
 def encode_token_datetime(DT: datetime.datetime) -> bytes:
     # 7-byte DATE prefix is shared by all three temporal formats. TIMESTAMP

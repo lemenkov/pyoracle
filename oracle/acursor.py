@@ -7,6 +7,7 @@
 from oracle.cursor import (
     _assign_out_binds,
     _col_annotations,
+    _check_object_bind_support,
     _column_description,
     _is_plsql,
     _resolve_parameters,
@@ -121,6 +122,7 @@ class AsyncCursor:
     async def _run(self, operation: str, Bind: list,
                    Batch: list | None = None, BatchErrors: bool = False,
                    ArrayDmlRowCounts: bool = False) -> 'AsyncCursor':
+        _check_object_bind_support(self._connection, Bind, Batch)
         Result = await self._connection.execute(
             operation, Bind=Bind, Batch=Batch, BatchErrors=BatchErrors,
             ArrayDmlRowCounts=ArrayDmlRowCounts)
