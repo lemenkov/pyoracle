@@ -51,6 +51,7 @@ from oracle.tns_consts import (
     DictionaryType, TNS_DATA, TNS_REDIRECT, TTI_ALL7, TTI_ALL8, TTI_AUTH, TTI_BVC,
     TTI_DCB, TTI_DTY, TTI_FETCH, TTI_FOB, TTI_FUN, TTI_IOV, TTI_LOB,
     TTI_LOGOFF, TTI_OAC, TTI_OER, TTI_PFN, TTI_PRO, TTI_RPA, TTI_RXD,
+    TTI_IRD,
     TTI_RXH, TTI_SESS, TTI_SPFP, TTI_STA, TTI_STRT, TTI_STOP, TTI_UDS,
     TTI_3LOGON, TTI_3LOGA,
     TTI_WRN, TNS_BIND_DIR_INPUT, TNS_AL8I4_ARRAY_DML_ROWCOUNTS,
@@ -192,6 +193,8 @@ def decode_packet(Data: bytes, Acc: object, FieldVersion: int | None = None) -> 
             return (False, 'fob')
         case t if t == TTI_IOV:
             return decode_token_iov(Data, Acc)
+        case t if t == TTI_IRD:
+            return decode_token_implicit(Data, Acc)
         case t if t == TTI_LOB:
             return decode_token_lob(Data, Acc)
         case t if t == TTI_OAC:
@@ -313,23 +316,55 @@ def decode_token_dcb(Data: bytes, Acc: object) -> tuple:
     (Cursor, _, Rows) = Acc[:3]
     Rest = Data[1:]
     Rest = _skip_chunked_bytes(Rest)
-    (_, Rest) = decode_ub4(Rest)
+    (Columns, Rest) = _decode_describe_body(Rest)
+    return decode_packet(Rest, (Cursor, Columns, Rows))
+
+def decode_token_implicit(Data: bytes, Acc: object) -> tuple:
+    # Implicit result sets (#121, DBMS_SQL.RETURN_RESULT). Layout (oracledb
+    # base.pyx _process_implicit_result):
+    #   ub4  num_results
+    #   per result:  ub1 len + that many bytes (skip)
+    #                describe body (column metadata, _decode_describe_body)
+    #                ub2 cursor id
+    # Each result is a server cursor (id + row format), fetched on demand like a
+    # REF CURSOR. We surface them as a record the cursor turns into nextset()
+    # result sets, then continue decoding the block's trailing RPA/OER.
+    (Cursor, RowFormat, Rows, *_) = Acc
+    Rest = Data[1:]
+    (NumResults, Rest) = decode_ub4(Rest)
+    Results = []
+    for _ in range(NumResults):
+        PreLen = Rest[0]
+        Rest = Rest[1 + PreLen:]
+        (Columns, Rest) = _decode_describe_body(Rest)
+        (CursorId, Rest) = decode_ub4(Rest)       # ub2 cursor id
+        Results.append({'cursor_id': CursorId, 'row_format': Columns})
+    Record = {'implicit_results': Results}
+    return decode_packet(Rest, (Cursor, RowFormat, Rows + [Record]))
+
+def _decode_describe_body(Rest: bytes) -> tuple[list, bytes]:
+    # The describe-info body shared by the TTI_DCB token and the implicit-result
+    # describe (#121): max row size, column count, a reserved byte, the
+    # per-column metadata, then the describe trailer. The token-specific
+    # preamble (DCB's chunked uuid/timestamp, or the implicit-result ub1 block)
+    # is consumed by the caller before this point.
+    (_, Rest) = decode_ub4(Rest)              # max row size
     (NumCols, Rest) = decode_ub4(Rest)
     if NumCols > 0:
-        Rest = Rest[1:]
+        Rest = Rest[1:]                       # reserved
     Columns = []
     for _ in range(NumCols):
         (Col, Rest) = _decode_dcb_column(Rest)
         Columns.append(Col)
-    Rest = _skip_bytes_with_length(Rest)
+    Rest = _skip_bytes_with_length(Rest)      # current date
     for _ in range(4):
-        (_, Rest) = decode_ub4(Rest)
+        (_, Rest) = decode_ub4(Rest)          # dcbflag/dcbmdbz/dcbmnpr/dcbmxpr
     if _DECODE_FIELD_VERSION.get() >= FIELD_VERSION_11_2:
         # dcbqcky (query-cache key) is an 11g addition (the result cache landed
         # in 11g); 10g's describe ends after the four ub4 flags, so skipping a
         # phantom bytes-with-length here would consume the first row token (#84).
         Rest = _skip_bytes_with_length(Rest)
-    return decode_packet(Rest, (Cursor, Columns, Rows))
+    return (Columns, Rest)
 
 def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
     # Per-column metadata. 12c+ (field version >= 12.2) differs from 11g in two
@@ -1768,6 +1803,15 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
     if ArrayDmlRowCounts and len(All8) > 9:
         All8 = list(All8)
         All8[9] = TNS_AL8I4_ARRAY_DML_ROWCOUNTS
+
+    # Implicit result sets (#121): opt in on PL/SQL block executes (12c+) by
+    # setting TNS_EXEC_FLAGS_IMPLICIT_RESULTSET (0x8000) in al8i4[9]. Without it
+    # a block calling DBMS_SQL.RETURN_RESULT fails with ORA-29481 ("implicit
+    # results cannot be returned to client"). oracledb sets this on every
+    # normal execute; scoping it to blocks keeps the DML/DDL paths untouched.
+    if Type == 'block' and FieldVersion >= FIELD_VERSION_12_1 and len(All8) > 9:
+        All8 = list(All8)
+        All8[9] = All8[9] | 0x8000
 
     # 23ai (fv > 17, #89): the execute framing the server expects under field
     # version 24 differs from the legacy form in three spots, reverse-engineered

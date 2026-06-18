@@ -42,6 +42,9 @@ class Cursor:
         self._closed: bool = False
         self._lastrowid = None
         self._rowfactory = None
+        # Pending implicit result sets (#121): (row_format, cursor_id) queue
+        # left by a DBMS_SQL.RETURN_RESULT block, consumed via nextset().
+        self._implicit_results: list = []
 
     def _check_open(self) -> None:
         if self._closed:
@@ -175,6 +178,10 @@ class Cursor:
 
         # DML RETURNING ... INTO: write the returned value list onto each Var.
         _assign_return_binds(Bind, Result)
+
+        # Implicit result sets (#121): queue any DBMS_SQL.RETURN_RESULT cursors
+        # for nextset() to fetch on demand.
+        self._implicit_results = _extract_implicit_results(Result)
 
         ServerRowCount = None
         ColMeta = None
@@ -339,6 +346,28 @@ class Cursor:
             Out.append(Row)
         return Out
 
+    def nextset(self) -> bool | None:
+        """Advance to the next implicit result set (#121, PEP 249).
+
+        A PL/SQL block that calls ``DBMS_SQL.RETURN_RESULT`` returns one or more
+        result sets; each ``nextset()`` makes the next one current (its rows
+        become fetchable and ``description`` reflects it) and returns ``True``.
+        Returns ``None`` when there are no more sets. 12c+.
+        """
+        self._check_open()
+        if not self._implicit_results:
+            return None
+        RowFormat, CursorId = self._implicit_results.pop(0)
+        Rows = self._connection.fetch_all_rows(CursorId, RowFormat)
+        self._description = [_column_description(C) for C in RowFormat]
+        self._annotations = [_col_annotations(C) for C in RowFormat]
+        self._rows = [_resolve_objects(self._connection,
+                                       _resolve_lobs(self._connection, Row))
+                      for Row in (Rows or [])]
+        self._rowcount = len(self._rows)
+        self._row_index = 0
+        return True
+
     def scroll(self, value: int = 0, mode: str = "relative") -> None:
         """Scroll the result-set cursor to a new position (PEP 249 / oracledb
         semantics). `mode` is one of:
@@ -449,6 +478,22 @@ def _assign_return_binds(Bind, Result) -> None:
         Variable._value = [decode_value(Column, V if V else None)
                            for V in Values]
         Variable.has_value = True
+
+
+def _extract_implicit_results(Result) -> list:
+    # Pull the {'implicit_results': [...]} record the response decoder leaves in
+    # the rows for a DBMS_SQL.RETURN_RESULT block (#121). Returns a list of
+    # (row_format, cursor_id) pairs (empty if none), in server order.
+    if not isinstance(Result, tuple) or len(Result) < 5:
+        return []
+    Rows = Result[4]
+    if not Rows:
+        return []
+    for Row in Rows:
+        if isinstance(Row, dict) and 'implicit_results' in Row:
+            return [(R['row_format'], R['cursor_id'])
+                    for R in Row['implicit_results']]
+    return []
 
 
 def _build_refcursor_cursor(Connection, Rows, Marker) -> 'Cursor':

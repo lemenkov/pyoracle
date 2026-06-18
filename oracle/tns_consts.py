@@ -67,6 +67,7 @@ TTI_DCB = 16
 TTI_PFN = 17
 TTI_FOB = 19
 TTI_BVC = 21
+TTI_IRD = 27        # implicit result-set describe (DBMS_SQL.RETURN_RESULT, #121)
 
 TTI_OPEN = 2
 TTI_EXEC = 4

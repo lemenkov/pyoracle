@@ -2216,3 +2216,34 @@ and the cursor decodes each by its `Var`'s type. `var.getvalue()` returns the
 list of returned values (python-oracledb-compatible). Sync + async; verified on
 10g/11g/21c/23ai (INSERT / multi-row UPDATE / multi-row DELETE / zero-row /
 all-return-no-input). Array (`executemany`) RETURNING is out of scope here.
+
+## 23. Implicit result sets — DBMS_SQL.RETURN_RESULT (#121)
+
+A 12c+ PL/SQL block can hand result sets back to the client with
+`DBMS_SQL.RETURN_RESULT(refcursor)`. The client opts in by setting
+**`TNS_EXEC_FLAGS_IMPLICIT_RESULTSET` (0x8000)** in the execute's al8i4[9]
+exec-flags word; without it the server rejects the block with **ORA-29481**
+("implicit results cannot be returned to client"). pyoracle sets the flag on
+PL/SQL **block** executes on 12c+ (scoping it to blocks leaves the DML/DDL exec
+paths untouched).
+
+The results come back in the block's response as a **`TTI_IRD` (token 27,
+`TNS_MSG_TYPE_IMPLICIT_RESULTSET`)** message, before the block's RPA/OER:
+
+```
+ub4  num_results
+per result:
+    ub1 len + that many bytes        (preamble, skipped)
+    describe body                    (column metadata — the same body as the
+                                      TTI_DCB token, §6.4, minus the preamble)
+    ub2 cursor_id
+```
+
+Each result is therefore a server cursor (a cursor id + a row format), exactly
+like a REF CURSOR (§ REF CURSOR) — pyoracle keeps the `(row_format, cursor_id)`
+pairs and **`cursor.nextset()`** fetches each on demand (via the same
+`fetch_all_rows` path), making that set's rows fetchable and updating
+`cursor.description`; it returns `True` per set and `None` when exhausted. The
+describe body is shared with the `TTI_DCB` decoder (`_decode_describe_body`).
+Sync + async; verified on 21c / 23ai (multiple result sets, varying shapes);
+12c+ only (11g lacks `DBMS_SQL.RETURN_RESULT`).
