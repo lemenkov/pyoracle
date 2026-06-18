@@ -35,6 +35,7 @@ class Cursor:
     def __init__(self, connection):
         self._connection = connection
         self._description: list[tuple] | None = None
+        self._annotations: list[dict | None] | None = None
         self._rows: list[list] = []
         self._row_index: int = 0
         self._rowcount: int = -1
@@ -51,6 +52,15 @@ class Cursor:
     @property
     def description(self) -> list[tuple] | None:
         return self._description
+
+    @property
+    def annotations(self) -> list[dict | None] | None:
+        """Per-column SQL annotations (23ai) for the last SELECT, aligned with
+        `description`: a list with one entry per column — a `{name: value}` dict
+        for an annotated column (value is '' for a name-only annotation) or
+        `None` for a column with no annotations. `None` overall when the last
+        statement produced no result set or the server is pre-23ai."""
+        return self._annotations
 
     @property
     def rowcount(self) -> int:
@@ -82,6 +92,7 @@ class Cursor:
     def close(self) -> None:
         self._closed = True
         self._description = None
+        self._annotations = None
         self._rows = []
         self._row_index = 0
 
@@ -171,6 +182,7 @@ class Cursor:
             # in the OER.
             self._lastrowid = None
             self._description = [_column_description(C) for C in ColMeta]
+            self._annotations = [_col_annotations(C) for C in ColMeta]
             self._rows = [_resolve_lobs(self._connection, row)
                           for row in (Rows or [])]
             # For SELECT, the OER's success-iters value is the per-call fetch
@@ -183,6 +195,7 @@ class Cursor:
             # touched-row rowid (None for DDL / zero-row changes).
             self._lastrowid = LastRowid
             self._description = None
+            self._annotations = None
             self._rows = []
             self._rowcount = ServerRowCount if isinstance(ServerRowCount, int) else -1
 
@@ -409,6 +422,7 @@ def _build_refcursor_cursor(Connection, Rows, Marker) -> 'Cursor':
     # Wrap an already-fetched REF CURSOR result set in a Cursor.
     Nested = Cursor(Connection)
     Nested._description = [_column_description(C) for C in Marker['row_format']]
+    Nested._annotations = [_col_annotations(C) for C in Marker['row_format']]
     Nested._rows = [_resolve_lobs(Connection, Row) for Row in Rows]
     Nested._rowcount = len(Nested._rows)
     Nested._row_index = 0
@@ -492,6 +506,17 @@ def _is_plsql(SQL: str) -> bool:
                       SQL, flags=re.S)
     Head = Stripped[:8].upper()
     return Head.startswith("BEGIN") or Head.startswith("DECLARE")
+
+
+def _col_annotations(Col: dict) -> dict | None:
+    # Decode a column's raw annotation map (bytes -> str), or None if the column
+    # carries no annotations (#89). Values are '' for a name-only annotation.
+    Ann = Col.get('annotations')
+    if not Ann:
+        return None
+    def _s(B):
+        return B.decode('utf-8', errors='replace') if isinstance(B, bytes) else B
+    return {_s(K): _s(V) for K, V in Ann.items()}
 
 
 def _column_description(Col: dict) -> tuple:

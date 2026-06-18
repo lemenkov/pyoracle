@@ -116,8 +116,19 @@ FIELD_VERSION_12_1 = 7
 FIELD_VERSION_12_2 = 8
 FIELD_VERSION_12_2_EXT1 = 9
 FIELD_VERSION_19_1 = 12
+FIELD_VERSION_19_1_EXT1 = 13   # written inside the FAST_AUTH envelope (#89)
 FIELD_VERSION_21_1 = 16
-FIELD_VERSION_23_1 = 17
+FIELD_VERSION_23_1 = 17        # highest the LEGACY 3-message handshake reaches
+FIELD_VERSION_23_4 = 24        # 23ai max; reached only via FAST_AUTH (#89)
+
+# Oracle 23ai "fast auth" (#89): a single TNS DATA packet (message type 0x22)
+# bundling the protocol, datatypes, and OSESSKEY messages in one round trip. It is
+# the only way to advertise CCAP_FIELD_VERSION >= 18 — the legacy three-message
+# handshake is rejected with ORA-03146 at fv >= 18. pyoracle gates on the server's
+# own field version (learned from its PRO reply, 23ai advertises 27), not an ACCEPT
+# flag: at the protocol version pyoracle sends (313) the ACCEPT carries no flag.
+TNS_MSG_TYPE_FAST_AUTH = 0x22
+TNS_SERVER_CONVERTS_CHARS = 0x01      # fast-auth envelope flag byte
 
 DictionaryType = Enum('DictionaryType', 'auth chgpwd close description dty exec fetch lobops login pig pro sess spfp start stop tran')
 

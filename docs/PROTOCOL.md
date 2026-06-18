@@ -1937,3 +1937,93 @@ computed because BFILE locators vary (CLOB/BLOB are a fixed 86 bytes).
 from `_resolve_fv2_lobs` by data type; the BFILE column resolves to the file
 bytes, like the modern path. This completes the 9i LOB surface (CLOB, BLOB,
 BFILE) and, with §19.6 / §19.7, the PL/SQL surface (IN, OUT, IN OUT).
+
+## 20. Oracle 23ai field version 24 — fast-auth + the fv24 framing (#89)
+
+Column **annotations** are only delivered when the client advertises a TTC
+field version ≥ 18. But advertising fv ≥ 18 changes both the login and the data
+path; the legacy forms are rejected (ORA-03146 / ORA-03120) or hang. pyoracle
+reaches field version 24 — the 23ai maximum — and decodes annotations.
+
+### 20.1 Gating and the protocol version
+
+pyoracle keeps its **CONNECT packet at protocol version 313**, deliberately
+below the end-of-response era (≥ 319). At 319 a 23ai server requires
+end-of-response response framing and closes the connection if the client clears
+that capability bit; staying at 313 sidesteps that whole layer while still
+reaching fv24. At 313 the ACCEPT carries no fast-auth flag, so pyoracle gates on
+the **server's own field version** taken from its TTI_PRO reply (23ai advertises
+27): after a normal PRO exchange, if `min(client, server) > 17`, switch to
+fast-auth. The default `field_version` is the fv24 constant; older servers
+negotiate it down (21c→16, 11g→6, 10g→4, 9i→2) and keep the legacy handshake.
+
+### 20.2 FAST_AUTH (`0x22`)
+
+The legacy three-message handshake (PRO, DTY, OSESSKEY as separate packets) is
+rejected at fv ≥ 18. Instead the three are bundled into one TNS DATA packet:
+
+```
+0x22  ver=1  SERVER_CONVERTS_CHARS(0x01)  flag2=0
+<PRO message>
+charset(ub2)=0  flag(ub1)=0  ncharset(ub2)=0
+ttc_field_version byte = 19_1_EXT_1 (13)      # note: not 24 here
+<DTY message>                                 # its caps array still carries fv24
+<OSESSKEY (auth phase-one) message>
+```
+
+The server replies with the three responses concatenated (PRO + DTY + the
+auth-challenge RPA). The challenge RPA is located by scanning for the TTI_RPA
+whose decode yields a session key (the DTY datatype table contains `0x08` bytes,
+so a naive token scan mis-hits), then handed to the normal phase-two path. The
+23ai server tolerates the duplicate PRO that the bundle re-sends.
+
+### 20.3 Phase two (OAUTH) and changepassword
+
+At fv > 17 the OAUTH header replicates oracledb byte-for-byte: the has-user
+pointer byte is `0` followed by an extra `0x01`, the logon mode gains `0x20000`,
+the username is still sent length-prefixed, and the call carries the session
+pairs the server now requires (`SESSION_CLIENT_CHARSET`,
+`SESSION_CLIENT_DRIVER_NAME`, `SESSION_CLIENT_VERSION`, `AUTH_ALTER_SESSION`,
+`AUTH_CONNECT_STRING`). changepassword is the same TTI_AUTH shape (extra leading
+byte + `0x20000` logon mode); without it the server returns ORA-03120.
+
+### 20.4 The fv24 data path
+
+Every TTI **function** message (execute, fetch, commit/rollback, LOB ops,
+logoff) gains **one extra pointer byte after the sequence number** — oracledb's
+`_write_function_code` at fv24. Omitting it desyncs the call (ORA-03146 /
+ORA-03120, or a hung read on the continuation fetch). This is centralised in
+`_fun_header`.
+
+The **execute** carries three more fv24-only changes:
+- the prefetch-buffer-size field (the first SELECT's `0xffffffff` long-fetch
+  sentinel) must be `0`, or the server overflows (ORA-03120);
+- a SELECT/fetch execute sets the `0x40` options bit and `al8i4[9] |= 0x8000`
+  (query flags; on a DDL/DML execute these give ORA-03137 `kpoal8Check-5`).
+
+### 20.5 Per-column annotations and vector descriptor
+
+At fv > 17 each column's describe (DCB) appends, after the SQL-domain fields,
+its **annotation map** and a **vector descriptor**:
+
+```
+ub4 num_annotations
+if num_annotations > 0:
+    ub1 pointer
+    ub4 num_annotations            # repeated
+    ub1 pointer
+    for each pair:
+        str key  (ub4-counted DALC)
+        str value
+        ub4 flags
+    ub4 flags                      # trailing
+ub4 vector_dimensions
+ub1 vector_format
+ub1 vector_flags
+```
+
+Both must be consumed or the row stream desyncs (it surfaces as an unknown token
+`0x7e`). The annotation map is decoded into the column metadata and exposed as
+`cursor.annotations` — a list aligned with `cursor.description`, one `{name:
+value}` dict per annotated column (`''` value for a name-only annotation) or
+`None` for an unannotated column.
