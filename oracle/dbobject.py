@@ -40,6 +40,17 @@ COLLECTION_VARRAY = 3
 _LONG_LENGTH_INDICATOR = 254    # next 4 bytes are a big-endian length
 _NULL_LENGTH_INDICATOR = 255    # NULL attribute (no bytes follow)
 
+# XMLType image flags (#124, python-oracledb constants.pxi).
+_XML_TYPE_LOB = 0x0001          # content is a CLOB locator
+_XML_TYPE_STRING = 0x0004       # content is an inline string
+_XML_TYPE_FLAG_SKIP_NEXT_4 = 0x100000
+# Observed only on Oracle 11g XMLType *columns* (CLOB storage): the image holds
+# a complex binary structure, not a plain CLOB locator, and the LOBOPS read of
+# it returns the wrong bytes. 12c+ (binary XML) and 10g never set this bit, so
+# it cleanly marks the one reference-less case (oracledb can't reach 11g) we
+# don't support. Inline XML (XMLELEMENT etc.) uses the STRING flag and is fine.
+_XML_TYPE_LEGACY_STORAGE = 0x01000000
+
 # Map an ALL_TYPE_ATTRS.attr_type_name to the TNS data type code that
 # oracle.types.decode_value understands. The image stores each scalar with the
 # same on-wire encoding the column form uses, so the existing scalar decoders
@@ -366,6 +377,37 @@ def decode_object_image(Image: bytes, Layout: list[dict],
         }
         Attrs.append((Attr['name'], decode_value(Col, Raw)))
     return Attrs
+
+
+def decode_xmltype(Image: bytes, Charset: int = AL32UTF8_CHARSET) -> tuple:
+    """Decode an XMLType image (#124), returning ``(is_lob, value)``.
+
+    Mirrors python-oracledb ``read_xmltype``: the shared image header, a 1-byte
+    XML version, a ``ub4`` flag word (with an optional 4-byte skip), then the
+    content. For an inline document (the ``STRING`` flag) ``value`` is the
+    decoded ``str`` and ``is_lob`` is False; for a large document (the ``LOB``
+    flag) ``value`` is the CLOB locator bytes and ``is_lob`` is True (the caller
+    reads it through the LOB path).
+    """
+    from oracle.tns_consts import CharsetDict
+    Pos = _read_image_header(Image)
+    Pos += 1                                     # XML version (skip)
+    Flag = int.from_bytes(Image[Pos:Pos + 4], 'big')
+    Pos += 4
+    if Flag & _XML_TYPE_FLAG_SKIP_NEXT_4:
+        Pos += 4
+    Content = bytes(Image[Pos:])
+    if Flag & _XML_TYPE_STRING:
+        return (False, Content.decode(CharsetDict.get(Charset, 'utf-8'),
+                                      'replace'))
+    if Flag & _XML_TYPE_LOB:
+        if Flag & _XML_TYPE_LEGACY_STORAGE:
+            raise NotSupportedError(
+                "reading a CLOB-stored XMLType column (Oracle 11g) is not "
+                "supported; cast it in SQL, e.g. "
+                "SELECT XMLTYPE.getclobval(col) or XMLSERIALIZE(...)")
+        return (True, Content)                   # CLOB locator
+    raise NotSupportedError(f"unexpected XMLType flag 0x{Flag:x}")
 
 
 def decode_collection_image(Image: bytes, Element: dict,

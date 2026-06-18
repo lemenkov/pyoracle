@@ -200,7 +200,8 @@ class AsyncCursor:
         from oracle.lob import LOB
         from oracle.dbobject import (ObjectImage, DbObject,
                                      decode_object_image,
-                                     decode_collection_image)
+                                     decode_collection_image, decode_xmltype)
+        from oracle.tns_consts import TNS_TYPE_CLOB
         ResolvedRows = []
         for Row in (Rows or []):
             NewRow = list(Row)
@@ -208,6 +209,16 @@ class AsyncCursor:
                 if isinstance(Val, LOB):
                     Val._connection = self._connection
                     NewRow[I] = await Val.aread()
+                elif isinstance(Val, ObjectImage) and Val.type_name == 'XMLTYPE':
+                    # XMLType (#124): decode to str, or read the CLOB locator.
+                    (IsLob, XmlVal) = decode_xmltype(
+                        Val.image, Val.charset or AL32UTF8_CHARSET)
+                    if IsLob:
+                        Lob = LOB(TNS_TYPE_CLOB, XmlVal)
+                        Lob._connection = self._connection
+                        NewRow[I] = await Lob.aread()
+                    else:
+                        NewRow[I] = XmlVal
                 elif isinstance(Val, ObjectImage):
                     Typ = await self._connection._describe_object_type(
                         Val.type_schema, Val.type_name)
