@@ -60,6 +60,7 @@ from oracle.tns_consts import (
     TNS_TYPE_BDOUBLE, TNS_TYPE_BFILE,
     TNS_TYPE_BFLOAT, TNS_TYPE_BLOB, TNS_TYPE_BOOLEAN, TNS_TYPE_CLOB,
     TNS_TYPE_DATE,
+    TNS_TYPE_ADT,
     TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_JSON, TNS_TYPE_LONG,
     TNS_TYPE_LONGRAW, TNS_TYPE_VECTOR,
     TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_REFCURSOR, TNS_TYPE_RID,
@@ -237,6 +238,25 @@ def _skip_chunked_bytes(Data: bytes) -> bytes:
     else:
         return Data[1 + Length:]
 
+def _read_chunked_bytes(Data: bytes) -> tuple[bytes, bytes]:
+    # The value form _skip_chunked_bytes skips, but returning the bytes: a
+    # 1-byte length then that many raw bytes (length < 254), nothing (255 NULL),
+    # or a chunked ub4-prefixed sequence terminated by a zero-length chunk (254).
+    Length = Data[0]
+    if Length == 254:
+        Rest = Data[1:]
+        Out = b""
+        while True:
+            (ChunkLen, Rest) = decode_ub4(Rest)
+            if ChunkLen == 0:
+                return (Out, Rest)
+            Out += bytes(Rest[:ChunkLen])
+            Rest = Rest[ChunkLen:]
+    elif Length == 255:
+        return (b"", Data[1:])
+    else:
+        return (bytes(Data[1:1 + Length]), Data[1 + Length:])
+
 def _skip_bytes_with_length(Data: bytes) -> bytes:
     (NumBytes, Rest) = decode_ub4(Data)
     if NumBytes > 0:
@@ -318,8 +338,12 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
     (_, Rest) = decode_ub4(Rest)              # max_array_elems
     (_, Rest) = decode_ub4(Rest)              # cont_flags (ub8 on 12c; small)
     (OidLen, Rest) = decode_ub4(Rest)
+    TypeOid = b""
     if OidLen > 0:
-        Rest = _skip_chunked_bytes(Rest)
+        # For an object (ADT, type 109) / collection column this is the type's
+        # 16-byte OID; capturing it (rather than skipping) lets the row decoder
+        # tie the value back to its type for the attribute-layout lookup (#115).
+        (TypeOid, Rest) = _read_chunked_bytes(Rest)
     (_, Rest) = decode_ub4(Rest)              # version
     (Charset, Rest) = decode_ub4(Rest)        # charset id
     Rest = Rest[1:]                           # skip the csfrm byte
@@ -329,8 +353,8 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
     NullOk = Rest[0]
     Rest = Rest[2:]                           # skip nulls_allowed-byte AND v7 name length
     (ColName, Rest) = _read_str_with_length(Rest)
-    (_, Rest) = _read_str_with_length(Rest)   # schema
-    (_, Rest) = _read_str_with_length(Rest)   # type name
+    (TypeSchema, Rest) = _read_str_with_length(Rest)   # owner of the type (ADT)
+    (TypeName, Rest) = _read_str_with_length(Rest)     # the type's name (ADT)
     (_, Rest) = decode_ub4(Rest)              # column position
     if _DECODE_FIELD_VERSION.get() >= FIELD_VERSION_11_2:
         # `uds flags` is an 11g addition; a 10g (field version 4) describe ends
@@ -387,6 +411,14 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
         'domain_name': DomainName or None,
         'annotations': Annotations or None,
     }
+    if DataType == TNS_TYPE_ADT:
+        # Object (ADT) column: keep the type identity so the row decoder can
+        # look up the attribute layout (#115). Names are plain ASCII identifiers.
+        Col['type_oid'] = TypeOid
+        Col['type_schema'] = TypeSchema.decode('ascii', 'replace') or None \
+            if TypeSchema else None
+        Col['type_name'] = TypeName.decode('ascii', 'replace') or None \
+            if TypeName else None
     return (Col, Rest)
 
 def decode_token_iov(Data: bytes, Acc: object) -> tuple:
@@ -843,6 +875,10 @@ def decode_token_rxd(Data: bytes, Acc: object) -> tuple:
                 (Val, Rest) = _read_long_column(Rest)
                 Row.append(decode_value(Col, Val))
                 continue
+            if DataType == TNS_TYPE_ADT:
+                (Val, Rest) = _read_object_column(Rest, Col)
+                Row.append(Val)
+                continue
             (Val, Rest) = decode_dalc(Rest)
             Row.append(decode_value(Col, Val))
     return decode_packet(Rest, (Cursor, RowFormat, Rows + [Row]))
@@ -960,6 +996,42 @@ def _read_long_column(Rest: bytes) -> tuple[bytes | None, bytes]:
     (_, Rest) = decode_ub4(Rest)
     (_, Rest) = decode_ub4(Rest)
     return (Val, Rest)
+
+def _read_object_column(Rest: bytes, Col: dict) -> tuple[object, bytes]:
+    # SQL OBJECT (ADT, TNS type 109) value in RXD. The wire framing mirrors
+    # python-oracledb's packet.pyx read_dbobject:
+    #
+    #   bytes_with_length   type OID (the type's 16-byte identity)
+    #   bytes_with_length   object OID
+    #   bytes_with_length   snapshot                         (skip)
+    #   ub2                 version                          (skip)
+    #   ub4                 image length (gate: 0 => NULL)
+    #   ub2                 flags                            (skip)
+    #   bytes               packed image (own length prefix)
+    #
+    # The image is a self-delimiting blob (its own 1-byte length, or the 0xFE
+    # chunked form) -- NOT raw `num_bytes` bytes; num_bytes only gates whether
+    # an image is present (read_dbobject skips read_bytes when it is 0). This
+    # framing needs no attribute layout, so it keeps the row stream in sync
+    # regardless of whether the type has been described yet. We hand back an
+    # ObjectImage placeholder; the cursor decodes the image into a DbObject
+    # once it has fetched the layout (#115). XMLType (type 109 with no object
+    # type) is a separate path (#124).
+    from oracle.dbobject import ObjectImage
+    (TypeOid, Rest) = _read_str_with_length(Rest)        # type OID
+    (_, Rest) = _read_str_with_length(Rest)              # object OID
+    Rest = _skip_bytes_with_length(Rest)                 # snapshot
+    (_, Rest) = decode_ub4(Rest)                         # version (ub2)
+    (NumBytes, Rest) = decode_ub4(Rest)                  # image-present gate
+    (_, Rest) = decode_ub4(Rest)                         # flags (ub2)
+    if NumBytes == 0:
+        return (None, Rest)
+    (Image, Rest) = _read_chunked_bytes(Rest)
+    Oid = bytes(TypeOid) if not isinstance(TypeOid, list) else b""
+    Placeholder = ObjectImage(Oid or Col.get('type_oid', b""),
+                              Col.get('type_schema'), Col.get('type_name'),
+                              Col.get('charset'), Image)
+    return (Placeholder, Rest)
 
 def _bvc_bit_set(BitVec: bytes, Idx: int) -> bool:
     Byte = Idx // 8
