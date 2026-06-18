@@ -19,7 +19,7 @@ from oracle.tns_consts import (
     TNS_TYPE_BDOUBLE, TNS_TYPE_BFLOAT, TNS_TYPE_BOOLEAN, TNS_TYPE_CHAR,
     TNS_TYPE_DATE,
     TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_LONG, TNS_TYPE_LONGRAW,
-    TNS_TYPE_NUMBER, TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPLTZ,
+    TNS_TYPE_NUMBER, TNS_TYPE_REF, TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPLTZ,
     TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_VARCHAR,
 )
 
@@ -276,6 +276,13 @@ def decode_value(Column: dict, Data: bytes | list) -> object:
         return decode_interval_ds(Data)
     if DataType == TNS_TYPE_INTERVALYM:
         return decode_interval_ym(Data)
+    if DataType == TNS_TYPE_REF:
+        # REF (object reference, #119): an opaque locator. Surface it as a typed
+        # DbRef (raw bytes + the referenced type when the describe carried it)
+        # rather than bare bytes; dereference in SQL with DEREF(...) to get the
+        # object. NULL was already handled above.
+        from oracle.dbobject import DbRef
+        return DbRef(bytes(Data), Column.get('type_name'))
     if DataType == TNS_TYPE_BOOLEAN:
         # Native SQL BOOLEAN (23ai, #54). NULL is already handled above; a
         # present value's last byte is the truth value: TRUE arrives as

@@ -13,15 +13,16 @@
 import unittest
 
 from oracle.dbobject import (
-    COLLECTION_NESTED_TABLE, COLLECTION_VARRAY, DbObject, DbObjectType,
+    COLLECTION_NESTED_TABLE, COLLECTION_VARRAY, DbObject, DbObjectType, DbRef,
     ObjectImage, decode_collection_image, decode_object_image, type_name_to_tns,
 )
+from oracle.types import decode_value
 from oracle.tns import (
     _encode_object_bind_value, _read_object_column, encode_object_image,
 )
 from oracle.tns_consts import (
-    AL32UTF8_CHARSET, TNS_TYPE_CHAR, TNS_TYPE_NUMBER, TNS_TYPE_TIMESTAMP,
-    TNS_TYPE_VARCHAR,
+    AL32UTF8_CHARSET, TNS_TYPE_CHAR, TNS_TYPE_NUMBER, TNS_TYPE_REF,
+    TNS_TYPE_TIMESTAMP, TNS_TYPE_VARCHAR,
 )
 
 # The full on-wire object column value for ('Main St', 12345, 'US') plus four
@@ -258,6 +259,36 @@ class TestNestedTableCollection(unittest.TestCase):
         self.assertEqual(Rest, _SENTINEL)
         self.assertEqual(decode_collection_image(Val.image, self._NT.element),
                          [1, None, 3])
+
+
+class TestDbRef(unittest.TestCase):
+    # A REF locator captured from a live 21c `SELECT REF(o)` (#119).
+    _LOC = bytes.fromhex(
+        "00280209548b330e9c292c65e063c000a8c03c4e"
+        "548b330e9c282c65e063c000a8c03c4e0300223e0000")
+
+    def test_decode_value_wraps_ref(self):
+        v = decode_value({"data_type": TNS_TYPE_REF, "type_name": "REF_OBJ"},
+                         self._LOC)
+        self.assertIsInstance(v, DbRef)
+        self.assertEqual(v.bytes, self._LOC)
+        self.assertEqual(v.hex, self._LOC.hex())
+        self.assertEqual(v.type_name, "REF_OBJ")
+
+    def test_null_ref_is_none(self):
+        self.assertIsNone(
+            decode_value({"data_type": TNS_TYPE_REF}, b""))
+
+    def test_equality_and_hash(self):
+        a = DbRef(self._LOC, "REF_OBJ")
+        b = DbRef(self._LOC, "OTHER")          # equality is by locator bytes
+        self.assertEqual(a, b)
+        self.assertEqual(hash(a), hash(b))
+        self.assertNotEqual(a, DbRef(self._LOC[:-1] + b"\x99"))
+        self.assertEqual(len({a, b}), 1)
+
+    def test_repr_includes_type(self):
+        self.assertIn("REF_OBJ", repr(DbRef(self._LOC, "REF_OBJ")))
 
 
 class TestTypeNameMap(unittest.TestCase):
