@@ -91,19 +91,71 @@ class ObjectImage:
         self.image = image
 
 
-class DbObject:
-    """A decoded SQL OBJECT (ADT) value.
+class DbObjectType:
+    """A SQL object type handle, returned by ``connection.gettype(name)``.
 
-    Attributes are read by name (``obj.STREET``) or item (``obj['STREET']``),
-    in the order Oracle declared them. Read-only; oracledb-compatible enough
-    for the common ``cursor.fetchone()`` use.
+    Holds what the wire bind needs: the type's owner / name, its 16-byte OID,
+    its version, and the ordered attribute layout (each entry
+    ``{'name', 'type_name', 'data_type', 'charset'}``). ``newobject()`` builds
+    a fresh, settable DbObject of this type ready to bind (#116).
     """
 
-    def __init__(self, type_name: str | None, attrs: list[tuple[str, object]]):
-        # _ prefixes keep the namespace clear of attribute names.
+    def __init__(self, schema, name, oid, version, attrs):
+        self.schema = schema
+        self.name = name
+        self.oid = oid                       # 16-byte type OID (bytes)
+        self.version = version
+        self.attrs = attrs                   # ordered layout (list of dict)
+
+    @property
+    def full_name(self) -> str:
+        return f"{self.schema}.{self.name}" if self.schema else self.name
+
+    @property
+    def attr_names(self) -> list:
+        return [A['name'] for A in self.attrs]
+
+    def newobject(self, values=None) -> 'DbObject':
+        """A new DbObject of this type with every attribute set to NULL.
+
+        Optionally seed from ``values`` (a dict or a sequence in declaration
+        order). Set attributes by name (``obj.STREET = '...'``) before binding.
+        """
+        Obj = DbObject(self.full_name, [(A['name'], None) for A in self.attrs],
+                       dbtype=self)
+        if isinstance(values, dict):
+            # Oracle identifiers are upper-cased unless quoted, so accept seed
+            # keys in any case (direct obj.ATTR access stays exact).
+            ByUpper = {A['name'].upper(): A['name'] for A in self.attrs}
+            for Key, Val in values.items():
+                Obj[ByUpper.get(Key.upper(), Key)] = Val
+        elif values is not None:
+            for Name, Val in zip(self.attr_names, values):
+                Obj[Name] = Val
+        return Obj
+
+    def __repr__(self):
+        return f"<oracle.DbObjectType {self.full_name}>"
+
+
+class DbObject:
+    """A SQL OBJECT (ADT) value.
+
+    Attributes are read and set by name (``obj.STREET``) or item
+    (``obj['STREET']``), in the order Oracle declared them. A fetched object is
+    typically read; one built via ``DbObjectType.newobject()`` carries its type
+    (``_dbtype``) so it can be bound (#116). oracledb-compatible enough for the
+    common ``cursor.fetchone()`` / bind use.
+    """
+
+    def __init__(self, type_name: str | None, attrs: list[tuple[str, object]],
+                 dbtype: 'DbObjectType | None' = None):
+        # _ prefixes keep the namespace clear of attribute names; __setattr__
+        # routes any non-underscore name into _attrs.
         object.__setattr__(self, '_type_name', type_name)
         object.__setattr__(self, '_attrs', dict(attrs))
         object.__setattr__(self, '_order', [Name for Name, _ in attrs])
+        object.__setattr__(self, '_dbtype', dbtype)
 
     @property
     def type_name(self) -> str | None:
@@ -115,8 +167,23 @@ class DbObject:
         except KeyError:
             raise AttributeError(name)
 
+    def __setattr__(self, name: str, value):
+        if name.startswith('_'):
+            object.__setattr__(self, name, value)
+            return
+        Attrs = object.__getattribute__(self, '_attrs')
+        if name not in Attrs:
+            raise AttributeError(
+                f"{self._type_name or 'object'} has no attribute {name!r}")
+        Attrs[name] = value
+
     def __getitem__(self, name: str):
         return self._attrs[name]
+
+    def __setitem__(self, name: str, value):
+        if name not in self._attrs:
+            raise KeyError(name)
+        self._attrs[name] = value
 
     def aslist(self) -> list:
         """The attribute values in declaration order."""

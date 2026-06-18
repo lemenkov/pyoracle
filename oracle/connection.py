@@ -896,37 +896,79 @@ class OracleConnect:
             return Content.decode('utf-16-be', errors='replace')
         return Content
 
-    def _object_type_layout(self, schema: str | None, name: str | None) -> list:
-        # Ordered attribute layout for a SQL object type, used to walk an object
-        # image into a DbObject (#115). Fetched from the data dictionary
-        # (ALL_TYPE_ATTRS) and cached per connection keyed by (owner, name).
-        # A type the session can't see (no row) yields an empty layout, so the
-        # object decodes to a DbObject with no attributes rather than raising.
-        if not schema or not name:
-            return []
-        Key = (schema, name)
+    def gettype(self, name: str) -> 'DbObjectType':
+        """Look up a SQL object type by name and return a ``DbObjectType``.
+
+        ``name`` is the type name, optionally schema-qualified
+        (``'ADDR_T'`` or ``'PYO.ADDR_T'``); an unqualified name resolves in the
+        current schema. Use ``newobject()`` on the result to build a value to
+        bind (#116). oracledb-compatible.
+        """
+        if '.' in name:
+            Schema, _, TypeName = name.partition('.')
+            Schema = Schema.strip('"').upper() if '"' not in Schema else Schema.strip('"')
+        else:
+            Schema, TypeName = None, name
+        TypeName = TypeName.strip('"') if '"' in TypeName else TypeName.upper()
+        Typ = self._describe_object_type(Schema, TypeName)
+        if Typ is None or not Typ.attrs:
+            from oracle.exceptions import DatabaseError
+            raise DatabaseError(f"object type {name!r} not found")
+        return Typ
+
+    def _describe_object_type(self, schema: str | None,
+                              name: str | None) -> 'DbObjectType | None':
+        # Fetch a SQL object type's identity (16-byte OID + version) and ordered
+        # attribute layout from the data dictionary, cached per connection keyed
+        # by (owner, name). Used both by the row decoder (#115) and gett() /
+        # bind (#116). When `schema` is None the type resolves in the current
+        # schema (USER). A type the session can't see yields a handle with an
+        # empty layout (the #115 read path tolerates that).
+        if not name:
+            return None
+        from oracle.dbobject import DbObjectType, type_name_to_tns
+        Owner = schema
+        if Owner is None:
+            Result = self.execute("SELECT USER FROM dual")
+            Rows = Result[4] if len(Result) > 4 and Result[4] else []
+            Owner = Rows[0][0] if Rows else None
+        if not Owner:
+            return None
+        Key = (Owner, name)
         Cached = self._object_type_cache.get(Key)
         if Cached is not None:
             return Cached
-        from oracle.dbobject import type_name_to_tns
+        OidSQL = ("SELECT type_oid, typecode FROM all_types "
+                  "WHERE owner = :1 AND type_name = :2")
+        OidRes = self.execute(OidSQL, Bind=[Owner, name])
+        OidRows = OidRes[4] if len(OidRes) > 4 and OidRes[4] else []
+        Oid = bytes(OidRows[0][0]) if OidRows and OidRows[0][0] else b""
         SQL = ("SELECT attr_name, attr_type_name, length, precision, scale "
                "FROM all_type_attrs "
                "WHERE owner = :1 AND type_name = :2 "
                "ORDER BY attr_no")
-        Result = self.execute(SQL, Bind=[schema, name])
+        Result = self.execute(SQL, Bind=[Owner, name])
         Rows = Result[4] if len(Result) > 4 and Result[4] else []
-        Layout = []
+        Attrs = []
         for Row in Rows:
-            AttrName = Row[0]
             TypeName = Row[1]
-            Layout.append({
-                'name': AttrName,
+            Attrs.append({
+                'name': Row[0],
                 'type_name': TypeName,
                 'data_type': type_name_to_tns(TypeName),
                 'charset': None,
             })
-        self._object_type_cache[Key] = Layout
-        return Layout
+        # The OAC type version: the freshly-created/common case is 1; the server
+        # validated this across 10g..23ai in the round-trip tests.
+        Typ = DbObjectType(Owner, name, Oid, 1, Attrs)
+        self._object_type_cache[Key] = Typ
+        return Typ
+
+    def _object_type_layout(self, schema: str | None, name: str | None) -> list:
+        # The ordered attribute layout (#115 read path). Delegates to the type
+        # describe so the OID/version/layout are fetched and cached once.
+        Typ = self._describe_object_type(schema, name)
+        return Typ.attrs if Typ is not None else []
 
     def create_temp_lob(self, is_blob: bool = False) -> bytes:
         # Create a session-duration temporary LOB on the server (TTI_LOBOPS
