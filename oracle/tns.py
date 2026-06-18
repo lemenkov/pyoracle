@@ -111,6 +111,17 @@ def set_decode_dml_rowcounts(Flag: bool) -> None:
     block. Reset every execute so a stale flag never leaks into another call."""
     _DECODE_DML_ROWCOUNTS.set(bool(Flag))
 
+# DML RETURNING ... INTO (#120): the sorted return-bind positions for the next
+# response, so the TTI_RXD decoder reads the out-bind return data (per bind:
+# ub4 num_rows + per row a value + sb4 truncation length) instead of treating
+# the RXD as query rows. Reset every execute.
+_DECODE_RETURN_BINDS = contextvars.ContextVar("decode_return_binds", default=())
+
+def set_decode_return_binds(Positions) -> None:
+    """Arm return-bind decoding for the next response (#120). `Positions` is the
+    set/list of 0-based OUT-bind positions, or empty/None to disarm."""
+    _DECODE_RETURN_BINDS.set(tuple(sorted(Positions)) if Positions else ())
+
 def assemble_packet(Data: bytes, Length: int) -> tuple[bool, int | None, bytes | None, bytes | None]:
     (PacketSize, PacketFlags, Type, Flags, Zero) = struct.unpack(">HhBBh", Data[:8])
     if Type == TNS_DATA and Zero == 0:
@@ -853,6 +864,25 @@ def decode_token_rxd(Data: bytes, Acc: object) -> tuple:
     (Cursor, RowFormat, Rows, *Extra) = Acc
     BitVec = Extra[0] if Extra else None
     Rest = Data[1:]
+    ReturnPositions = _DECODE_RETURN_BINDS.get()
+    if ReturnPositions:
+        # DML RETURNING ... INTO (#120): this RXD is out-bind return data, not
+        # query rows. Per return bind: ub4 num_rows, then per affected row a
+        # length-prefixed value + an sb4 truncation length (discarded). Keep the
+        # raw value bytes; the cursor decodes them by each Var's type. Surfaced
+        # as a record the cursor maps onto its return Vars (one list per bind).
+        ReturnValues = []
+        for _ in ReturnPositions:
+            (NumRows, Rest) = decode_ub4(Rest)
+            Vals = []
+            for _Row in range(NumRows):
+                (Val, Rest) = decode_dalc(Rest)
+                (_, Rest) = decode_ub4(Rest)         # sb4 actual length (trunc)
+                Vals.append(Val)
+            ReturnValues.append(Vals)
+        Record = {'return_positions': list(ReturnPositions),
+                  'return_values': ReturnValues}
+        return decode_packet(Rest, (Cursor, RowFormat, Rows + [Record]))
     Row = []
     if RowFormat:
         PrevRow = Rows[-1] if Rows else None
@@ -1692,6 +1722,11 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
     Bind = Dictionary['query']['bind']
     BindLen = len(Bind)
     BindFlag = 1 if (Cursor == 0) and (BindLen > 0) else 0
+    # DML RETURNING ... INTO (#120): the positions of the OUT (return) binds.
+    # All binds get an OAC, but only the non-return binds carry a value in the
+    # RXD row (the server fills the return binds from the affected rows).
+    ReturnBinds = Dictionary['query'].get('return_binds') or frozenset()
+    InBind = [V for I, V in enumerate(Bind) if I not in ReturnBinds]
     Batch = Dictionary['query']['batch']
     # Batch is a list of *additional* rows (each a list of column values) for
     # array DML: the OAC describes the columns once (from `Bind`, the first
@@ -1764,6 +1799,9 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
     elif DefLen == QueryLen == 0:
         if BatchLen > 0:
             Tokens = b"".join(encode_tokens_rxd(R, b"") for R in [Bind] + Batch)
+        elif ReturnBinds:
+            # Cached-cursor RETURNING: values for the input binds only.
+            Tokens = encode_tokens_rxd(InBind, b"") if InBind else b""
         else:
             Tokens = encode_tokens_rxd(Bind, b"")
     elif DefLen == 0:
@@ -1775,6 +1813,11 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
             Oac = encode_tokens_oac(_oac_rep_row(AllRows), b"")
             Tokens = Oac + b"".join(
                 encode_tokens_rxd(R, b"") for R in AllRows)
+        elif ReturnBinds:
+            # DML RETURNING ... INTO: OAC for every bind, then an RXD carrying
+            # only the input binds' values (the return binds are server-filled).
+            Oac = encode_tokens_oac(Bind, b"")
+            Tokens = (encode_tokens_rxd(InBind, Oac) if InBind else Oac)
         else:
             Oac = encode_tokens_oac(Bind, b"")
             Tokens = encode_tokens_rxd(Bind, Oac)

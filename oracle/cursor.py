@@ -131,9 +131,12 @@ class Cursor:
              BatchErrors: bool = False,
              ArrayDmlRowCounts: bool = False) -> 'Cursor':
         _check_object_bind_support(self._connection, Bind, Batch)
-        Result = self._connection.execute(operation, Bind=Bind, Batch=Batch,
-                                          BatchErrors=BatchErrors,
-                                          ArrayDmlRowCounts=ArrayDmlRowCounts)
+        Kw = {'Bind': Bind, 'Batch': Batch, 'BatchErrors': BatchErrors,
+              'ArrayDmlRowCounts': ArrayDmlRowCounts}
+        ReturnBinds = _returning_bind_positions(operation, len(Bind or []))
+        if ReturnBinds:                       # DML RETURNING ... INTO (#120)
+            Kw['ReturnBinds'] = ReturnBinds
+        Result = self._connection.execute(operation, **Kw)
         # Wire result tuple from decode_token_oer:
         #   (call_status, oracle_error_code, cursor_id, (rowcount, col_meta),
         #    rows, message_or_none, last_rowid, batch_errors)
@@ -169,6 +172,9 @@ class Cursor:
                 Marker['cursor_id'], Marker['row_format'])
             Variable._value = _build_refcursor_cursor(
                 self._connection, Rows, Marker)
+
+        # DML RETURNING ... INTO: write the returned value list onto each Var.
+        _assign_return_binds(Bind, Result)
 
         ServerRowCount = None
         ColMeta = None
@@ -420,6 +426,31 @@ def _assign_out_binds(Bind, Result) -> list:
     return RefCursors
 
 
+def _assign_return_binds(Bind, Result) -> None:
+    # DML RETURNING ... INTO (#120): the response decoder left a
+    # {'return_positions', 'return_values'} record as the single "row", where
+    # return_values[i] is the list of raw values for that bind (one per affected
+    # row). Decode each by its Var's declared type and store the list on the Var
+    # (getvalue() returns the list, matching python-oracledb).
+    if not isinstance(Bind, list) or not isinstance(Result, tuple) \
+            or len(Result) < 5:
+        return
+    Rows = Result[4]
+    if not Rows or not isinstance(Rows[0], dict) \
+            or 'return_positions' not in Rows[0]:
+        return
+    from oracle.types import decode_value
+    Record = Rows[0]
+    for Pos, Values in zip(Record['return_positions'], Record['return_values']):
+        if Pos >= len(Bind) or not isinstance(Bind[Pos], Var):
+            continue
+        Variable = Bind[Pos]
+        Column = {'data_type': Variable.dbtype.tns_type, 'charset': UTF8_CHARSET}
+        Variable._value = [decode_value(Column, V if V else None)
+                           for V in Values]
+        Variable.has_value = True
+
+
 def _build_refcursor_cursor(Connection, Rows, Marker) -> 'Cursor':
     # Wrap an already-fetched REF CURSOR result set in a Cursor.
     Nested = Cursor(Connection)
@@ -484,6 +515,38 @@ def _resolve_objects(Connection, Row: list) -> list:
                 Attrs = decode_object_image(Val.image, Layout, Charset)
                 Out[I] = DbObject(Val.type_name, Attrs, dbtype=Typ)
     return Out
+
+
+_RETURNING_RE = re.compile(r'\bRETURNING\b', re.I)
+_INTO_RE = re.compile(r'\bINTO\b', re.I)
+# Broad placeholder match for counting the INTO binds: covers both :name and
+# :1 styles (the narrower _NAMED_BIND_RE misses numeric positionals).
+_ANY_BIND_RE = re.compile(r':\s*(\w+)')
+
+
+def _returning_bind_positions(SQL: str, num_binds: int) -> frozenset:
+    # 0-based positions of the OUT binds in a DML
+    # `... RETURNING col[, ...] INTO :b[, ...]` (#120). Empty if the statement
+    # isn't a RETURNING-INTO. The INTO binds are the trailing K of the bind
+    # list (the leading binds are the VALUES/SET/WHERE inputs); K is the count
+    # of placeholders after the RETURNING's INTO, so this is robust to both
+    # named and numeric placeholder styles.
+    if num_binds <= 0:
+        return frozenset()
+    Cleaned = re.sub(r"'(?:''|[^'])*'", "''", SQL)
+    Cleaned = re.sub(r'"(?:""|[^"])*"', '""', Cleaned)
+    Cleaned = re.sub(r'--[^\n]*', '', Cleaned)
+    Cleaned = re.sub(r'/\*.*?\*/', '', Cleaned, flags=re.S)
+    Ret = _RETURNING_RE.search(Cleaned)
+    if Ret is None:
+        return frozenset()
+    Into = _INTO_RE.search(Cleaned, Ret.end())
+    if Into is None:
+        return frozenset()
+    K = len(_ANY_BIND_RE.findall(Cleaned[Into.end():]))
+    if K <= 0 or K > num_binds:
+        return frozenset()
+    return frozenset(range(num_binds - K, num_binds))
 
 
 def _resolve_parameters(SQL: str, Params) -> list:
