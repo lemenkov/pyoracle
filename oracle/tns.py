@@ -353,6 +353,27 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
         # trailing fields here), so they neither appear nor desync here.
         (DomainSchema, Rest) = _read_str_with_length(Rest)
         (DomainName, Rest) = _read_str_with_length(Rest)
+    Annotations = {}
+    if _DECODE_FIELD_VERSION.get() > FIELD_VERSION_23_1:     # 23ai fv >= 18 (#89)
+        # Each column carries its annotation map and the vector descriptor after
+        # the domain fields (oracledb base.pyx _process_metadata). Both must be
+        # consumed or the row stream desyncs; the annotations are the #89 payload.
+        # The count is sent twice around a 1-byte pointer, and each key/value pair
+        # is followed by a ub4 flags word, with a trailing ub4 flags after the loop.
+        (NumAnno, Rest) = decode_ub4(Rest)
+        if NumAnno > 0:
+            Rest = Rest[1:]                       # pointer
+            (NumAnno, Rest) = decode_ub4(Rest)    # count, repeated
+            Rest = Rest[1:]                       # pointer
+            for _ in range(NumAnno):
+                (Key, Rest) = _read_str_with_length(Rest)
+                (Val, Rest) = _read_str_with_length(Rest)
+                Annotations[Key] = Val or b""
+                (_, Rest) = decode_ub4(Rest)      # per-pair flags
+            (_, Rest) = decode_ub4(Rest)          # trailing flags
+        # Vector descriptor (23.4+): dimensions (ub4) + format + flags (ub1 each).
+        (_, Rest) = decode_ub4(Rest)
+        Rest = Rest[2:]
     Col = {
         'column_name': ColName,
         'data_type': DataType,
@@ -364,6 +385,7 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
         'null_ok': NullOk,
         'domain_schema': DomainSchema or None,
         'domain_name': DomainName or None,
+        'annotations': Annotations or None,
     }
     return (Col, Rest)
 
@@ -1617,6 +1639,27 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
         All8 = list(All8)
         All8[9] = TNS_AL8I4_ARRAY_DML_ROWCOUNTS
 
+    # 23ai (fv > 17, #89): the execute framing the server expects under field
+    # version 24 differs from the legacy form in three spots, reverse-engineered
+    # from an oracledb-thin fv24 capture (docs/PROTOCOL.md §20):
+    #   - the prefetch-buffer-size field (LMax) must be 0, not the 0xffffffff
+    #     long-fetch sentinel the first SELECT carries, or the server's stricter
+    #     parse overflows (ORA-03120, two-task conversion integer overflow);
+    #   - the exec-options word gains 0x40;
+    #   - al8i4[9] (exec flags) gains 0x8000 (already implied by the array-DML
+    #     0xC000 value, so only set it when that path didn't).
+    if FieldVersion > FIELD_VERSION_23_1:
+        if LMax == 0xFFFFFFFF:
+            LMax = 0
+        # The 0x40 options bit and al8i4[9] = 0x8000 are query-execute flags;
+        # setting them on a DDL/DML execute makes the server reject it
+        # (ORA-03137 kpoal8Check-5 [32768]).
+        if Type in ('select', 'fetch'):
+            Opt |= 0x40
+            if not ArrayDmlRowCounts and len(All8) > 9:
+                All8 = list(All8)
+                All8[9] = 0x8000
+
     All8Len = len(All8)
     All8Flag = 1 if All8Len > 0 else 0
     All8s = reduce( lambda x,y: x+y, [ encode_sb4(A) for A in All8])
@@ -1645,7 +1688,10 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
     else:
         raise Exception("Unhandled tokens combination", Bind, Batch, Def, Query)
 
-    Head = bytes([TTI_FUN, TTI_ALL8, Tseq]) + encode_sb4(Opt) + encode_sb4(Cursor) + bytes([QueryFlag]) + encode_sb4(QueryLen) + bytes([All8Flag]) + \
+    # 23ai (fv > 17, #89) writes one extra pointer byte between the sequence
+    # number and the options word (oracledb's _write_function_code at fv24).
+    FunHead = bytes([TTI_FUN, TTI_ALL8, Tseq, 0]) if FieldVersion > FIELD_VERSION_23_1 else bytes([TTI_FUN, TTI_ALL8, Tseq])
+    Head = FunHead + encode_sb4(Opt) + encode_sb4(Cursor) + bytes([QueryFlag]) + encode_sb4(QueryLen) + bytes([All8Flag]) + \
             encode_sb4(All8Len) + bytes([0,0]) + encode_sb4(LMax) + encode_sb4(Fetch) + encode_sb4(Max) + bytes([BindFlag]) + encode_sb4(BindLen) + \
             bytes([0,0,0,0,0]) + bytes([DefFlag]) + encode_sb4(DefLen)
 
@@ -1677,7 +1723,13 @@ def encode_dictionary_fetch(Dictionary: dict) -> bytes:
     Tseq = Dictionary['seq']
     Cursor = encode_sb4(Dictionary['cursor'])
     Fetch = encode_sb4(Dictionary['fetch'])
-    return bytes([TTI_FUN, TTI_FETCH, Tseq]) + Cursor + Fetch
+    # 23ai (fv > 17, #89): the same extra pointer byte after the sequence number
+    # the execute carries (oracledb's fv24 _write_function_code); without it the
+    # continuation FETCH desyncs and the server never replies (read timeout).
+    FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
+    Head = (bytes([TTI_FUN, TTI_FETCH, Tseq, 0]) if FieldVersion > FIELD_VERSION_23_1
+            else bytes([TTI_FUN, TTI_FETCH, Tseq]))
+    return Head + Cursor + Fetch
 
 # ---------------------------------------------------------------------------
 # Oracle 9i (pre-10g, field version 2) query/fetch — the TTI_ALL7 dialect.
