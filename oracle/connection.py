@@ -20,11 +20,13 @@ from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe, enc
                         encode_o7_bfile_close, decode_fv2_opened_locator)
 from oracle.exceptions import OperationalError
 from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
-                        FIELD_VERSION_12_1, FIELD_VERSION_21_1)
+                        FIELD_VERSION_12_1, FIELD_VERSION_21_1,
+                        encode_fast_auth, find_fast_auth_rpa)
 from oracle.tns_consts import (
     CONN_STATE_AUTH_NEGOTIATE, CONN_STATE_AUTHENTICATED,
     CONN_STATE_CONNECTED, CONN_STATE_DISCONNECTED, DictionaryType,
-    MAX_SEQ_NUM, TNS_ACCEPT, TNS_CONNECT, TNS_DATA, TNS_MARKER,
+    FIELD_VERSION_23_1, MAX_SEQ_NUM,
+    TNS_ACCEPT, TNS_CONNECT, TNS_DATA, TNS_MARKER,
     TNS_REDIRECT, TNS_REFUSE, TNS_RESEND, TTI_AUTH, TTI_DTY, TTI_PRO,
     TTI_OER, TTI_RPA, TTI_SESS, TTI_WRN,
 )
@@ -276,6 +278,16 @@ class OracleConnect:
                         case p if p == TTI_PRO:
                             logger.debug("handle_login: recv PRO")
                             self._negotiate_capabilities(Packet)
+                            if self.field_version > FIELD_VERSION_23_1:
+                                # 23ai (#89): the negotiated field version is
+                                # >= 18, where the legacy OSESSKEY is rejected
+                                # (ORA-03146). Switch to the fast-auth bundle —
+                                # the only path to fv >= 18, which is in turn the
+                                # prerequisite for column annotations. The PRO
+                                # exchange just done is harmlessly repeated inside
+                                # the bundle. Only reached when the caller opts in
+                                # with field_version >= 18 (default stays 21.1).
+                                return self._fast_auth_login()
                             Data = encode_dictionary(self._make_dict(DictionaryType.dty))
                             self.send(TNS_DATA, Data)
                         case p if p == TTI_DTY:
@@ -379,6 +391,29 @@ class OracleConnect:
                 case _:
                     logger.debug("handle_login: unexpected %s", Type)
                     return 1
+
+    def _fast_auth_login(self) -> int | None:
+        # 23ai fast-auth (#89): send PRO, DTY and OSESSKEY bundled in one
+        # FAST_AUTH packet (the field version was already negotiated to >= 18 in
+        # _negotiate_capabilities). The server replies with the three responses
+        # concatenated; pick out the auth-challenge RPA and hand it to the normal
+        # phase-two path (_handle_rpa), which finishes the login exactly as the
+        # legacy handshake does.
+        Pro = encode_dictionary(self._make_dict(DictionaryType.pro))
+        Dty = encode_dictionary(self._make_dict(DictionaryType.dty))
+        Sess = encode_dictionary(self._make_dict(DictionaryType.sess))
+        self.send(TNS_DATA, encode_fast_auth(Pro, Dty, Sess))
+        Received = self._next_data_packet()
+        if Received is False:
+            logger.debug("fast_auth: connection closed by peer")
+            return 1
+        (Type, Packet) = Received
+        Off = find_fast_auth_rpa(Packet) if Type == TNS_DATA else -1
+        if Off < 0:
+            logger.error("fast_auth: no auth challenge in bundled reply "
+                         "(type=%s, head=%r)", Type, Packet[:16])
+            raise OperationalError("fast-auth handshake failed")
+        return self._handle_rpa(Packet[Off + 1:])
 
     def _negotiate_capabilities(self, Packet: bytes) -> None:
         # Parse the server's PRO response and lower our field version to the

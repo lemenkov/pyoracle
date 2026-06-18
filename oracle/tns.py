@@ -45,8 +45,9 @@ from oracle.tns_consts import (
     AL16UTF16_CHARSET, AL32UTF8_CHARSET, CharsetDict, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_SID,
     FIELD_VERSION_9_2, FIELD_VERSION_10_2,
     FIELD_VERSION_11_2, FIELD_VERSION_12_1, FIELD_VERSION_12_2,
-    FIELD_VERSION_12_2_EXT1, FIELD_VERSION_19_1, FIELD_VERSION_21_1,
-    FIELD_VERSION_23_1,
+    FIELD_VERSION_12_2_EXT1, FIELD_VERSION_19_1, FIELD_VERSION_19_1_EXT1,
+    FIELD_VERSION_21_1, FIELD_VERSION_23_1,
+    TNS_MSG_TYPE_FAST_AUTH, TNS_SERVER_CONVERTS_CHARS,
     DictionaryType, TNS_DATA, TNS_REDIRECT, TTI_ALL7, TTI_ALL8, TTI_AUTH, TTI_BVC,
     TTI_DCB, TTI_DTY, TTI_FETCH, TTI_FOB, TTI_FUN, TTI_IOV, TTI_LOB,
     TTI_LOGOFF, TTI_OAC, TTI_OER, TTI_PFN, TTI_PRO, TTI_RPA, TTI_RXD,
@@ -1066,11 +1067,77 @@ def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
     # raw form to 21c makes it read the first username byte as a length and
     # desync — surfaces as ORA-03120 (two-task conversion: integer overflow).
     FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
-    UserField = bytes([len(User)]) + User if FieldVersion >= FIELD_VERSION_12_1 else User
 
-    Data = bytes([TTI_FUN, TTI_AUTH, Tseq, 1]) + encode_sb4(len(User)) + LogonMode + bytes([1]) + encode_sb4(2 + SpeedyKeyInd) + bytes([1, 1]) + UserField + AuthPass + PBKDF2 + AuthSess
+    # At fv >= 18 (fast-auth / 23ai, #89) phase two follows python-oracledb
+    # exactly: the username is NOT re-sent (has_user = 0, user length 0 — the
+    # session is already established by OSESSKEY), and the OAUTH carries the
+    # session-context pairs the server now requires. The legacy fv <= 17 path
+    # re-sends the username and the minimal AUTH_PASSWORD/SESSKEY/SPEEDY_KEY set;
+    # using either shape against the other desyncs the server's parse, surfacing
+    # as ORA-03120 (two-task conversion: integer overflow). RE'd from an
+    # oracledb-thin fv24 capture (docs/PROTOCOL.md §20).
+    if FieldVersion > FIELD_VERSION_23_1:
+        # Header replicates python-oracledb's fv24 phase two byte-for-byte: the
+        # has-user pointer byte is 0 followed by an extra 0x01, the logon mode
+        # gains 0x20000, and the username is still sent length-prefixed. RE'd from
+        # an oracledb-thin fv24 capture (docs/PROTOCOL.md §20).
+        Header = bytes([TTI_FUN, TTI_AUTH, Tseq, 0, 1])
+        Mode = encode_sb4((Role * 32) | (Prelim * 128) | 1 | 256 | 0x20000)
+        UserField = bytes([len(User)]) + User
+        SessionKvs = _auth_session_kvs(Dictionary)
+        NumPairs = 2 + SpeedyKeyInd + 5
+    else:
+        # 12c+ length-prefixes the username (write_bytes_with_length); 11g sends
+        # it raw (read via the UserLen field). Sending the raw form to 21c makes
+        # it read the first username byte as a length and desync (ORA-03120).
+        Header = bytes([TTI_FUN, TTI_AUTH, Tseq, 1])
+        Mode = LogonMode
+        UserField = bytes([len(User)]) + User if FieldVersion >= FIELD_VERSION_12_1 else User
+        SessionKvs = b""
+        NumPairs = 2 + SpeedyKeyInd
+
+    Data = Header + encode_sb4(len(User)) + Mode + bytes([1]) + encode_sb4(NumPairs) + bytes([1, 1]) + UserField + AuthPass + PBKDF2 + AuthSess + SessionKvs
 
     return (Data, ConnKey)
+
+
+# pyoracle's advertised client version, packed the way python-oracledb encodes
+# SESSION_CLIENT_VERSION: (major << 24) | (minor << 20) | (patch << 12). Keep the
+# string in sync with pyproject.toml. (4.0.1 -> 67112960 in the reference capture.)
+_CLIENT_VERSION = "1.1.0"
+
+
+def _packed_client_version(Version: str) -> int:
+    Parts = [int(p) for p in Version.split(".")[:3]] + [0, 0, 0]
+    return (Parts[0] << 24) | (Parts[1] << 20) | (Parts[2] << 12)
+
+
+def _local_tz_clause() -> bytes:
+    # "ALTER SESSION SET TIME_ZONE='±hh:mm'" + NUL, matching the reference client:
+    # the client pins the session time zone to its own UTC offset.
+    Offset = datetime.datetime.now().astimezone().utcoffset() or datetime.timedelta(0)
+    Total = int(Offset.total_seconds())
+    Sign = "+" if Total >= 0 else "-"
+    Hh, Mm = divmod(abs(Total) // 60, 60)
+    return (f"ALTER SESSION SET TIME_ZONE='{Sign}{Hh:02d}:{Mm:02d}'\x00"
+            .encode("utf-8"))
+
+
+def _auth_session_kvs(Dictionary: dict) -> bytes:
+    """The session-context key/value pairs the OAUTH phase two must carry at
+    fv >= 18 (#89): client charset, driver banner, packed version, the time-zone
+    ALTER SESSION, and the connect descriptor."""
+    Charset = struct.pack("<H", CharsetDict.get(Dictionary['req'], AL32UTF8_CHARSET))
+    return (
+        encode_kv(b"SESSION_CLIENT_CHARSET",
+                  str(int.from_bytes(Charset, "little")).encode("utf-8"))
+        + encode_kv(b"SESSION_CLIENT_DRIVER_NAME",
+                    f"pyoracle thn : {_CLIENT_VERSION}".encode("utf-8"))
+        + encode_kv(b"SESSION_CLIENT_VERSION",
+                    str(_packed_client_version(_CLIENT_VERSION)).encode("utf-8"))
+        + encode_kv(b"AUTH_ALTER_SESSION", _local_tz_clause(), 1)
+        + encode_kv(b"AUTH_CONNECT_STRING",
+                    encode_dictionary_description(Dictionary)))
 
 def encode_dictionary_chgpwd(Dictionary: dict) -> bytes:
     # Password change (#21). Sent on an already-authenticated session: a single
@@ -2232,7 +2299,11 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
     return Out
 
 def encode_dictionary_login(Dictionary: dict) -> bytes:
-    PacketVersion = bytes([1,57]) # Packet version number (313)
+    PacketVersion = bytes([1,57]) # Packet version number (313). Deliberately
+    # kept below the end-of-response era (>=319): at 313 a 23ai server still
+    # accepts the FAST_AUTH bundle (#89) but does NOT require end-of-response
+    # response framing, so pyoracle reaches field version 24 (and annotations)
+    # without reworking the whole response-parsing layer.
     # Lowest compatible version we accept. The server negotiates
     # min(its_max, our PacketVersion); it REFUSES the connect if that is below
     # our floor. Oracle 9i's max protocol version is 312, so a floor of 313
@@ -2263,6 +2334,45 @@ def encode_dictionary_pig(Dictionary: dict) -> bytes:
 
 def encode_dictionary_pro(Dictionary: dict) -> bytes:
     return bytes([TTI_PRO, 6, 5, 4, 3, 2, 1, 0]) + b"python" + bytes([0])
+
+
+def encode_fast_auth(Pro: bytes, Dty: bytes, Sess: bytes) -> bytes:
+    """Bundle the protocol, datatypes, and OSESSKEY (phase-one) messages into a
+    single 23ai FAST_AUTH message (#89). Sending the legacy three messages
+    separately is rejected with ORA-03146 once the client advertises a field
+    version >= 18, so a fast-auth-capable server (it sets TNS_ACCEPT_FLAG_FAST_AUTH
+    in the ACCEPT) gets this one packet instead. Layout reverse-engineered and
+    byte-validated against a python-oracledb fv24 capture (docs/PROTOCOL.md §20):
+
+        0x22 ver=1 SERVER_CONVERTS_CHARS flag2=0
+        <PRO message>
+        charset(ub2)=0  flag(ub1)=0  ncharset(ub2)=0
+        ttc_field_version byte = FIELD_VERSION_19_1_EXT1
+        <DTY message>            (its caps array still advertises the real fv)
+        <OSESSKEY message>
+    """
+    return (bytes([TNS_MSG_TYPE_FAST_AUTH, 1, TNS_SERVER_CONVERTS_CHARS, 0])
+            + Pro
+            + b"\x00\x00\x00\x00\x00"
+            + bytes([FIELD_VERSION_19_1_EXT1])
+            + Dty + Sess)
+
+
+def find_fast_auth_rpa(Body: bytes) -> int:
+    """Return the offset of the auth-challenge TTI_RPA inside a bundled fast-auth
+    response (PRO response + DTY response + RPA). The DTY datatype table contains
+    0x08 bytes, so a naive token scan mis-hits; instead accept the first TTI_RPA
+    whose decode yields the OSESSKEY challenge (a non-empty session key)."""
+    for Off in range(len(Body)):
+        if Body[Off] != TTI_RPA:
+            continue
+        try:
+            Result = decode_token_rpa(Body[Off + 1:], None)
+        except Exception:
+            continue
+        if Result[0] == TTI_SESS and Result[1]:
+            return Off
+    return -1
 
 def encode_dictionary_sess(Dictionary: dict) -> bytes:
     Tseq = Dictionary['seq']
