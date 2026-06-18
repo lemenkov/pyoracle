@@ -6,6 +6,7 @@
 
 from oracle.cursor import (
     _assign_out_binds,
+    _col_annotations,
     _column_description,
     _is_plsql,
     _resolve_parameters,
@@ -32,6 +33,7 @@ class AsyncCursor:
     def __init__(self, connection):
         self._connection = connection
         self._description: list[tuple] | None = None
+        self._annotations: list[dict | None] | None = None
         self._rows: list[list] = []
         self._row_index: int = 0
         self._rowcount: int = -1
@@ -48,6 +50,12 @@ class AsyncCursor:
     @property
     def description(self) -> list[tuple] | None:
         return self._description
+
+    @property
+    def annotations(self) -> list[dict | None] | None:
+        """Per-column SQL annotations (23ai) for the last SELECT, aligned with
+        `description`. See `oracle.cursor.Cursor.annotations`."""
+        return self._annotations
 
     @property
     def rowcount(self) -> int:
@@ -76,6 +84,7 @@ class AsyncCursor:
     async def close(self) -> None:
         self._closed = True
         self._description = None
+        self._annotations = None
         self._rows = []
         self._row_index = 0
 
@@ -156,6 +165,7 @@ class AsyncCursor:
             # SELECT result set: clear lastrowid (see sync Cursor._run).
             self._lastrowid = None
             self._description = [_column_description(C) for C in ColMeta]
+            self._annotations = [_col_annotations(C) for C in ColMeta]
             # Async LOB auto-resolve: same shape as sync `_resolve_lobs`
             # but each `LOB.aread()` is awaited individually. CLOB → str,
             # BLOB / BFILE → bytes, NULL LOBs stay as None (already
@@ -174,6 +184,7 @@ class AsyncCursor:
         else:
             self._lastrowid = LastRowid
             self._description = None
+            self._annotations = None
             self._rows = []
             self._rowcount = ServerRowCount if isinstance(ServerRowCount, int) else -1
 
@@ -186,6 +197,8 @@ class AsyncCursor:
         from oracle.lob import LOB
         Nested = AsyncCursor(self._connection)
         Nested._description = [_column_description(C)
+                               for C in Marker['row_format']]
+        Nested._annotations = [_col_annotations(C)
                                for C in Marker['row_format']]
         Resolved = []
         for Row in Rows:
