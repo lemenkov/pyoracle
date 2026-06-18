@@ -271,6 +271,21 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
         Dict21 = dict(Dict, field_version=FIELD_VERSION_21_1)
         self.assertEqual(encode_dictionary_dty(Dict21)[5], 3)
 
+    def test_fun_header_fv24_extra_pointer(self):
+        # 23ai (fv > 17, #89) appends one extra pointer byte after the sequence
+        # number on every function message; the legacy form (fv <= 17) does not.
+        from oracle.tns import (_fun_header, FIELD_VERSION_23_1,
+                                FIELD_VERSION_11_2, TTI_FUN)
+        from oracle.tns_consts import (FIELD_VERSION_23_4, TTI_ALL8, TTI_FETCH,
+                                       TTI_COMMIT)
+        for Token in (TTI_ALL8, TTI_FETCH, TTI_COMMIT):
+            self.assertEqual(_fun_header(Token, 5, FIELD_VERSION_11_2),
+                             bytes([TTI_FUN, Token, 5]))
+            self.assertEqual(_fun_header(Token, 5, FIELD_VERSION_23_1),
+                             bytes([TTI_FUN, Token, 5]))
+            self.assertEqual(_fun_header(Token, 5, FIELD_VERSION_23_4),
+                             bytes([TTI_FUN, Token, 5, 0]))
+
     @patch('os.getpid')
     @patch('socket.gethostname')
     def test_tns_sess_0(self, mock_gethostname, mock_getpid):

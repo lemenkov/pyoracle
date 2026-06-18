@@ -657,6 +657,33 @@ class TestDcbColumnFv17Domain(unittest.TestCase):
         self.assertEqual(rest, b"")          # the bug was leaving bytes here
 
 
+class TestDcbColumnFv24Annotations(unittest.TestCase):
+    """23ai (field version 24) per-column annotation map + vector descriptor
+    (#89). Fixture is the real per-column DCB bytes captured from a 23ai server
+    for a NUMBER column 'A' annotated with `Mykey 'Myval'` and a name-only
+    `Flag`. The annotation block (count sent twice around a pointer, each pair
+    trailed by a ub4 flags) and the trailing vector descriptor must be fully
+    consumed or the row stream desyncs."""
+
+    ANNOTATED = bytes.fromhex(
+        "020000810116000000000000000001010101014100000002800000000101100102"
+        "160105054d594b45590105054d7976616c00010404464c4147000000000000")
+
+    def _decode_at_fv24(self, data):
+        from oracle.tns import _decode_dcb_column, _DECODE_FIELD_VERSION
+        tok = _DECODE_FIELD_VERSION.set(24)
+        try:
+            return _decode_dcb_column(data)
+        finally:
+            _DECODE_FIELD_VERSION.reset(tok)
+
+    def test_annotations_decode_and_consume_all(self):
+        col, rest = self._decode_at_fv24(self.ANNOTATED)
+        self.assertEqual(col['data_type'], 2)   # NUMBER
+        self.assertEqual(col['annotations'], {b'MYKEY': b'Myval', b'FLAG': b''})
+        self.assertEqual(rest, b"")          # full per-column consume, no desync
+
+
 class TestFv2Describe(unittest.TestCase):
     """Oracle 9i (field version 2) describe-in-RPA decode (#97, PROTOCOL §19.1).
     Fixture is the real 0x62-describe RPA captured from a live 9.2.0.4 server for
