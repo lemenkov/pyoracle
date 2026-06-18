@@ -14,8 +14,10 @@ import unittest
 
 from oracle.dbobject import (
     COLLECTION_NESTED_TABLE, COLLECTION_VARRAY, DbObject, DbObjectType, DbRef,
-    ObjectImage, decode_collection_image, decode_object_image, type_name_to_tns,
+    ObjectImage, decode_collection_image, decode_object_image, decode_xmltype,
+    type_name_to_tns,
 )
+from oracle.exceptions import NotSupportedError
 from oracle.types import decode_value
 from oracle.tns import (
     _encode_object_bind_value, _read_object_column, encode_object_image,
@@ -289,6 +291,31 @@ class TestDbRef(unittest.TestCase):
 
     def test_repr_includes_type(self):
         self.assertIn("REF_OBJ", repr(DbRef(self._LOC, "REF_OBJ")))
+
+
+class TestXmlType(unittest.TestCase):
+    # XMLType images captured from live servers (#124).
+    # 21c column '<a><b>hi</b></a>' (pretty-printed): header + STRING flag 0x14.
+    _INLINE = bytes.fromhex("85011d0100000014") + b"<a>\n  <b>hi</b>\n</a>\n"
+    # XMLELEMENT("r", 42): STRING + SKIP_NEXT_4 (flag 0x100414), then a 4-byte
+    # skip, then the content.
+    _XMLELEMENT = bytes.fromhex("8501150100100414") + bytes(4) + b"<r>42</r>"
+    # 11g CLOB-stored column: LOB + legacy-storage bit (flag 0x1020011) -> error.
+    _LEGACY_11G = bytes.fromhex("8501080101020011")
+
+    def test_inline_string(self):
+        (is_lob, value) = decode_xmltype(self._INLINE)
+        self.assertFalse(is_lob)
+        self.assertEqual(value, "<a>\n  <b>hi</b>\n</a>\n")
+
+    def test_xmlelement_skip_next_4(self):
+        (is_lob, value) = decode_xmltype(self._XMLELEMENT)
+        self.assertFalse(is_lob)
+        self.assertEqual(value, "<r>42</r>")
+
+    def test_11g_legacy_storage_unsupported(self):
+        with self.assertRaises(NotSupportedError):
+            decode_xmltype(self._LEGACY_11G)
 
 
 class TestTypeNameMap(unittest.TestCase):

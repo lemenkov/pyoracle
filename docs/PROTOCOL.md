@@ -2247,3 +2247,41 @@ pairs and **`cursor.nextset()`** fetches each on demand (via the same
 describe body is shared with the `TTI_DCB` decoder (`_decode_describe_body`).
 Sync + async; verified on 21c / 23ai (multiple result sets, varying shapes);
 12c+ only (11g lacks `DBMS_SQL.RETURN_RESULT`).
+
+## 24. XMLType (#124)
+
+An XMLType column is **TNS type 109 with no user object type** — the same row
+framing as a SQL object (§21.2), but the packed image is decoded by a
+specialised walk (python-oracledb `read_xmltype`) instead of the attribute walk.
+pyoracle recognises it by the column's described type identity (`SYS.XMLTYPE`,
+§21.1) and short-circuits the object describe.
+
+Image (after the shared header, §21.3):
+
+```
+ub1   XML version                       (skip)
+ub4   xml_flag
+[ if xml_flag & 0x100000 (SKIP_NEXT_4): 4 bytes skipped ]
+<content>
+```
+
+- `xml_flag & 0x0004` (**STRING**) → the content is the document text (decoded
+  with the DB charset). This covers inline documents and SQL-built XML
+  (`XMLELEMENT`/`XMLAGG`, which set the SKIP_NEXT_4 bit) on every tier.
+- `xml_flag & 0x0001` (**LOB**) → the content is a CLOB locator; pyoracle reads
+  it through the LOB path (§14) and returns the string. This is the large-document
+  form on 12c+, and how 10g stores XMLType columns.
+
+**Bind** needs no special framing: a plain string bind works, either through the
+`XMLTYPE(:1)` constructor or directly into an XMLType column (the server
+converts). Verified on 10g/11g/21c/23ai. (A document over the ~32 KB regular-bind
+limit hits the usual streamed-LONG ORA-01461 — the general large-bind limit, not
+XMLType-specific.)
+
+**Limitation:** Oracle **11g** XMLType *columns* are CLOB-stored with a complex
+binary image whose locator pyoracle can't read (a reference-less case —
+python-oracledb requires 12.1+). That image sets a distinguishing flag bit
+(`0x01000000`, never set on the working 10g / 12c+ forms), so pyoracle raises a
+clear `NotSupportedError` for it rather than returning corrupt data; cast such a
+column in SQL (`XMLTYPE.getclobval(col)` / `XMLSERIALIZE`) to read it. Inline XML
+(`XMLELEMENT`, etc.) on 11g uses the STRING flag and works. Sync + async.

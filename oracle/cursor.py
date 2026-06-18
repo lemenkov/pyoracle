@@ -8,7 +8,9 @@ from oracle.exceptions import (
     DatabaseError, InterfaceError, NotSupportedError, ProgrammingError,
     from_ora_code,
 )
-from oracle.tns_consts import AL32UTF8_CHARSET, FIELD_VERSION_12_1, UTF8_CHARSET
+from oracle.tns_consts import (
+    AL32UTF8_CHARSET, FIELD_VERSION_12_1, TNS_TYPE_CLOB, UTF8_CHARSET,
+)
 
 
 # `:name` placeholder. Names are case-insensitive and follow normal SQL
@@ -545,10 +547,24 @@ def _resolve_objects(Connection, Row: list) -> list:
     # known at decode time); fetch the layout for the type now (cached on the
     # connection) and walk the image. NULL objects already came back as None.
     from oracle.dbobject import (ObjectImage, DbObject, decode_object_image,
-                                 decode_collection_image)
+                                 decode_collection_image, decode_xmltype)
+    from oracle.lob import LOB
     Out = list(Row)
     for I, Val in enumerate(Out):
         if isinstance(Val, ObjectImage):
+            if Val.type_name == 'XMLTYPE':
+                # XMLType (#124): type 109 with no user object type. Decode the
+                # image directly (no describe round trip) -> str, or read the
+                # CLOB locator for a large document.
+                (IsLob, XmlVal) = decode_xmltype(
+                    Val.image, Val.charset or AL32UTF8_CHARSET)
+                if IsLob:
+                    Lob = LOB(TNS_TYPE_CLOB, XmlVal)
+                    Lob._connection = Connection
+                    Out[I] = Lob.read()
+                else:
+                    Out[I] = XmlVal
+                continue
             Typ = Connection._describe_object_type(Val.type_schema, Val.type_name)
             Charset = Val.charset or AL32UTF8_CHARSET
             if Typ is not None and Typ.is_collection:
