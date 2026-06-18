@@ -134,7 +134,7 @@ speaks to every supported server:
 
 | Oracle Database | Status | Notes |
 | --- | --- | --- |
-| 23ai | ✅ supported | JSON / OSON, native `BOOLEAN`, `VECTOR` (dense + sparse) |
+| 23ai | ✅ supported | fast-auth login at field version 24; JSON / OSON, native `BOOLEAN`, `VECTOR` (dense + sparse), column annotations |
 | 21c | ✅ supported | |
 | 19c · 18c · 12c | ✅ supported | same 12c+ wire protocol as 21c |
 | 11g (11.2) | ✅ supported | primary reference tier |
@@ -155,6 +155,7 @@ live 11g, 21c and 23ai; 10g and 9i are validated locally, and 12c–19c share th
 | **LONG / LONG RAW** | ✅ |
 | **LOBs** — CLOB, NCLOB, BLOB, BFILE read; large `str` / `bytes` → CLOB / BLOB binds (streamed past the ~32 KiB inline limit) | ✅ |
 | **23ai types** — JSON / OSON, `BOOLEAN`, `VECTOR` (dense + sparse) | ✅ |
+| **23ai column annotations** — `cursor.annotations` (per-column `{name: value}` maps), via fast-auth at field version 24 | ✅ |
 | **PL/SQL** — anonymous blocks, `callproc`, `callfunc`, OUT / IN OUT binds, REF CURSOR OUT | ✅ |
 | **Transactions** — commit, rollback, autocommit, ping | ✅ |
 | **Array DML** — `executemany`, `getbatcherrors`, `getarraydmlrowcounts` (12.1+) | ✅ |
