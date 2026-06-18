@@ -1178,7 +1178,6 @@ def encode_dictionary_chgpwd(Dictionary: dict) -> bytes:
     CurPass = Dictionary['auth']['old_password'].encode('utf-8')
     NewPass = Dictionary['auth']['new_password'].encode('utf-8')
 
-    LogonMode = encode_sb4(0x102)
     AuthPass = encode_kv(
         b"AUTH_PASSWORD",
         encrypt_password(ConnKey, CurPass).hex().upper().encode('utf-8'))
@@ -1187,9 +1186,18 @@ def encode_dictionary_chgpwd(Dictionary: dict) -> bytes:
         encrypt_password(ConnKey, NewPass).hex().upper().encode('utf-8'))
 
     FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
+    # fv >= 18 (23ai, #89) needs the same header shape as the login phase two:
+    # the extra leading pointer byte and the 0x20000 logon-mode bit (else the
+    # server rejects the change with ORA-03120). See encode_dictionary_auth.
+    if FieldVersion > FIELD_VERSION_23_1:
+        Header = bytes([TTI_FUN, TTI_AUTH, Tseq, 0, 1])
+        LogonMode = encode_sb4(0x102 | 0x20000)
+    else:
+        Header = bytes([TTI_FUN, TTI_AUTH, Tseq, 1])
+        LogonMode = encode_sb4(0x102)
     UserField = bytes([len(User)]) + User if FieldVersion >= FIELD_VERSION_12_1 else User
 
-    return bytes([TTI_FUN, TTI_AUTH, Tseq, 1]) + encode_sb4(len(User)) + \
+    return Header + encode_sb4(len(User)) + \
         LogonMode + bytes([1]) + encode_sb4(2) + bytes([1, 1]) + UserField + \
         AuthPass + AuthNewPass
 
