@@ -2319,3 +2319,38 @@ cancellation should work against an Oracle reachable over a path that carries
 urgent data. The async OOB send reaches the real socket under the asyncio
 `TransportSocket` wrapper; where it can't, the break is a best-effort no-op.
 Sync + async.
+
+## 26. PL/SQL associative-array binds (#122)
+
+`cursor.arrayvar(type, value_or_numelements)` binds a PL/SQL `TABLE OF <scalar>
+INDEX BY PLS_INTEGER` (associative array) parameter as a bulk array — IN, OUT,
+or IN OUT. It returns a `Var` flagged `is_array` with a declared capacity
+(`num_elements`); `getvalue()` yields a Python list. The array Var flows through
+the normal PL/SQL-block OUT-bind path (the IOV reply, § OUT binds).
+
+Versus a scalar bind:
+
+- **OAC** (bind descriptor): the flag byte gains **`TNS_BIND_ARRAY` (0x40)** —
+  `0x41` on the 12c+ form — and the **max-num-elements** field (0 for a scalar)
+  carries `num_elements`.
+- **Value** (input row): `ub4 count` then `count` element values (the normal
+  per-type encoding); `count` = 0 for a pure-OUT array.
+- **OUT/IN OUT return** (IOV RXD): `ub4 count` then `count` × (value +
+  indicator) — decoded into the Var's list by element type.
+
+```python
+arr = cur.arrayvar(int, [1, 2, 3])
+cur.callproc('pkg.double_all', [arr])      # IN OUT
+arr.getvalue()                              # [2, 4, 6]
+names = cur.arrayvar(str, 10)
+cur.callproc('pkg.make_names', [3, names])  # OUT -> ['name1', 'name2', 'name3']
+```
+
+Sync + async. **12c+ only:** there is no python-oracledb reference for a pre-12c
+array bind OAC (thin requires 12.1+), and the pre-12c short OAC doesn't signal
+array-ness — the server then mis-types the argument (PLS-00306). So pyoracle
+gates array binds on field version ≥ 12.1 with a clear `NotSupportedError`
+(alongside the object-bind gate, §21.5), raised before anything goes on the
+wire. Verified on 21c/23ai (IN / OUT / IN OUT, NUMBER + VARCHAR2 elements);
+clean gate on 10g/11g. Scalar element types only (nested object/collection
+elements are out of scope).

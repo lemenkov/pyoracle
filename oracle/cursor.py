@@ -229,6 +229,26 @@ class Cursor:
         """
         return Var(typ, size)
 
+    def arrayvar(self, typ, value_or_numelements, size=None) -> Var:
+        """Create a bulk-array bind for a PL/SQL associative array (index-by
+        table) parameter (#122, oracledb-compatible).
+
+        `typ` is the element type. The second argument is either a list of
+        initial element values or an int giving the maximum number of elements.
+        Pass the returned `Var` for an IN / OUT / IN OUT array argument and read
+        the result list with `getvalue()`.
+        """
+        if isinstance(value_or_numelements, int):
+            num = value_or_numelements
+            values = []
+        else:
+            values = list(value_or_numelements)
+            num = len(values)
+        var = Var(typ, size, is_array=True, num_elements=max(num, 1))
+        var._value = values
+        var.has_value = bool(values)
+        return var
+
     def callproc(self, name: str, parameters=None) -> list:
         """Call a stored procedure. `parameters` is a positional list of plain
         values (IN) and `Var` objects (OUT / IN OUT). Returns the parameter
@@ -448,11 +468,15 @@ def _assign_out_binds(Bind, Result) -> list:
         if Pos >= len(Bind) or not isinstance(Bind[Pos], Var):
             continue
         Variable = Bind[Pos]
+        Column = {'data_type': Variable.dbtype.tns_type, 'charset': UTF8_CHARSET}
         if isinstance(Value, dict) and Value.get('_refcursor'):
             RefCursors.append((Variable, Value))
+        elif isinstance(Value, dict) and Value.get('_array'):
+            # Associative-array OUT (#122): decode each element by the Var's
+            # type into a Python list.
+            Variable._value = [decode_value(Column, V if V else None)
+                               for V in Value['values']]
         else:
-            Column = {'data_type': Variable.dbtype.tns_type,
-                      'charset': UTF8_CHARSET}
             Variable._value = decode_value(Column, Value if Value else None)
     return RefCursors
 
@@ -525,20 +549,26 @@ def _resolve_lobs(Connection, Row: list) -> list:
 
 
 def _check_object_bind_support(Connection, Bind, Batch=None) -> None:
-    # Binding a SQL OBJECT (ADT) value needs the 12c+ bind-OAC layout (#116);
-    # pre-12c servers reject it with a fatal ORA-03106 that desyncs the
-    # connection, so refuse it up front with a clear error. (Object *decode*
-    # works on all tiers — only the bind is 12c+.)
+    # Some binds need the 12c+ bind-OAC layout and have no pre-12c reference
+    # (python-oracledb is 12.1+): a SQL OBJECT (ADT) value (#116; pre-12c
+    # rejects it with a fatal ORA-03106 that desyncs the connection) and a
+    # PL/SQL associative-array bind (#122; pre-12c mis-types it, PLS-00306).
+    # Refuse both up front on pre-12c with a clear error. (Object/collection
+    # *decode* works on all tiers — only these binds are 12c+.)
     from oracle.dbobject import DbObject
     if getattr(Connection, 'field_version', 0) >= FIELD_VERSION_12_1:
         return
     Rows = [Bind] + (Batch or []) if Bind else (Batch or [])
     for Row in Rows:
-        if isinstance(Row, DbObject) or (
-                isinstance(Row, (list, tuple))
-                and any(isinstance(V, DbObject) for V in Row)):
-            raise NotSupportedError(
-                "binding a SQL OBJECT value requires an Oracle 12.1+ server")
+        Values = Row if isinstance(Row, (list, tuple)) else [Row]
+        for V in Values:
+            if isinstance(V, DbObject):
+                raise NotSupportedError(
+                    "binding a SQL OBJECT value requires an Oracle 12.1+ server")
+            if isinstance(V, Var) and getattr(V, 'is_array', False):
+                raise NotSupportedError(
+                    "binding a PL/SQL associative array (arrayvar) requires an "
+                    "Oracle 12.1+ server")
 
 
 def _resolve_objects(Connection, Row: list) -> list:

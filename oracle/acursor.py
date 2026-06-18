@@ -277,6 +277,19 @@ class AsyncCursor:
         `oracle.cursor.Cursor.var`."""
         return Var(typ, size)
 
+    def arrayvar(self, typ, value_or_numelements, size=None) -> Var:
+        """Bulk-array bind for a PL/SQL associative array (#122). See
+        `oracle.cursor.Cursor.arrayvar`."""
+        if isinstance(value_or_numelements, int):
+            num, values = value_or_numelements, []
+        else:
+            values = list(value_or_numelements)
+            num = len(values)
+        var = Var(typ, size, is_array=True, num_elements=max(num, 1))
+        var._value = values
+        var.has_value = bool(values)
+        return var
+
     async def callproc(self, name: str, parameters=None) -> list:
         """Call a stored procedure. `parameters` is a positional list of plain
         values (IN) and `Var` objects (OUT / IN OUT). Returns the list with
