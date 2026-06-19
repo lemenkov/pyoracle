@@ -14,6 +14,7 @@ from oracle.tns_consts import (
     TPC_END_NORMAL, TPC_END_SUSPEND,
 )
 from oracle.dbobject import DbObject, DbObjectType, DbRef
+from oracle.aq import Queue, MessageProperties, EnqOptions, DeqOptions
 from oracle.datatypes import (
     CURSOR, DB_TYPE_BINARY_DOUBLE, DB_TYPE_BINARY_FLOAT, DB_TYPE_CURSOR,
     DB_TYPE_DATE, DB_TYPE_INTERVAL_DS, DB_TYPE_INTERVAL_YM, DB_TYPE_NUMBER,
@@ -83,6 +84,7 @@ __all__ = [
     "OracleConnect", "AsyncOracleConnect", "Pool", "AsyncPool",
     "BinaryFloat", "BinaryDouble", "IntervalYM", "JSON", "SparseVector", "Var",
     "DbObject", "DbObjectType", "DbRef", "Xid",
+    "Queue", "MessageProperties", "EnqOptions", "DeqOptions",
     "TPC_BEGIN_NEW", "TPC_BEGIN_JOIN", "TPC_BEGIN_RESUME", "TPC_BEGIN_PROMOTE",
     "TPC_END_NORMAL", "TPC_END_SUSPEND",
     "NUMBER", "STRING", "DB_TYPE_NUMBER", "DB_TYPE_VARCHAR",

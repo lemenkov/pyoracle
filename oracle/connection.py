@@ -10,6 +10,7 @@ from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
 from oracle.tns import set_decode_dml_rowcounts, set_decode_return_binds
 from oracle.tns import encode_tpc_switch, encode_tpc_change_state
+from oracle.tns import encode_aq_enq, encode_aq_deq, encode_aq_array
 from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe, encode_o7_exec,
                         encode_o7_close, encode_o7_block, encode_tokens_rxd,
                         decode_fv2_describe,
@@ -21,7 +22,7 @@ from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe, enc
                         encode_o7_bfile_close, decode_fv2_opened_locator)
 from oracle.exceptions import OperationalError
 from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
-                        FIELD_VERSION_12_1,
+                        FIELD_VERSION_12_1, FIELD_VERSION_21_1,
                         encode_fast_auth, find_fast_auth_rpa)
 from oracle.tns_consts import (
     CONN_STATE_AUTH_NEGOTIATE, CONN_STATE_AUTHENTICATED,
@@ -104,6 +105,196 @@ def _decode_tpc_context(Packet: bytes) -> bytes:
     (_AppValue, Rest) = decode_ub4(Rest)
     (CtxLen, Rest) = decode_ub4(Rest)              # context length (ub2)
     return bytes(Rest[:CtxLen])
+
+
+def _decode_aq_enq(Packet: bytes) -> bytes:
+    # AQ enqueue return: the RPA token then the 16-byte message id (the trailing
+    # ub2 extensions length is ignored). #128.
+    from oracle.tns_consts import TNS_AQ_MESSAGE_ID_LENGTH
+    if not Packet:
+        raise OperationalError("empty AQ enqueue response")
+    if Packet[0] != TTI_RPA:
+        _aq_raise(Packet)
+    return bytes(Packet[1:1 + TNS_AQ_MESSAGE_ID_LENGTH])
+
+
+import re as _re
+_AQ_ORA_RE = _re.compile(rb'ORA-(\d{5}):\s*([^\x00\n]*)')
+
+
+def _aq_error_info(Packet: bytes):
+    # Pull the ORA code + message out of an AQ error (TTI_OER) response. The OER
+    # token layout varies a little across tiers, so the embedded "ORA-NNNNN:"
+    # text is the reliable source.
+    Match = _AQ_ORA_RE.search(bytes(Packet))
+    if Match:
+        return (int(Match.group(1)),
+                Match.group(2).rstrip().decode('utf-8', 'replace'))
+    return (0, None)
+
+
+def _aq_oer_code(Packet: bytes) -> int:
+    return _aq_error_info(Packet)[0]
+
+
+def _aq_raise(Packet: bytes) -> None:
+    from oracle.exceptions import from_ora_code
+    (Code, Msg) = _aq_error_info(Packet)
+    if Code:
+        raise from_ora_code(Code)(Msg or f"ORA-{Code:05d}", code=Code)
+    raise DatabaseError(f"unexpected AQ response 0x{Packet[:1].hex()}")
+
+
+def _aq_str(Rest: bytes) -> tuple:
+    # read_bytes_with_length / read_str_with_length: a ub4 count, then (if
+    # non-zero) the chunked data. Empty/null normalised to b"".
+    from oracle.tns import _read_str_with_length
+    (Value, Rest) = _read_str_with_length(Rest)
+    return (b"" if isinstance(Value, list) else bytes(Value), Rest)
+
+
+def _aq_raw(Rest: bytes) -> tuple:
+    # read_raw_bytes_and_length / read_bytes(): a single length byte then the
+    # data (0xFE = chunked). Used for the enqueue-time date and the payload image.
+    from oracle.tns import decode_dalc
+    (Value, Rest) = decode_dalc(Rest)
+    return (b"" if isinstance(Value, list) else bytes(Value), Rest)
+
+
+def _decode_aq_payload(Rest: bytes, queue):
+    # Read the message payload (#128). For RAW the image is a length-prefixed
+    # blob whose first 4 bytes are a header; for an object queue it's a packed
+    # DbObject; for JSON it's OSON. Returns (payload, remaining_bytes).
+    from oracle.tns import decode_ub4
+    if queue.payload_type is not None:
+        from oracle.tns import _read_object_column
+        from oracle.dbobject import (DbObject, decode_object_image,
+                                     decode_collection_image)
+        from oracle.tns_consts import AL32UTF8_CHARSET
+        (Img, Rest) = _read_object_column(Rest, {})
+        if Img is None:
+            return (None, Rest)
+        Typ = queue.payload_type
+        if Typ.is_collection:
+            Elements = decode_collection_image(Img.image, Typ.element or {},
+                                               AL32UTF8_CHARSET)
+            return (DbObject(Typ.name, elements=Elements, dbtype=Typ), Rest)
+        Attrs = decode_object_image(Img.image, Typ.attrs, AL32UTF8_CHARSET)
+        return (DbObject(Typ.name, Attrs, dbtype=Typ), Rest)
+    (_toid, Rest) = _aq_str(Rest)
+    (_oid, Rest) = _aq_str(Rest)
+    (_snapshot, Rest) = _aq_str(Rest)
+    (_version, Rest) = decode_ub4(Rest)            # skip_ub2 version no
+    (image_length, Rest) = decode_ub4(Rest)
+    (_flags, Rest) = decode_ub4(Rest)              # skip_ub2 flags
+    if image_length > 0:
+        (Image, Rest) = _aq_raw(Rest)
+        Payload = bytes(Image[4:image_length])
+        if queue.is_json:
+            from oracle.oson import decode_oson
+            return (decode_oson(Payload), Rest)
+        return (Payload, Rest)
+    return (None if queue.is_json else b"", Rest)
+
+
+def _decode_aq_deq(Packet: bytes, queue):
+    # AQ dequeue return parameters (#128): RPA token then, when a message is
+    # present, the message properties, recipients, payload, and 16-byte msgid.
+    # An empty queue comes back as ORA-25228 (no messages) -> None. RE'd from a
+    # live 21c capture; mirrors python-oracledb AqDeqMessage.
+    from oracle.tns import decode_ub4
+    from oracle.aq import MessageProperties
+    if not Packet:
+        return None
+    if Packet[0] == TTI_OER:
+        if _aq_oer_code(Packet) in (25228, 25254):     # no message available
+            return None
+        _aq_raise(Packet)
+    Rest = Packet[1:]
+    (NumBytes, Rest) = decode_ub4(Rest)
+    if NumBytes == 0:
+        return None
+    Props = MessageProperties()
+    Rest = _parse_aq_msg_props(Rest, Props, queue._connection.field_version)
+    (_NumRecipients, Rest) = decode_ub4(Rest)
+    (Props.payload, Rest) = _decode_aq_payload(Rest, queue)
+    Props.msgid = bytes(Rest[:16])
+    return Props
+
+
+def _parse_aq_msg_props(Rest: bytes, Props, field_version: int) -> bytes:
+    # The message-property fields shared by single dequeue and the array path
+    # (#128): priority/delay/expiration, correlation, attempts, exception queue,
+    # state, enqueue date, txn id, the keyword extensions, and the trailing
+    # user-property/cscn/dscn/flags (+ shard at fv >= 21.1).
+    from oracle.tns import decode_ub4
+    (Props.priority, Rest) = decode_ub4(Rest)
+    (Props.delay, Rest) = decode_ub4(Rest)
+    (Props.expiration, Rest) = decode_ub4(Rest)
+    (Corr, Rest) = _aq_str(Rest)
+    Props.correlation = Corr.decode('utf-8') if Corr else None
+    (Props.num_attempts, Rest) = decode_ub4(Rest)
+    (ExQ, Rest) = _aq_str(Rest)
+    Props.exceptionq = ExQ.decode('utf-8') if ExQ else None
+    (Props.state, Rest) = decode_ub4(Rest)
+    (DateFlag, Rest) = decode_ub4(Rest)                 # enqueue time
+    if DateFlag > 0:
+        (_DateBytes, Rest) = _aq_raw(Rest)
+    (Props.enq_txn_id, Rest) = _aq_str(Rest)
+    (NumExt, Rest) = decode_ub4(Rest)                   # extensions
+    if NumExt > 0:
+        Rest = Rest[1:]                                 # skip_ub1
+        for _ in range(NumExt):
+            (_Text, Rest) = _aq_str(Rest)
+            (_Bin, Rest) = _aq_str(Rest)
+            (_Keyword, Rest) = decode_ub4(Rest)
+    (_UserProps, Rest) = decode_ub4(Rest)
+    (_Csn, Rest) = decode_ub4(Rest)
+    (_Dsn, Rest) = decode_ub4(Rest)
+    (_Flags, Rest) = decode_ub4(Rest)
+    if field_version >= FIELD_VERSION_21_1:
+        (_Shard, Rest) = decode_ub4(Rest)
+    return Rest
+
+
+def _decode_aq_array(Packet: bytes, queue, operation: int, props_list: list):
+    # AQ array enqueue/dequeue return (#128). For enqueue the response carries a
+    # block of concatenated 16-byte message ids assigned back to props_list; for
+    # dequeue it carries num_iters messages (properties + payload + msgid). An
+    # empty queue comes back as ORA-25228 -> []. Mirrors AqArrayMessage.
+    from oracle.tns import decode_ub4
+    from oracle.tns_consts import TNS_AQ_ARRAY_ENQ
+    from oracle.aq import MessageProperties
+    if not Packet:
+        return []
+    if Packet[0] == TTI_OER:
+        if _aq_oer_code(Packet) in (25228, 25254):
+            return []
+        _aq_raise(Packet)
+    Rest = Packet[1:]
+    FV = queue._connection.field_version
+    (NumIters, Rest) = decode_ub4(Rest)
+    Out = []
+    for I in range(NumIters):
+        Props = MessageProperties()
+        (Flag, Rest) = decode_ub4(Rest)                 # ub2 props-present
+        if Flag > 0:
+            Rest = Rest[1:]                             # skip_ub1
+            Rest = _parse_aq_msg_props(Rest, Props, FV)
+        (_NumRecipients, Rest) = decode_ub4(Rest)
+        (PayFlag, Rest) = decode_ub4(Rest)              # ub2 payload-present
+        if PayFlag > 0:
+            (Props.payload, Rest) = _decode_aq_payload(Rest, queue)
+        (MsgId, Rest) = _aq_str(Rest)
+        if operation == TNS_AQ_ARRAY_ENQ:
+            for J, P in enumerate(props_list):
+                P.msgid = bytes(MsgId[J * 16:(J + 1) * 16])
+        else:
+            Props.msgid = bytes(MsgId)
+        (ExtLen, Rest) = decode_ub4(Rest)               # ub2 extensions length
+        (_Ack, Rest) = decode_ub4(Rest)                 # ub2 output ack
+        Out.append(Props)
+    return props_list if operation == TNS_AQ_ARRAY_ENQ else Out
 
 
 def _decode_tpc_state(Packet: bytes) -> int:
@@ -1492,6 +1683,65 @@ class OracleConnect:
         self._transaction_context = None
         if Result != TNS_TPC_TXN_STATE_ABORTED:
             raise DatabaseError(f"unexpected TPC rollback state {Result}")
+
+    # --- Advanced Queuing (#128) ---
+
+    def queue(self, name: str, payload_type=None):
+        """Return a Queue handle. payload_type is a DbObjectType (object-payload
+        queue) or oracle.JSON (JSON-payload queue); omit it for a RAW queue."""
+        from oracle.aq import Queue
+        from oracle.datatypes import JSON as _JSON
+        from oracle.exceptions import NotSupportedError
+        if self.field_version < FIELD_VERSION_12_1:
+            raise NotSupportedError(
+                "Advanced Queuing requires an Oracle 12.1+ server")
+        if payload_type is _JSON:
+            raise NotSupportedError(
+                "JSON-payload AQ queues are not yet supported (the OSON-over-AQ "
+                "framing needs a protocol capture); RAW and object payloads work")
+        return Queue(self, name, payload_type=payload_type)
+
+    def msgproperties(self, payload=None, correlation=None, delay=0,
+                      expiration=-1, priority=0, exceptionq=None,
+                      recipients=None):
+        """Build a MessageProperties for enqueue."""
+        from oracle.aq import MessageProperties
+        return MessageProperties(payload=payload, correlation=correlation,
+                                 delay=delay, expiration=expiration,
+                                 priority=priority, exceptionq=exceptionq,
+                                 recipients=recipients)
+
+    def _aq_request(self, Data: bytes) -> bytes:
+        self.send(TNS_DATA, Data)
+        Received = self._next_data_packet(b"", b"")
+        if Received is False:
+            raise OperationalError("connection closed during AQ operation")
+        (_, Packet) = Received
+        return Packet
+
+    def _aq_enq_one(self, queue, props) -> None:
+        Data = encode_aq_enq(self._next_seq(), self.field_version, queue, props)
+        props.msgid = _decode_aq_enq(self._aq_request(Data))
+
+    def _aq_deq_one(self, queue):
+        Data = encode_aq_deq(self._next_seq(), self.field_version, queue)
+        return _decode_aq_deq(self._aq_request(Data), queue)
+
+    def _aq_enq_many(self, queue, props_list) -> None:
+        from oracle.tns_consts import TNS_AQ_ARRAY_ENQ
+        Data = encode_aq_array(self._next_seq(), self.field_version, queue,
+                               TNS_AQ_ARRAY_ENQ, props_list, len(props_list))
+        _decode_aq_array(self._aq_request(Data), queue, TNS_AQ_ARRAY_ENQ,
+                         props_list)
+
+    def _aq_deq_many(self, queue, max_messages):
+        from oracle.aq import MessageProperties
+        from oracle.tns_consts import TNS_AQ_ARRAY_DEQ
+        Placeholders = [MessageProperties() for _ in range(max_messages)]
+        Data = encode_aq_array(self._next_seq(), self.field_version, queue,
+                               TNS_AQ_ARRAY_DEQ, Placeholders, max_messages)
+        return _decode_aq_array(self._aq_request(Data), queue,
+                                TNS_AQ_ARRAY_DEQ, Placeholders)
 
     @property
     def call_timeout(self) -> int:
