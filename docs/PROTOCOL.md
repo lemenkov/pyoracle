@@ -2286,39 +2286,37 @@ clear `NotSupportedError` for it rather than returning corrupt data; cast such a
 column in SQL (`XMLTYPE.getclobval(col)` / `XMLSERIALIZE`) to read it. Inline XML
 (`XMLELEMENT`, etc.) on 11g uses the STRING flag and works. Sync + async.
 
-## 25. Query cancellation / call_timeout (#123)
+## 25. Query cancellation / call_timeout (#123, #144)
 
 `connection.cancel()` interrupts the call currently executing on the connection,
 and `connection.call_timeout` (milliseconds, 0 = none) does the same
-automatically when a call runs too long. Both work by sending an **out-of-band
-break**.
+automatically when a call runs too long. Both send an **in-band INTERRUPT marker
+break** (#144, superseding the OOB-only break originally shipped in #123).
 
-- **Break**: `socket.send(b"!", MSG_OOB)` — TCP urgent data, so the server's
-  attention handler sees it *while* the call is running (an in-band marker would
-  only be read after the call returns, and could linger and desync the next
-  call, so pyoracle sends **OOB only**). The server interrupts the call and
-  replies with break/reset markers followed by `ORA-01013` (user requested
-  cancel); the reader drains the markers via the existing reset handshake
-  (§ the #45 break/reset machinery) and surfaces the error.
+- **Break**: a `TNS_MARKER` packet with body `01 00 03` (INTERRUPT) written
+  straight to the socket. The server's two-task layer polls for it *while* the
+  call is running, interrupts the call, and replies with break/reset markers
+  followed by `ORA-01013` (user requested cancel); the reader drains the markers
+  via the existing reset handshake (the #45 break/reset machinery) and surfaces
+  the error. The connection resyncs and is immediately reusable.
+- **Why in-band, not OOB.** python-oracledb sends an OOB urgent byte
+  (`send(b"!", MSG_OOB)`) *only* when the server advertises attention support
+  (`TNS_GSO_CAN_RECV_ATTENTION`) and the path carries TCP urgent data, falling
+  back to the in-band INTERRUPT marker otherwise. #123 sent OOB only — but a
+  default server reached over a rootless-podman port-forward honours neither, so
+  the break silently did nothing. The in-band marker is an ordinary packet, so
+  it works on every tier and over any path; pyoracle uses it unconditionally.
 - **call_timeout**: a timer (`threading.Timer` sync, `loop.call_later` async)
   fires the break after the timeout; the resulting `ORA-01013` is remapped to a
-  call-timeout `OperationalError` (ORA-03136-style). The timer is disarmed as
-  soon as the call completes; a dropped/late break leaves no protocol residue
-  (OOB only), so a normal call with `call_timeout` armed is unaffected.
-- Marker packet form (in-band, used by the server and the reset handshake): a
-  `TNS_MARKER` packet body `01 00 <type>` where type is BREAK=1, RESET=2,
-  INTERRUPT=3 (pyoracle replies RESET=2 to a server break).
+  call-timeout `OperationalError`. The timer is disarmed as soon as the call
+  completes, so a normal call with `call_timeout` armed is unaffected.
+- Marker packet form `01 00 <type>`: BREAK=1, RESET=2, INTERRUPT=3 (pyoracle
+  sends INTERRUPT to cancel and replies RESET=2 to a server break).
 
-**Unverified locally / caveat.** The break depends on the network path carrying
-TCP urgent data. The container testbeds (rootless-podman port-forwarding) do
-**not** deliver OOB to the server, so interruption could not be verified here —
-a `DBMS_SESSION.SLEEP` was not interrupted. The client-side wiring (break sent
-OOB, state latching, the call_timeout timer and remap, no effect on normal
-calls) is implemented per python-oracledb and tested structurally; end-to-end
-cancellation should work against an Oracle reachable over a path that carries
-urgent data. The async OOB send reaches the real socket under the asyncio
-`TransportSocket` wrapper; where it can't, the break is a best-effort no-op.
-Sync + async.
+**Verified** end-to-end on 10g/11g/21c/23ai, sync + async: `cancel()` (from
+another thread) and `call_timeout` interrupt a long-running query with
+`ORA-01013`, and the connection is reusable afterwards. The async break reaches
+the real socket under the asyncio `TransportSocket` wrapper.
 
 ## 26. PL/SQL associative-array binds (#122)
 

@@ -13,6 +13,13 @@ TNS_NULL = 7
 TNS_ABORT = 9
 TNS_RESEND = 11
 TNS_MARKER = 12
+# Marker packet sub-types (#144). A break/cancel is an in-band INTERRUPT marker
+# packet (type 12, body [1, 0, marker_type]) -- the universally-honoured way to
+# interrupt a running call; the OOB urgent byte is an optimisation many servers
+# (and rootless container networks) don't deliver.
+TNS_MARKER_TYPE_BREAK = 1
+TNS_MARKER_TYPE_RESET = 2
+TNS_MARKER_TYPE_INTERRUPT = 3
 TNS_ATTENTION = 13
 TNS_CONTROL = 14
 TNS_MAX = 19

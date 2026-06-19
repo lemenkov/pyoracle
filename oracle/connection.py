@@ -29,6 +29,7 @@ from oracle.tns_consts import (
     CONN_STATE_CONNECTED, CONN_STATE_DISCONNECTED, DictionaryType,
     FIELD_VERSION_23_1, FIELD_VERSION_23_4, MAX_SEQ_NUM,
     TNS_ACCEPT, TNS_CONNECT, TNS_DATA, TNS_MARKER,
+    TNS_MARKER_TYPE_INTERRUPT,
     TNS_REDIRECT, TNS_REFUSE, TNS_RESEND, TTI_AUTH, TTI_DTY, TTI_PRO,
     TTI_OER, TTI_RPA, TTI_SESS, TTI_WRN,
     TNS_TPC_TXN_START, TNS_TPC_TXN_DETACH, TNS_TPC_TXN_COMMIT,
@@ -1754,8 +1755,8 @@ class OracleConnect:
     @property
     def call_timeout(self) -> int:
         """Per-call timeout in milliseconds (0 = none). A call that runs longer
-        is interrupted with an out-of-band break and raises a timeout error
-        (#123, oracledb-compatible)."""
+        is interrupted with an in-band break and raises a timeout error
+        (#123/#144, oracledb-compatible)."""
         return self._call_timeout
 
     @call_timeout.setter
@@ -1763,10 +1764,10 @@ class OracleConnect:
         self._call_timeout = max(0, int(value or 0))
 
     def cancel(self) -> None:
-        """Interrupt the call currently executing on this connection (#123).
+        """Interrupt the call currently executing on this connection (#123/#144).
 
-        Sends an out-of-band break; the thread blocked in the call drains the
-        server's interrupt response and raises ORA-01013. Safe to call from
+        Sends an in-band INTERRUPT marker; the thread blocked in the call drains
+        the server's interrupt response and raises ORA-01013. Safe to call from
         another thread (e.g. a timer or signal handler)."""
         self._send_break()
 
@@ -1776,19 +1777,23 @@ class OracleConnect:
         self._send_break()
 
     def _send_break(self) -> None:
-        # Out-of-band break (urgent data) so the server's attention handler sees
-        # it mid-call -- an in-band marker would only be read after the call
-        # ends, and (worse) could linger on the wire and desync the next call,
-        # so we send OOB only. When the server honours it, it interrupts the
-        # call and replies with markers + ORA-01013, which the reader drains via
-        # the existing reset handshake (#45). NOTE: relies on the server (and
-        # the network path) carrying TCP urgent data; if OOB is not delivered
-        # the break is simply a no-op (no protocol residue) -- see #123.
+        # Interrupt the running call with an in-band INTERRUPT marker packet
+        # (#144). The server's two-task layer polls for it mid-call and responds
+        # with break + reset markers and ORA-01013, which the reader drains via
+        # the existing reset handshake (#45). This supersedes the OOB-only break
+        # from #123: the out-of-band urgent byte is only honoured when the server
+        # advertises attention support and the network path carries TCP urgent
+        # data -- neither holds for a default server reached over a rootless
+        # container port-forward, so the OOB break silently did nothing. The
+        # in-band marker is an ordinary packet, so it works everywhere; verified
+        # on 10g/11g/21c/23ai.
         if self._break_in_progress or self.sock is None:
             return
         self._break_in_progress = True
+        (Packet, _) = encode_packet(
+            TNS_MARKER, bytes([1, 0, TNS_MARKER_TYPE_INTERRUPT]), self.sdu)
         try:
-            self.sock.send(b"!", socket.MSG_OOB)
+            self.sock.send(Packet)
         except OSError:
             pass
 
