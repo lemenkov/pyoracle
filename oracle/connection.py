@@ -36,6 +36,7 @@ from oracle.tns_consts import (
     TNS_TPC_TXN_STATE_REQUIRES_COMMIT, TNS_TPC_TXN_STATE_COMMITTED,
     TNS_TPC_TXN_STATE_ABORTED, TNS_TPC_TXN_STATE_READ_ONLY,
     TNS_TPC_TXN_STATE_FORGOTTEN, TPC_BEGIN_NEW, TPC_END_NORMAL,
+    PURITY_DEFAULT, PURITY_NEW,
 )
 from oracle.exceptions import DatabaseError
 import logging
@@ -320,7 +321,7 @@ def _split_proxy_user(user: str) -> tuple[str, str | None]:
 
 
 class OracleConnect:
-    def __init__(self, host: str = "localhost", port: int = 1521, user: str = "", password: str = "", sid: str = "", service_name: str = "", ssl: object = None, socket_options: object = None, timeout: int = 15000, autocommit: bool = True, fetch: int = 15, role: int = 0, prelim: int = 0, sdu: int = 8192, charset: str = "utf-8", app_name: str = "pyoracle", field_version: int = FIELD_VERSION_23_4):
+    def __init__(self, host: str = "localhost", port: int = 1521, user: str = "", password: str = "", sid: str = "", service_name: str = "", ssl: object = None, socket_options: object = None, timeout: int = 15000, autocommit: bool = True, fetch: int = 15, role: int = 0, prelim: int = 0, sdu: int = 8192, charset: str = "utf-8", app_name: str = "pyoracle", field_version: int = FIELD_VERSION_23_4, cclass: str = None, purity: int = PURITY_DEFAULT):
         # field_version is the highest TTC field version pyoracle advertises;
         # the server negotiates it down (min(client, server)). The default is the
         # 23ai max (24), reached via fast-auth (#89) — older servers settle at
@@ -332,6 +333,11 @@ class OracleConnect:
         # here so the whole auth flow uses the real (proxy) user and the bracketed
         # schema is sent as the PROXY_CLIENT_NAME auth pair.
         (self.user, self.proxy_user) = _split_proxy_user(user)
+        # DRCP (#130): a connection class + session purity request a pooled
+        # server (the connect descriptor gains SERVER=POOLED and the auth carries
+        # the AUTH_KPPL_* pairs).
+        self.cclass = cclass
+        self.purity = purity
         self.password = password
         self.sid = sid
         self.service_name = service_name
@@ -427,6 +433,8 @@ class OracleConnect:
                 'port': self.port,
                 'user': self.user,
                 'proxy_user': self.proxy_user,
+                'cclass': self.cclass,
+                'purity': self.purity,
                 'password': self.password,
                 'sid': self.sid,
                 'service_name': self.service_name,

@@ -2439,3 +2439,31 @@ gated at field versions 21.1 / 20.1.
 async. **JSON-payload queues are not yet supported** (the OSON-over-AQ framing
 needs a protocol capture; `queue(payload_type=oracle.JSON)` raises
 `NotSupportedError`). **12c+** (no pre-12c reference); verified on 21c and 23ai.
+
+## 30. DRCP / implicit connection pooling (#130)
+
+`connect(..., cclass=..., purity=...)` requests a Database Resident Connection
+Pool server. Two small additions to the existing connect flow:
+
+- **Connect descriptor** — when a connection class or non-default purity is
+  given, the `CONNECT_DATA` gains `(SERVER=POOLED)`, which tells the listener to
+  route to the connection broker instead of a dedicated server.
+- **Auth pairs** — the final auth message carries `AUTH_KPPL_CONN_CLASS` (the
+  connection class) and `AUTH_KPPL_PURITY` (the purity as a decimal string), the
+  same way proxy auth (§27) adds its pair. Purity is `oracle.PURITY_NEW` (1) or
+  `PURITY_SELF` (2); when DRCP is requested with `PURITY_DEFAULT` a standalone
+  connection defaults to `NEW` (matching python-oracledb).
+
+The DRCP capability itself is already advertised (`compile_caps[CCAP_OCI2]` has
+the `0x10` DRCP bit at field version ≥ 21.1), so no handshake change is needed.
+
+The one decode addition: a DRCP-pooled session's responses are preceded by a
+**server-side piggyback** (token 23) — `SESS_RET` (the assigned session id /
+serial and any session-state key/value pairs) and `OS_PID_MTS`. The response
+decoder consumes the piggyback (`decode_token_server_piggyback`) and continues
+to the real status/data; without it the stream desyncs on the first call. The
+trailing `ORA-01403` on a fetch is the normal end-of-data marker, not an error.
+
+Verified on 21c and 23ai (sync + async): connections route through the broker
+(`v$cpool_stats` / `v$cpool_conn_info` show the connection class). Needs the
+server pool started (`DBMS_CONNECTION_POOL.START_POOL`).

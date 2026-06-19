@@ -12,6 +12,7 @@ from oracle.connection import OracleConnect, Xid
 from oracle.tns_consts import (
     TPC_BEGIN_NEW, TPC_BEGIN_JOIN, TPC_BEGIN_RESUME, TPC_BEGIN_PROMOTE,
     TPC_END_NORMAL, TPC_END_SUSPEND,
+    PURITY_DEFAULT, PURITY_NEW, PURITY_SELF,
 )
 from oracle.dbobject import DbObject, DbObjectType, DbRef
 from oracle.aq import Queue, MessageProperties, EnqOptions, DeqOptions
@@ -87,6 +88,7 @@ __all__ = [
     "Queue", "MessageProperties", "EnqOptions", "DeqOptions",
     "TPC_BEGIN_NEW", "TPC_BEGIN_JOIN", "TPC_BEGIN_RESUME", "TPC_BEGIN_PROMOTE",
     "TPC_END_NORMAL", "TPC_END_SUSPEND",
+    "PURITY_DEFAULT", "PURITY_NEW", "PURITY_SELF",
     "NUMBER", "STRING", "DB_TYPE_NUMBER", "DB_TYPE_VARCHAR",
     "DB_TYPE_RAW", "DB_TYPE_DATE", "CURSOR", "DB_TYPE_CURSOR",
     "DB_TYPE_TIMESTAMP", "DB_TYPE_TIMESTAMP_TZ", "DB_TYPE_BINARY_FLOAT",
