@@ -3,12 +3,14 @@
 
 # Tests for query cancellation / call_timeout (#123, #144).
 #
-# The break is an in-band INTERRUPT marker packet (#144): an ordinary TNS packet
-# (type 12, body 01 00 03), not an OOB urgent byte. This works against a default
-# server over any network path (the OOB-only break from #123 silently did
-# nothing when the server didn't advertise attention support / the path dropped
-# urgent data). The actual interruption -> ORA-01013 and connection reuse after
-# the break are verified live on 10g/11g/21c/23ai; these cover the client wiring.
+# The break has two paths (matching python-oracledb): an out-of-band urgent byte
+# when the server advertised attention support (CAN_RECV_ATTENTION -> conn.
+# _supports_oob), else an in-band INTERRUPT marker packet (TNS_MARKER, body
+# 01 00 03). The in-band path works on any server over any network path; the
+# OOB-only break from #123 silently did nothing where OOB isn't advertised /
+# carried. None of the local Free/XE testbeds advertise OOB, so the in-band
+# interruption -> ORA-01013 and connection reuse are what's verified live on
+# 10g/11g/21c/23ai; these cover the client wiring for both paths.
 
 import socket
 import unittest
@@ -47,18 +49,28 @@ class TestCallTimeout(unittest.TestCase):
 
 
 class TestBreak(unittest.TestCase):
-    def test_cancel_sends_inband_marker(self):
+    def test_cancel_sends_inband_marker_by_default(self):
+        # no OOB advertised -> in-band INTERRUPT marker packet
         c = _conn()
         c.sock = _FakeSock()
+        self.assertFalse(c._supports_oob)
         c.cancel()
         self.assertTrue(c._break_in_progress)
-        self.assertEqual(c.sock.oob, [])                 # not OOB anymore
+        self.assertEqual(c.sock.oob, [])
         self.assertEqual(len(c.sock.normal), 1)
         pkt = c.sock.normal[0]
         self.assertEqual(pkt[4], TNS_MARKER)             # packet type byte
-        # body is the INTERRUPT marker triple
         self.assertEqual(pkt[-3:],
                          bytes([1, 0, TNS_MARKER_TYPE_INTERRUPT]))
+
+    def test_cancel_sends_oob_when_supported(self):
+        # server advertised CAN_RECV_ATTENTION -> the OOB urgent byte
+        c = _conn()
+        c.sock = _FakeSock()
+        c._supports_oob = True
+        c.cancel()
+        self.assertEqual(c.sock.oob, [b"!"])
+        self.assertEqual(c.sock.normal, [])
 
     def test_break_is_idempotent(self):
         c = _conn()

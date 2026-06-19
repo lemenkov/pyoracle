@@ -2290,22 +2290,27 @@ column in SQL (`XMLTYPE.getclobval(col)` / `XMLSERIALIZE`) to read it. Inline XM
 
 `connection.cancel()` interrupts the call currently executing on the connection,
 and `connection.call_timeout` (milliseconds, 0 = none) does the same
-automatically when a call runs too long. Both send an **in-band INTERRUPT marker
-break** (#144, superseding the OOB-only break originally shipped in #123).
+automatically when a call runs too long. The break has **two paths**, matching
+python-oracledb (#144, fixing the OOB-only break originally shipped in #123):
 
-- **Break**: a `TNS_MARKER` packet with body `01 00 03` (INTERRUPT) written
-  straight to the socket. The server's two-task layer polls for it *while* the
-  call is running, interrupts the call, and replies with break/reset markers
-  followed by `ORA-01013` (user requested cancel); the reader drains the markers
-  via the existing reset handshake (the #45 break/reset machinery) and surfaces
-  the error. The connection resyncs and is immediately reusable.
-- **Why in-band, not OOB.** python-oracledb sends an OOB urgent byte
-  (`send(b"!", MSG_OOB)`) *only* when the server advertises attention support
-  (`TNS_GSO_CAN_RECV_ATTENTION`) and the path carries TCP urgent data, falling
-  back to the in-band INTERRUPT marker otherwise. #123 sent OOB only — but a
-  default server reached over a rootless-podman port-forward honours neither, so
-  the break silently did nothing. The in-band marker is an ordinary packet, so
-  it works on every tier and over any path; pyoracle uses it unconditionally.
+- **OOB** — when the server advertised attention support, an out-of-band urgent
+  byte `send(b"!", MSG_OOB)`. The accept packet's global service options carry
+  `TNS_GSO_CAN_RECV_ATTENTION` (`0x0400`); pyoracle records it as
+  `connection._supports_oob`. The urgent byte reaches the server's attention
+  handler immediately, even while it's compute-bound — the fastest interrupt.
+- **In-band** — otherwise, a `TNS_MARKER` packet with body `01 00 03`
+  (INTERRUPT) written straight to the socket. It's an ordinary packet, so it
+  works on every tier and over any network path (including rootless-container
+  port-forwards that drop OOB); the server's two-task layer polls for it
+  mid-call. #123 sent OOB *unconditionally*, which silently did nothing against
+  a server that doesn't advertise OOB — the call only ended on the client read
+  timeout. The in-band fallback is the fix.
+
+Either way the server interrupts the call and replies with break/reset markers
+followed by `ORA-01013` (user requested cancel); the reader drains the markers
+via the existing reset handshake (the #45 break/reset machinery), the connection
+resyncs, and it's immediately reusable.
+
 - **call_timeout**: a timer (`threading.Timer` sync, `loop.call_later` async)
   fires the break after the timeout; the resulting `ORA-01013` is remapped to a
   call-timeout `OperationalError`. The timer is disarmed as soon as the call
@@ -2315,8 +2320,11 @@ break** (#144, superseding the OOB-only break originally shipped in #123).
 
 **Verified** end-to-end on 10g/11g/21c/23ai, sync + async: `cancel()` (from
 another thread) and `call_timeout` interrupt a long-running query with
-`ORA-01013`, and the connection is reusable afterwards. The async break reaches
-the real socket under the asyncio `TransportSocket` wrapper.
+`ORA-01013`, and the connection is reusable afterwards. None of these Free/XE
+servers advertise `CAN_RECV_ATTENTION`, so the **in-band** path is what's
+exercised live; the OOB path is taken automatically against a server that does
+advertise it. The async break reaches the real socket under the asyncio
+`TransportSocket` wrapper.
 
 ## 26. PL/SQL associative-array binds (#122)
 

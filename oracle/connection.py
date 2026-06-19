@@ -29,7 +29,7 @@ from oracle.tns_consts import (
     CONN_STATE_CONNECTED, CONN_STATE_DISCONNECTED, DictionaryType,
     FIELD_VERSION_23_1, FIELD_VERSION_23_4, MAX_SEQ_NUM,
     TNS_ACCEPT, TNS_CONNECT, TNS_DATA, TNS_MARKER,
-    TNS_MARKER_TYPE_INTERRUPT,
+    TNS_MARKER_TYPE_INTERRUPT, TNS_GSO_CAN_RECV_ATTENTION,
     TNS_REDIRECT, TNS_REFUSE, TNS_RESEND, TTI_AUTH, TTI_DTY, TTI_PRO,
     TTI_OER, TTI_RPA, TTI_SESS, TTI_WRN,
     TNS_TPC_TXN_START, TNS_TPC_TXN_DETACH, TNS_TPC_TXN_COMMIT,
@@ -372,6 +372,7 @@ class OracleConnect:
         self._break_in_progress = False
         self._call_timeout = 0          # ms; 0 = no timeout
         self._timed_out = False
+        self._supports_oob = False      # set from the accept (#144)
         # Two-phase commit (#131): the opaque transaction context the server
         # returns from tpc_begin, replayed on prepare/commit/rollback/end.
         self._transaction_context = None
@@ -560,6 +561,12 @@ class OracleConnect:
                     # Extract negotiated SDU from the accept body
                     (Ver, Opts, Sdu) = struct.unpack(">hhh", Packet[:6])
                     self.sdu = Sdu
+                    # OOB break support (#144): the accept's global service
+                    # options carry CAN_RECV_ATTENTION when the server can
+                    # receive an out-of-band break. When set we prefer the OOB
+                    # urgent byte (it interrupts a compute-bound server faster);
+                    # otherwise we use the in-band INTERRUPT marker.
+                    self._supports_oob = bool(Opts & TNS_GSO_CAN_RECV_ATTENTION)
                     self.conn_state = CONN_STATE_CONNECTED
                     logger.debug("handle_login: Ver=%s, Opts=%s, Sdu=%s", Ver, Opts, Sdu)
                     Data = encode_dictionary(self._make_dict(DictionaryType.pro))
@@ -1766,9 +1773,10 @@ class OracleConnect:
     def cancel(self) -> None:
         """Interrupt the call currently executing on this connection (#123/#144).
 
-        Sends an in-band INTERRUPT marker; the thread blocked in the call drains
-        the server's interrupt response and raises ORA-01013. Safe to call from
-        another thread (e.g. a timer or signal handler)."""
+        Sends a break (an out-of-band urgent byte when the server advertised
+        attention support, otherwise an in-band INTERRUPT marker); the thread
+        blocked in the call drains the server's interrupt response and raises
+        ORA-01013. Safe to call from another thread (e.g. a timer/signal)."""
         self._send_break()
 
     def _on_call_timeout(self) -> None:
@@ -1777,23 +1785,29 @@ class OracleConnect:
         self._send_break()
 
     def _send_break(self) -> None:
-        # Interrupt the running call with an in-band INTERRUPT marker packet
-        # (#144). The server's two-task layer polls for it mid-call and responds
-        # with break + reset markers and ORA-01013, which the reader drains via
-        # the existing reset handshake (#45). This supersedes the OOB-only break
-        # from #123: the out-of-band urgent byte is only honoured when the server
-        # advertises attention support and the network path carries TCP urgent
-        # data -- neither holds for a default server reached over a rootless
-        # container port-forward, so the OOB break silently did nothing. The
-        # in-band marker is an ordinary packet, so it works everywhere; verified
-        # on 10g/11g/21c/23ai.
+        # Interrupt the running call. Two paths, matching python-oracledb (#144):
+        #   * when the server advertised attention support (CAN_RECV_ATTENTION in
+        #     the accept, self._supports_oob) we send an out-of-band urgent byte
+        #     -- the server's attention handler sees it immediately, even while
+        #     compute-bound;
+        #   * otherwise we send an in-band INTERRUPT marker packet (an ordinary
+        #     packet the server's two-task layer polls for), which works on every
+        #     tier and over any network path.
+        # Either way the server interrupts the call and replies with break/reset
+        # markers + ORA-01013, drained via the existing reset handshake (#45);
+        # the connection resyncs and is reusable. #123 sent OOB unconditionally,
+        # which silently did nothing against servers that don't advertise OOB.
         if self._break_in_progress or self.sock is None:
             return
         self._break_in_progress = True
-        (Packet, _) = encode_packet(
-            TNS_MARKER, bytes([1, 0, TNS_MARKER_TYPE_INTERRUPT]), self.sdu)
         try:
-            self.sock.send(Packet)
+            if self._supports_oob:
+                self.sock.send(b"!", socket.MSG_OOB)
+            else:
+                (Packet, _) = encode_packet(
+                    TNS_MARKER, bytes([1, 0, TNS_MARKER_TYPE_INTERRUPT]),
+                    self.sdu)
+                self.sock.send(Packet)
         except OSError:
             pass
 

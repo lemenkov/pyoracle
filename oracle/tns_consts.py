@@ -20,6 +20,10 @@ TNS_MARKER = 12
 TNS_MARKER_TYPE_BREAK = 1
 TNS_MARKER_TYPE_RESET = 2
 TNS_MARKER_TYPE_INTERRUPT = 3
+# Global service option in the accept packet: the server can receive an
+# out-of-band break (attention). When set we prefer OOB over the in-band
+# marker for cancel()/call_timeout (#144).
+TNS_GSO_CAN_RECV_ATTENTION = 0x0400
 TNS_ATTENTION = 13
 TNS_CONTROL = 14
 TNS_MAX = 19
