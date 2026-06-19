@@ -62,7 +62,8 @@ from oracle.tns_consts import (
     CONN_STATE_AUTHENTICATED, CONN_STATE_AUTH_NEGOTIATE,
     CONN_STATE_CONNECTED, CONN_STATE_DISCONNECTED,
     DictionaryType, FIELD_VERSION_23_1, FIELD_VERSION_23_4, TNS_ACCEPT,
-    TNS_CONNECT, TNS_DATA, TNS_MARKER, TNS_REDIRECT, TNS_REFUSE, TNS_RESEND,
+    TNS_CONNECT, TNS_DATA, TNS_MARKER, TNS_MARKER_TYPE_INTERRUPT,
+    TNS_GSO_CAN_RECV_ATTENTION, TNS_REDIRECT, TNS_REFUSE, TNS_RESEND,
     TTI_DTY, TTI_OER, TTI_PRO, TTI_RPA, TTI_SESS, TTI_WRN,
 )
 
@@ -119,6 +120,7 @@ class AsyncOracleConnect:
         self._break_in_progress = False
         self._call_timeout = 0
         self._timed_out = False
+        self._supports_oob = False              # set from the accept (#144)
         self._transaction_context = None        # two-phase commit (#131)
         self.conn_key = None
         self.server_version = 0
@@ -338,6 +340,8 @@ class AsyncOracleConnect:
                 case t if t == TNS_ACCEPT:
                     (Ver, Opts, Sdu) = struct.unpack(">hhh", Packet[:6])
                     self.sdu = Sdu
+                    self._supports_oob = bool(                  # OOB break (#144)
+                        Opts & TNS_GSO_CAN_RECV_ATTENTION)
                     self.conn_state = CONN_STATE_CONNECTED
                     Data = encode_dictionary(self._make_dict(DictionaryType.pro))
                     await self.send(TNS_DATA, Data)
@@ -1198,9 +1202,10 @@ class AsyncOracleConnect:
         self._call_timeout = max(0, int(value or 0))
 
     def cancel(self) -> None:
-        """Interrupt the call currently executing on this connection (#123).
+        """Interrupt the call currently executing on this connection (#123/#144).
         Async port of OracleConnect.cancel(); a plain (non-coroutine) method so
-        it can fire from a timer/callback. Sends an out-of-band break."""
+        it can fire from a timer/callback. Sends a break (OOB urgent byte when
+        the server supports it, otherwise an in-band INTERRUPT marker)."""
         self._send_break()
 
     def _on_call_timeout(self) -> None:
@@ -1208,12 +1213,12 @@ class AsyncOracleConnect:
         self._send_break()
 
     def _send_break(self) -> None:
-        # OOB break via the StreamWriter's underlying socket (see OracleConnect
-        # for why OOB only). asyncio wraps the socket in a TransportSocket that
-        # forbids direct send(), so reach the real socket via its private _sock;
-        # if that's unavailable the break is a best-effort no-op (no protocol
-        # residue). Relies on the network path carrying urgent data. #123,
-        # untested locally (the container port-forward does not deliver OOB).
+        # In-band INTERRUPT marker break (#144), the async port of OracleConnect.
+        # Written straight to the StreamWriter's underlying socket so it flushes
+        # immediately regardless of the event loop being parked in the call's
+        # read; asyncio wraps it in a TransportSocket that forbids send(), so we
+        # reach the real socket via its private _sock. Supersedes the OOB-only
+        # break from #123 (see OracleConnect._send_break).
         if self._break_in_progress or self._writer is None:
             return
         self._break_in_progress = True
@@ -1222,7 +1227,13 @@ class AsyncOracleConnect:
         Target = Raw if Raw is not None and hasattr(Raw, 'send') else Sock
         if Target is not None and hasattr(Target, 'send'):
             try:
-                Target.send(b"!", socket.MSG_OOB)
+                if self._supports_oob:
+                    Target.send(b"!", socket.MSG_OOB)
+                else:
+                    (Packet, _) = encode_packet(
+                        TNS_MARKER, bytes([1, 0, TNS_MARKER_TYPE_INTERRUPT]),
+                        self.sdu)
+                    Target.send(Packet)
             except OSError:
                 pass
 
