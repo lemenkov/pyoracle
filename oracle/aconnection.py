@@ -1313,9 +1313,7 @@ class AsyncOracleConnect:
             raise NotSupportedError(
                 "Advanced Queuing requires an Oracle 12.1+ server")
         if payload_type is _JSON:
-            raise NotSupportedError(
-                "JSON-payload AQ queues are not yet supported (the OSON-over-AQ "
-                "framing needs a protocol capture); RAW and object payloads work")
+            return AsyncQueue(self, name, payload_type=None, is_json=True)
         return AsyncQueue(self, name, payload_type=payload_type)
 
     def msgproperties(self, payload=None, correlation=None, delay=0,
