@@ -2440,11 +2440,24 @@ while the enqueue-time **date** and the payload **image** use the single-byte
 drifts the whole parse. The shard id (props and array) and the JSON pointer are
 gated at field versions 21.1 / 20.1.
 
-**Payloads:** RAW (`bytes`) and SQL object (a `DbObjectType` from
-`gettype()`, reusing the §21 object machinery) — both single and array, sync +
-async. **JSON-payload queues are not yet supported** (the OSON-over-AQ framing
-needs a protocol capture; `queue(payload_type=oracle.JSON)` raises
-`NotSupportedError`). **12c+** (no pre-12c reference); verified on 21c and 23ai.
+**Payloads:** RAW (`bytes`), SQL object (a `DbObjectType` from `gettype()`,
+reusing the §21 object machinery), and **JSON** (`queue(name, oracle.JSON)`,
+#150). RAW + object support both single and array; sync + async.
+
+**JSON payload framing** (#150): the OSON image is wrapped in a fixed
+descriptor — `01 28 00 26 00 04 61 08 00 00 00 01 00 00 00 00 00 00` then the
+image length (ub2), 22 zero bytes, and the image length-prefixed
+(`write_bytes_with_length`). RE'd from an oracledb-thin capture; it's the
+native-LOB value form used for JSON columns (#70) but with a one-byte-different
+descriptor. The image must use the 12c+ single-byte/0xFE-chunked length form —
+the 11g `encode_chr` path chunks at 64 bytes and desyncs the server (ORA-03120).
+JSON numbers dequeue as `Decimal` (Oracle semantics). JSON is **single-message
+only**: `enqmany`/`deqmany` for a JSON queue raise `NotSupportedError` (the
+server errors — ORA-00600 even from python-oracledb — on these editions), and a
+payload whose OSON exceeds ~254 bytes is bounded by the native-encoder limit
+tracked in #88.
+
+**12c+** (no pre-12c reference); verified on 21c and 23ai.
 
 ## 30. DRCP / implicit connection pooling (#130)
 

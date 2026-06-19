@@ -3420,6 +3420,10 @@ def _encode_object_oac(Obj: object) -> bytes:
 
 # --- Advanced Queuing (#128) ---
 
+# AQ JSON payload descriptor (#150): the fixed prefix before the ub2 image
+# length / 22 zero bytes / encode_chr(OSON). RE'd from an oracledb-thin capture.
+_AQ_JSON_DESCRIPTOR = bytes.fromhex("012800260004610800000001000000000000")
+
 def _encode_sb4i(Val: int) -> bytes:
     # Signed ub4: non-negative via encode_sb4; negative as 0x80|width then the
     # big-endian magnitude (e.g. expiration -1 -> 81 01). Mirrors write_sb4.
@@ -3473,10 +3477,18 @@ def _aq_write_msg_props(Props, FieldVersion: int) -> bytes:
 def _aq_write_payload(Queue, Props) -> bytes:
     # The payload bytes: JSON (OSON), a SQL object image, or RAW bytes.
     if Queue.is_json:
-        # write_oson length-prefixes the OSON image (_write_raw_bytes_and_length),
-        # matching the single-byte/chunked form the dequeue side reads back.
+        # JSON payload (#150): the OSON image wrapped in the AQ JSON descriptor
+        # (fixed 18-byte prefix + ub2 image length + 22 zero bytes + the image
+        # framed like RAW via encode_chr). RE'd from an oracledb-thin capture --
+        # it's the native-LOB value form (#70) but with a slightly different
+        # descriptor than VECTOR_BIND_DESCRIPTOR (no second 0x28 byte).
         from oracle.oson import encode_oson
-        return _bytes_with_length(encode_oson(Props.payload))
+        Oson = encode_oson(Props.payload)
+        # _bytes_with_length (the 12c+ single-byte/0xFE-chunked form) -- NOT
+        # encode_chr, whose 11g branch chunks at 64 bytes when the encode field
+        # version isn't set in this context and desyncs the server (ORA-03120).
+        return (_AQ_JSON_DESCRIPTOR + len(Oson).to_bytes(2, "big")
+                + b"\x00" * 22 + _bytes_with_length(Oson))
     if Queue.payload_type is not None:
         return _encode_object_bind_value(Props.payload)
     Payload = Props.payload if Props.payload is not None else b""

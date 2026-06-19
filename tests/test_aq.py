@@ -48,6 +48,28 @@ class TestEncode(unittest.TestCase):
         self.assertIn(b'MY_Q', out)
         self.assertIn(b'hello', out)                    # RAW payload (raw bytes)
 
+    def test_json_payload_descriptor(self):
+        # JSON enqueue (#150): the OSON image is wrapped in the AQ JSON
+        # descriptor (fixed prefix + ub2 length + 22 zeros + length-prefixed
+        # image), NOT a plain length-prefix. The OSON magic (ff 4a 5a) follows.
+        from oracle.tns import _AQ_JSON_DESCRIPTOR
+        q = Queue(_FakeConn(), 'JQ', payload_type=None, is_json=True)
+        out = encode_aq_enq(3, 16, q, MessageProperties(payload={'id': 7}))
+        self.assertIn(_AQ_JSON_DESCRIPTOR, out)
+        self.assertIn(bytes.fromhex('ff4a5a'), out)     # OSON magic
+
+
+class TestArrayJsonGate(unittest.TestCase):
+    # array enqueue/dequeue of JSON is gated (server-side ORA-00600 on these
+    # editions); single enqone/deqone JSON works (#150).
+    def test_enqmany_gated_for_json(self):
+        from oracle.exceptions import NotSupportedError
+        q = Queue(_FakeConn(), 'JQ', payload_type=None, is_json=True)
+        with self.assertRaises(NotSupportedError):
+            q.enqmany([MessageProperties(payload={'a': 1})])
+        with self.assertRaises(NotSupportedError):
+            q.deqmany(5)
+
 
 class TestDecode(unittest.TestCase):
     # A live RAW tpc dequeue response: RPA, num_bytes flag, message properties
