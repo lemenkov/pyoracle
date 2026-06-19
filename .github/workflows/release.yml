@@ -21,7 +21,7 @@ jobs:
     name: Build and publish release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # Full history so the auto-generated notes can reach the
           # previous tag for the "Full Changelog" diff link.
