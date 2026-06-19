@@ -1286,6 +1286,70 @@ class AsyncOracleConnect:
         if Result != TNS_TPC_TXN_STATE_ABORTED:
             raise DatabaseError(f"unexpected TPC rollback state {Result}")
 
+    # --- Advanced Queuing (#128), async port ---
+
+    def queue(self, name: str, payload_type=None):
+        from oracle.aq import AsyncQueue
+        from oracle.datatypes import JSON as _JSON
+        from oracle.exceptions import NotSupportedError
+        if self.field_version < FIELD_VERSION_12_1:
+            raise NotSupportedError(
+                "Advanced Queuing requires an Oracle 12.1+ server")
+        if payload_type is _JSON:
+            raise NotSupportedError(
+                "JSON-payload AQ queues are not yet supported (the OSON-over-AQ "
+                "framing needs a protocol capture); RAW and object payloads work")
+        return AsyncQueue(self, name, payload_type=payload_type)
+
+    def msgproperties(self, payload=None, correlation=None, delay=0,
+                      expiration=-1, priority=0, exceptionq=None,
+                      recipients=None):
+        from oracle.aq import MessageProperties
+        return MessageProperties(payload=payload, correlation=correlation,
+                                 delay=delay, expiration=expiration,
+                                 priority=priority, exceptionq=exceptionq,
+                                 recipients=recipients)
+
+    async def _aq_request(self, Data: bytes) -> bytes:
+        await self.send(TNS_DATA, Data)
+        Received = await self._next_data_packet(b"", b"")
+        if Received is False:
+            raise OperationalError("connection closed during AQ operation")
+        (_, Packet) = Received
+        return Packet
+
+    async def _aq_enq_one(self, queue, props) -> None:
+        from oracle.tns import encode_aq_enq
+        from oracle.connection import _decode_aq_enq
+        Data = encode_aq_enq(self._next_seq(), self.field_version, queue, props)
+        props.msgid = _decode_aq_enq(await self._aq_request(Data))
+
+    async def _aq_deq_one(self, queue):
+        from oracle.tns import encode_aq_deq
+        from oracle.connection import _decode_aq_deq
+        Data = encode_aq_deq(self._next_seq(), self.field_version, queue)
+        return _decode_aq_deq(await self._aq_request(Data), queue)
+
+    async def _aq_enq_many(self, queue, props_list) -> None:
+        from oracle.tns import encode_aq_array
+        from oracle.connection import _decode_aq_array
+        from oracle.tns_consts import TNS_AQ_ARRAY_ENQ
+        Data = encode_aq_array(self._next_seq(), self.field_version, queue,
+                               TNS_AQ_ARRAY_ENQ, props_list, len(props_list))
+        _decode_aq_array(await self._aq_request(Data), queue, TNS_AQ_ARRAY_ENQ,
+                         props_list)
+
+    async def _aq_deq_many(self, queue, max_messages):
+        from oracle.tns import encode_aq_array
+        from oracle.connection import _decode_aq_array
+        from oracle.aq import MessageProperties
+        from oracle.tns_consts import TNS_AQ_ARRAY_DEQ
+        Placeholders = [MessageProperties() for _ in range(max_messages)]
+        Data = encode_aq_array(self._next_seq(), self.field_version, queue,
+                               TNS_AQ_ARRAY_DEQ, Placeholders, max_messages)
+        return _decode_aq_array(await self._aq_request(Data), queue,
+                                TNS_AQ_ARRAY_DEQ, Placeholders)
+
     async def close(self) -> None:
         """Send TNS logoff, then close the underlying writer."""
         if self._writer is None:

@@ -2406,3 +2406,36 @@ framed differently and desyncs, so `tpc_begin` raises `NotSupportedError` on
 field version < 12.1 (before any wire activity — the connection stays usable).
 Verified on 21c/23ai (two-phase commit, one-phase commit, rollback, read-only
 prepare), sync + async.
+
+## 29. Advanced Queuing (#128)
+
+Enqueue/dequeue via `connection.queue(name[, payload_type])` →
+`enqone`/`deqone` (single) and `enqmany`/`deqmany` (array), with
+`connection.msgproperties(payload=...)` and the queue's `enqoptions`/
+`deqoptions`. Three TTI functions, RE'd from python-oracledb:
+
+- **Enqueue** (`TNS_FUNC_AQ_ENQ` = 121) — queue name, the message properties
+  block, recipients, visibility, the 16-byte payload **TOID** (RAW = `…00 17`,
+  object = the type OID), a payload-pointer triple selecting RAW vs object vs
+  JSON, the return-msgid request, then the data: queue name, TOID, payload. The
+  RPA response returns the 16-byte message id.
+- **Dequeue** (`TNS_FUNC_AQ_DEQ` = 122) — queue name, dequeue mode/navigation/
+  visibility/wait, consumer/correlation/condition, TOID. The RPA response (when
+  a message is present) carries the message properties, recipients, payload and
+  msgid; an empty queue comes back as ORA-25228 → `None`.
+- **Array** (`TNS_FUNC_ARRAY_AQ` = 145) — `enqmany`/`deqmany`, the messages
+  framed with ROW_HEADER/ROW_DATA/STATUS markers; the response returns one block
+  of concatenated msgids (enqueue) or N messages (dequeue).
+
+Message properties use a mix of length encodings: most fields are
+`read/write_bytes_with_length` (a ub4 count + a single-byte/0xFE-chunked value),
+while the enqueue-time **date** and the payload **image** use the single-byte
+`read_raw_bytes_and_length` / `read_bytes()` form — getting this split wrong
+drifts the whole parse. The shard id (props and array) and the JSON pointer are
+gated at field versions 21.1 / 20.1.
+
+**Payloads:** RAW (`bytes`) and SQL object (a `DbObjectType` from
+`gettype()`, reusing the §21 object machinery) — both single and array, sync +
+async. **JSON-payload queues are not yet supported** (the OSON-over-AQ framing
+needs a protocol capture; `queue(payload_type=oracle.JSON)` raises
+`NotSupportedError`). **12c+** (no pre-12c reference); verified on 21c and 23ai.

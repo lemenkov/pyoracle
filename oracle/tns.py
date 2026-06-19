@@ -46,7 +46,14 @@ from oracle.tns_consts import (
     FIELD_VERSION_9_2, FIELD_VERSION_10_2,
     FIELD_VERSION_11_2, FIELD_VERSION_12_1, FIELD_VERSION_12_2,
     FIELD_VERSION_12_2_EXT1, FIELD_VERSION_19_1, FIELD_VERSION_19_1_EXT1,
-    FIELD_VERSION_21_1, FIELD_VERSION_23_1,
+    FIELD_VERSION_20_1, FIELD_VERSION_21_1, FIELD_VERSION_23_1,
+    TNS_FUNC_AQ_ENQ, TNS_FUNC_AQ_DEQ, TNS_FUNC_ARRAY_AQ,
+    TNS_AQ_ARRAY_ENQ, TNS_AQ_ARRAY_FLAGS_RETURN_MESSAGE_ID,
+    TNS_AQ_MESSAGE_VERSION,
+    TNS_AQ_MESSAGE_ID_LENGTH, TNS_AQ_EXT_KEYWORD_AGENT_NAME,
+    TNS_AQ_EXT_KEYWORD_AGENT_ADDRESS, TNS_AQ_EXT_KEYWORD_AGENT_PROTOCOL,
+    TNS_AQ_EXT_KEYWORD_ORIGINAL_MSGID, TNS_KPD_AQ_BUFMSG, TNS_KPD_AQ_EITHER,
+    TNS_AQ_MSG_BUFFERED, TNS_AQ_MSG_PERSISTENT_OR_BUFFERED,
     TNS_MSG_TYPE_FAST_AUTH, TNS_SERVER_CONVERTS_CHARS,
     DictionaryType, TNS_DATA, TNS_REDIRECT, TTI_ALL7, TTI_ALL8, TTI_AUTH, TTI_BVC,
     TTI_DCB, TTI_DTY, TTI_FETCH, TTI_FOB, TTI_FUN, TTI_IOV, TTI_LOB,
@@ -3345,6 +3352,260 @@ def _encode_object_oac(Obj: object) -> bytes:
             + bytes([0])                          # character set form
             + encode_sb4(0)                       # LOB prefetch length
             + encode_sb4(0))                      # oaccolid (12.2+)
+
+# --- Advanced Queuing (#128) ---
+
+def _encode_sb4i(Val: int) -> bytes:
+    # Signed ub4: non-negative via encode_sb4; negative as 0x80|width then the
+    # big-endian magnitude (e.g. expiration -1 -> 81 01). Mirrors write_sb4.
+    if Val >= 0:
+        return encode_sb4(Val)
+    Mag = (-Val).to_bytes(4, 'big').lstrip(b'\x00') or b'\x00'
+    return bytes([0x80 | len(Mag)]) + Mag
+
+def _aq_value_with_length(Value) -> bytes:
+    # write_value_with_length: None -> ub4 0; else write_bytes_with_two_lengths.
+    if Value is None:
+        return encode_sb4(0)
+    if isinstance(Value, str):
+        Value = Value.encode('utf-8')
+    return _obj_two_lengths(bytes(Value))
+
+def _aq_kv_pair(Text, Binary, Keyword: int) -> bytes:
+    # write_keyword_value_pair: the text value, the binary value, then the ub2
+    # keyword (each value length-prefixed; None -> ub4 0).
+    return (_aq_value_with_length(Text) + _aq_value_with_length(Binary)
+            + encode_sb4(Keyword))
+
+def _aq_write_msg_props(Props, FieldVersion: int) -> bytes:
+    # write_msg_props (aq_base): priority/delay/expiration, correlation,
+    # attempts, exception queue, state, enqueue time, txn id, then the four
+    # fixed agent/extension keyword-value pairs, user-property/cscn/dscn/flags,
+    # and (at fv >= 21.1) a shard id. RE'd from python-oracledb.
+    Out = encode_sb4(Props.priority)
+    Out += encode_sb4(Props.delay)
+    Out += _encode_sb4i(Props.expiration)
+    Out += _aq_value_with_length(Props.correlation)
+    Out += encode_sb4(0)                            # number of attempts
+    Out += _aq_value_with_length(Props.exceptionq)
+    Out += encode_sb4(Props.state)
+    Out += encode_sb4(0)                            # enqueue time length
+    Out += _aq_value_with_length(Props.enq_txn_id)
+    Out += encode_sb4(4)                            # number of extensions
+    Out += bytes([0x0e])                            # unknown extra byte
+    Out += _aq_kv_pair(None, None, TNS_AQ_EXT_KEYWORD_AGENT_NAME)
+    Out += _aq_kv_pair(None, None, TNS_AQ_EXT_KEYWORD_AGENT_ADDRESS)
+    Out += _aq_kv_pair(None, b'\x00', TNS_AQ_EXT_KEYWORD_AGENT_PROTOCOL)
+    Out += _aq_kv_pair(None, None, TNS_AQ_EXT_KEYWORD_ORIGINAL_MSGID)
+    Out += encode_sb4(0)                            # user property
+    Out += encode_sb4(0)                            # cscn
+    Out += encode_sb4(0)                            # dscn
+    Out += encode_sb4(0)                            # flags
+    if FieldVersion >= FIELD_VERSION_21_1:
+        Out += encode_sb4(0xFFFFFFFF)               # shard id
+    return Out
+
+def _aq_write_payload(Queue, Props) -> bytes:
+    # The payload bytes: JSON (OSON), a SQL object image, or RAW bytes.
+    if Queue.is_json:
+        # write_oson length-prefixes the OSON image (_write_raw_bytes_and_length),
+        # matching the single-byte/chunked form the dequeue side reads back.
+        from oracle.oson import encode_oson
+        return _bytes_with_length(encode_oson(Props.payload))
+    if Queue.payload_type is not None:
+        return _encode_object_bind_value(Props.payload)
+    Payload = Props.payload if Props.payload is not None else b""
+    if isinstance(Payload, str):
+        Payload = Payload.encode('utf-8')
+    return bytes(Payload)
+
+def encode_aq_enq(Seq: int, FieldVersion: int, Queue, Props) -> bytes:
+    # AQ enqueue (TNS_FUNC_AQ_ENQ). RE'd from python-oracledb AqEnqMessage.
+    QName = Queue.name.encode('utf-8')
+    Out = _fun_header(TNS_FUNC_AQ_ENQ, Seq, FieldVersion)
+    Out += bytes([1]) + encode_sb4(len(QName))      # queue name ptr + len
+    Out += _aq_write_msg_props(Props, FieldVersion)
+    if Props.recipients is None:
+        Out += bytes([0]) + encode_sb4(0)           # recipients ptr + count
+    else:
+        Out += bytes([1]) + encode_sb4(3 * len(Props.recipients))
+    Out += encode_sb4(Queue.enqoptions.visibility)
+    Out += bytes([0]) + encode_sb4(0)               # relative message id ptr+len
+    Out += encode_sb4(0)                            # sequence deviation
+    Out += bytes([1]) + encode_sb4(16)              # payload TOID ptr + len
+    Out += encode_sb4(TNS_AQ_MESSAGE_VERSION)       # message version (ub2)
+    if Queue.is_json:
+        Out += bytes([0, 0]) + encode_sb4(0)        # payload 0, RAW 0, RAW len 0
+    elif Queue.payload_type is not None:
+        Out += bytes([1, 0]) + encode_sb4(0)        # payload 1, RAW 0, RAW len 0
+    else:
+        RawLen = len(Props.payload) if Props.payload is not None else 0
+        Out += bytes([0, 1]) + encode_sb4(RawLen)   # payload 0, RAW 1, RAW len
+    Out += bytes([1]) + encode_sb4(TNS_AQ_MESSAGE_ID_LENGTH)  # return msgid ptr+len
+    EnqFlags = (TNS_KPD_AQ_BUFMSG
+                if Queue.enqoptions.delivery_mode == TNS_AQ_MSG_BUFFERED else 0)
+    Out += encode_sb4(EnqFlags)                     # enqueue flags
+    Out += bytes([0]) + encode_sb4(0)               # extensions 1 ptr + count
+    Out += bytes([0]) + encode_sb4(0)               # extensions 2 ptr + count
+    Out += bytes([0]) + encode_sb4(0)               # source sequence num ptr+len
+    Out += bytes([0]) + encode_sb4(0)               # max sequence num ptr + len
+    Out += bytes([0])                               # output ack length
+    Out += bytes([0]) + encode_sb4(0)               # correlation ptr + len
+    Out += bytes([0]) + encode_sb4(0)               # sender name ptr + len
+    Out += bytes([0]) + encode_sb4(0)               # sender address ptr + len
+    Out += bytes([0])                               # sender charset id ptr
+    Out += bytes([0])                               # sender ncharset id ptr
+    if FieldVersion >= FIELD_VERSION_20_1:
+        Out += bytes([1 if Queue.is_json else 0])   # JSON payload ptr
+    # data section
+    Out += _bytes_with_length(QName)
+    Out += Queue.payload_toid                       # 16-byte type OID (raw)
+    Out += _aq_write_payload(Queue, Props)
+    return Out
+
+def encode_aq_deq(Seq: int, FieldVersion: int, Queue) -> bytes:
+    # AQ dequeue (TNS_FUNC_AQ_DEQ). RE'd from python-oracledb AqDeqMessage.
+    Opts = Queue.deqoptions
+    QName = Queue.name.encode('utf-8')
+    Out = _fun_header(TNS_FUNC_AQ_DEQ, Seq, FieldVersion)
+    Out += bytes([1]) + encode_sb4(len(QName))      # queue name ptr + len
+    Out += bytes([1, 1, 1, 1])                      # msg props + recipient list ptrs
+    Consumer = Opts.consumer_name.encode('utf-8') if Opts.consumer_name else None
+    if Consumer is not None:
+        Out += bytes([1]) + encode_sb4(len(Consumer))
+    else:
+        Out += bytes([0]) + encode_sb4(0)
+    Out += _encode_sb4i(Opts.mode)
+    Out += _encode_sb4i(Opts.navigation)
+    Out += _encode_sb4i(Opts.visibility)
+    Out += _encode_sb4i(Opts.wait)
+    if Opts.msgid:
+        Out += bytes([1]) + encode_sb4(TNS_AQ_MESSAGE_ID_LENGTH)
+    else:
+        Out += bytes([0]) + encode_sb4(0)
+    Correlation = Opts.correlation.encode('utf-8') if Opts.correlation else None
+    if Correlation is not None:
+        Out += bytes([1]) + encode_sb4(len(Correlation))
+    else:
+        Out += bytes([0]) + encode_sb4(0)
+    Out += bytes([1]) + encode_sb4(16)              # payload TOID ptr + len
+    Out += encode_sb4(TNS_AQ_MESSAGE_VERSION)       # message version (ub2)
+    Out += bytes([1])                               # payload ptr
+    Out += bytes([1]) + encode_sb4(TNS_AQ_MESSAGE_ID_LENGTH)  # return msgid ptr+len
+    DeqFlags = 0
+    if Opts.delivery_mode == TNS_AQ_MSG_BUFFERED:
+        DeqFlags |= TNS_KPD_AQ_BUFMSG
+    elif Opts.delivery_mode == TNS_AQ_MSG_PERSISTENT_OR_BUFFERED:
+        DeqFlags |= TNS_KPD_AQ_EITHER
+    Out += encode_sb4(DeqFlags)                     # dequeue flags
+    Condition = Opts.condition.encode('utf-8') if Opts.condition else None
+    if Condition is not None:
+        Out += bytes([1]) + encode_sb4(len(Condition))
+    else:
+        Out += bytes([0]) + encode_sb4(0)
+    Out += bytes([0]) + encode_sb4(0)               # extensions ptr + count
+    if FieldVersion >= FIELD_VERSION_20_1:
+        Out += bytes([0])                           # JSON payload ptr
+    if FieldVersion >= FIELD_VERSION_21_1:
+        Out += _encode_sb4i(-1)                     # shard id
+    # data section
+    Out += _bytes_with_length(QName)
+    if Consumer is not None:
+        Out += _bytes_with_length(Consumer)
+    if Opts.msgid:
+        Out += bytes(Opts.msgid[:16]).ljust(16, b'\x00')
+    if Correlation is not None:
+        Out += _bytes_with_length(Correlation)
+    Out += Queue.payload_toid                       # 16-byte type OID (raw)
+    if Condition is not None:
+        Out += _bytes_with_length(Condition)
+    return Out
+
+def _aq_write_array_enq(Queue, PropsList, FieldVersion: int) -> bytes:
+    QName = Queue.name.encode('utf-8')
+    Flags = (TNS_KPD_AQ_BUFMSG
+             if Queue.enqoptions.delivery_mode == TNS_AQ_MSG_BUFFERED else 0)
+    Out = encode_sb4(0)                              # relative msgid length
+    Out += bytes([TTI_RXH])                          # ROW_HEADER marker
+    Out += _obj_two_lengths(QName)
+    Out += Queue.payload_toid
+    Out += encode_sb4(TNS_AQ_MESSAGE_VERSION)
+    Out += encode_sb4(Flags)
+    for Props in PropsList:
+        Out += bytes([TTI_RXD])                      # ROW_DATA marker
+        Out += encode_sb4(Flags)                     # aqi flags
+        Out += _aq_write_msg_props(Props, FieldVersion)
+        Out += encode_sb4(0)                         # num recipients (None)
+        Out += encode_sb4(Queue.enqoptions.visibility)
+        Out += encode_sb4(0)                         # relative message id
+        Out += encode_sb4(0)                         # sequence deviation
+        if Queue.payload_type is None and not Queue.is_json:
+            Out += encode_sb4(len(Props.payload))
+        Out += _aq_write_payload(Queue, Props)
+    Out += bytes([TTI_STA])                          # STATUS marker
+    return Out
+
+def _aq_write_array_deq(Queue, PropsList, FieldVersion: int) -> bytes:
+    Opts = Queue.deqoptions
+    QName = Queue.name.encode('utf-8')
+    Flags = 0
+    if Opts.delivery_mode == TNS_AQ_MSG_BUFFERED:
+        Flags |= TNS_KPD_AQ_BUFMSG
+    elif Opts.delivery_mode == TNS_AQ_MSG_PERSISTENT_OR_BUFFERED:
+        Flags |= TNS_KPD_AQ_EITHER
+    Consumer = Opts.consumer_name.encode('utf-8') if Opts.consumer_name else None
+    Correlation = Opts.correlation.encode('utf-8') if Opts.correlation else None
+    Condition = Opts.condition.encode('utf-8') if Opts.condition else None
+    Out = b""
+    for Props in PropsList:
+        Out += _obj_two_lengths(QName)
+        Out += _aq_write_msg_props(Props, FieldVersion)
+        Out += encode_sb4(0)                         # num recipients
+        Out += _aq_value_with_length(Consumer)
+        Out += _encode_sb4i(Opts.mode)
+        Out += _encode_sb4i(Opts.navigation)
+        Out += _encode_sb4i(Opts.visibility)
+        Out += _encode_sb4i(Opts.wait)
+        Out += _aq_value_with_length(Opts.msgid)
+        Out += _aq_value_with_length(Correlation)
+        Out += _aq_value_with_length(Condition)
+        Out += encode_sb4(0)                         # extensions
+        Out += encode_sb4(0)                         # relative message id
+        Out += encode_sb4(0)                         # sequence deviation
+        Out += _obj_two_lengths(Queue.payload_toid)
+        Out += encode_sb4(TNS_AQ_MESSAGE_VERSION)
+        Out += encode_sb4(0)                         # payload length
+        Out += encode_sb4(0)                         # raw payload length
+        Out += encode_sb4(0)
+        Out += encode_sb4(Flags)
+        Out += encode_sb4(0)                         # extensions length
+        Out += encode_sb4(0)                         # source sequence length
+    return Out
+
+def encode_aq_array(Seq: int, FieldVersion: int, Queue, Operation: int,
+                    PropsList, NumIters: int) -> bytes:
+    # AQ array enqueue / dequeue (TNS_FUNC_ARRAY_AQ). RE'd from python-oracledb
+    # AqArrayMessage. For dequeue PropsList is NumIters placeholder properties.
+    Out = _fun_header(TNS_FUNC_ARRAY_AQ, Seq, FieldVersion)
+    if Operation == TNS_AQ_ARRAY_ENQ:
+        Out += bytes([0]) + encode_sb4(0)            # input params ptr + len
+    else:
+        Out += bytes([1]) + encode_sb4(NumIters)
+    Out += encode_sb4(TNS_AQ_ARRAY_FLAGS_RETURN_MESSAGE_ID)
+    if Operation == TNS_AQ_ARRAY_ENQ:
+        Out += bytes([1, 0])                         # output params ptr + len
+    else:
+        Out += bytes([1, 1])
+    Out += _encode_sb4i(Operation)
+    Out += bytes([1 if Operation == TNS_AQ_ARRAY_ENQ else 0])  # num iters ptr
+    if FieldVersion >= FIELD_VERSION_21_1:
+        Out += encode_sb4(0xFFFF)                    # shard id
+    if Operation == TNS_AQ_ARRAY_ENQ:
+        Out += encode_sb4(NumIters)
+        Out += _aq_write_array_enq(Queue, PropsList, FieldVersion)
+    else:
+        Out += _aq_write_array_deq(Queue, PropsList, FieldVersion)
+    return Out
 
 def encode_token_datetime(DT: datetime.datetime) -> bytes:
     # 7-byte DATE prefix is shared by all three temporal formats. TIMESTAMP
