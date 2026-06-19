@@ -42,7 +42,8 @@ from oracle.tns_consts import (
     TNS_TPC_TXN_ABORT, TNS_TPC_TXN_PREPARE,
     TNS_TPC_TXN_STATE_REQUIRES_COMMIT, TNS_TPC_TXN_STATE_COMMITTED,
     TNS_TPC_TXN_STATE_ABORTED, TNS_TPC_TXN_STATE_READ_ONLY,
-    TNS_TPC_TXN_STATE_FORGOTTEN, TPC_BEGIN_NEW, TPC_END_NORMAL)
+    TNS_TPC_TXN_STATE_FORGOTTEN, TPC_BEGIN_NEW, TPC_END_NORMAL,
+    PURITY_DEFAULT)
 from oracle.exceptions import DatabaseError
 from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
                         FIELD_VERSION_12_1,
@@ -81,12 +82,15 @@ class AsyncOracleConnect:
                  autocommit: bool = True, fetch: int = 15, role: int = 0,
                  prelim: int = 0, sdu: int = 8192, charset: str = "utf-8",
                  app_name: str = "pyoracle",
-                 field_version: int = FIELD_VERSION_23_4):
+                 field_version: int = FIELD_VERSION_23_4,
+                 cclass: str = None, purity: int = PURITY_DEFAULT):
         self.host = host
         self.port = port
         # Proxy auth (#126): split proxy_user[schema] (see OracleConnect).
         from oracle.connection import _split_proxy_user
         (self.user, self.proxy_user) = _split_proxy_user(user)
+        self.cclass = cclass            # DRCP (#130)
+        self.purity = purity
         self.password = password
         self.sid = sid
         self.service_name = service_name
@@ -170,6 +174,8 @@ class AsyncOracleConnect:
                 'port': self.port,
                 'user': self.user,
                 'proxy_user': self.proxy_user,
+                'cclass': self.cclass,
+                'purity': self.purity,
                 'password': self.password,
                 'sid': self.sid,
                 'service_name': self.service_name,

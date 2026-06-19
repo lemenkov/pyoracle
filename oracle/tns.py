@@ -60,6 +60,10 @@ from oracle.tns_consts import (
     TTI_LOGOFF, TTI_OAC, TTI_OER, TTI_PFN, TTI_PRO, TTI_RPA, TTI_RXD,
     TTI_IRD,
     TTI_RXH, TTI_SESS, TTI_SPFP, TTI_STA, TTI_STRT, TTI_STOP, TTI_UDS,
+    TTI_SVR_PIGGYBACK, TNS_SERVER_PIGGYBACK_OS_PID_MTS,
+    TNS_SERVER_PIGGYBACK_SESS_RET, TNS_SERVER_PIGGYBACK_LTXID,
+    TNS_SERVER_PIGGYBACK_QUERY_CACHE_INVALIDATION,
+    TNS_SERVER_PIGGYBACK_TRACE_EVENT,
     TTI_3LOGON, TTI_3LOGA,
     TTI_WRN, TNS_BIND_DIR_INPUT, TNS_AL8I4_ARRAY_DML_ROWCOUNTS,
     TNS_FUNC_TPC_TXN_SWITCH, TNS_FUNC_TPC_TXN_CHANGE_STATE,
@@ -219,6 +223,8 @@ def decode_packet(Data: bytes, Acc: object, FieldVersion: int | None = None) -> 
             # response handler, where RPA is a server-side session-state
             # piggyback that precedes the trailing OER — skip it and continue.
             return decode_token_rpa_piggyback(Data, Acc)
+        case t if t == TTI_SVR_PIGGYBACK:
+            return decode_token_server_piggyback(Data, Acc)
         case t if t == TTI_STA:  # tran
             return (True, Acc)
         case t if t == TTI_UDS:
@@ -823,6 +829,46 @@ _KNOWN_TTI_TOKENS = frozenset((TTI_OER, TTI_RXH, TTI_RXD, TTI_RPA, TTI_STA,
                                TTI_IOV, TTI_UDS, TTI_OAC, TTI_LOB, TTI_WRN,
                                TTI_DCB, TTI_FOB, TTI_BVC))
 
+def decode_token_server_piggyback(Data: bytes, Acc: tuple) -> object:
+    # Server-side piggyback (#130): a session-state block the server prepends to
+    # a response. DRCP-pooled sessions carry SESS_RET (the assigned session id /
+    # serial + any session-state key/value pairs) and OS_PID_MTS; consume it
+    # byte-for-byte (the values are not needed) and continue with the rest of the
+    # response. Mirrors python-oracledb _process_server_side_piggyback. ub2/ub4
+    # are the variable-length form (decode_ub4); skip_ub1 is one raw byte;
+    # skip_bytes is a single-byte/0xFE-chunked value (decode_dalc).
+    Rest = Data[1:]
+    Opcode = Rest[0]
+    Rest = Rest[1:]
+    if Opcode == TNS_SERVER_PIGGYBACK_SESS_RET:
+        (_, Rest) = decode_ub4(Rest)                 # number of DTYs (ub2)
+        Rest = Rest[1:]                              # length of DTYs (ub1)
+        (NumElements, Rest) = decode_ub4(Rest)       # number of pairs (ub2)
+        if NumElements > 0:
+            Rest = Rest[1:]                          # skip_ub1
+            for _ in range(NumElements):
+                (KeyLen, Rest) = decode_ub4(Rest)
+                if KeyLen > 0:
+                    (_, Rest) = decode_dalc(Rest)
+                (ValLen, Rest) = decode_ub4(Rest)
+                if ValLen > 0:
+                    (_, Rest) = decode_dalc(Rest)
+                (_, Rest) = decode_ub4(Rest)         # pair flags (ub2)
+        (_, Rest) = decode_ub4(Rest)                 # session flags (ub4)
+        (_, Rest) = decode_ub4(Rest)                 # session id (ub4)
+        (_, Rest) = decode_ub4(Rest)                 # serial number (ub2)
+    elif Opcode == TNS_SERVER_PIGGYBACK_OS_PID_MTS:
+        (_, Rest) = decode_ub4(Rest)                 # ub2
+        (_, Rest) = decode_dalc(Rest)                # pid bytes
+    elif Opcode == TNS_SERVER_PIGGYBACK_LTXID:
+        (_, Rest) = decode_dalc(Rest)                # logical transaction id
+    elif Opcode in (TNS_SERVER_PIGGYBACK_QUERY_CACHE_INVALIDATION,
+                    TNS_SERVER_PIGGYBACK_TRACE_EVENT):
+        pass                                         # no body
+    else:
+        raise Exception("Unhandled server-side piggyback opcode", Opcode, Data)
+    return decode_packet(Rest, Acc)
+
 def decode_token_rpa_piggyback(Data: bytes, Acc: tuple) -> object:
     # Walks past a server-side session-state piggyback so the next decode_packet
     # call lands on the real status token (OER). The block layout is opaque
@@ -1250,6 +1296,20 @@ def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
                if ProxyUser else b"")
     ProxyInd = 1 if ProxyUser else 0
 
+    # DRCP (#130): a connection class and/or session purity. When DRCP is used
+    # but no purity was given, a standalone connection defaults to NEW (matching
+    # python-oracledb). cclass -> AUTH_KPPL_CONN_CLASS, purity -> AUTH_KPPL_PURITY.
+    CClass = Dictionary['env'].get('cclass')
+    Purity = Dictionary['env'].get('purity', 0) or 0
+    if (CClass or Purity) and Purity == 0:
+        Purity = 1                                  # PURITY_NEW
+    CClassKv = (encode_kv(b"AUTH_KPPL_CONN_CLASS",
+                          CClass.encode('utf-8')) if CClass else b"")
+    PurityKv = (encode_kv(b"AUTH_KPPL_PURITY",
+                          str(Purity).encode('utf-8'), 1) if Purity else b"")
+    DrcpInd = (1 if CClass else 0) + (1 if Purity else 0)
+    DrcpKv = CClassKv + PurityKv
+
     # 12c+ length-prefixes the username (write_bytes_with_length), same as the
     # OSESSKEY phase; 11g sends it raw (read via the UserLen field). Sending the
     # raw form to 21c makes it read the first username byte as a length and
@@ -1273,7 +1333,7 @@ def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
         Mode = encode_sb4((Role * 32) | (Prelim * 128) | 1 | 256 | 0x20000)
         UserField = bytes([len(User)]) + User
         SessionKvs = _auth_session_kvs(Dictionary)
-        NumPairs = 2 + SpeedyKeyInd + 5 + ProxyInd
+        NumPairs = 2 + SpeedyKeyInd + 5 + ProxyInd + DrcpInd
     else:
         # 12c+ length-prefixes the username (write_bytes_with_length); 11g sends
         # it raw (read via the UserLen field). Sending the raw form to 21c makes
@@ -1282,9 +1342,9 @@ def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
         Mode = LogonMode
         UserField = bytes([len(User)]) + User if FieldVersion >= FIELD_VERSION_12_1 else User
         SessionKvs = b""
-        NumPairs = 2 + SpeedyKeyInd + ProxyInd
+        NumPairs = 2 + SpeedyKeyInd + ProxyInd + DrcpInd
 
-    Data = Header + encode_sb4(len(User)) + Mode + bytes([1]) + encode_sb4(NumPairs) + bytes([1, 1]) + UserField + AuthPass + PBKDF2 + AuthSess + SessionKvs + ProxyKv
+    Data = Header + encode_sb4(len(User)) + Mode + bytes([1]) + encode_sb4(NumPairs) + bytes([1, 1]) + UserField + AuthPass + PBKDF2 + AuthSess + SessionKvs + ProxyKv + DrcpKv
 
     return (Data, ConnKey)
 
@@ -1492,7 +1552,12 @@ def encode_dictionary_description(Dictionary: dict) -> bytes:
     SslOpts = Dictionary['env'].get('ssl', None)
     Sn = b"SID=" + SID if ServiceName is None else b"SERVICE_NAME=" + ServiceName.encode('utf-8')
     Proto = b"TCP" if SslOpts is None else b"TCPS"
-    return b"(DESCRIPTION=(CONNECT_DATA=(" + Sn + b")(CID=(PROGRAM=" + AppName + b")(HOST=" + Hostname + b")(USER=" + User + b")))(ADDRESS=(PROTOCOL=" + Proto + b")(HOST=" + Host + b")(PORT=" + Port + b")))"
+    # DRCP (#130): a connection class or non-default purity requests a pooled
+    # server from the connection broker via (SERVER=POOLED) in the CONNECT_DATA.
+    Drcp = (b"(SERVER=POOLED)"
+            if (Dictionary['env'].get('cclass') or Dictionary['env'].get('purity'))
+            else b"")
+    return b"(DESCRIPTION=(CONNECT_DATA=(" + Sn + b")" + Drcp + b"(CID=(PROGRAM=" + AppName + b")(HOST=" + Hostname + b")(USER=" + User + b")))(ADDRESS=(PROTOCOL=" + Proto + b")(HOST=" + Host + b")(PORT=" + Port + b")))"
 
 # ---------------------------------------------------------------------------
 # TTC capability vectors (carried in the TTI_DTY / DATA_TYPES message)
