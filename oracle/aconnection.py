@@ -1376,6 +1376,56 @@ class AsyncOracleConnect:
             TNS_TPC_TXN_DETACH, None, TPC_TXN_FLAGS_SESSIONLESS, 0)
         self._sessionless_txn_active = False
 
+    # --- Request pipelining (#132), async port ---
+
+    async def run_pipeline(self, pipeline,
+                           continue_on_error: bool = False) -> list:
+        """Async port of OracleConnect.run_pipeline (#132): run the queued
+        operations in order and return a PipelineOpResult for each. Serial for
+        now (same API/results as a pipelined run; the single-round-trip wire
+        optimisation is a follow-up)."""
+        from oracle.pipeline import PipelineOpResult, PipelineOpType as T
+        from oracle.connection import _apply_rowfactory
+        results = []
+        Cur = self.cursor()
+        for Op in pipeline.operations:
+            Result = PipelineOpResult(Op)
+            results.append(Result)
+            params = Op.parameters or []
+            try:
+                if Op.op_type == T.EXECUTE:
+                    await Cur.execute(Op.statement, params)
+                elif Op.op_type == T.EXECUTE_MANY:
+                    await Cur.executemany(Op.statement, Op.parameters)
+                elif Op.op_type == T.FETCH_ONE:
+                    await Cur.execute(Op.statement, params)
+                    row = await Cur.fetchone()
+                    Result.rows = _apply_rowfactory(
+                        [] if row is None else [row], Op.rowfactory)
+                    Result.columns = Cur.description
+                elif Op.op_type == T.FETCH_MANY:
+                    await Cur.execute(Op.statement, params)
+                    Result.rows = _apply_rowfactory(
+                        await Cur.fetchmany(Op.num_rows), Op.rowfactory)
+                    Result.columns = Cur.description
+                elif Op.op_type == T.FETCH_ALL:
+                    await Cur.execute(Op.statement, params)
+                    Result.rows = _apply_rowfactory(
+                        await Cur.fetchall(), Op.rowfactory)
+                    Result.columns = Cur.description
+                elif Op.op_type == T.COMMIT:
+                    await self.commit()
+                elif Op.op_type == T.CALL_PROC:
+                    await Cur.callproc(Op.name, params)
+                elif Op.op_type == T.CALL_FUNC:
+                    Result.return_value = await Cur.callfunc(
+                        Op.name, Op.return_type, params)
+            except DatabaseError as exc:
+                Result.error = exc
+                if not continue_on_error:
+                    raise
+        return results
+
     # --- Advanced Queuing (#128), async port ---
 
     def queue(self, name: str, payload_type=None):

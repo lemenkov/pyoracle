@@ -2579,3 +2579,37 @@ through the logging proxy; the server accepts pyoracle's minimal sb4 encoding of
 the format-id (`03 4e5c3e`) where oracledb pads to four bytes. Verified on 23ai
 (suspend/resume across sessions, cross-session isolation, rollback), sync +
 async.
+
+## 32. Request pipelining (#132)
+
+`pipeline = oracle.create_pipeline()` collects operations
+(`add_execute` / `add_executemany` / `add_fetchone` / `add_fetchmany` /
+`add_fetchall` / `add_commit` / `add_callproc` / `add_callfunc`); running
+`connection.run_pipeline(pipeline, continue_on_error=False)` returns a
+`PipelineOpResult` per op (`.rows` / `.return_value` / `.columns` / `.error`).
+With `continue_on_error` a failing op records its error and the rest still run;
+otherwise the first error is raised after its result is recorded. Sync + async.
+
+The driver currently runs the operations **serially** — the API, ordering and
+results are exactly those of a pipelined run; the single-round-trip wire
+optimisation is a follow-up. The wire framing for that optimisation is already
+in place and byte-validated against an oracledb-thin async-pipeline capture on
+23ai:
+
+- **Token framing** — at field version 24 each function-call header carries a
+  ub8 token number after the sequence byte (`_fun_header`). An ordinary call
+  uses token 0 (`encode_sb4(0)` = the historical single `0x00`); a pipelined
+  call numbers itself 1..N.
+- **Begin-pipeline piggyback** (`TNS_FUNC_PIPELINE_BEGIN` = 199, message type
+  `0x11`) rides on the first pipelined message, carrying the error mode
+  (`1` continue / `2` abort); the packet sets the `BEGIN_PIPELINE` (0x1000) data
+  flag, and each result-bearing call sets `END_OF_REQUEST` (0x800).
+- **End-of-pipeline** (`TNS_FUNC_PIPELINE_END` = 200) closes the burst.
+- **Response correlation** — the server prefixes each op's response with a
+  `TOKEN` (33) marker carrying the matching ub8 token and ends it with the
+  end-of-response (29) marker (§1.1), so the stacked responses can be split and
+  matched back to their ops.
+
+This rides on the end-of-response framing from #155 and is only available on a
+23ai server that negotiated it; otherwise pyoracle falls back to serial
+execution (which is what it does today on every tier).

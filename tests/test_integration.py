@@ -2206,6 +2206,42 @@ class RefBindIntegration(_IntegrationBase):
 
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
+class PipelineIntegration(_IntegrationBase):
+    # Request pipelining (#132). Runs on every tier (serial execution); the
+    # API, ordering and results match a single-round-trip pipelined run.
+    def test_pipeline_runs_all_ops(self):
+        self.cur.execute(
+            f"CREATE TABLE {self.TABLE} (id NUMBER, name VARCHAR2(20))")
+        p = oracle.create_pipeline()
+        p.add_execute(f"INSERT INTO {self.TABLE} VALUES (1, 'a')")
+        p.add_executemany(f"INSERT INTO {self.TABLE} VALUES (:1, :2)",
+                          [(2, "b"), (3, "c")])
+        p.add_commit()
+        p.add_fetchall(f"SELECT id, name FROM {self.TABLE} ORDER BY id")
+        p.add_fetchone(f"SELECT COUNT(*) FROM {self.TABLE}")
+        results = self.conn.run_pipeline(p)
+        self.assertEqual(len(results), 5)
+        self.assertTrue(all(r.error is None for r in results))
+        self.assertEqual(results[3].rows, [(1, "a"), (2, "b"), (3, "c")])
+        self.assertEqual(results[4].rows, [(3,)])
+
+    def test_pipeline_continue_on_error(self):
+        p = oracle.create_pipeline()
+        p.add_execute("SELECT * FROM a_table_that_does_not_exist")
+        p.add_fetchone("SELECT 42 FROM dual")
+        results = self.conn.run_pipeline(p, continue_on_error=True)
+        self.assertIsNotNone(results[0].error)
+        self.assertEqual(results[1].rows, [(42,)])
+
+    def test_pipeline_abort_raises(self):
+        p = oracle.create_pipeline()
+        p.add_execute("SELECT * FROM a_table_that_does_not_exist")
+        p.add_fetchone("SELECT 42 FROM dual")
+        with self.assertRaises(oracle.DatabaseError):
+            self.conn.run_pipeline(p)
+
+
+@unittest.skipUnless(_USER, _SKIP_REASON)
 class SessionlessTransactionIntegration(unittest.TestCase):
     # Sessionless transactions (#133, 23ai). A transaction is started on one
     # session, suspended, then resumed and committed on a *different* session.
@@ -2798,6 +2834,26 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                                            oracle.NUMBER, [21]), 42)
                 finally:
                     await Cur.execute("DROP FUNCTION PYORACLE_ASYNC_FUNC")
+
+    async def test_async_pipeline(self):
+        # Async mirror of PipelineIntegration (#132).
+        table = "PYORACLE_APIPE"
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            cur = Conn.cursor()
+            try:
+                await cur.execute(f"DROP TABLE {table}")
+            except oracle.DatabaseError:
+                pass
+            await cur.execute(f"CREATE TABLE {table} (id NUMBER)")
+            p = oracle.create_pipeline()
+            p.add_execute(f"INSERT INTO {table} VALUES (1)")
+            p.add_executemany(f"INSERT INTO {table} VALUES (:1)", [(2,), (3,)])
+            p.add_commit()
+            p.add_fetchall(f"SELECT id FROM {table} ORDER BY id")
+            results = await Conn.run_pipeline(p)
+            self.assertEqual(results[3].rows, [(1,), (2,), (3,)])
+            self.assertTrue(all(r.error is None for r in results))
+            await cur.execute(f"DROP TABLE {table}")
 
     async def test_async_ref_bind(self):
         # Async mirror of RefBindIntegration (#139): fetch a REF, bind it back.
