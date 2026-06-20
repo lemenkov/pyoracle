@@ -20,7 +20,8 @@ from oracle.dbobject import (
 from oracle.exceptions import NotSupportedError
 from oracle.types import decode_value
 from oracle.tns import (
-    _encode_object_bind_value, _read_object_column, encode_object_image,
+    _encode_object_bind_value, _encode_ref_oac, _encode_ref_bind_value,
+    _read_object_column, encode_object_image, _ENCODE_FIELD_VERSION,
 )
 from oracle.tns_consts import (
     AL32UTF8_CHARSET, TNS_TYPE_CHAR, TNS_TYPE_NUMBER, TNS_TYPE_REF,
@@ -151,6 +152,47 @@ class TestObjectBindEncode(unittest.TestCase):
         Wire = _encode_object_bind_value(Obj)
         # toid = 00 22 02 08 + the 16-byte type OID + the fixed extent OID.
         self.assertIn(b"\x00\x22\x02\x08" + _ADDR_TYPE.oid, Wire)
+
+
+class TestRefBindEncode(unittest.TestCase):
+    # REF bind (#139). Byte fixtures captured from the Oracle JDBC thin driver
+    # binding a fetched REF back (oracledb has no REF type, so JDBC is the only
+    # reference) on 23ai: person_t REF for ('Alice'), bound into DEREF(?).
+    _OID = bytes.fromhex("54b3dec71d796414e063c000a8c01de8")
+    _LOCATOR = bytes.fromhex(
+        "0028020954b3dec71d7f6414e063c000a8c01de8"
+        "54b3dec71d7e6414e063c000a8c01de800017afb0000")
+    _CAP_OAC = bytes.fromhex(
+        "6f030000020fa0000001101054b3dec71d796414e063c000a8c01de801010102000000")
+    _CAP_VAL = bytes.fromhex(
+        "2a0028020954b3dec71d7f6414e063c000a8c01de8"
+        "54b3dec71d7e6414e063c000a8c01de800017afb0000")
+
+    def setUp(self):
+        _ENCODE_FIELD_VERSION.set(24)
+
+    def tearDown(self):
+        _ENCODE_FIELD_VERSION.set(6)
+
+    def _ref(self, oid=None):
+        return DbRef(self._LOCATOR, "PERSON_T", "PYO",
+                     self._OID if oid is None else oid)
+
+    def test_oac_matches_jdbc_capture(self):
+        self.assertEqual(_encode_ref_oac(self._ref()), self._CAP_OAC)
+
+    def test_value_is_length_prefixed_locator(self):
+        self.assertEqual(_encode_ref_bind_value(self._ref()), self._CAP_VAL)
+
+    def test_oac_carries_referenced_type_oid(self):
+        self.assertIn(self._OID, _encode_ref_oac(self._ref()))
+        self.assertEqual(_encode_ref_oac(self._ref())[0], TNS_TYPE_REF)
+
+    def test_bind_without_oid_rejected(self):
+        # A DbRef lacking the type OID (e.g. a describe that didn't carry it)
+        # cannot build the bind OAC.
+        with self.assertRaises(NotSupportedError):
+            _encode_ref_oac(DbRef(self._LOCATOR, "PERSON_T"))
 
 
 class TestDbObjectTypeApi(unittest.TestCase):

@@ -18,6 +18,12 @@
 # connection. Read-only here -- binding an object is #116, and VARRAY / nested
 # table / REF are #117 / #118 / #119.
 
+# Defer annotation evaluation (PEP 563): DbRef defines a `bytes` property that
+# shadows the builtin inside the class body, so an eagerly-evaluated annotation
+# like `-> bytes | None` on a later method would fail on Python < 3.14 with
+# "unsupported operand type(s) for |: 'property' and 'NoneType'".
+from __future__ import annotations
+
 from oracle.exceptions import NotSupportedError
 from oracle.tns_consts import (
     AL32UTF8_CHARSET,

@@ -2178,13 +2178,32 @@ length-prefixed value (no special framing), so it reads on every tier without
 desync. To read the referenced object, dereference in SQL —
 `SELECT DEREF(ref_col) ...` returns a normal object that decodes via §21.1–21.4.
 
-pyoracle surfaces a REF as a read-only `oracle.DbRef` exposing `.bytes` / `.hex`
-and the referenced type name (`.type_name`, captured from the per-column
-describe, which carries the referenced type's OID + owner/name in the same
-fields an ADT column uses, §21.1). Note python-oracledb has **no** REF type at
-all, so there is no thin-mode reference for this; the locator structure above
-was read from live captures (10g/11g/21c/23ai). **Read-only** here — binding a
-REF back (a type-111 bind OAC, no reference; capture-based) is a follow-up.
+pyoracle surfaces a REF as `oracle.DbRef` exposing `.bytes` / `.hex` and the
+referenced type identity (`.type_name` / `.type_schema` / `.type_oid`, captured
+from the per-column describe, which carries the referenced type's OID +
+owner/name in the same fields an ADT column uses, §21.1). Note python-oracledb
+has **no** REF type at all, so there is no thin-mode reference for this; the
+locator structure above was read from live captures (10g/11g/21c/23ai).
+
+### 21.8 REF bind (#139)
+
+A fetched `DbRef` can be bound back — e.g. `INSERT INTO t (r) VALUES (:ref)` or
+`SELECT DEREF(:ref) ...`. Since python-oracledb has no REF type, the bind format
+was captured from the **Oracle JDBC thin** driver (the only client that emits a
+type-111 bind). Two parts:
+
+- **OAC** — the same 12c+ ADT-style metadata as an OBJECT bind (§21.5) but with
+  type code **111** and the *referenced* type's 16-byte OID:
+  `6f 03 00 00 | sb4(buffer) | sb4(0) | sb4(0) | <ub4-count + len + OID> |
+  sb4(version) | sb4(charset) | csfrm | sb4(0) | sb4(0)`. The OID comes from the
+  `DbRef` (kept from its describe); a `DbRef` without it cannot be bound.
+- **Value** — just the opaque locator, length-prefixed (`_bytes_with_length`) —
+  the exact inverse of the read path; no image, no envelope.
+
+**12c+ only** (like all object/collection binds — no pre-12c reference): a REF
+bind on field version < 12.1 raises `NotSupportedError` up front. Verified on
+21c/23ai, sync + async (round-trip through `DEREF` returns the original object).
+This completes the object-type family (#115–#119).
 
 ## 22. DML RETURNING ... INTO (#120)
 

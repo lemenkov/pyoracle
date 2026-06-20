@@ -555,7 +555,7 @@ def _check_object_bind_support(Connection, Bind, Batch=None) -> None:
     # PL/SQL associative-array bind (#122; pre-12c mis-types it, PLS-00306).
     # Refuse both up front on pre-12c with a clear error. (Object/collection
     # *decode* works on all tiers — only these binds are 12c+.)
-    from oracle.dbobject import DbObject
+    from oracle.dbobject import DbObject, DbRef
     if getattr(Connection, 'field_version', 0) >= FIELD_VERSION_12_1:
         return
     Rows = [Bind] + (Batch or []) if Bind else (Batch or [])
@@ -565,6 +565,9 @@ def _check_object_bind_support(Connection, Bind, Batch=None) -> None:
             if isinstance(V, DbObject):
                 raise NotSupportedError(
                     "binding a SQL OBJECT value requires an Oracle 12.1+ server")
+            if isinstance(V, DbRef):
+                raise NotSupportedError(
+                    "binding a REF value requires an Oracle 12.1+ server")
             if isinstance(V, Var) and getattr(V, 'is_array', False):
                 raise NotSupportedError(
                     "binding a PL/SQL associative array (arrayvar) requires an "

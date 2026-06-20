@@ -3087,10 +3087,13 @@ def encode_token_rxd(Token: object) -> bytes:
                 + Token.locator)
     if Token is None:
         return bytes([0])
-    from oracle.dbobject import DbObject
+    from oracle.dbobject import DbObject, DbRef
     if isinstance(Token, DbObject):
         # SQL OBJECT (ADT) bind (#116): the write_dbobject framing + image.
         return _encode_object_bind_value(Token)
+    if isinstance(Token, DbRef):
+        # REF bind (#139): the opaque locator, length-prefixed.
+        return _encode_ref_bind_value(Token)
     if isinstance(Token, (dict, JSON)):
         # JSON bind: native OSON image (#70) when encodable, else the text cast
         # (#50). The OAC path in encode_token_oac makes the same choice.
@@ -3226,10 +3229,13 @@ def encode_token_oac(Token: object) -> bytes:
         # NULL value (0 bytes): a minimal VARCHAR OAC, again avoiding the
         # 32767 LONG-reorder swap when a NULL bind precedes another bind.
         return encode_token_raw(TNS_TYPE_VARCHAR, 1, 16, AL32UTF8_CHARSET, 0)
-    from oracle.dbobject import DbObject
+    from oracle.dbobject import DbObject, DbRef
     if isinstance(Token, DbObject):
         # SQL OBJECT (ADT) bind OAC (#116): type 109 + the type's OID + version.
         return _encode_object_oac(Token)
+    if isinstance(Token, DbRef):
+        # REF bind OAC (#139): type 111 + the referenced type's OID.
+        return _encode_ref_oac(Token)
     if isinstance(Token, (dict, JSON)):
         # JSON bind: a native JSON OAC (#70) when the value is OSON-encodable,
         # else the VARCHAR OAC for the text cast (#50). Must match the choice in
@@ -3438,6 +3444,39 @@ def _encode_object_oac(Obj: object) -> bytes:
             + bytes([0])                          # character set form
             + encode_sb4(0)                       # LOB prefetch length
             + encode_sb4(0))                      # oaccolid (12.2+)
+
+# Fixed buffer size the REF bind OAC advertises (matches the Oracle JDBC thin
+# reference capture; the locator is self-describing so the exact value is not
+# load-bearing).
+_REF_OAC_BUFFER_SIZE = 4000
+
+def _encode_ref_oac(Ref: object) -> bytes:
+    # The bind OAC for a REF (type 111, #139). Same 12c+ ADT-style metadata as
+    # _encode_object_oac but with the REF type code and the *referenced* type's
+    # 16-byte OID. Byte-for-byte from the Oracle JDBC thin reference (oracledb
+    # has no REF type, so JDBC is the only reference). The type OID is carried on
+    # the DbRef from its describe (#119); without it we cannot build the OAC.
+    if Ref.type_oid is None:
+        from oracle.exceptions import NotSupportedError
+        raise NotSupportedError(
+            "cannot bind a REF without its referenced type OID; the value must "
+            "come from a fetched DbRef whose describe carried the type identity")
+    return (bytes([TNS_TYPE_REF, 3, 0, 0])        # type 111, flag, prec, scale
+            + encode_sb4(_REF_OAC_BUFFER_SIZE)    # buffer size
+            + encode_sb4(0)                       # max number of array elements
+            + encode_sb4(0)                       # cont flag (ub8)
+            + _obj_two_lengths(Ref.type_oid)      # referenced type OID (16 bytes)
+            + encode_sb4(1)                       # type version
+            + encode_sb4(2)                       # charset id (ub2) — per capture
+            + bytes([0])                          # character set form
+            + encode_sb4(0)                       # LOB prefetch length
+            + encode_sb4(0))                      # oaccolid (12.2+)
+
+def _encode_ref_bind_value(Ref: object) -> bytes:
+    # The bind value for a REF (#139): just the opaque locator, length-prefixed —
+    # the exact inverse of the read path (decode_dalc). Confirmed against the
+    # JDBC reference for both an INSERT and a DEREF bind.
+    return _bytes_with_length(Ref.bytes)
 
 # --- Advanced Queuing (#128) ---
 
