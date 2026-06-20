@@ -34,6 +34,17 @@ TNS_VERSION_MIN_OOB_CHECK = 318          # accept carries the extended flags2
 TNS_ACCEPT_FLAG_HAS_END_OF_RESPONSE = 0x02000000
 TNS_CCAP_END_OF_RESPONSE = 0x20          # CCAP_TTC4 opt-in bit (#155/#132)
 TTI_END_OF_RESPONSE = 29                 # per-response terminator marker
+# Request pipelining (#132). Several calls are sent back-to-back, each numbered
+# with a ub8 token, then a PIPELINE_END message; the server tags each response
+# with a matching TOKEN (33) marker and ends it with the EOR (29) marker.
+TTI_MSG_TYPE_PIGGYBACK = 0x11            # piggyback message type (17)
+TTI_TOKEN = 33                           # response correlation marker
+TNS_FUNC_PIPELINE_BEGIN = 199            # begin-pipeline piggyback
+TNS_FUNC_PIPELINE_END = 200              # end-of-pipeline message
+TNS_DATA_FLAGS_BEGIN_PIPELINE = 0x1000   # first pipelined packet
+TNS_DATA_FLAGS_END_OF_REQUEST = 0x0800   # a pipelined call expecting a result
+TNS_PIPELINE_MODE_CONTINUE_ON_ERROR = 1
+TNS_PIPELINE_MODE_ABORT_ON_ERROR = 2
 TNS_ATTENTION = 13
 TNS_CONTROL = 14
 TNS_MAX = 19

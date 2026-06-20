@@ -61,6 +61,8 @@ from oracle.tns_consts import (
     TTI_IRD,
     TTI_RXH, TTI_SESS, TTI_SPFP, TTI_STA, TTI_STRT, TTI_STOP, TTI_UDS,
     TTI_END_OF_RESPONSE, TNS_CCAP_END_OF_RESPONSE,
+    TTI_MSG_TYPE_PIGGYBACK, TTI_TOKEN,
+    TNS_FUNC_PIPELINE_BEGIN, TNS_FUNC_PIPELINE_END,
     TTI_SVR_PIGGYBACK, TNS_SERVER_PIGGYBACK_OS_PID_MTS,
     TNS_SERVER_PIGGYBACK_SESS_RET, TNS_SERVER_PIGGYBACK_LTXID,
     TNS_SERVER_PIGGYBACK_SYNC,
@@ -1474,16 +1476,36 @@ def encode_dictionary_chgpwd(Dictionary: dict) -> bytes:
         LogonMode + bytes([1]) + encode_sb4(2) + bytes([1, 1]) + UserField + \
         AuthPass + AuthNewPass
 
-def _fun_header(Token: int, Seq: int, FieldVersion: int) -> bytes:
-    # Header for a TTI function-call message. 23ai (fv > 17, #89) appends one
-    # extra pointer byte after the sequence number (oracledb's
+def _fun_header(Token: int, Seq: int, FieldVersion: int,
+                TokenNum: int = 0) -> bytes:
+    # Header for a TTI function-call message. 23ai (fv > 17, #89) appends a
+    # ub8 "token number" after the sequence number (oracledb's
     # _write_function_code at fv24) — present on every function message
     # (execute, fetch, commit/rollback, LOB ops, logoff, ...). Omitting it
     # desyncs the call: the server either rejects it (ORA-03146 / ORA-03120) or
-    # never replies (read timeout).
+    # never replies (read timeout). For an ordinary call the token is 0
+    # (encode_sb4(0) == b"\x00", the historical single zero byte); request
+    # pipelining (#132) numbers each piggybacked call 1..N so the server can tag
+    # each response with a matching TOKEN (33) marker.
     if FieldVersion > FIELD_VERSION_23_1:
-        return bytes([TTI_FUN, Token, Seq, 0])
+        return bytes([TTI_FUN, Token, Seq]) + encode_sb4(TokenNum)
     return bytes([TTI_FUN, Token, Seq])
+
+def encode_pipeline_begin(Seq: int, FieldVersion: int, TokenNum: int,
+                          Mode: int) -> bytes:
+    # The begin-pipeline piggyback (#132): tells the server a pipelined burst is
+    # starting and which error mode applies. It rides on the first pipelined
+    # message (the caller sets the BEGIN_PIPELINE data flag on that packet) and
+    # shares that message's token. Mirrors oracledb
+    # _write_begin_pipeline_piggyback; byte-validated against a 23ai capture.
+    Out = bytes([TTI_MSG_TYPE_PIGGYBACK, TNS_FUNC_PIPELINE_BEGIN, Seq])
+    if FieldVersion > FIELD_VERSION_23_1:
+        Out += encode_sb4(TokenNum)
+    return Out + encode_sb4(0) + bytes([0]) + bytes([Mode])
+
+def encode_pipeline_end(Seq: int, FieldVersion: int) -> bytes:
+    # The PIPELINE_END (func 200) message closing a pipelined burst (#132).
+    return _fun_header(TNS_FUNC_PIPELINE_END, Seq, FieldVersion) + encode_sb4(0)
 
 
 def encode_dictionary_close(Dictionary: dict) -> bytes:
