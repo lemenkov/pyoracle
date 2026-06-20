@@ -62,6 +62,7 @@ from oracle.tns_consts import (
     TTI_RXH, TTI_SESS, TTI_SPFP, TTI_STA, TTI_STRT, TTI_STOP, TTI_UDS,
     TTI_SVR_PIGGYBACK, TNS_SERVER_PIGGYBACK_OS_PID_MTS,
     TNS_SERVER_PIGGYBACK_SESS_RET, TNS_SERVER_PIGGYBACK_LTXID,
+    TNS_SERVER_PIGGYBACK_SYNC,
     TNS_SERVER_PIGGYBACK_QUERY_CACHE_INVALIDATION,
     TNS_SERVER_PIGGYBACK_TRACE_EVENT,
     TTI_3LOGON, TTI_3LOGA,
@@ -860,6 +861,26 @@ def decode_token_server_piggyback(Data: bytes, Acc: tuple) -> object:
     elif Opcode == TNS_SERVER_PIGGYBACK_OS_PID_MTS:
         (_, Rest) = decode_ub4(Rest)                 # ub2
         (_, Rest) = decode_dalc(Rest)                # pid bytes
+    elif Opcode == TNS_SERVER_PIGGYBACK_SYNC:
+        # Sessionless transactions (#133): the server reports txn-id sync state
+        # as keyword-value pairs (keyword 201 = transaction id) piggybacked on
+        # the next call response while a sessionless txn is active. pyoracle
+        # tracks the active flag client-side, so the pairs are only consumed
+        # byte-for-byte here. Each pair = ub2 text-len + dalc / ub2 binary-len +
+        # dalc / ub2 keyword-num, framed like the SESS_RET pair loop.
+        (_, Rest) = decode_ub4(Rest)                 # number of DTYs (ub2)
+        Rest = Rest[1:]                              # length of DTYs (ub1)
+        (NumElements, Rest) = decode_ub4(Rest)       # number of pairs (ub2)
+        Rest = Rest[1:]                              # length (ub1)
+        for _ in range(NumElements):
+            (TextLen, Rest) = decode_ub4(Rest)       # text value len (ub2)
+            if TextLen > 0:
+                (_, Rest) = decode_dalc(Rest)
+            (BinLen, Rest) = decode_ub4(Rest)        # binary value len (ub2)
+            if BinLen > 0:
+                (_, Rest) = decode_dalc(Rest)
+            (_, Rest) = decode_ub4(Rest)             # keyword num (ub2)
+        (_, Rest) = decode_ub4(Rest)                 # overall flags (ub4)
     elif Opcode == TNS_SERVER_PIGGYBACK_LTXID:
         (_, Rest) = decode_dalc(Rest)                # logical transaction id
     elif Opcode in (TNS_SERVER_PIGGYBACK_QUERY_CACHE_INVALIDATION,

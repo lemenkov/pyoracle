@@ -2486,3 +2486,42 @@ trailing `ORA-01403` on a fetch is the normal end-of-data marker, not an error.
 Verified on 21c and 23ai (sync + async): connections route through the broker
 (`v$cpool_stats` / `v$cpool_conn_info` show the connection class). Needs the
 server pool started (`DBMS_CONNECTION_POOL.START_POOL`).
+
+## 31. Sessionless transactions (#133, 23ai)
+
+`begin_sessionless_transaction(transaction_id=None, timeout=60)` /
+`suspend_sessionless_transaction()` / `resume_sessionless_transaction(id,
+timeout=60)`. A transaction is started on one session, suspended, then resumed
+and committed on **any** session — the transaction lives in the database, not
+the session. Built entirely on the existing two-phase-commit machinery (§28):
+there is **no new function code**.
+
+- **The switch message reuses `TNS_FUNC_TPC_TXN_SWITCH` (103)** with the same
+  `encode_tpc_switch` body. The sessionless identity is carried in the xid slot
+  with a fixed magic **format-id `0x4e5c3e`** and the user transaction id (≤ 64
+  bytes, defaulting to a fresh uuid4) in the gtrid; bqual is empty. `begin` is
+  op `START` with flags `NEW(0x01) | SESSIONLESS(0x10)`; `resume` is op `START`
+  with `RESUME(0x04) | SESSIONLESS`; `suspend` is op `DETACH` with `SESSIONLESS`
+  only and **no xid attached**. `timeout` (seconds the server keeps the
+  suspended transaction resumable) goes in the message's timeout field.
+- **Commit / rollback are ordinary** `TTI_COMMIT` / `TTI_ROLLBACK` messages —
+  they end the sessionless transaction with no sessionless flag.
+- **Server sync state** — while a sessionless transaction is active the server
+  piggybacks a **`SYNC` server-side piggyback (opcode 5)** onto the next call's
+  response, carrying keyword-value pairs (keyword `201` = the transaction id and
+  a 2-byte sync state, e.g. `0x83 0x01` = unset|version-1 after a commit).
+  pyoracle tracks the active flag client-side and consumes the piggyback
+  byte-for-byte in `decode_token_server_piggyback`; without that the stream
+  desyncs on the first call after `begin`. The pair loop mirrors `SESS_RET`
+  (§30): per pair a ub2-gated text value, a ub2-gated binary value, then the
+  keyword number, followed by an overall ub4 flags field.
+
+Use `autocommit=False` so the DML between `begin`/`resume` and `suspend`/commit
+joins the transaction; a suspended transaction's rows are invisible to other
+sessions until committed. Sync + async. **23ai+ only:** `begin`/`resume`/
+`suspend` raise `NotSupportedError` on field version < 23.1 (before any wire
+activity). The wire format was confirmed against the oracledb-thin reference
+through the logging proxy; the server accepts pyoracle's minimal sb4 encoding of
+the format-id (`03 4e5c3e`) where oracledb pads to four bytes. Verified on 23ai
+(suspend/resume across sessions, cross-session isolation, rollback), sync +
+async.

@@ -103,6 +103,13 @@ TPC_BEGIN_PROMOTE = 0x00000008
 # tpc_end flags
 TPC_END_NORMAL = 0x00000000
 TPC_END_SUSPEND = 0x00100000
+# Sessionless transactions (#133, 23ai). They reuse the func-103 switch message
+# with the SESSIONLESS flag OR'd into the start/resume/detach flags, and a fixed
+# magic format-id carried in the XID slot (the user txn id goes in the gtrid).
+# Confirmed on the wire (23ai 23.26) against the oracledb-thin reference.
+TPC_TXN_FLAGS_SESSIONLESS = 0x00000010
+TNS_TPC_SESSIONLESS_FORMAT_ID = 0x4e5c3e
+TNS_SESSIONLESS_TXN_ID_MAX = 64
 
 # DRCP session purity (#130).
 PURITY_DEFAULT = 0
