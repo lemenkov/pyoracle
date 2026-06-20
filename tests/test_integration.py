@@ -2150,6 +2150,62 @@ class PoolIntegration(unittest.TestCase):
 
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
+class RefBindIntegration(_IntegrationBase):
+    # REF bind (#139): fetch a REF for a row object, bind it back into an INSERT
+    # and into DEREF(?), and confirm it round-trips to the original object. REF
+    # decode works on all tiers (#119), but the bind needs the 12c+ OAC — pre-12c
+    # raises NotSupportedError, so the test skips there.
+    TYPE = "PYORACLE_REF_PERSON"
+    PEOPLE = "PYORACLE_REF_PEOPLE"
+    REFS = "PYORACLE_REF_REFS"
+
+    def _setup_schema(self):
+        from oracle.exceptions import DatabaseError
+        for s in (f"DROP TABLE {self.REFS}", f"DROP TABLE {self.PEOPLE}",
+                  f"DROP TYPE {self.TYPE}"):
+            try:
+                self.cur.execute(s)
+            except DatabaseError:
+                pass
+        self.cur.execute(
+            f"CREATE TYPE {self.TYPE} AS OBJECT (id NUMBER, name VARCHAR2(40))")
+        self.cur.execute(f"CREATE TABLE {self.PEOPLE} OF {self.TYPE}")
+        self.cur.execute(f"INSERT INTO {self.PEOPLE} VALUES (1, 'Alice')")
+        self.cur.execute(
+            f"CREATE TABLE {self.REFS} (id NUMBER, r REF {self.TYPE})")
+
+    def tearDown(self):
+        try:
+            cleanup = self.conn.cursor()
+            for s in (f"DROP TABLE {self.REFS}", f"DROP TABLE {self.PEOPLE}",
+                      f"DROP TYPE {self.TYPE}"):
+                try:
+                    cleanup.execute(s)
+                except Exception:
+                    pass
+            cleanup.close()
+        finally:
+            super().tearDown()
+
+    def test_ref_bind_roundtrip(self):
+        self._setup_schema()
+        self.cur.execute(f"SELECT REF(p) FROM {self.PEOPLE} p WHERE p.id = 1")
+        ref = self.cur.fetchone()[0]
+        self.assertEqual(ref.type_name, self.TYPE)
+        if getattr(self.conn, "field_version", 0) < FIELD_VERSION_12_1:
+            self.skipTest("REF bind needs a 12.1+ server")
+        # Bind into an INSERT, then DEREF the stored REF back to the object.
+        self.cur.execute(
+            f"INSERT INTO {self.REFS} (id, r) VALUES (:1, :2)", [100, ref])
+        self.cur.execute(
+            f"SELECT id, DEREF(r).name FROM {self.REFS} WHERE id = 100")
+        self.assertEqual(self.cur.fetchone(), (100, "Alice"))
+        # Bind into DEREF directly.
+        self.cur.execute(f"SELECT DEREF(:1).name FROM dual", [ref])
+        self.assertEqual(self.cur.fetchone(), ("Alice",))
+
+
+@unittest.skipUnless(_USER, _SKIP_REASON)
 class SessionlessTransactionIntegration(unittest.TestCase):
     # Sessionless transactions (#133, 23ai). A transaction is started on one
     # session, suspended, then resumed and committed on a *different* session.
@@ -2742,6 +2798,43 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                                            oracle.NUMBER, [21]), 42)
                 finally:
                     await Cur.execute("DROP FUNCTION PYORACLE_ASYNC_FUNC")
+
+    async def test_async_ref_bind(self):
+        # Async mirror of RefBindIntegration (#139): fetch a REF, bind it back.
+        from oracle.tns_consts import FIELD_VERSION_12_1 as _FV12
+        TYPE, PEOPLE, REFS = ("PYORACLE_AREF_T", "PYORACLE_AREF_PEOPLE",
+                              "PYORACLE_AREF_REFS")
+        Conn = await oracle.connect_async(**self._kwargs())
+        try:
+            cur = Conn.cursor()
+            for s in (f"DROP TABLE {REFS}", f"DROP TABLE {PEOPLE}",
+                      f"DROP TYPE {TYPE}"):
+                try:
+                    await cur.execute(s)
+                except oracle.DatabaseError:
+                    pass
+            await cur.execute(
+                f"CREATE TYPE {TYPE} AS OBJECT (id NUMBER, name VARCHAR2(40))")
+            await cur.execute(f"CREATE TABLE {PEOPLE} OF {TYPE}")
+            await cur.execute(f"INSERT INTO {PEOPLE} VALUES (1, 'Alice')")
+            await cur.execute(f"CREATE TABLE {REFS} (id NUMBER, r REF {TYPE})")
+            await cur.execute(f"SELECT REF(p) FROM {PEOPLE} p WHERE p.id = 1")
+            ref = (await cur.fetchone())[0]
+            if getattr(Conn, "field_version", 0) < _FV12:
+                self.skipTest("REF bind needs a 12.1+ server")
+            await cur.execute(
+                f"INSERT INTO {REFS} (id, r) VALUES (:1, :2)", [100, ref])
+            await cur.execute(
+                f"SELECT id, DEREF(r).name FROM {REFS} WHERE id = 100")
+            self.assertEqual(await cur.fetchone(), (100, "Alice"))
+            for s in (f"DROP TABLE {REFS}", f"DROP TABLE {PEOPLE}",
+                      f"DROP TYPE {TYPE}"):
+                try:
+                    await cur.execute(s)
+                except oracle.DatabaseError:
+                    pass
+        finally:
+            await Conn.close()
 
     async def test_async_sessionless_suspend_resume(self):
         # Async mirror of SessionlessTransactionIntegration (#133): suspend on

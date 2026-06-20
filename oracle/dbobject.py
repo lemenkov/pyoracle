@@ -18,6 +18,12 @@
 # connection. Read-only here -- binding an object is #116, and VARRAY / nested
 # table / REF are #117 / #118 / #119.
 
+# Defer annotation evaluation (PEP 563): DbRef defines a `bytes` property that
+# shadows the builtin inside the class body, so an eagerly-evaluated annotation
+# like `-> bytes | None` on a later method would fail on Python < 3.14 with
+# "unsupported operand type(s) for |: 'property' and 'NoneType'".
+from __future__ import annotations
+
 from oracle.exceptions import NotSupportedError
 from oracle.tns_consts import (
     AL32UTF8_CHARSET,
@@ -113,15 +119,20 @@ class DbRef:
     A REF is a pointer to an object instance, not the object itself; to read the
     object, dereference it in SQL (``SELECT DEREF(ref_col) ...``), which yields a
     DbObject (#115). The raw locator bytes are exposed for inspection / equality
-    (and for a future REF bind); ``type_name`` is the referenced object type when
-    the describe carried it. Read-only here -- binding a REF is a follow-up.
+    and to bind the REF back (#139); ``type_name`` / ``type_oid`` identify the
+    referenced object type when the describe carried them — the bind OAC needs
+    the 16-byte OID.
     """
 
-    __slots__ = ('_locator', '_type_name')
+    __slots__ = ('_locator', '_type_name', '_type_schema', '_type_oid')
 
-    def __init__(self, locator: bytes, type_name: str | None = None):
+    def __init__(self, locator: bytes, type_name: str | None = None,
+                 type_schema: str | None = None,
+                 type_oid: bytes | None = None):
         self._locator = bytes(locator)
         self._type_name = type_name
+        self._type_schema = type_schema
+        self._type_oid = bytes(type_oid) if type_oid else None
 
     @property
     def bytes(self) -> bytes:
@@ -137,6 +148,17 @@ class DbRef:
     def type_name(self) -> str | None:
         """The referenced object type name, if known."""
         return self._type_name
+
+    @property
+    def type_schema(self) -> str | None:
+        """The referenced object type's schema/owner, if known."""
+        return self._type_schema
+
+    @property
+    def type_oid(self) -> bytes | None:
+        """The referenced object type's 16-byte OID, if the describe carried it
+        (needed to bind the REF back, #139)."""
+        return self._type_oid
 
     def __eq__(self, other):
         if not isinstance(other, DbRef):

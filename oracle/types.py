@@ -282,7 +282,8 @@ def decode_value(Column: dict, Data: bytes | list) -> object:
         # rather than bare bytes; dereference in SQL with DEREF(...) to get the
         # object. NULL was already handled above.
         from oracle.dbobject import DbRef
-        return DbRef(bytes(Data), Column.get('type_name'))
+        return DbRef(bytes(Data), Column.get('type_name'),
+                     Column.get('type_schema'), Column.get('type_oid'))
     if DataType == TNS_TYPE_BOOLEAN:
         # Native SQL BOOLEAN (23ai, #54). NULL is already handled above; a
         # present value's last byte is the truth value: TRUE arrives as
