@@ -35,6 +35,28 @@ All communication is framed into TNS packets. Every packet begins with an 8- or 
 - **Flags** (8 bits): Reserved, set to `0x00`.
 - **Header Checksum** (16 bits): Set to `0x0000`.
 
+> **Large-SDU header (#155).** When the negotiated protocol version is **≥ 315**
+> (a 21c/23ai-era server, reached because pyoracle advertises version 319 in the
+> CONNECT — see §2), the header changes: the **Packet Length becomes 32 bits**
+> (bytes 0–3), replacing the legacy 16-bit length + 16-bit packet-flags pair.
+> The Packet Type stays at byte 4, so the rest of the layout is unchanged. The
+> CONNECT and ACCEPT packets themselves stay in the legacy 16-bit form; only the
+> post-ACCEPT DATA stream on a ≥315 session uses the 4-byte length. pyoracle
+> flips `self._large_packets` from the ACCEPT's negotiated version and
+> `encode_packet` / `assemble_packet` take a `Large` flag. Older tiers (9i/10g/
+> 11g) negotiate down below 315 and keep the legacy 16-bit header.
+
+> **End-of-response framing (#155 → #132).** A ≥318 server's ACCEPT carries an
+> extended `flags2` word (uint32 at accept-body offset 33); its
+> `0x02000000` bit means the server supports **end-of-response** delimiting. When
+> set, pyoracle advertises `CCAP_TTC4 |= 0x20` in the DTY, and the server then
+> ends **every** response with a `TTI_END_OF_RESPONSE` (29) marker. For an
+> ordinary single call this marker simply trails the existing STATUS/OER
+> terminal in the same packet (so it is consumed implicitly); it becomes load-
+> bearing for request **pipelining** (#132), where several responses are stacked
+> in one stream and the 29 marks where each ends. `_supports_eor` records the
+> negotiation; `decode_packet` treats token 29 as a terminator.
+
 For **TNS_DATA** packets (type 6), an additional 2-byte field follows:
 
 - **Data Flags** (16 bits): on the **client -> server** side, `0x0000` for a
@@ -131,25 +153,38 @@ The receive-side handshake that keeps the stream in sync (#45):
 
 The client sends a TNS_CONNECT packet containing a fixed header and a connect descriptor string.
 
-**Fixed header fields** (58 bytes before the connect data):
+**Fixed header fields** (74 bytes before the connect data, #155):
 
-| Offset | Size | Field                        | Default Value     |
+| Offset | Size | Field                        | Value             |
 |--------|------|------------------------------|-------------------|
-| 0      | 2    | Protocol version             | `0x0139` (313)    |
-| 2      | 2    | Lowest compatible version    | `0x0139` (313)    |
-| 4      | 2    | Global service options       | `0x0000`          |
+| 0      | 2    | Protocol version             | `0x013F` (319)    |
+| 2      | 2    | Lowest compatible version    | `0x012C` (300)    |
+| 4      | 2    | Global service options       | `0x0401`          |
 | 6      | 2    | Session Data Unit (SDU)      | `0x2000` (8192)   |
-| 8      | 2    | Transport Data Unit (TDU)    | `0xFFFF` (65535)  |
+| 8      | 2    | Transport Data Unit (TDU)    | `0x2000` (8192)   |
 | 10     | 2    | Protocol characteristics     | `0x4F98`          |
 | 12     | 2    | Max packets before ACK       | `0x0000`          |
 | 14     | 2    | Hardware byte order          | `0x0001` (big-endian) |
 | 16     | 2    | Connect data length          | (computed)        |
-| 18     | 2    | Connect data offset          | `0x003A` (58)     |
+| 18     | 2    | Connect data offset          | `0x004A` (74)     |
 | 20     | 4    | Max receivable connect data  | `0x00000000`      |
 | 24     | 2    | ANO flags                    | `0x8484` (ANO disabled) |
 | 26     | 24   | Reserved                     | `0x00...`         |
+| 50     | 4    | Session Data Unit (large)    | `0x00002000` (8192) |
+| 54     | 4    | Transport Data Unit (large)  | `0x00002000` (8192) |
+| 58     | 4    | Connect flags 1              | `0x00000000`      |
+| 62     | 4    | Connect flags 2              | `0x00000001` (OOB check) |
 
-**Connect descriptor** (at offset 58): An Oracle Net connect descriptor string in the standard `(DESCRIPTION=(...))` format:
+pyoracle advertises **protocol version 319** (`#155`) — the version a 23ai
+server needs to negotiate the end-of-response framing pipelining (`#132`) rides
+on. The 319 layout adds the 16-byte trailer (offsets 50–66: large SDU/TDU +
+connect flags) and moves the connect data to offset 74. The `300` lowest-
+compatible floor keeps older servers working: 9i (max version 312), 10g, and
+11g negotiate down (`min(their_max, 319)`) and fall back to the legacy 16-bit
+packet framing (§1.1); only ≥315 servers (21c/23ai) use the large framing. The
+CONNECT packet itself is sent in the legacy 16-bit-length envelope regardless.
+
+**Connect descriptor** (at offset 74): An Oracle Net connect descriptor string in the standard `(DESCRIPTION=(...))` format:
 
 ```
 (DESCRIPTION=

@@ -24,6 +24,16 @@ TNS_MARKER_TYPE_INTERRUPT = 3
 # out-of-band break (attention). When set we prefer OOB over the in-band
 # marker for cancel()/call_timeout (#144).
 TNS_GSO_CAN_RECV_ATTENTION = 0x0400
+# Protocol-version-319 / large-SDU handshake (#155). pyoracle advertises version
+# 319 in the CONNECT; a server whose negotiated version is >= 315 switches to the
+# 4-byte ("large") packet length, and a >= 318 server's ACCEPT carries an
+# extended flags2 word whose HAS_END_OF_RESPONSE bit lets the client opt into the
+# end-of-response framing that pipelining (#132) needs.
+TNS_VERSION_MIN_LARGE_SDU = 315          # 4-byte packet length from here up
+TNS_VERSION_MIN_OOB_CHECK = 318          # accept carries the extended flags2
+TNS_ACCEPT_FLAG_HAS_END_OF_RESPONSE = 0x02000000
+TNS_CCAP_END_OF_RESPONSE = 0x20          # CCAP_TTC4 opt-in bit (#155/#132)
+TTI_END_OF_RESPONSE = 29                 # per-response terminator marker
 TNS_ATTENTION = 13
 TNS_CONTROL = 14
 TNS_MAX = 19

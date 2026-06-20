@@ -30,6 +30,8 @@ from oracle.tns_consts import (
     FIELD_VERSION_23_1, FIELD_VERSION_23_4, MAX_SEQ_NUM,
     TNS_ACCEPT, TNS_CONNECT, TNS_DATA, TNS_MARKER,
     TNS_MARKER_TYPE_INTERRUPT, TNS_GSO_CAN_RECV_ATTENTION,
+    TNS_VERSION_MIN_LARGE_SDU, TNS_VERSION_MIN_OOB_CHECK,
+    TNS_ACCEPT_FLAG_HAS_END_OF_RESPONSE,
     TNS_REDIRECT, TNS_REFUSE, TNS_RESEND, TTI_AUTH, TTI_DTY, TTI_PRO,
     TTI_OER, TTI_RPA, TTI_SESS, TTI_WRN,
     TNS_TPC_TXN_START, TNS_TPC_TXN_DETACH, TNS_TPC_TXN_COMMIT,
@@ -313,6 +315,30 @@ def _decode_tpc_state(Packet: bytes) -> int:
     return State
 
 
+def _parse_accept_eor(version: int, packet: bytes) -> bool:
+    # End-of-response negotiation (#155). The accept body (8-byte header already
+    # stripped) is Ver/Opts then, for protocol version >= 318, an extended
+    # flags2 uint32 at offset 33 (mirrors oracledb connect.pyx: skip 10, flags1,
+    # skip 9, sdu(4), skip 5, flags2). The HAS_END_OF_RESPONSE bit means the
+    # server will honour the EOR cap. Best-effort: any short/odd packet disables
+    # EOR (the connection behaves exactly as it does without it).
+    if version < TNS_VERSION_MIN_OOB_CHECK or len(packet) < 37:
+        return False
+    (flags2,) = struct.unpack(">I", packet[33:37])
+    return bool(flags2 & TNS_ACCEPT_FLAG_HAS_END_OF_RESPONSE)
+
+
+def _parse_accept_sdu(version: int, packet: bytes, legacy_sdu: int) -> int:
+    # The negotiated SDU (#155). A >= 315 ("large SDU") accept carries the real
+    # SDU as a uint32 at offset 24; below that it is the legacy 16-bit field the
+    # caller already read from packet[4:6].
+    if version >= TNS_VERSION_MIN_LARGE_SDU and len(packet) >= 28:
+        (sdu,) = struct.unpack(">I", packet[24:28])
+        if sdu > 0:
+            return sdu
+    return legacy_sdu
+
+
 def _normalize_sessionless_txn_id(transaction_id) -> bytes:
     # Sessionless transactions (#133): the id goes in the gtrid slot of the
     # func-103 switch message. str -> UTF-8 bytes; None -> a fresh uuid4; max
@@ -392,6 +418,8 @@ class OracleConnect:
         self._call_timeout = 0          # ms; 0 = no timeout
         self._timed_out = False
         self._supports_oob = False      # set from the accept (#144)
+        self._supports_eor = False      # end-of-response framing (#155/#132)
+        self._large_packets = False     # 4-byte packet length (#155, ver >= 315)
         # Two-phase commit (#131): the opaque transaction context the server
         # returns from tpc_begin, replayed on prepare/commit/rollback/end.
         self._transaction_context = None
@@ -479,6 +507,7 @@ class OracleConnect:
             'req': self.charset,
             'seq': self._next_seq(),
             'field_version': self.field_version,
+            'supports_eor': self._supports_eor,
         }
         d.update(extra)
         return d
@@ -582,8 +611,13 @@ class OracleConnect:
                 case t if t == TNS_ACCEPT:
                     logger.debug("handle_login: accept")
                     # Extract negotiated SDU from the accept body
-                    (Ver, Opts, Sdu) = struct.unpack(">hhh", Packet[:6])
-                    self.sdu = Sdu
+                    (Ver, Opts, Sdu) = struct.unpack(">Hhh", Packet[:6])
+                    # 319-era accept (#155): a >= 315 server negotiates the
+                    # large (32-bit) SDU and switches to 4-byte packet framing;
+                    # a >= 318 server's flags2 carries the end-of-response bit.
+                    self.sdu = _parse_accept_sdu(Ver, Packet, Sdu)
+                    self._large_packets = Ver >= TNS_VERSION_MIN_LARGE_SDU
+                    self._supports_eor = _parse_accept_eor(Ver, Packet)
                     # OOB break support (#144): the accept's global service
                     # options carry CAN_RECV_ATTENTION when the server can
                     # receive an out-of-band break. When set we prefer the OOB
@@ -1638,7 +1672,8 @@ class OracleConnect:
         # cross more than a few SDU boundaries (test_basic crashed with
         # RecursionError on the auth handshake).
         while Data is not None:
-            (Packet, Rest) = encode_packet(Type, Data, self.sdu)
+            (Packet, Rest) = encode_packet(Type, Data, self.sdu,
+                                           self._large_packets)
             try:
                 self.sock.send(Packet)
             except TimeoutError as exc:
@@ -1889,7 +1924,7 @@ class OracleConnect:
             else:
                 (Packet, _) = encode_packet(
                     TNS_MARKER, bytes([1, 0, TNS_MARKER_TYPE_INTERRUPT]),
-                    self.sdu)
+                    self.sdu, self._large_packets)
                 self.sock.send(Packet)
         except OSError:
             pass
@@ -1912,7 +1947,8 @@ class OracleConnect:
             # least 8 bytes for a TNS header before assemble_packet can
             # do anything useful.
             while len(Acc) >= 8:
-                (Flag, Type, Body, Rest) = assemble_packet(Acc, self.sdu)
+                (Flag, Type, Body, Rest) = assemble_packet(Acc, self.sdu,
+                                                            self._large_packets)
                 if Flag is True and Type == TNS_MARKER:
                     # Preserve everything after the marker (the coalesced
                     # reset / error DATA) for the next recv() rather than

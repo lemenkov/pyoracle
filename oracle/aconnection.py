@@ -37,7 +37,7 @@ from oracle.tns import set_decode_dml_rowcounts, set_decode_return_binds
 from oracle.tns import encode_tpc_switch, encode_tpc_change_state
 from oracle.connection import (
     Xid, _decode_tpc_context, _decode_tpc_state,
-    _normalize_sessionless_txn_id)
+    _normalize_sessionless_txn_id, _parse_accept_eor, _parse_accept_sdu)
 from oracle.tns_consts import (
     TNS_TPC_TXN_START, TNS_TPC_TXN_DETACH, TNS_TPC_TXN_COMMIT,
     TNS_TPC_TXN_ABORT, TNS_TPC_TXN_PREPARE,
@@ -66,7 +66,8 @@ from oracle.tns_consts import (
     CONN_STATE_CONNECTED, CONN_STATE_DISCONNECTED,
     DictionaryType, FIELD_VERSION_23_1, FIELD_VERSION_23_4, TNS_ACCEPT,
     TNS_CONNECT, TNS_DATA, TNS_MARKER, TNS_MARKER_TYPE_INTERRUPT,
-    TNS_GSO_CAN_RECV_ATTENTION, TNS_REDIRECT, TNS_REFUSE, TNS_RESEND,
+    TNS_GSO_CAN_RECV_ATTENTION, TNS_VERSION_MIN_LARGE_SDU,
+    TNS_REDIRECT, TNS_REFUSE, TNS_RESEND,
     TTI_DTY, TTI_OER, TTI_PRO, TTI_RPA, TTI_SESS, TTI_WRN,
 )
 
@@ -124,6 +125,8 @@ class AsyncOracleConnect:
         self._call_timeout = 0
         self._timed_out = False
         self._supports_oob = False              # set from the accept (#144)
+        self._supports_eor = False              # end-of-response (#155/#132)
+        self._large_packets = False             # 4-byte framing (#155, >=315)
         self._transaction_context = None        # two-phase commit (#131)
         self._sessionless_txn_active = False     # sessionless txns (#133)
         self.conn_key = None
@@ -201,6 +204,7 @@ class AsyncOracleConnect:
             'req': self.charset,
             'seq': self._next_seq(),
             'field_version': self.field_version,
+            'supports_eor': self._supports_eor,
         }
         d.update(extra)
         return d
@@ -264,7 +268,8 @@ class AsyncOracleConnect:
     async def send(self, Type: int, Data: bytes | None) -> None:
         """Iterative split-and-send; mirrors `OracleConnect.send`."""
         while Data is not None:
-            (Packet, Rest) = encode_packet(Type, Data, self.sdu)
+            (Packet, Rest) = encode_packet(Type, Data, self.sdu,
+                                           self._large_packets)
             self._writer.write(Packet)
             Data = Rest
         await self._writer.drain()
@@ -279,7 +284,8 @@ class AsyncOracleConnect:
         self._pending = b""
         while True:
             while len(Acc) >= 8:
-                (Flag, Type, Body, Rest) = assemble_packet(Acc, self.sdu)
+                (Flag, Type, Body, Rest) = assemble_packet(Acc, self.sdu,
+                                                           self._large_packets)
                 if Flag is True and Type == TNS_MARKER:
                     self._pending = Rest
                     return (TNS_MARKER, b"")
@@ -342,8 +348,12 @@ class AsyncOracleConnect:
                 self._in_break = False
             match Type:
                 case t if t == TNS_ACCEPT:
-                    (Ver, Opts, Sdu) = struct.unpack(">hhh", Packet[:6])
-                    self.sdu = Sdu
+                    (Ver, Opts, Sdu) = struct.unpack(">Hhh", Packet[:6])
+                    # 319-era accept (#155): large SDU / 4-byte framing at
+                    # version >= 315, end-of-response bit at >= 318.
+                    self.sdu = _parse_accept_sdu(Ver, Packet, Sdu)
+                    self._large_packets = Ver >= TNS_VERSION_MIN_LARGE_SDU
+                    self._supports_eor = _parse_accept_eor(Ver, Packet)
                     self._supports_oob = bool(                  # OOB break (#144)
                         Opts & TNS_GSO_CAN_RECV_ATTENTION)
                     self.conn_state = CONN_STATE_CONNECTED
@@ -1239,7 +1249,7 @@ class AsyncOracleConnect:
                 else:
                     (Packet, _) = encode_packet(
                         TNS_MARKER, bytes([1, 0, TNS_MARKER_TYPE_INTERRUPT]),
-                        self.sdu)
+                        self.sdu, self._large_packets)
                     Target.send(Packet)
             except OSError:
                 pass
