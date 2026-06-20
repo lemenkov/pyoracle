@@ -8,10 +8,44 @@
 
 import unittest
 
+import oracle
+from oracle.pipeline import Pipeline, PipelineOpType, create_pipeline
 from oracle.tns import _fun_header, encode_pipeline_begin, encode_pipeline_end
 from oracle.tns_consts import (
     TNS_PIPELINE_MODE_ABORT_ON_ERROR, TNS_PIPELINE_MODE_CONTINUE_ON_ERROR,
 )
+
+
+class TestPipelineApi(unittest.TestCase):
+    def test_create_and_add(self):
+        p = create_pipeline()
+        self.assertIsInstance(p, Pipeline)
+        p.add_execute("insert into t values (1)")
+        p.add_executemany("insert into t values (:1)", [(1,), (2,)])
+        p.add_fetchone("select 1 from dual")
+        p.add_fetchmany("select * from t", num_rows=5)
+        p.add_fetchall("select * from t")
+        p.add_commit()
+        p.add_callproc("myproc", [1, 2])
+        p.add_callfunc("myfunc", oracle.NUMBER, [3])
+        types = [op.op_type for op in p.operations]
+        self.assertEqual(types, [
+            PipelineOpType.EXECUTE, PipelineOpType.EXECUTE_MANY,
+            PipelineOpType.FETCH_ONE, PipelineOpType.FETCH_MANY,
+            PipelineOpType.FETCH_ALL, PipelineOpType.COMMIT,
+            PipelineOpType.CALL_PROC, PipelineOpType.CALL_FUNC])
+
+    def test_op_carries_fields(self):
+        p = create_pipeline()
+        op = p.add_fetchmany("select x from t", [42], num_rows=7)
+        self.assertEqual(op.statement, "select x from t")
+        self.assertEqual(op.parameters, [42])
+        self.assertEqual(op.num_rows, 7)
+
+    def test_exported_from_package(self):
+        self.assertIs(oracle.create_pipeline, create_pipeline)
+        self.assertTrue(hasattr(oracle, "Pipeline"))
+        self.assertTrue(hasattr(oracle, "PipelineOpResult"))
 
 
 class TestTokenFraming(unittest.TestCase):

@@ -29,6 +29,9 @@ from oracle.exceptions import (
 )
 from oracle.pool import Pool
 from oracle.vector import SparseVector
+from oracle.pipeline import (
+    Pipeline, PipelineOp, PipelineOpResult, PipelineOpType, create_pipeline,
+)
 
 
 def connect(*args, **kwargs) -> OracleConnect:
@@ -86,6 +89,8 @@ __all__ = [
     "BinaryFloat", "BinaryDouble", "IntervalYM", "JSON", "SparseVector", "Var",
     "DbObject", "DbObjectType", "DbRef", "Xid",
     "Queue", "MessageProperties", "EnqOptions", "DeqOptions",
+    "Pipeline", "PipelineOp", "PipelineOpResult", "PipelineOpType",
+    "create_pipeline",
     "TPC_BEGIN_NEW", "TPC_BEGIN_JOIN", "TPC_BEGIN_RESUME", "TPC_BEGIN_PROMOTE",
     "TPC_END_NORMAL", "TPC_END_SUSPEND",
     "PURITY_DEFAULT", "PURITY_NEW", "PURITY_SELF",
