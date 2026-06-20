@@ -37,6 +37,8 @@ from oracle.tns_consts import (
     TNS_TPC_TXN_STATE_REQUIRES_COMMIT, TNS_TPC_TXN_STATE_COMMITTED,
     TNS_TPC_TXN_STATE_ABORTED, TNS_TPC_TXN_STATE_READ_ONLY,
     TNS_TPC_TXN_STATE_FORGOTTEN, TPC_BEGIN_NEW, TPC_END_NORMAL,
+    TPC_BEGIN_RESUME, TPC_TXN_FLAGS_SESSIONLESS,
+    TNS_TPC_SESSIONLESS_FORMAT_ID, TNS_SESSIONLESS_TXN_ID_MAX,
     PURITY_DEFAULT, PURITY_NEW,
 )
 from oracle.exceptions import DatabaseError
@@ -44,6 +46,7 @@ import logging
 import socket
 import struct
 import threading
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -310,6 +313,22 @@ def _decode_tpc_state(Packet: bytes) -> int:
     return State
 
 
+def _normalize_sessionless_txn_id(transaction_id) -> bytes:
+    # Sessionless transactions (#133): the id goes in the gtrid slot of the
+    # func-103 switch message. str -> UTF-8 bytes; None -> a fresh uuid4; max
+    # 64 bytes (mirrors oracledb normalize_sessionless_transaction_id).
+    if transaction_id is None:
+        return uuid.uuid4().bytes
+    if isinstance(transaction_id, str):
+        transaction_id = transaction_id.encode()
+    elif not isinstance(transaction_id, (bytes, bytearray)):
+        raise TypeError("transaction_id must be str, bytes, or None")
+    if len(transaction_id) > TNS_SESSIONLESS_TXN_ID_MAX:
+        raise ValueError(
+            f"transaction_id exceeds {TNS_SESSIONLESS_TXN_ID_MAX} bytes")
+    return bytes(transaction_id)
+
+
 def _split_proxy_user(user: str) -> tuple[str, str | None]:
     # Proxy auth (#126): `proxy_user[schema]` -> (proxy_user, schema). A plain
     # user name (or None) returns (user, None). Mirrors python-oracledb
@@ -376,6 +395,10 @@ class OracleConnect:
         # Two-phase commit (#131): the opaque transaction context the server
         # returns from tpc_begin, replayed on prepare/commit/rollback/end.
         self._transaction_context = None
+        # Sessionless transactions (#133): True between begin/resume and
+        # suspend/commit/rollback. Tracked client-side; the server confirms via
+        # a keyword-201 sync pair piggybacked on subsequent call responses.
+        self._sessionless_txn_active = False
         self.conn_key = None
         self.server_version = 0
         self.session_id = None
@@ -1510,12 +1533,16 @@ class OracleConnect:
         Data = encode_dictionary(self._make_dict(DictionaryType.tran, req=TTI_COMMIT))
         self.send(TNS_DATA, Data)
         self._handle_response()
+        # An ordinary commit ends an active sessionless transaction (#133); the
+        # server confirms via a keyword-201 sync-unset pair on this response.
+        self._sessionless_txn_active = False
 
     def rollback(self) -> None:
         from oracle.tns_consts import TTI_ROLLBACK
         Data = encode_dictionary(self._make_dict(DictionaryType.tran, req=TTI_ROLLBACK))
         self.send(TNS_DATA, Data)
         self._handle_response()
+        self._sessionless_txn_active = False
 
     def ping(self) -> None:
         from oracle.tns_consts import TTI_PING
@@ -1699,6 +1726,64 @@ class OracleConnect:
         self._transaction_context = None
         if Result != TNS_TPC_TXN_STATE_ABORTED:
             raise DatabaseError(f"unexpected TPC rollback state {Result}")
+
+    # --- Sessionless transactions (#133, 23ai) ---
+
+    def _check_sessionless_support(self) -> None:
+        if self.field_version < FIELD_VERSION_23_1:
+            from oracle.exceptions import NotSupportedError
+            raise NotSupportedError(
+                "sessionless transactions require an Oracle 23ai+ server")
+
+    def _sessionless_switch(self, operation: int, transaction_id, flags: int,
+                            timeout: int):
+        # Send a func-103 switch carrying the magic sessionless format-id. The
+        # txn id (gtrid) is only attached for start/resume; detach sends none.
+        xid = None
+        if transaction_id is not None:
+            xid = Xid(TNS_TPC_SESSIONLESS_FORMAT_ID, transaction_id, b"")
+        Data = encode_tpc_switch(self._next_seq(), self.field_version,
+                                 operation, xid, flags, timeout, None)
+        self._tpc_request(Data)
+
+    def begin_sessionless_transaction(self, transaction_id=None,
+                                      timeout: int = 60) -> bytes:
+        """Start a sessionless transaction. `transaction_id` (str/bytes, <=64
+        bytes) defaults to a fresh uuid4; returns the id used. `timeout` is the
+        seconds the server keeps the suspended transaction resumable."""
+        self._check_sessionless_support()
+        if self._sessionless_txn_active:
+            raise DatabaseError("a sessionless transaction is already active")
+        txnid = _normalize_sessionless_txn_id(transaction_id)
+        self._sessionless_switch(TNS_TPC_TXN_START, txnid,
+                                 TPC_BEGIN_NEW | TPC_TXN_FLAGS_SESSIONLESS,
+                                 timeout)
+        self._sessionless_txn_active = True
+        return txnid
+
+    def resume_sessionless_transaction(self, transaction_id,
+                                       timeout: int = 60) -> bytes:
+        """Resume a previously suspended sessionless transaction (possibly on a
+        different session). `transaction_id` is required; returns it."""
+        self._check_sessionless_support()
+        if self._sessionless_txn_active:
+            raise DatabaseError("a sessionless transaction is already active")
+        txnid = _normalize_sessionless_txn_id(transaction_id)
+        self._sessionless_switch(TNS_TPC_TXN_START, txnid,
+                                 TPC_BEGIN_RESUME | TPC_TXN_FLAGS_SESSIONLESS,
+                                 timeout)
+        self._sessionless_txn_active = True
+        return txnid
+
+    def suspend_sessionless_transaction(self) -> None:
+        """Suspend the active sessionless transaction so another session can
+        resume it. The transaction's work is preserved (not committed)."""
+        self._check_sessionless_support()
+        if not self._sessionless_txn_active:
+            raise DatabaseError("no sessionless transaction is active")
+        self._sessionless_switch(TNS_TPC_TXN_DETACH, None,
+                                 TPC_TXN_FLAGS_SESSIONLESS, 0)
+        self._sessionless_txn_active = False
 
     # --- Advanced Queuing (#128) ---
 

@@ -36,13 +36,16 @@ from oracle.tns import exec_oac_signature
 from oracle.tns import set_decode_dml_rowcounts, set_decode_return_binds
 from oracle.tns import encode_tpc_switch, encode_tpc_change_state
 from oracle.connection import (
-    Xid, _decode_tpc_context, _decode_tpc_state)
+    Xid, _decode_tpc_context, _decode_tpc_state,
+    _normalize_sessionless_txn_id)
 from oracle.tns_consts import (
     TNS_TPC_TXN_START, TNS_TPC_TXN_DETACH, TNS_TPC_TXN_COMMIT,
     TNS_TPC_TXN_ABORT, TNS_TPC_TXN_PREPARE,
     TNS_TPC_TXN_STATE_REQUIRES_COMMIT, TNS_TPC_TXN_STATE_COMMITTED,
     TNS_TPC_TXN_STATE_ABORTED, TNS_TPC_TXN_STATE_READ_ONLY,
     TNS_TPC_TXN_STATE_FORGOTTEN, TPC_BEGIN_NEW, TPC_END_NORMAL,
+    TPC_BEGIN_RESUME, TPC_TXN_FLAGS_SESSIONLESS,
+    TNS_TPC_SESSIONLESS_FORMAT_ID,
     PURITY_DEFAULT)
 from oracle.exceptions import DatabaseError
 from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
@@ -122,6 +125,7 @@ class AsyncOracleConnect:
         self._timed_out = False
         self._supports_oob = False              # set from the accept (#144)
         self._transaction_context = None        # two-phase commit (#131)
+        self._sessionless_txn_active = False     # sessionless txns (#133)
         self.conn_key = None
         self.server_version = 0
         self.session_id = None
@@ -1150,6 +1154,8 @@ class AsyncOracleConnect:
                                                   req=TTI_COMMIT))
         await self.send(TNS_DATA, Data)
         await self._handle_response()
+        # An ordinary commit ends an active sessionless transaction (#133).
+        self._sessionless_txn_active = False
 
     async def rollback(self) -> None:
         from oracle.tns_consts import TTI_ROLLBACK
@@ -1157,6 +1163,7 @@ class AsyncOracleConnect:
                                                   req=TTI_ROLLBACK))
         await self.send(TNS_DATA, Data)
         await self._handle_response()
+        self._sessionless_txn_active = False
 
     async def ping(self) -> None:
         from oracle.tns_consts import TTI_PING
@@ -1302,6 +1309,62 @@ class AsyncOracleConnect:
         self._transaction_context = None
         if Result != TNS_TPC_TXN_STATE_ABORTED:
             raise DatabaseError(f"unexpected TPC rollback state {Result}")
+
+    # --- Sessionless transactions (#133, 23ai), async port ---
+
+    def _check_sessionless_support(self) -> None:
+        if self.field_version < FIELD_VERSION_23_1:
+            from oracle.exceptions import NotSupportedError
+            raise NotSupportedError(
+                "sessionless transactions require an Oracle 23ai+ server")
+
+    async def _sessionless_switch(self, operation: int, transaction_id,
+                                  flags: int, timeout: int):
+        xid = None
+        if transaction_id is not None:
+            xid = Xid(TNS_TPC_SESSIONLESS_FORMAT_ID, transaction_id, b"")
+        Data = encode_tpc_switch(self._next_seq(), self.field_version,
+                                 operation, xid, flags, timeout, None)
+        await self._tpc_request(Data)
+
+    async def begin_sessionless_transaction(self, transaction_id=None,
+                                            timeout: int = 60) -> bytes:
+        """Start a sessionless transaction. `transaction_id` (str/bytes, <=64
+        bytes) defaults to a fresh uuid4; returns the id used. `timeout` is the
+        seconds the server keeps the suspended transaction resumable."""
+        self._check_sessionless_support()
+        if self._sessionless_txn_active:
+            raise DatabaseError("a sessionless transaction is already active")
+        txnid = _normalize_sessionless_txn_id(transaction_id)
+        await self._sessionless_switch(
+            TNS_TPC_TXN_START, txnid,
+            TPC_BEGIN_NEW | TPC_TXN_FLAGS_SESSIONLESS, timeout)
+        self._sessionless_txn_active = True
+        return txnid
+
+    async def resume_sessionless_transaction(self, transaction_id,
+                                             timeout: int = 60) -> bytes:
+        """Resume a previously suspended sessionless transaction (possibly on a
+        different session). `transaction_id` is required; returns it."""
+        self._check_sessionless_support()
+        if self._sessionless_txn_active:
+            raise DatabaseError("a sessionless transaction is already active")
+        txnid = _normalize_sessionless_txn_id(transaction_id)
+        await self._sessionless_switch(
+            TNS_TPC_TXN_START, txnid,
+            TPC_BEGIN_RESUME | TPC_TXN_FLAGS_SESSIONLESS, timeout)
+        self._sessionless_txn_active = True
+        return txnid
+
+    async def suspend_sessionless_transaction(self) -> None:
+        """Suspend the active sessionless transaction so another session can
+        resume it. The transaction's work is preserved (not committed)."""
+        self._check_sessionless_support()
+        if not self._sessionless_txn_active:
+            raise DatabaseError("no sessionless transaction is active")
+        await self._sessionless_switch(
+            TNS_TPC_TXN_DETACH, None, TPC_TXN_FLAGS_SESSIONLESS, 0)
+        self._sessionless_txn_active = False
 
     # --- Advanced Queuing (#128), async port ---
 

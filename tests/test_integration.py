@@ -2149,6 +2149,88 @@ class PoolIntegration(unittest.TestCase):
             Pool.close()
 
 
+@unittest.skipUnless(_USER, _SKIP_REASON)
+class SessionlessTransactionIntegration(unittest.TestCase):
+    # Sessionless transactions (#133, 23ai). A transaction is started on one
+    # session, suspended, then resumed and committed on a *different* session.
+    # Needs two connections with autocommit off, so it manages its own
+    # connections rather than the single-connection _IntegrationBase. Skips
+    # below 23ai (begin raises NotSupportedError at field version < 23.1).
+    TABLE = "PYORACLE_SL_TEST"
+
+    def _conn(self):
+        c = oracle.connect(host=_HOST, port=_PORT, user=_USER,
+                           password=_PASSWORD, service_name=_SERVICE, **_FV_KW)
+        c.autocommit = False
+        return c
+
+    def setUp(self):
+        from oracle.exceptions import NotSupportedError
+        self.conns = []
+        setup = self._conn()
+        self.conns.append(setup)
+        cur = setup.cursor()
+        try:
+            cur.execute(f"DROP TABLE {self.TABLE}")
+        except oracle.DatabaseError as e:
+            if e.code != 942:
+                raise
+        cur.execute(f"CREATE TABLE {self.TABLE} (id NUMBER)")
+        setup.commit()
+        # Probe support up front so the whole class skips cleanly pre-23ai.
+        try:
+            setup.begin_sessionless_transaction("probe", timeout=10)
+            setup.suspend_sessionless_transaction()
+            setup.rollback()
+        except NotSupportedError:
+            self.skipTest("sessionless transactions need a 23ai+ server")
+
+    def tearDown(self):
+        for c in self.conns:
+            try:
+                c.close()
+            except Exception:
+                pass
+
+    def test_suspend_resume_commit_across_sessions(self):
+        c1 = self._conn(); self.conns.append(c1)
+        tid = c1.begin_sessionless_transaction("sl-it-1", timeout=120)
+        self.assertEqual(tid, b"sl-it-1")
+        c1.cursor().execute(f"INSERT INTO {self.TABLE} VALUES (10)")
+        c1.suspend_sessionless_transaction()
+
+        # An outsider must not see the uncommitted, suspended row.
+        obs = self._conn(); self.conns.append(obs)
+        ocur = obs.cursor()
+        ocur.execute(f"SELECT COUNT(*) FROM {self.TABLE}")
+        self.assertEqual(ocur.fetchone()[0], 0)
+
+        c2 = self._conn(); self.conns.append(c2)
+        c2.resume_sessionless_transaction("sl-it-1", timeout=120)
+        c2.cursor().execute(f"INSERT INTO {self.TABLE} VALUES (20)")
+        c2.commit()
+
+        ocur.execute(f"SELECT id FROM {self.TABLE} ORDER BY id")
+        self.assertEqual(ocur.fetchall(), [(10,), (20,)])
+
+    def test_rollback_discards_sessionless_work(self):
+        c = self._conn(); self.conns.append(c)
+        c.begin_sessionless_transaction("sl-it-2", timeout=60)
+        c.cursor().execute(f"INSERT INTO {self.TABLE} VALUES (99)")
+        c.rollback()
+        cur = c.cursor()
+        cur.execute(f"SELECT COUNT(*) FROM {self.TABLE}")
+        self.assertEqual(cur.fetchone()[0], 0)
+
+    def test_default_id_is_uuid_and_double_begin_rejected(self):
+        c = self._conn(); self.conns.append(c)
+        tid = c.begin_sessionless_transaction(timeout=30)
+        self.assertEqual(len(tid), 16)              # uuid4 bytes
+        with self.assertRaises(oracle.DatabaseError):
+            c.begin_sessionless_transaction("other")  # already active
+        c.suspend_sessionless_transaction()
+
+
 _BFILE_TEST_FILE = "pyoracle_bfile_test.txt"
 _BFILE_TEST_CONTENT = b"hello bfile from disk"
 
@@ -2660,6 +2742,48 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                                            oracle.NUMBER, [21]), 42)
                 finally:
                     await Cur.execute("DROP FUNCTION PYORACLE_ASYNC_FUNC")
+
+    async def test_async_sessionless_suspend_resume(self):
+        # Async mirror of SessionlessTransactionIntegration (#133): suspend on
+        # one async connection, resume + commit on another. Skips below 23ai.
+        from oracle.exceptions import NotSupportedError
+        Kw = dict(self._kwargs()); Kw["autocommit"] = False
+        table = "PYORACLE_ASL_TEST"
+        setup = await oracle.connect_async(**Kw)
+        c1 = c2 = None
+        try:
+            scur = setup.cursor()
+            try:
+                await scur.execute(f"DROP TABLE {table}")
+            except oracle.DatabaseError as e:
+                if e.code != 942:
+                    raise
+            await scur.execute(f"CREATE TABLE {table} (id NUMBER)")
+            await setup.commit()
+            try:
+                await setup.begin_sessionless_transaction("aprobe", timeout=10)
+            except NotSupportedError:
+                self.skipTest("sessionless transactions need a 23ai+ server")
+            await setup.suspend_sessionless_transaction()
+            await setup.rollback()
+
+            c1 = await oracle.connect_async(**Kw)
+            await c1.begin_sessionless_transaction("asl-1", timeout=120)
+            await c1.cursor().execute(f"INSERT INTO {table} VALUES (10)")
+            await c1.suspend_sessionless_transaction()
+
+            c2 = await oracle.connect_async(**Kw)
+            await c2.resume_sessionless_transaction("asl-1", timeout=120)
+            await c2.cursor().execute(f"INSERT INTO {table} VALUES (20)")
+            await c2.commit()
+
+            ccur = c2.cursor()
+            await ccur.execute(f"SELECT id FROM {table} ORDER BY id")
+            self.assertEqual(await ccur.fetchall(), [(10,), (20,)])
+        finally:
+            for c in (setup, c1, c2):
+                if c is not None:
+                    await c.close()
 
 
 @unittest.skipUnless(
