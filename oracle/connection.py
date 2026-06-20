@@ -339,6 +339,47 @@ def _parse_accept_sdu(version: int, packet: bytes, legacy_sdu: int) -> int:
     return legacy_sdu
 
 
+def _apply_rowfactory(rows, rowfactory):
+    return [rowfactory(*r) for r in rows] if rowfactory else rows
+
+
+def _run_pipeline_op(conn, cur, op, T):
+    # Run a single pipeline operation on `cur` and return its PipelineOpResult
+    # (#132, sync). The async connection has its own awaiting copy of this.
+    from oracle.pipeline import PipelineOpResult
+    result = PipelineOpResult(op)
+    params = op.parameters or []
+    try:
+        if op.op_type == T.EXECUTE:
+            cur.execute(op.statement, params)
+        elif op.op_type == T.EXECUTE_MANY:
+            cur.executemany(op.statement, op.parameters)
+        elif op.op_type == T.FETCH_ONE:
+            cur.execute(op.statement, params)
+            row = cur.fetchone()
+            result.rows = _apply_rowfactory([] if row is None else [row],
+                                            op.rowfactory)
+            result.columns = cur.description
+        elif op.op_type == T.FETCH_MANY:
+            cur.execute(op.statement, params)
+            result.rows = _apply_rowfactory(cur.fetchmany(op.num_rows),
+                                            op.rowfactory)
+            result.columns = cur.description
+        elif op.op_type == T.FETCH_ALL:
+            cur.execute(op.statement, params)
+            result.rows = _apply_rowfactory(cur.fetchall(), op.rowfactory)
+            result.columns = cur.description
+        elif op.op_type == T.COMMIT:
+            conn.commit()
+        elif op.op_type == T.CALL_PROC:
+            cur.callproc(op.name, params)
+        elif op.op_type == T.CALL_FUNC:
+            result.return_value = cur.callfunc(op.name, op.return_type, params)
+    except DatabaseError as exc:
+        result.error = exc
+    return result
+
+
 def _normalize_sessionless_txn_id(transaction_id) -> bytes:
     # Sessionless transactions (#133): the id goes in the gtrid slot of the
     # func-103 switch message. str -> UTF-8 bytes; None -> a fresh uuid4; max
@@ -1819,6 +1860,28 @@ class OracleConnect:
         self._sessionless_switch(TNS_TPC_TXN_DETACH, None,
                                  TPC_TXN_FLAGS_SESSIONLESS, 0)
         self._sessionless_txn_active = False
+
+    # --- Request pipelining (#132) ---
+
+    def run_pipeline(self, pipeline, continue_on_error: bool = False) -> list:
+        """Run a Pipeline's queued operations and return a PipelineOpResult for
+        each (#132). The operations run in order; `continue_on_error` records a
+        failing op's error and keeps going, otherwise the first error is raised
+        after its result is recorded.
+
+        The operations currently run serially — the API, ordering and results
+        are exactly those of a pipelined run; the single-round-trip 23ai wire
+        optimisation (the token-tagged burst this driver already knows how to
+        frame) is a follow-up."""
+        from oracle.pipeline import PipelineOpType as T
+        results = []
+        Cur = self.cursor()
+        for Op in pipeline.operations:
+            Result = _run_pipeline_op(self, Cur, Op, T)
+            results.append(Result)
+            if Result.error is not None and not continue_on_error:
+                raise Result.error
+        return results
 
     # --- Advanced Queuing (#128) ---
 
