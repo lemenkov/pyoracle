@@ -67,6 +67,19 @@ class TestTokenFraming(unittest.TestCase):
         self.assertEqual(_fun_header(0x5e, 8, 6, 1), bytes([3, 0x5e, 8]))
 
 
+class TestTokenDecode(unittest.TestCase):
+    def test_token_marker_consumed(self):
+        # A pipelined op response is prefixed with TOKEN (33) + ub8 token; the
+        # decoder consumes it and decodes the body (here STATUS + EOR). The
+        # marker decode is field-version-independent, so don't perturb the
+        # shared _DECODE_FIELD_VERSION context (it would leak into later tests).
+        from oracle.tns import decode_packet
+        data = bytes.fromhex("210101") + bytes.fromhex("0903010005024be9") \
+            + bytes([29])
+        self.assertEqual(decode_packet(data, (None, None, [])),
+                         (True, (None, None, [])))
+
+
 class TestPipelineEncoders(unittest.TestCase):
     def test_begin_matches_capture(self):
         # C2S begin-pipeline piggyback: seq 0x07, token 1, ABORT mode (2).

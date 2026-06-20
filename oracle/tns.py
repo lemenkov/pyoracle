@@ -247,6 +247,13 @@ def decode_packet(Data: bytes, Acc: object, FieldVersion: int | None = None) -> 
             # terminal, so this is normally the trailing byte in the same
             # packet; handle it explicitly so it is never an "unknown type".
             return (True, Acc)
+        case t if t == TTI_TOKEN:
+            # Pipeline response-correlation marker (#158): a ub8 token number
+            # tagging which pipelined op this response belongs to. The pipelined
+            # responses arrive in op order, so consume the token and continue
+            # decoding the op's response body (which ends on its own EOR).
+            (_, Rest) = decode_ub4(Data[1:])
+            return decode_packet(Rest, Acc)
         case t if t == TTI_UDS:
             return decode_token_uds(Data, Acc)
         case t if t == TTI_WRN:
