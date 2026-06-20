@@ -46,6 +46,17 @@ All communication is framed into TNS packets. Every packet begins with an 8- or 
 > `encode_packet` / `assemble_packet` take a `Large` flag. Older tiers (9i/10g/
 > 11g) negotiate down below 315 and keep the legacy 16-bit header.
 
+> **End-of-response framing (#155 → #132).** A ≥318 server's ACCEPT carries an
+> extended `flags2` word (uint32 at accept-body offset 33); its
+> `0x02000000` bit means the server supports **end-of-response** delimiting. When
+> set, pyoracle advertises `CCAP_TTC4 |= 0x20` in the DTY, and the server then
+> ends **every** response with a `TTI_END_OF_RESPONSE` (29) marker. For an
+> ordinary single call this marker simply trails the existing STATUS/OER
+> terminal in the same packet (so it is consumed implicitly); it becomes load-
+> bearing for request **pipelining** (#132), where several responses are stacked
+> in one stream and the 29 marks where each ends. `_supports_eor` records the
+> negotiation; `decode_packet` treats token 29 as a terminator.
+
 For **TNS_DATA** packets (type 6), an additional 2-byte field follows:
 
 - **Data Flags** (16 bits): on the **client -> server** side, `0x0000` for a

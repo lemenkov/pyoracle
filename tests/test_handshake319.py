@@ -8,9 +8,14 @@
 import struct
 import unittest
 
-from oracle.tns import encode_packet, assemble_packet, encode_dictionary_login
+from oracle.tns import (
+    encode_packet, assemble_packet, encode_dictionary_login,
+    encode_dictionary_dty, decode_packet, CCAP_TTC4,
+)
 from oracle.connection import _parse_accept_eor, _parse_accept_sdu
-from oracle.tns_consts import DictionaryType, TNS_DATA
+from oracle.tns_consts import (
+    DictionaryType, TNS_DATA, TNS_CCAP_END_OF_RESPONSE, TTI_END_OF_RESPONSE,
+)
 
 
 class TestLargePacketFraming(unittest.TestCase):
@@ -50,6 +55,33 @@ class TestLargePacketFraming(unittest.TestCase):
         self.assertEqual(struct.unpack(">H", out[:2])[0], 319)   # version
         self.assertEqual(struct.unpack(">H", out[2:4])[0], 300)  # compat floor
         self.assertEqual(struct.unpack(">H", out[18:20])[0], 74) # connect-data offset
+
+
+class TestEndOfResponseCap(unittest.TestCase):
+    def _dty(self, supports_eor):
+        Dict = {"type": DictionaryType.dty, "field_version": 24,
+                "req": 873, "supports_eor": supports_eor}
+        return encode_dictionary_dty(Dict)
+
+    def _ttc4(self, dty):
+        # The compile-caps array is a length byte + array, after the 5-byte DTY
+        # header (token + charset_in(2) + charset_out(2) + flag). Index by
+        # CCAP_TTC4 into the array.
+        caps_len = dty[6]
+        caps = dty[7:7 + caps_len]
+        return caps[CCAP_TTC4]
+
+    def test_eor_bit_set_when_supported(self):
+        self.assertTrue(self._ttc4(self._dty(True)) & TNS_CCAP_END_OF_RESPONSE)
+
+    def test_eor_bit_clear_otherwise(self):
+        self.assertFalse(self._ttc4(self._dty(False)) & TNS_CCAP_END_OF_RESPONSE)
+
+    def test_end_of_response_token_is_terminal(self):
+        # The EOR (29) marker terminates a response decode without raising.
+        (flag, acc) = decode_packet(bytes([TTI_END_OF_RESPONSE]),
+                                    (None, None, []))
+        self.assertEqual(flag, True)
 
 
 class TestAcceptParse(unittest.TestCase):

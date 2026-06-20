@@ -507,6 +507,7 @@ class OracleConnect:
             'req': self.charset,
             'seq': self._next_seq(),
             'field_version': self.field_version,
+            'supports_eor': self._supports_eor,
         }
         d.update(extra)
         return d

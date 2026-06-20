@@ -60,6 +60,7 @@ from oracle.tns_consts import (
     TTI_LOGOFF, TTI_OAC, TTI_OER, TTI_PFN, TTI_PRO, TTI_RPA, TTI_RXD,
     TTI_IRD,
     TTI_RXH, TTI_SESS, TTI_SPFP, TTI_STA, TTI_STRT, TTI_STOP, TTI_UDS,
+    TTI_END_OF_RESPONSE, TNS_CCAP_END_OF_RESPONSE,
     TTI_SVR_PIGGYBACK, TNS_SERVER_PIGGYBACK_OS_PID_MTS,
     TNS_SERVER_PIGGYBACK_SESS_RET, TNS_SERVER_PIGGYBACK_LTXID,
     TNS_SERVER_PIGGYBACK_SYNC,
@@ -236,6 +237,13 @@ def decode_packet(Data: bytes, Acc: object, FieldVersion: int | None = None) -> 
         case t if t == TTI_SVR_PIGGYBACK:
             return decode_token_server_piggyback(Data, Acc)
         case t if t == TTI_STA:  # tran
+            return (True, Acc)
+        case t if t == TTI_END_OF_RESPONSE:
+            # End-of-response marker (#155/#132): on an EOR-negotiated 23ai
+            # connection the server terminates each response with this token.
+            # A single (non-pipelined) call already ends on its STATUS/OER
+            # terminal, so this is normally the trailing byte in the same
+            # packet; handle it explicitly so it is never an "unknown type".
             return (True, Acc)
         case t if t == TTI_UDS:
             return decode_token_uds(Data, Acc)
@@ -1845,6 +1853,15 @@ def encode_dictionary_dty(Dictionary: dict) -> bytes:
     # followed by the array (write_bytes_with_length in oracledb terms).
     FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
     CompileCaps, RuntimeCaps = capability_arrays(FieldVersion)
+    # End-of-response opt-in (#155/#132): when the server advertised EOR support
+    # in its accept, set CCAP_TTC4's 0x20 bit so the server delimits every
+    # response with the EOR (29) marker — the prerequisite for pipelining. Only
+    # reached on a >= 318 server (older tiers never set supports_eor), and
+    # guarded on the cap array being long enough.
+    if Dictionary.get('supports_eor') and len(CompileCaps) > CCAP_TTC4:
+        CompileCaps = bytearray(CompileCaps)
+        CompileCaps[CCAP_TTC4] |= TNS_CCAP_END_OF_RESPONSE
+        CompileCaps = bytes(CompileCaps)
     CapabilityHeader = bytes([len(CompileCaps)]) + CompileCaps
     TableHeader = bytes([len(RuntimeCaps)]) + RuntimeCaps
 
