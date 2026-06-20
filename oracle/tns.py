@@ -136,8 +136,17 @@ def set_decode_return_binds(Positions) -> None:
     set/list of 0-based OUT-bind positions, or empty/None to disarm."""
     _DECODE_RETURN_BINDS.set(tuple(sorted(Positions)) if Positions else ())
 
-def assemble_packet(Data: bytes, Length: int) -> tuple[bool, int | None, bytes | None, bytes | None]:
-    (PacketSize, PacketFlags, Type, Flags, Zero) = struct.unpack(">HhBBh", Data[:8])
+def assemble_packet(Data: bytes, Length: int, Large: bool = False) -> tuple[bool, int | None, bytes | None, bytes | None]:
+    # Two on-wire packet-header layouts share an 8-byte size and put the type at
+    # byte 4. Legacy: len(ub2) + checksum(ub2) + type + flags + hdr-cksum(ub2).
+    # Large-SDU (#155, negotiated at protocol version >= 315): len(ub4) + type +
+    # flags + hdr-cksum(ub2) — the 4-byte length replaces the legacy len+cksum.
+    # `Zero` (the hdr-cksum at bytes 6-7) is read the same way in both.
+    if Large:
+        (PacketSize, Type, Flags, Zero) = struct.unpack(">IBBh", Data[:8])
+        PacketFlags = 0
+    else:
+        (PacketSize, PacketFlags, Type, Flags, Zero) = struct.unpack(">HhBBh", Data[:8])
     if Type == TNS_DATA and Zero == 0:
         BodySize = PacketSize - 10
         Rest = Data[10:]
@@ -1223,7 +1232,14 @@ def decode_token_wrn(Data: bytes, Acc: object) -> tuple:
     logger.debug("decode_token_wrn: err=%s rows=%s ret=%s warn=%s", ErrNum, RowCount, RetCode, WarnFlag)
     return decode_packet(Rest, Acc)
 
-def encode_packet(Type: int, Data: bytes, Length: int) -> tuple[bytes, bytes | None]:
+def _packet_header(Size: int, Type: int, Large: bool) -> bytes:
+    # The 8-byte TNS packet header in the legacy (ub2 length + ub2 checksum) or
+    # large-SDU (ub4 length, #155) layout. Type sits at byte 4 in both.
+    if Large:
+        return struct.pack(">IBBh", Size, Type, 0, 0)
+    return struct.pack(">HhBBh", Size, 0, Type, 0, 0)
+
+def encode_packet(Type: int, Data: bytes, Length: int, Large: bool = False) -> tuple[bytes, bytes | None]:
     if Type == TNS_DATA:
         PacketSize = len(Data) + 10
         if PacketSize > Length:
@@ -1237,14 +1253,16 @@ def encode_packet(Type: int, Data: bytes, Length: int) -> tuple[bytes, bytes | N
             # mis-encoded that 0x20 flag as a 5-byte tail and drew ORA-12592 /
             # ORA-01013 from the server — issue #8.)
             BodySize = Length - 10
-            return (struct.pack(">HhBBhh", BodySize + 10, 0, Type, 0, 0, 0x0020)
-                    + Data[:BodySize], Data[BodySize:])
-        # PacketSize is a uint16 on the wire; fragmentation above keeps any
-        # single packet within the SDU, well inside uint16 range.
-        return (struct.pack(">HhBBhh", PacketSize, 0, Type, 0, 0, 0) + Data, None)
+            return (_packet_header(BodySize + 10, Type, Large)
+                    + struct.pack(">h", 0x0020) + Data[:BodySize], Data[BodySize:])
+        # The non-final fragment branch above carries data-flags 0x0020; the
+        # final/whole packet uses 0x0000. The 2-byte data flags follow the
+        # 8-byte header in both framing layouts.
+        return (_packet_header(PacketSize, Type, Large)
+                + struct.pack(">h", 0) + Data, None)
     else:
         PacketSize = len(Data) + 8
-        return (struct.pack(">HhBBh", PacketSize, 0, Type, 0, 0) + Data, None)
+        return (_packet_header(PacketSize, Type, Large) + Data, None)
 
 def encode_dictionary(Dictionary: dict) -> bytes | tuple[bytes, bytes]:
     match Dictionary['type']:
@@ -2714,31 +2732,42 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
     return Out
 
 def encode_dictionary_login(Dictionary: dict) -> bytes:
-    PacketVersion = bytes([1,57]) # Packet version number (313). Deliberately
-    # kept below the end-of-response era (>=319): at 313 a 23ai server still
-    # accepts the FAST_AUTH bundle (#89) but does NOT require end-of-response
-    # response framing, so pyoracle reaches field version 24 (and annotations)
-    # without reworking the whole response-parsing layer.
+    # The CONNECT packet, in the protocol-version-319 ("large SDU" / end-of-
+    # response era) layout (#155). pyoracle previously sent version 313 to stay
+    # below the EOR era; 319 is what a 23ai server needs to negotiate the
+    # end-of-response framing that pipelining (#132) rides on. The header is
+    # backward-compatible: 9i/10g/11g negotiate down (min(their_max, 319)) and
+    # keep the legacy DATA framing, while a >=315 server switches to the 4-byte
+    # ("large") packet length — see encode_packet/assemble_packet and the accept
+    # handler that flips self._large_packets. The connect-data offset is 74 (the
+    # legacy 58 plus the 16 trailing bytes: large SDU/TDU + connect flags).
+    Sdu = Dictionary['sdu']
+    PacketVersion = struct.pack(">H", 319)
     # Lowest compatible version we accept. The server negotiates
     # min(its_max, our PacketVersion); it REFUSES the connect if that is below
-    # our floor. Oracle 9i's max protocol version is 312, so a floor of 313
-    # (our PacketVersion) made 9i refuse outright. 300 matches what the 9i
-    # client (sqlplus) advertises and lets 9i settle on 312, while newer servers
-    # still negotiate up to our 313 (the floor only gates the lower bound). (#90)
-    LowestCompatVersion = bytes([1,44]) # 300
-    GSO = bytes([0,0]) # Global service options supported
-    SDU = struct.pack(">h", Dictionary['sdu']) # SDU
-    TDU = bytes([255,255]) # TDU
-    ProtocolCharacteristics = bytes([79,152]) # Protocol Characteristics
+    # our floor. Oracle 9i's max protocol version is 312, so the 300 floor lets
+    # 9i settle on 312 while newer servers negotiate up to 319 (#90).
+    LowestCompatVersion = struct.pack(">H", 300)
+    GSO = struct.pack(">H", 0x0401)            # global/service options
+    SDU = struct.pack(">H", Sdu)
+    TDU = struct.pack(">H", Sdu)
+    ProtocolCharacteristics = struct.pack(">H", 0x4f98)
     MaxUnackPackets = bytes([0,0]) # Max packets before ACK
     Endiannes = struct.pack(">h", 1) # 1 in hardware byte order
     Data = encode_dictionary_description(Dictionary)
-    DataLength = struct.pack(">h", len(Data)) # Connect Data length
-    CDO = bytes([0,58]) # Connect Data offset
+    DataLength = struct.pack(">H", len(Data)) # Connect Data length
+    CDO = struct.pack(">H", 74) # Connect Data offset (legacy 58 + 16 trailing)
     MaxConnDataRecv = bytes(4) # Max connect data that can be received
     ANO = bytes([132,132]) # ANO disabled
     Padding = bytes(24)
-    return PacketVersion + LowestCompatVersion + GSO + SDU + TDU + ProtocolCharacteristics + MaxUnackPackets + Endiannes + DataLength + CDO + MaxConnDataRecv + ANO + Padding + Data
+    # The 319-era trailing block before the connect data: 32-bit SDU and TDU,
+    # then connect_flags_1 (0) and connect_flags_2 (1 = OOB check), per capture.
+    Trailer = (struct.pack(">I", Sdu) + struct.pack(">I", Sdu)
+               + struct.pack(">I", 0) + struct.pack(">I", 1))
+    return (PacketVersion + LowestCompatVersion + GSO + SDU + TDU
+            + ProtocolCharacteristics + MaxUnackPackets + Endiannes
+            + DataLength + CDO + MaxConnDataRecv + ANO + Padding + Trailer
+            + Data)
 
 def encode_dictionary_pig(Dictionary: dict) -> bytes:
     Request = Dictionary['req']        # single function-code byte (ping works)

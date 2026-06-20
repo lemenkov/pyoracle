@@ -363,8 +363,13 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
         mock_gethostname.return_value = "ExampleHost"
         EnvOpts = { 'host' : "localhost", 'port' : 1521, 'user' : "system", 'password' : "MYORAPASS", 'sid' : "XE", 'app_name' : "oratest" }
         Dict = {'type' : DictionaryType.login, 'env' : EnvOpts, 'sdu' : 8192}
-        Ret = bytes([1,57,1,44,0,0,32,0,255,255,79,152,0,0,0,1,0,142,0,58,0,0,0,0,132,132,0,
-       0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,40,68,69,83,67,82,73,80,
+        # CONNECT in the protocol-version-319 layout (#155): version 319,
+        # service options 0x0401, TDU 0x2000, connect-data offset 74, plus the
+        # 16-byte trailer (large SDU/TDU = 8192, connect_flags 0 / 1).
+        Ret = bytes([1,63,1,44,4,1,32,0,32,0,79,152,0,0,0,1,0,142,0,74,0,0,0,0,132,132,
+       0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+       0,0,32,0,0,0,32,0,0,0,0,0,0,0,0,1,
+       40,68,69,83,67,82,73,80,
        84,73,79,78,61,40,67,79,78,78,69,67,84,95,68,65,84,65,61,40,83,73,68,61,
        88,69,41,40,67,73,68,61,40,80,82,79,71,82,65,77,61,111,114,97,116,101,
        115,116,41,40,72,79,83,84,61,69,120,97,109,112,108,101,72,111,115,116,
@@ -379,8 +384,13 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
         mock_gethostname.return_value = "ExampleHost"
         EnvOpts = { 'host' : "localhost", 'port' : 1521, 'user' : "system", 'password' : "MYORAPASS", 'sid' : "XE", 'app_name' : "oratest" }
         Dict = {'type' : DictionaryType.login, 'env' : EnvOpts, 'sdu' : 8192}
-        Ret = bytes([1,57,1,44,0,0,32,0,255,255,79,152,0,0,0,1,0,142,0,58,0,0,0,0,132,132,0,
-       0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,40,68,69,83,67,82,73,80,
+        # CONNECT in the protocol-version-319 layout (#155): version 319,
+        # service options 0x0401, TDU 0x2000, connect-data offset 74, plus the
+        # 16-byte trailer (large SDU/TDU = 8192, connect_flags 0 / 1).
+        Ret = bytes([1,63,1,44,4,1,32,0,32,0,79,152,0,0,0,1,0,142,0,74,0,0,0,0,132,132,
+       0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+       0,0,32,0,0,0,32,0,0,0,0,0,0,0,0,1,
+       40,68,69,83,67,82,73,80,
        84,73,79,78,61,40,67,79,78,78,69,67,84,95,68,65,84,65,61,40,83,73,68,61,
        88,69,41,40,67,73,68,61,40,80,82,79,71,82,65,77,61,111,114,97,116,101,
        115,116,41,40,72,79,83,84,61,69,120,97,109,112,108,101,72,111,115,116,
