@@ -34,6 +34,7 @@ from oracle.tns import encode_dictionary
 from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
 from oracle.tns import set_decode_dml_rowcounts, set_decode_return_binds
+from oracle.tns import encode_end_to_end_piggyback
 from oracle.tns import (encode_data_packet, encode_pipeline_begin,
                         encode_pipeline_end)
 from oracle.tns import encode_tpc_switch, encode_tpc_change_state
@@ -131,6 +132,8 @@ class AsyncOracleConnect:
         self._supports_oob = False              # set from the accept (#144)
         self._supports_eor = False              # end-of-response (#155/#132)
         self._large_packets = False             # 4-byte framing (#155, >=315)
+        self._e2e_values: dict = {}             # end-to-end tracing (#183)
+        self._e2e_pending: dict = {}
         self._transaction_context = None        # two-phase commit (#131)
         self._sessionless_txn_active = False     # sessionless txns (#133)
         self.conn_key = None
@@ -599,8 +602,9 @@ class AsyncOracleConnect:
             'arraydmlrowcounts': ArrayDmlRowCounts,
             'return_binds': ReturnBinds or None,
         }
+        Pre = self._flush_end_to_end_bytes()       # tracing piggyback (#183)
         Data = encode_dictionary(self._make_dict(DictionaryType.exec, query=QueryDict))
-        await self.send(TNS_DATA, Data)
+        await self.send(TNS_DATA, Pre + Data)
         # Arm row-count extraction for this response only (#18).
         set_decode_dml_rowcounts(ArrayDmlRowCounts)
         # Arm RETURNING out-bind decoding for this response only (#120).
@@ -1701,6 +1705,53 @@ class AsyncOracleConnect:
         # Lazy import to avoid a circular dep with acursor importing us.
         from oracle.acursor import AsyncCursor
         return AsyncCursor(self, scrollable=scrollable)
+
+    # --- End-to-end application tracing (#183), async port ---
+
+    def _set_e2e(self, name: str, value) -> None:
+        if self.field_version < FIELD_VERSION_12_1:
+            from oracle.exceptions import NotSupportedError
+            raise NotSupportedError(
+                "end-to-end tracing attributes require an Oracle 12.1+ server")
+        self._e2e_values[name] = value
+        self._e2e_pending[name] = value
+
+    def _flush_end_to_end_bytes(self) -> bytes:
+        if not self._e2e_pending:
+            return b""
+        Seq = self._next_seq()
+        Bytes = encode_end_to_end_piggyback(Seq, self.field_version,
+                                            self._e2e_pending)
+        self._e2e_pending = {}
+        return Bytes
+
+    @property
+    def module(self):
+        """Session MODULE for end-to-end tracing (#183). See
+        `OracleConnect.module`."""
+        return self._e2e_values.get('module')
+
+    @module.setter
+    def module(self, value) -> None:
+        self._set_e2e('module', value)
+
+    @property
+    def action(self):
+        """Session ACTION for end-to-end tracing (#183)."""
+        return self._e2e_values.get('action')
+
+    @action.setter
+    def action(self, value) -> None:
+        self._set_e2e('action', value)
+
+    @property
+    def client_identifier(self):
+        """Session CLIENT_IDENTIFIER for end-to-end tracing (#183)."""
+        return self._e2e_values.get('client_identifier')
+
+    @client_identifier.setter
+    def client_identifier(self, value) -> None:
+        self._set_e2e('client_identifier', value)
 
     # ----- async context manager -----
 

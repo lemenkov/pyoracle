@@ -63,6 +63,9 @@ from oracle.tns_consts import (
     TTI_END_OF_RESPONSE, TNS_CCAP_END_OF_RESPONSE,
     TTI_MSG_TYPE_PIGGYBACK, TTI_TOKEN,
     TNS_FUNC_PIPELINE_BEGIN, TNS_FUNC_PIPELINE_END,
+    TNS_FUNC_SET_END_TO_END_ATTR, TNS_END_TO_END_CLIENT_IDENTIFIER,
+    TNS_END_TO_END_MODULE, TNS_END_TO_END_ACTION, TNS_END_TO_END_CLIENT_INFO,
+    TNS_END_TO_END_DBOP,
     TTI_SVR_PIGGYBACK, TNS_SERVER_PIGGYBACK_OS_PID_MTS,
     TNS_SERVER_PIGGYBACK_SESS_RET, TNS_SERVER_PIGGYBACK_LTXID,
     TNS_SERVER_PIGGYBACK_SYNC,
@@ -1522,6 +1525,60 @@ def encode_pipeline_begin(Seq: int, FieldVersion: int, TokenNum: int,
 def encode_pipeline_end(Seq: int, FieldVersion: int) -> bytes:
     # The PIPELINE_END (func 200) message closing a pipelined burst (#132).
     return _fun_header(TNS_FUNC_PIPELINE_END, Seq, FieldVersion) + encode_sb4(0)
+
+
+def _e2e_header(Modified: bool, Value: bytes | None) -> bytes:
+    # One end-to-end attribute's header: a pointer byte (1 if the attribute is
+    # being set this flush, else 0) + a ub4 length of its value (0 when unset or
+    # cleared). The value bytes themselves are appended later, in field order.
+    if Modified:
+        return bytes([1]) + encode_sb4(len(Value) if Value else 0)
+    return bytes([0]) + encode_sb4(0)
+
+
+def encode_end_to_end_piggyback(Seq: int, FieldVersion: int,
+                                Attrs: dict) -> bytes:
+    """Build the SET_END_TO_END_ATTR piggyback (#183, func 135) that updates the
+    session's end-to-end application-tracing attributes. `Attrs` maps each name
+    (client_identifier / module / action / client_info / dbop) to either its new
+    str value or None (clear); only the keys present are flushed. The piggyback
+    rides in front of the next call's message. Byte layout + field order mirror
+    oracledb's _write_end_to_end_piggyback (validated against a 23ai capture)."""
+    def enc(Name):
+        return Attrs[Name].encode('utf-8') if Attrs.get(Name) is not None else None
+    Mod = {Name: Name in Attrs for Name in
+           ('client_identifier', 'module', 'action', 'client_info', 'dbop')}
+    Val = {Name: enc(Name) for Name in Mod}
+    Flags = 0
+    if Mod['action']:
+        Flags |= TNS_END_TO_END_ACTION
+    if Mod['client_identifier']:
+        Flags |= TNS_END_TO_END_CLIENT_IDENTIFIER
+    if Mod['client_info']:
+        Flags |= TNS_END_TO_END_CLIENT_INFO
+    if Mod['module']:
+        Flags |= TNS_END_TO_END_MODULE
+    if Mod['dbop']:
+        Flags |= TNS_END_TO_END_DBOP
+
+    Out = bytes([TTI_MSG_TYPE_PIGGYBACK, TNS_FUNC_SET_END_TO_END_ATTR, Seq])
+    if FieldVersion > FIELD_VERSION_23_1:
+        Out += encode_sb4(0)                      # ub8 token (0)
+    Out += bytes([0, 0]) + encode_sb4(Flags)      # cidnam, cidser pointers; flags
+    Out += _e2e_header(Mod['client_identifier'], Val['client_identifier'])
+    Out += _e2e_header(Mod['module'], Val['module'])
+    Out += _e2e_header(Mod['action'], Val['action'])
+    Out += bytes([0]) + encode_sb4(0)             # cideci (unsupported)
+    Out += bytes([0]) + encode_sb4(0)             # cidcct / cidecs (unsupported)
+    Out += _e2e_header(Mod['client_info'], Val['client_info'])
+    Out += bytes([0]) + encode_sb4(0)             # cidkstk (unsupported)
+    Out += bytes([0]) + encode_sb4(0)             # cidktgt (unsupported)
+    Out += _e2e_header(Mod['dbop'], Val['dbop'])
+    # values, in field order, only those set to a non-None value
+    for Name in ('client_identifier', 'module', 'action', 'client_info', 'dbop'):
+        if Mod[Name] and Val[Name] is not None:
+            Out += _bytes_with_length(Val[Name])
+    return Out
 
 
 def encode_dictionary_close(Dictionary: dict) -> bytes:

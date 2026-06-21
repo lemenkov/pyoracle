@@ -1517,6 +1517,31 @@ class FetchFlowIntegration(_IntegrationBase):
         self.assertEqual(empty.num_rows, 0)
         self.assertEqual(len(empty.column_names), 2)
 
+    def test_end_to_end_tracing(self):
+        # End-to-end application tracing (#183): set module / action /
+        # client_identifier; the change flushes with the next execute and shows
+        # up in SYS_CONTEXT('USERENV', ...). 12c+ only (the piggyback closes a
+        # pre-12c connection), so pre-12c must raise NotSupportedError instead.
+        if self.conn.field_version < FIELD_VERSION_12_1:
+            with self.assertRaises(oracle.NotSupportedError):
+                self.conn.module = "M"
+            return
+        self.conn.module = "PYOMOD"
+        self.conn.action = "PYOACT"
+        self.conn.client_identifier = "PYOCLID"
+        self.assertEqual(self.conn.module, "PYOMOD")
+        self.cur.execute(
+            "SELECT SYS_CONTEXT('USERENV','MODULE'), "
+            "SYS_CONTEXT('USERENV','ACTION'), "
+            "SYS_CONTEXT('USERENV','CLIENT_IDENTIFIER') FROM dual")
+        self.assertEqual(self.cur.fetchone(), ("PYOMOD", "PYOACT", "PYOCLID"))
+        # changing only one updates just that attribute
+        self.conn.action = "ACT2"
+        self.cur.execute(
+            "SELECT SYS_CONTEXT('USERENV','ACTION'), "
+            "SYS_CONTEXT('USERENV','MODULE') FROM dual")
+        self.assertEqual(self.cur.fetchone(), ("ACT2", "PYOMOD"))
+
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class LOBIntegration(_IntegrationBase):
@@ -2889,6 +2914,23 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(sizes, [3, 3, 1])
                 finally:
                     await Cur.execute(f"DROP TABLE {table}")
+
+    async def test_async_end_to_end_tracing(self):
+        # End-to-end tracing (#183) on the async path; 12c+ only.
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            if Conn.field_version < FIELD_VERSION_12_1:
+                with self.assertRaises(oracle.NotSupportedError):
+                    Conn.module = "M"
+                return
+            Conn.module = "AMOD"
+            Conn.action = "AACT"
+            Conn.client_identifier = "ACLID"
+            async with Conn.cursor() as Cur:
+                await Cur.execute(
+                    "SELECT SYS_CONTEXT('USERENV','MODULE'), "
+                    "SYS_CONTEXT('USERENV','ACTION'), "
+                    "SYS_CONTEXT('USERENV','CLIENT_IDENTIFIER') FROM dual")
+                self.assertEqual(await Cur.fetchone(), ("AMOD", "AACT", "ACLID"))
 
     async def test_async_executemany(self):
         async with await oracle.connect_async(**self._kwargs()) as Conn:

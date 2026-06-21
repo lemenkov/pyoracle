@@ -816,3 +816,39 @@ class TestO3logonMessages(unittest.TestCase):
             "203a3120616e64206964203d203a3201010101000000000001010000"
             "020fa000000000011f0106010000011600000000011f010705636172"
             "6f6c02c104")
+
+
+class TestEndToEndPiggyback(unittest.TestCase):
+    # SET_END_TO_END_ATTR piggyback (#183). Bytes byte-validated against a real
+    # oracledb-thin capture on 23ai (fv24); the action/client-identifier cases
+    # below are the exact piggyback portions of that capture.
+    def test_action_matches_capture(self):
+        from oracle.tns import encode_end_to_end_piggyback
+        self.assertEqual(
+            encode_end_to_end_piggyback(6, 24, {"action": "MYACT"}).hex(),
+            "118706000000011000000000010105000000000000000000000000054d59414354")
+
+    def test_client_identifier_matches_capture(self):
+        from oracle.tns import encode_end_to_end_piggyback
+        self.assertEqual(
+            encode_end_to_end_piggyback(8, 24, {"client_identifier": "MYCLID"}).hex(),
+            "118708000000010101010600000000000000000000000000000000064d59434c4944")
+
+    def test_pre_23ai_omits_token(self):
+        # On a < 23ai (fv <= 17) server the piggyback carries no ub8 token,
+        # exactly like _fun_header.
+        from oracle.tns import encode_end_to_end_piggyback
+        fv16 = encode_end_to_end_piggyback(6, 16, {"action": "MYACT"}).hex()
+        fv24 = encode_end_to_end_piggyback(6, 24, {"action": "MYACT"}).hex()
+        # fv24 has one extra 00 (the token) right after the seq byte.
+        self.assertEqual(fv16, "1187060000011000000000010105"
+                               "000000000000000000000000054d59414354")
+        self.assertEqual(len(fv24), len(fv16) + 2)
+
+    def test_combined_flags(self):
+        from oracle.tns import encode_end_to_end_piggyback
+        out = encode_end_to_end_piggyback(
+            7, 24, {"module": "M", "action": "A", "client_identifier": "C"})
+        # flags = MODULE(0x08) | ACTION(0x10) | CLIENT_IDENTIFIER(0x01) = 0x19
+        self.assertIn("0119", out.hex())
+        self.assertTrue(out.startswith(bytes([0x11, 0x87, 7])))
