@@ -23,6 +23,9 @@ dependencies = [
     # WITH TIME ZONE values resolve where the OS ships no system zoneinfo
     # (e.g. Windows, slim containers). A no-op where system tzdata exists.
     "tzdata",
+    # Arrow / DataFrame bulk fetch (#162): cursor.fetch_df_all/_batches return
+    # a pyarrow.Table for fast hand-off to pandas / Polars / pyarrow.
+    "pyarrow",
 ]
 
 [project.urls]
