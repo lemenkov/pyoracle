@@ -123,6 +123,19 @@ class _IntegrationBase(unittest.TestCase):
     """
     TABLE = "PYORACLE_TEST"
 
+    def __init_subclass__(cls, **kwargs):
+        # Give each integration class its OWN table name (#170). All classes
+        # used to share "PYORACLE_TEST", so a single stuck lock — e.g. a 9i
+        # connection killed mid-DML leaving a zombie session (#168/#169) — would
+        # block every later class's setUp/tearDown DROP and cascade into dozens
+        # of phantom ORA-00054, especially on the slow 9i VM. A unique name per
+        # class contains the blast radius to that one class. A subclass that
+        # sets its own TABLE keeps it.
+        super().__init_subclass__(**kwargs)
+        if 'TABLE' not in cls.__dict__:
+            Name = cls.__name__.replace('Integration', '') or cls.__name__
+            cls.TABLE = ('PYO_' + Name.upper())[:30]
+
     def run(self, result=None):
         import time
         for attempt in range(_THROTTLE_RETRIES + 1):
