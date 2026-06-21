@@ -2214,6 +2214,20 @@ def _o7_bind_oac(Value: object) -> bytes:
         Type, MaxSize, Csfrm = TNS_TYPE_RAW, 2000, 0
     elif isinstance(Value, bool) or isinstance(Value, (int, float, Decimal)):
         Type, MaxSize, Csfrm = 0x06, 22, 1          # VARNUM
+    elif isinstance(Value, datetime.datetime):
+        # A datetime/date bind must declare the same Oracle temporal type the
+        # value carries on the wire (encode_token_datetime emits 7/11/13 bytes),
+        # else the server reads the binary value as a VARCHAR and the implicit
+        # date conversion fails with ORA-01858 (#172). Mirror encode_token_oac:
+        # tz-aware -> TIMESTAMPTZ(13); sub-second -> TIMESTAMP(11); else DATE(7).
+        if Value.tzinfo is not None:
+            Type, MaxSize, Csfrm = TNS_TYPE_TIMESTAMPTZ, 13, 0
+        elif Value.microsecond > 0:
+            Type, MaxSize, Csfrm = TNS_TYPE_TIMESTAMP, 11, 0
+        else:
+            Type, MaxSize, Csfrm = TNS_TYPE_DATE, 7, 0
+    elif isinstance(Value, datetime.date):
+        Type, MaxSize, Csfrm = TNS_TYPE_DATE, 7, 0
     elif Value is None:
         Type, MaxSize, Csfrm = TNS_TYPE_VARCHAR, 1, 1
     else:
