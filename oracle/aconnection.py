@@ -554,6 +554,10 @@ class AsyncOracleConnect:
         if self.field_version < FIELD_VERSION_10_2:
             from oracle.connection import _check_fv2_bind_sizes
             _check_fv2_bind_sizes(Bind, Batch)
+            if Batch:                          # array DML unsupported on fv2 (#168)
+                from oracle.exceptions import NotSupportedError
+                raise NotSupportedError(
+                    "executemany (array DML) is not supported on Oracle 9i")
             if Head.startswith('SELECT'):
                 return await self._drain_cursor(
                     await self._execute_fv2(Query, Bind))
@@ -1182,6 +1186,10 @@ class AsyncOracleConnect:
         self._sessionless_txn_active = False
 
     async def ping(self) -> None:
+        if self.field_version < FIELD_VERSION_10_2:
+            # 9i lacks TTI_PING (func 147); use a trivial round trip (#168).
+            await self.execute("SELECT 'X' FROM dual")
+            return
         from oracle.tns_consts import TTI_PING
         Data = encode_dictionary(self._make_dict(DictionaryType.tran,
                                                   req=TTI_PING))
@@ -1193,7 +1201,10 @@ class AsyncOracleConnect:
         """Change the connected user's password (#21). Async mirror of
         `OracleConnect.changepassword` — same single TTI_AUTH password-change
         call reusing the login session key, same error behaviour."""
-        from oracle.exceptions import from_ora_code
+        from oracle.exceptions import from_ora_code, NotSupportedError
+        if self.field_version < FIELD_VERSION_10_2:
+            raise NotSupportedError(
+                "changepassword is not supported on Oracle 9i")     # (#168)
         if self.conn_state != CONN_STATE_AUTHENTICATED or self.conn_key is None:
             raise InterfaceError(
                 "changepassword requires an authenticated connection")

@@ -41,7 +41,35 @@ _FV2_UNSUPPORTED = (
      "Oracle 9i has no streamed LOB/LONG bind path (#169)"),
     ("error_then_large_lob",
      "Oracle 9i has no streamed LOB/LONG bind path (#169)"),
+    # Behavioural features the fv2 path does not implement (#168): they now
+    # raise a clean NotSupportedError or exercise a capability 9i lacks, rather
+    # than silently misbehaving, so the tests skip on 9i.
+    ("executemany", "array DML (executemany) is not supported on Oracle 9i"),
+    ("batcherror", "array DML batcherrors are not supported on Oracle 9i"),
+    ("refcursor", "REF CURSOR is not supported on Oracle 9i (fv2)"),
+    ("ref_bind", "REF / object types are not supported on Oracle 9i"),
+    ("changepassword", "changepassword is not supported on Oracle 9i"),
+    ("cache_evicts", "the cursor cache is a fv4+ feature; 9i re-parses"),
+    ("reuses_cursor", "the cursor cache is a fv4+ feature; 9i re-parses"),
+    ("scroll", "scrollable cursors are not supported on Oracle 9i (fv2)"),
+    ("pipeline", "the pipeline test uses array DML, unsupported on Oracle 9i"),
+    # Non-AL32UTF8 / national-charset handling on 9i is deferred (#174): its DB
+    # is WE8ISO8859P1, so UTF-8 / national / supplementary-plane values do not
+    # round-trip until that work lands.
+    ("varchar_utf8", "9i charset handling deferred (#174)"),
+    ("varchar_supplementary", "9i charset handling deferred (#174)"),
+    ("nvarchar", "9i national-charset handling deferred (#174)"),
+    ("nchar", "9i national-charset handling deferred (#174)"),
+    ("nclob", "9i national-charset handling deferred (#174)"),
 )
+
+
+def _fv2_skip_reason(test_method_name: str) -> str | None:
+    # The skip reason for a test whose feature Oracle 9i (fv2) lacks, or None.
+    for Pattern, Reason in _FV2_UNSUPPORTED:
+        if Pattern in test_method_name:
+            return Reason
+    return None
 
 # Resolve the TLS proxy fixture without depending on the `tests` package
 # layout (works under both `python -m unittest tests.test_integration` and
@@ -214,10 +242,10 @@ class _IntegrationBase(unittest.TestCase):
         # piles up sessions).
         if self.conn.field_version >= FIELD_VERSION_10_2:
             return
-        for Pattern, Reason in _FV2_UNSUPPORTED:
-            if Pattern in self._testMethodName:
-                self.conn.close()
-                self.skipTest(Reason)
+        Reason = _fv2_skip_reason(self._testMethodName)
+        if Reason is not None:
+            self.conn.close()
+            self.skipTest(Reason)
 
     def tearDown(self):
         # The test may have closed self.cur — always reach for a fresh one.
@@ -2045,6 +2073,13 @@ class ChangePasswordIntegration(unittest.TestCase):
         return dict(host=_HOST, port=_PORT, user=_USER, password=password,
                     service_name=_SERVICE, autocommit=True, **_FV_KW)
 
+    def setUp(self):
+        # changepassword is gated on Oracle 9i (its O3LOGON password change
+        # differs); skip the live tests there (#168).
+        with oracle.connect(**self._kwargs(_PASSWORD)) as conn:
+            if conn.field_version < FIELD_VERSION_10_2:
+                self.skipTest("changepassword is not supported on Oracle 9i")
+
     def test_changepassword_roundtrip(self):
         new = _PASSWORD + "_chg9"
         with oracle.connect(**self._kwargs(_PASSWORD)) as conn:
@@ -2387,6 +2422,20 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
             autocommit=True,
             **_FV_KW,
         )
+
+    async def asyncSetUp(self):
+        # Skip the async tests whose feature Oracle 9i (fv2) lacks, mirroring
+        # _IntegrationBase._skip_if_fv2_unsupported for this standalone async
+        # class (#168). A quick connect just to learn the negotiated field
+        # version, then close — the tests open their own connections.
+        Reason = _fv2_skip_reason(self._testMethodName)
+        if Reason is None:
+            return
+        Conn = await oracle.connect_async(**self._kwargs())
+        Fv = Conn.field_version
+        await Conn.close()
+        if Fv < FIELD_VERSION_10_2:
+            self.skipTest(Reason)
 
     async def test_connect_and_simple_query(self):
         Conn = await oracle.connect_async(**self._kwargs())
