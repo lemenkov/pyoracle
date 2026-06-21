@@ -85,6 +85,22 @@ contributing rather than after.
   database; integration tests gated on `PYORACLE_TEST_USER` are the
   right place for anything that needs to talk to a real Oracle.
 
+## Branches and pull-request scope
+
+- **One isolated feature per pull request.** Keep each branch and PR to a
+  single, self-contained change — one ticket, one concern. Don't bundle
+  separable changes (e.g. several datatypes, or a fix plus an unrelated
+  refactor) into one PR; split them so each can be reviewed and reverted on
+  its own.
+- **Open every PR against `master` — never against another feature branch.**
+  Even when a follow-up genuinely builds on an as-yet-unmerged branch, set the
+  PR's base to `master`. Branch off the dependency locally for the code if you
+  need it, but the PR base stays `master`: until the dependency merges the
+  follow-up's diff will also show its commits, and once it merges to `master`
+  the diff narrows to just the follow-up. Basing a PR on another feature branch
+  invites merging it into that branch by mistake instead of `master`, stranding
+  the work off `master`.
+
 ## Developer Certificate of Origin
 
 By submitting a pull request, you certify that:
