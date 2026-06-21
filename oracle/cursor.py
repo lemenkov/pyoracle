@@ -142,6 +142,13 @@ class Cursor:
         if ReturnBinds:                       # DML RETURNING ... INTO (#120)
             Kw['ReturnBinds'] = ReturnBinds
         Result = self._connection.execute(operation, **Kw)
+        return self._apply_result(Bind, Result, BatchErrors=BatchErrors)
+
+    def _apply_result(self, Bind: list, Result, BatchErrors: bool = False) -> 'Cursor':
+        # Interpret a decoded execute Result tuple into this cursor's rows /
+        # rowcount / description / OUT binds. Split out of _run (#158) so the
+        # request pipelining path can reuse the exact post-processing on a
+        # response it read out-of-band, without re-sending the request.
         # Wire result tuple from decode_token_oer:
         #   (call_status, oracle_error_code, cursor_id, (rowcount, col_meta),
         #    rows, message_or_none, last_rowid, batch_errors)

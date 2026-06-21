@@ -10,10 +10,27 @@ import unittest
 
 import oracle
 from oracle.pipeline import Pipeline, PipelineOpType, create_pipeline
-from oracle.tns import _fun_header, encode_pipeline_begin, encode_pipeline_end
+from oracle.tns import (_fun_header, encode_data_packet, encode_dictionary,
+                        encode_pipeline_begin, encode_pipeline_end)
 from oracle.tns_consts import (
+    DictionaryType, TNS_DATA,
+    TNS_DATA_FLAGS_BEGIN_PIPELINE, TNS_DATA_FLAGS_END_OF_REQUEST,
     TNS_PIPELINE_MODE_ABORT_ON_ERROR, TNS_PIPELINE_MODE_CONTINUE_ON_ERROR,
+    FIELD_VERSION_23_4,
 )
+
+
+def _exec_bytes(token_num, seq=0x0b, fv=FIELD_VERSION_23_4):
+    # Build one pipelined execute's request bytes (no cursor cache), as
+    # OracleConnect._encode_pipeline_op does for op number `token_num`.
+    Dict = {'type': DictionaryType.exec, 'seq': seq, 'field_version': fv,
+            'env': {'user': 'pyo'}, 'token_num': token_num,
+            'query': {'type': 'change', 'auto': 1, 'fetch': 15,
+                      'server_version': 0, 'cursor': 0,
+                      'query': "INSERT INTO t VALUES (1)", 'bind': [],
+                      'batch': [], 'def': [], 'batcherrors': False,
+                      'arraydmlrowcounts': False, 'return_binds': None}}
+    return encode_dictionary(Dict)
 
 
 class TestPipelineApi(unittest.TestCase):
@@ -67,6 +84,19 @@ class TestTokenFraming(unittest.TestCase):
         self.assertEqual(_fun_header(0x5e, 8, 6, 1), bytes([3, 0x5e, 8]))
 
 
+class TestTokenDecode(unittest.TestCase):
+    def test_token_marker_consumed(self):
+        # A pipelined op response is prefixed with TOKEN (33) + ub8 token; the
+        # decoder consumes it and decodes the body (here STATUS + EOR). The
+        # marker decode is field-version-independent, so don't perturb the
+        # shared _DECODE_FIELD_VERSION context (it would leak into later tests).
+        from oracle.tns import decode_packet
+        data = bytes.fromhex("210101") + bytes.fromhex("0903010005024be9") \
+            + bytes([29])
+        self.assertEqual(decode_packet(data, (None, None, [])),
+                         (True, (None, None, [])))
+
+
 class TestPipelineEncoders(unittest.TestCase):
     def test_begin_matches_capture(self):
         # C2S begin-pipeline piggyback: seq 0x07, token 1, ABORT mode (2).
@@ -83,6 +113,44 @@ class TestPipelineEncoders(unittest.TestCase):
     def test_end_matches_capture(self):
         # C2S PIPELINE_END (func 200), seq 0x0c.
         self.assertEqual(encode_pipeline_end(0x0c, 24).hex(), "03c80c0000")
+
+
+class TestExecTokenThreading(unittest.TestCase):
+    def test_token_num_only_changes_token_field(self):
+        # Threading token_num through encode_dictionary_exec (#158) must touch
+        # only the ub8 token in the function header — nothing else moves.
+        # _fun_header at fv24: TTI_FUN(03) ALL8(5e) seq(0b) then encode_sb4(tok).
+        zero = _exec_bytes(0)   # encode_sb4(0) == b"\x00" (1 byte)
+        one = _exec_bytes(1)    # encode_sb4(1) == b"\x01\x01" (2 bytes)
+        two = _exec_bytes(2)    # encode_sb4(2) == b"\x01\x02"
+        self.assertEqual(zero[:3], one[:3])
+        self.assertEqual(zero[3], 0x00)
+        self.assertEqual(zero[4:], one[5:])       # bodies identical past token
+        # token 1 vs 2 are equal length and differ only in the final token byte.
+        self.assertEqual(len(one), len(two))
+        self.assertEqual(one[:4], two[:4])
+        self.assertEqual(one[4], 0x01)
+        self.assertEqual(two[4], 0x02)
+        self.assertEqual(one[5:], two[5:])
+
+
+class TestDataPacketEncoder(unittest.TestCase):
+    def test_data_flags_in_header(self):
+        # A pipelined first packet carries BEGIN_PIPELINE | END_OF_REQUEST in
+        # the 2-byte data-flags field after the 10-byte large-SDU header.
+        body = bytes.fromhex("11c70a0101000001")
+        flags = TNS_DATA_FLAGS_BEGIN_PIPELINE | TNS_DATA_FLAGS_END_OF_REQUEST
+        pkt = encode_data_packet(body, flags, Large=True)
+        # large header: ub4 length, type, flags, 2-byte cksum, then dataflags.
+        self.assertEqual(int.from_bytes(pkt[0:4], "big"), len(body) + 10)
+        self.assertEqual(pkt[4], TNS_DATA)
+        self.assertEqual(int.from_bytes(pkt[8:10], "big"), 0x1800)
+        self.assertEqual(pkt[10:], body)
+
+    def test_end_of_request_flag(self):
+        pkt = encode_data_packet(b"\x03\x5e\x0c", TNS_DATA_FLAGS_END_OF_REQUEST,
+                                 Large=True)
+        self.assertEqual(int.from_bytes(pkt[8:10], "big"), 0x0800)
 
 
 if __name__ == "__main__":
