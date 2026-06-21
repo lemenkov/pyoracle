@@ -405,6 +405,33 @@ class AsyncCursor:
             Out.append(Row)
         return Out
 
+    async def fetch_df_all(self):
+        """Fetch all remaining rows as a single ``pyarrow.Table`` (#162). Async
+        mirror of `Cursor.fetch_df_all`; the rows are already buffered so this
+        awaits nothing on the wire but stays async for API symmetry."""
+        self._check_open()
+        if self._description is None:
+            raise InterfaceError("no result set; call execute() with a SELECT first")
+        from oracle.dataframe import build_table
+        Rows = self._rows[self._row_index:]
+        self._row_index = len(self._rows)
+        return build_table(Rows, self._description)
+
+    async def fetch_df_batches(self, size: int | None = None):
+        """Yield the result set as ``pyarrow.Table`` batches of ``size`` rows
+        (#162). Async generator mirror of `Cursor.fetch_df_batches`."""
+        self._check_open()
+        if self._description is None:
+            raise InterfaceError("no result set; call execute() with a SELECT first")
+        from oracle.dataframe import build_table
+        if size is None:
+            size = self.arraysize
+        size = max(int(size), 1)
+        while self._row_index < len(self._rows):
+            Rows = self._rows[self._row_index:self._row_index + size]
+            self._row_index += len(Rows)
+            yield build_table(Rows, self._description)
+
     async def scroll(self, value: int = 0, mode: str = "relative") -> None:
         """Scroll the result-set cursor to a new position. See
         `oracle.cursor.Cursor.scroll`. The reposition is local (the whole

@@ -1494,6 +1494,29 @@ class FetchFlowIntegration(_IntegrationBase):
         sc.scroll(mode="first")
         self.assertEqual(sc.fetchone(), (1,))
 
+    def test_fetch_df_all_and_batches(self):
+        # Arrow / DataFrame bulk fetch (#162): fetch_df_all returns a
+        # pyarrow.Table column-major; fetch_df_batches streams it in chunks.
+        import pyarrow as pa
+        self._populate(7)
+        self.cur.execute(f"SELECT id, name FROM {self.TABLE} ORDER BY id")
+        table = self.cur.fetch_df_all()
+        self.assertIsInstance(table, pa.Table)
+        self.assertEqual(table.num_rows, 7)
+        self.assertEqual([c.upper() for c in table.column_names], ["ID", "NAME"])
+        self.assertEqual(table.column("ID").to_pylist(), list(range(1, 8)))
+        self.assertEqual(table.column("NAME").to_pylist(),
+                         [f"row{i}" for i in range(1, 8)])
+        # batches of 3 -> 3 + 3 + 1
+        self.cur.execute(f"SELECT id FROM {self.TABLE} ORDER BY id")
+        sizes = [b.num_rows for b in self.cur.fetch_df_batches(size=3)]
+        self.assertEqual(sizes, [3, 3, 1])
+        # empty result keeps a usable schema
+        self.cur.execute(f"SELECT id, name FROM {self.TABLE} WHERE id > 999")
+        empty = self.cur.fetch_df_all()
+        self.assertEqual(empty.num_rows, 0)
+        self.assertEqual(len(empty.column_names), 2)
+
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class LOBIntegration(_IntegrationBase):
@@ -2845,6 +2868,27 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                         await Cur.scroll(-1, mode="relative")
                 finally:
                     await Cur.execute("DROP TABLE PYORACLE_ASYNC_SCROLL")
+
+    async def test_async_fetch_df(self):
+        # Arrow / DataFrame bulk fetch (#162) on the async path.
+        import pyarrow as pa
+        table = "PYORACLE_ASYNC_DF"
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                await Cur.execute(f"CREATE TABLE {table} (id NUMBER)")
+                try:
+                    for i in range(1, 8):
+                        await Cur.execute(
+                            f"INSERT INTO {table} VALUES (:1)", [i])
+                    await Cur.execute(f"SELECT id FROM {table} ORDER BY id")
+                    t = await Cur.fetch_df_all()
+                    self.assertIsInstance(t, pa.Table)
+                    self.assertEqual(t.column("ID").to_pylist(), list(range(1, 8)))
+                    await Cur.execute(f"SELECT id FROM {table} ORDER BY id")
+                    sizes = [b.num_rows async for b in Cur.fetch_df_batches(size=3)]
+                    self.assertEqual(sizes, [3, 3, 1])
+                finally:
+                    await Cur.execute(f"DROP TABLE {table}")
 
     async def test_async_executemany(self):
         async with await oracle.connect_async(**self._kwargs()) as Conn:

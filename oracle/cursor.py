@@ -390,6 +390,34 @@ class Cursor:
             Out.append(Row)
         return Out
 
+    def fetch_df_all(self):
+        """Fetch all remaining rows of the result set as a single
+        ``pyarrow.Table`` (column-major), for fast hand-off to pandas / Polars /
+        pyarrow (#162, oracledb-compatible). Consumes the rows like fetchall."""
+        self._check_open()
+        if self._description is None:
+            raise InterfaceError("no result set; call execute() with a SELECT first")
+        from oracle.dataframe import build_table
+        Rows = self._rows[self._row_index:]
+        self._row_index = len(self._rows)
+        return build_table(Rows, self._description)
+
+    def fetch_df_batches(self, size: int | None = None):
+        """Yield the result set as ``pyarrow.Table`` batches of ``size`` rows
+        (default ``arraysize``), for streaming large results into a DataFrame
+        without materialising every row at once (#162)."""
+        self._check_open()
+        if self._description is None:
+            raise InterfaceError("no result set; call execute() with a SELECT first")
+        from oracle.dataframe import build_table
+        if size is None:
+            size = self.arraysize
+        size = max(int(size), 1)
+        while self._row_index < len(self._rows):
+            Rows = self._rows[self._row_index:self._row_index + size]
+            self._row_index += len(Rows)
+            yield build_table(Rows, self._description)
+
     def nextset(self) -> bool | None:
         """Advance to the next implicit result set (#121, PEP 249).
 
