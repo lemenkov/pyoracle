@@ -947,6 +947,13 @@ class OracleConnect:
         # the dedicated four-call fv2 path (#97, PROTOCOL.md §19).
         if self.field_version < FIELD_VERSION_10_2:
             _check_fv2_bind_sizes(Bind, Batch)
+            if Batch:
+                # Array DML (executemany) is not implemented on the fv2 / TTI_ALL7
+                # path — it would silently apply only the first row. Fail loudly
+                # instead of corrupting data (#168).
+                from oracle.exceptions import NotSupportedError
+                raise NotSupportedError(
+                    "executemany (array DML) is not supported on Oracle 9i")
             if Head.startswith('SELECT'):
                 return self._drain_cursor(self._execute_fv2(Query, Bind))
             # Anonymous PL/SQL blocks (BEGIN/DECLARE) over the fv2 block path
@@ -1664,6 +1671,12 @@ class OracleConnect:
         self._sessionless_txn_active = False
 
     def ping(self) -> None:
+        if self.field_version < FIELD_VERSION_10_2:
+            # Oracle 9i lacks the TTI_PING (func 147) message — it closes the
+            # connection on receipt. Use a trivial round trip instead so ping
+            # still validates the session (e.g. for pool health checks). (#168)
+            self.execute("SELECT 'X' FROM dual")
+            return
         from oracle.tns_consts import TTI_PING
         Data = encode_dictionary(self._make_dict(DictionaryType.tran, req=TTI_PING))
         self.send(TNS_DATA, Data)
@@ -1679,7 +1692,13 @@ class OracleConnect:
         `old_password` raises ORA-01017; a rejected new password (policy /
         verifier) raises e.g. ORA-28003.
         """
-        from oracle.exceptions import InterfaceError, from_ora_code
+        from oracle.exceptions import (InterfaceError, from_ora_code,
+                                        NotSupportedError)
+        if self.field_version < FIELD_VERSION_10_2:
+            # 9i changes a password via the O3LOGON-era exchange, not the single
+            # TTI_AUTH this sends; gate it rather than break the session (#168).
+            raise NotSupportedError(
+                "changepassword is not supported on Oracle 9i")
         if self.conn_state != CONN_STATE_AUTHENTICATED or self.conn_key is None:
             raise InterfaceError(
                 "changepassword requires an authenticated connection")
