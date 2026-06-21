@@ -552,6 +552,8 @@ class AsyncOracleConnect:
         # Oracle 9i (field version < 10g) speaks the old TTI_ALL7 query dialect
         # (#97, PROTOCOL.md §19); route SELECTs through the fv2 path.
         if self.field_version < FIELD_VERSION_10_2:
+            from oracle.connection import _check_fv2_bind_sizes
+            _check_fv2_bind_sizes(Bind, Batch)
             if Head.startswith('SELECT'):
                 return await self._drain_cursor(
                     await self._execute_fv2(Query, Bind))

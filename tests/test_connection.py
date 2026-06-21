@@ -6,7 +6,9 @@ import threading
 import time
 import unittest
 from oracle.connection import OracleConnect, _split_proxy_user
-from oracle.exceptions import DatabaseError, OperationalError
+from oracle.connection import (_check_fv2_bind_sizes, _FV2_MAX_RAW_BIND,
+                               _FV2_MAX_VARCHAR_BIND)
+from oracle.exceptions import DatabaseError, OperationalError, NotSupportedError
 
 
 class TestProxyUser(unittest.TestCase):
@@ -34,6 +36,43 @@ class TestProxyUser(unittest.TestCase):
         env = c._make_dict(None)['env']
         self.assertEqual(env['user'], "pyo")
         self.assertEqual(env['proxy_user'], "hr")
+
+
+class TestFv2BindSizeGate(unittest.TestCase):
+    # 9i (fv2) has no streamed LOB/LONG bind path, so a bind is capped at the
+    # SQL inline limits: 2000 bytes (RAW) / 4000 bytes (VARCHAR2). Past those the
+    # 9i server kills the connection (BLOB) or errors; reject up front so the
+    # connection survives (#168/#169). Verified live on 9i in the integration
+    # suite; this guards the limits + boundary offline.
+    def test_bytes_within_cap_ok(self):
+        _check_fv2_bind_sizes([b"x" * _FV2_MAX_RAW_BIND])      # exactly 2000
+
+    def test_bytes_over_cap_raises(self):
+        with self.assertRaises(NotSupportedError):
+            _check_fv2_bind_sizes([b"x" * (_FV2_MAX_RAW_BIND + 1)])
+
+    def test_str_within_cap_ok(self):
+        _check_fv2_bind_sizes(["x" * _FV2_MAX_VARCHAR_BIND])   # exactly 4000
+
+    def test_str_over_cap_raises(self):
+        with self.assertRaises(NotSupportedError):
+            _check_fv2_bind_sizes(["x" * (_FV2_MAX_VARCHAR_BIND + 1)])
+
+    def test_str_counts_utf8_bytes_not_chars(self):
+        # A multibyte char string under 4000 chars can exceed 4000 utf-8 bytes.
+        Value = "é" * 2001                                # 4002 utf-8 bytes
+        with self.assertRaises(NotSupportedError):
+            _check_fv2_bind_sizes([Value])
+
+    def test_dict_and_batch_values_checked(self):
+        with self.assertRaises(NotSupportedError):
+            _check_fv2_bind_sizes({"b": b"x" * 2001})
+        with self.assertRaises(NotSupportedError):
+            _check_fv2_bind_sizes([1], Batch=[[b"x" * 2001]])
+
+    def test_small_and_nonblob_binds_pass(self):
+        _check_fv2_bind_sizes([1, "small", b"raw", None, 3.14])
+        _check_fv2_bind_sizes([])
 
 
 class TestConnection(unittest.TestCase):

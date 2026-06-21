@@ -352,6 +352,40 @@ def _apply_rowfactory(rows, rowfactory):
     return [rowfactory(*r) for r in rows] if rowfactory else rows
 
 
+# Oracle 9i (fv2 / TTI_ALL7) binds a value inline with no piecewise LONG/LOB
+# send protocol, so a bind can be no larger than the SQL inline limits: 2000
+# bytes for RAW (a `bytes` value) and 4000 bytes for VARCHAR2 (a `str` value).
+# Past those, the 9i server either closes the connection mid-DML (BLOB target,
+# leaving a zombie lock — #168/#169), raises ORA-00600 (CLOB), or ORA-01461.
+# Reject such binds up front with a clean NotSupportedError so the connection
+# survives and stays usable. (Streamed large LOB/LONG binds exist only on the
+# fv4+ path.)
+_FV2_MAX_RAW_BIND = 2000
+_FV2_MAX_VARCHAR_BIND = 4000
+
+
+def _check_fv2_bind_sizes(Bind, Batch=None) -> None:
+    from oracle.exceptions import NotSupportedError
+    Rows = [Bind] if Bind else []
+    if Batch:
+        Rows = Rows + list(Batch)
+    for Row in Rows:
+        Values = Row.values() if isinstance(Row, dict) else (Row or [])
+        for Value in Values:
+            if isinstance(Value, (bytes, bytearray)):
+                if len(Value) > _FV2_MAX_RAW_BIND:
+                    raise NotSupportedError(
+                        f"Oracle 9i cannot bind a bytes value larger than "
+                        f"{_FV2_MAX_RAW_BIND} bytes (got {len(Value)}); 9i has "
+                        f"no streamed LOB/LONG bind path")
+            elif isinstance(Value, str):
+                if len(Value.encode('utf-8')) > _FV2_MAX_VARCHAR_BIND:
+                    raise NotSupportedError(
+                        f"Oracle 9i cannot bind a str value larger than "
+                        f"{_FV2_MAX_VARCHAR_BIND} bytes (utf-8); 9i has no "
+                        f"streamed LOB/LONG bind path")
+
+
 def _run_pipeline_op(conn, cur, op, T):
     # Run a single pipeline operation on `cur` and return its PipelineOpResult
     # (#132, sync). The async connection has its own awaiting copy of this.
@@ -912,6 +946,7 @@ class OracleConnect:
         # not the TTI_ALL8 the rest of execute() builds. Route SELECTs through
         # the dedicated four-call fv2 path (#97, PROTOCOL.md §19).
         if self.field_version < FIELD_VERSION_10_2:
+            _check_fv2_bind_sizes(Bind, Batch)
             if Head.startswith('SELECT'):
                 return self._drain_cursor(self._execute_fv2(Query, Bind))
             # Anonymous PL/SQL blocks (BEGIN/DECLARE) over the fv2 block path
