@@ -34,7 +34,7 @@ class AsyncCursor:
 
     arraysize: int = 1
 
-    def __init__(self, connection):
+    def __init__(self, connection, scrollable: bool = False):
         self._connection = connection
         self._description: list[tuple] | None = None
         self._annotations: list[dict | None] | None = None
@@ -44,7 +44,19 @@ class AsyncCursor:
         self._closed: bool = False
         self._lastrowid = None
         self._rowfactory = None
+        self._scrollable = bool(scrollable)   # #161, oracledb parity
         self._implicit_results: list = []     # #121, consumed via nextset()
+
+    @property
+    def scrollable(self) -> bool:
+        """Whether this cursor was opened scrollable (#161). pyoracle buffers
+        the result set, so scroll() works on any cursor; exposed for oracledb
+        API compatibility."""
+        return self._scrollable
+
+    @scrollable.setter
+    def scrollable(self, value: bool) -> None:
+        self._scrollable = bool(value)
 
     def _check_open(self) -> None:
         if self._closed:

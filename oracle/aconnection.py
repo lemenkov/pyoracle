@@ -1694,11 +1694,13 @@ class AsyncOracleConnect:
 
     # ----- factory (cursor created lazily in step 2) -----
 
-    def cursor(self):
-        """Returns an `AsyncCursor` bound to this connection."""
+    def cursor(self, scrollable: bool = False):
+        """Returns an `AsyncCursor` bound to this connection. `scrollable`
+        (oracledb parity, #161) is accepted and surfaced; scroll() works
+        regardless since pyoracle buffers the result set."""
         # Lazy import to avoid a circular dep with acursor importing us.
         from oracle.acursor import AsyncCursor
-        return AsyncCursor(self)
+        return AsyncCursor(self, scrollable=scrollable)
 
     # ----- async context manager -----
 

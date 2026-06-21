@@ -51,7 +51,6 @@ _FV2_UNSUPPORTED = (
     ("changepassword", "changepassword is not supported on Oracle 9i"),
     ("cache_evicts", "the cursor cache is a fv4+ feature; 9i re-parses"),
     ("reuses_cursor", "the cursor cache is a fv4+ feature; 9i re-parses"),
-    ("scroll", "scrollable cursors are not supported on Oracle 9i (fv2)"),
     ("pipeline", "the pipeline test uses array DML, unsupported on Oracle 9i"),
     # Non-AL32UTF8 / national-charset handling on 9i is deferred (#174): its DB
     # is WE8ISO8859P1, so UTF-8 / national / supplementary-plane values do not
@@ -1478,6 +1477,23 @@ class FetchFlowIntegration(_IntegrationBase):
         with self.assertRaises(IndexError):
             self.cur.scroll(999, mode="absolute")
 
+    def test_scrollable_cursor(self):
+        # Scrollable cursor (#161, oracledb parity): cursor(scrollable=True) +
+        # the .scrollable property + scroll in every mode.
+        self._populate(10)
+        sc = self.conn.cursor(scrollable=True)
+        self.assertIs(sc.scrollable, True)
+        self.assertIs(self.conn.cursor().scrollable, False)
+        sc.execute(f"SELECT id FROM {self.TABLE} ORDER BY id")
+        sc.scroll(5, mode="absolute")
+        self.assertEqual(sc.fetchone(), (5,))
+        sc.scroll(-2, mode="relative")
+        self.assertEqual(sc.fetchone(), (3,))
+        sc.scroll(mode="last")
+        self.assertEqual(sc.fetchone(), (10,))
+        sc.scroll(mode="first")
+        self.assertEqual(sc.fetchone(), (1,))
+
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class LOBIntegration(_IntegrationBase):
@@ -2805,12 +2821,17 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_async_scroll(self):
         async with await oracle.connect_async(**self._kwargs()) as Conn:
-            async with Conn.cursor() as Cur:
+            # Scrollable cursor (#161) on the async path.
+            async with Conn.cursor(scrollable=True) as Cur:
+                self.assertIs(Cur.scrollable, True)
                 await Cur.execute("CREATE TABLE PYORACLE_ASYNC_SCROLL (id NUMBER)")
                 try:
-                    await Cur.executemany(
-                        "INSERT INTO PYORACLE_ASYNC_SCROLL VALUES (:1)",
-                        [(i,) for i in range(1, 11)])
+                    # Single inserts (not executemany) so scrollable cursors —
+                    # which are buffer-backed and work on every tier — can also
+                    # be exercised on 9i (#161).
+                    for i in range(1, 11):
+                        await Cur.execute(
+                            "INSERT INTO PYORACLE_ASYNC_SCROLL VALUES (:1)", [i])
                     Conn.fetch = 4
                     await Cur.execute(
                         "SELECT id FROM PYORACLE_ASYNC_SCROLL ORDER BY id")
