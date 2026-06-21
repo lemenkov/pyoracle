@@ -176,7 +176,12 @@ transactions) runs on 9i through the legacy dialect.
 ## Requirements
 
 - Python >= 3.10
-- [pycryptodome](https://pypi.org/project/pycryptodome/)
+- [pycryptodome](https://pypi.org/project/pycryptodome/) — login/auth crypto
+- [tzdata](https://pypi.org/project/tzdata/) — IANA time-zone database for
+  named-region `TIMESTAMP WITH TIME ZONE` values (a no-op where the OS ships
+  system zoneinfo)
+- [pyarrow](https://pypi.org/project/pyarrow/) — backs the Arrow / DataFrame
+  bulk fetch (`cursor.fetch_df_all` / `fetch_df_batches`)
 
 ## Installation
 
