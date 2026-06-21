@@ -2228,6 +2228,13 @@ def _o7_bind_oac(Value: object) -> bytes:
             Type, MaxSize, Csfrm = TNS_TYPE_DATE, 7, 0
     elif isinstance(Value, datetime.date):
         Type, MaxSize, Csfrm = TNS_TYPE_DATE, 7, 0
+    elif isinstance(Value, datetime.timedelta):
+        # INTERVAL DAY TO SECOND (#173): encode_token_rxd emits the 11-byte
+        # interval; declare the matching type so the server does not read it as
+        # a VARCHAR and fail with ORA-01867.
+        Type, MaxSize, Csfrm = TNS_TYPE_INTERVALDS, 11, 0
+    elif isinstance(Value, IntervalYM):
+        Type, MaxSize, Csfrm = TNS_TYPE_INTERVALYM, 5, 0   # 5-byte YM interval
     elif Value is None:
         Type, MaxSize, Csfrm = TNS_TYPE_VARCHAR, 1, 1
     else:

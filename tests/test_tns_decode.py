@@ -1057,6 +1057,18 @@ class TestFv2OutBinds(unittest.TestCase):
         self.assertEqual(_o7_bind_oac(datetime.date(2026, 6, 21))[0],
                          TNS_TYPE_DATE)
 
+    def test_oac_interval_declares_interval_type(self):
+        # INTERVAL DS/YM inline binds must declare the matching interval type
+        # (#173); a VARCHAR OAC over the binary value gives ORA-01867.
+        import datetime
+        from oracle.datatypes import IntervalYM
+        from oracle.tns import (_o7_bind_oac, TNS_TYPE_INTERVALDS,
+                                TNS_TYPE_INTERVALYM)
+        ds = _o7_bind_oac(datetime.timedelta(days=2, seconds=5))
+        self.assertEqual((ds[0], ds[5]), (TNS_TYPE_INTERVALDS, 11))
+        ym = _o7_bind_oac(IntervalYM(2, 6))
+        self.assertEqual((ym[0], ym[5]), (TNS_TYPE_INTERVALYM, 5))
+
     def test_outnum_request_matches_capture(self):
         from oracle.tns import encode_o7_block
         import oracle.datatypes as dt
