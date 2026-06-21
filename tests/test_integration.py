@@ -21,7 +21,27 @@ import unittest
 from decimal import Decimal
 
 import oracle
-from oracle.tns_consts import FIELD_VERSION_12_1
+from oracle.tns_consts import FIELD_VERSION_12_1, FIELD_VERSION_10_2
+
+# Features the Oracle 9i (fv2) server genuinely lacks, keyed by a substring of
+# the test method name. A 9i (field_version < 10.2) connection skips these with
+# a clear reason — the same bar 10g uses for 12c+/23ai features (#171). These
+# are *server* limitations or capabilities pyoracle deliberately does not offer
+# on fv2, not fixable fv2 bind gaps (those are #172 dates, #173 intervals,
+# #174 national charset).
+_FV2_UNSUPPORTED = (
+    ("binary_double", "BINARY_DOUBLE is a 10g+ type; Oracle 9i lacks it"),
+    ("binary_float", "BINARY_FLOAT is a 10g+ type; Oracle 9i lacks it"),
+    ("kib", "Oracle 9i has no streamed LOB/LONG bind path (#169)"),
+    ("clob_bind_above_varchar2_cap",
+     "Oracle 9i has no streamed LOB/LONG bind path (#169)"),
+    ("clob_bind_spans_multiple_packets",
+     "Oracle 9i has no streamed LOB/LONG bind path (#169)"),
+    ("blob_bind_round_trip_all_byte_values",
+     "Oracle 9i has no streamed LOB/LONG bind path (#169)"),
+    ("error_then_large_lob",
+     "Oracle 9i has no streamed LOB/LONG bind path (#169)"),
+)
 
 # Resolve the TLS proxy fixture without depending on the `tests` package
 # layout (works under both `python -m unittest tests.test_integration` and
@@ -168,6 +188,7 @@ class _IntegrationBase(unittest.TestCase):
             try:
                 self.conn = _connect()
                 self.cur = self.conn.cursor()
+                self._skip_if_fv2_unsupported()
                 self._drop_silently(self.cur)
                 return
             except oracle.OperationalError as e:
@@ -184,6 +205,19 @@ class _IntegrationBase(unittest.TestCase):
                 import time
                 time.sleep(0.05)
         raise Last
+
+    def _skip_if_fv2_unsupported(self):
+        # On a 9i (fv2) connection, skip the tests whose feature the 9i server
+        # genuinely lacks — same bar 10g uses for 12c+/23ai features (#171).
+        # Close the connection first: a SkipTest from setUp means tearDown does
+        # not run, so we must not leak the connection (a leak on the slow 9i VM
+        # piles up sessions).
+        if self.conn.field_version >= FIELD_VERSION_10_2:
+            return
+        for Pattern, Reason in _FV2_UNSUPPORTED:
+            if Pattern in self._testMethodName:
+                self.conn.close()
+                self.skipTest(Reason)
 
     def tearDown(self):
         # The test may have closed self.cur — always reach for a fresh one.
@@ -2624,6 +2658,9 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
         # them followed by a large CLOB read must not desync the stream.
         from oracle.exceptions import DatabaseError
         async with await oracle.connect_async(**self._kwargs()) as Conn:
+            if Conn.field_version < FIELD_VERSION_10_2:
+                self.skipTest(
+                    "Oracle 9i has no streamed LOB/LONG bind path (#169)")
             async with Conn.cursor() as Cur:
                 await self._drop_async(Cur, "PYORACLE_ASYNC_LOB45")
                 await Cur.execute(
@@ -2686,6 +2723,9 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
     async def test_async_out_extended_types(self):
         # OUT binds for the extended scalar types (issue #17), async path.
         async with await oracle.connect_async(**self._kwargs()) as Conn:
+            if Conn.field_version < FIELD_VERSION_10_2:
+                self.skipTest(
+                    "BINARY_DOUBLE / INTERVAL are 10g+ types; Oracle 9i lacks them")
             async with Conn.cursor() as Cur:
                 await Cur.execute(
                     "CREATE OR REPLACE PROCEDURE PYORACLE_ASYNC_OUTX"
