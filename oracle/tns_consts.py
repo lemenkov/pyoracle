@@ -45,6 +45,17 @@ TNS_DATA_FLAGS_BEGIN_PIPELINE = 0x1000   # first pipelined packet
 TNS_DATA_FLAGS_END_OF_REQUEST = 0x0800   # a pipelined call expecting a result
 TNS_PIPELINE_MODE_CONTINUE_ON_ERROR = 1
 TNS_PIPELINE_MODE_ABORT_ON_ERROR = 2
+
+# End-to-end application tracing attributes (#183): a SET_END_TO_END_ATTR
+# piggyback (func TTI_SCID=135) tells the server which of module / action /
+# client_identifier / client_info / dbop changed and carries the new values.
+# Flag bits (which attributes the piggyback updates).
+TNS_FUNC_SET_END_TO_END_ATTR = 135        # == TTI_SCID, 0x87
+TNS_END_TO_END_CLIENT_IDENTIFIER = 0x0001
+TNS_END_TO_END_MODULE = 0x0008
+TNS_END_TO_END_ACTION = 0x0010
+TNS_END_TO_END_CLIENT_INFO = 0x0100
+TNS_END_TO_END_DBOP = 0x0200
 TNS_ATTENTION = 13
 TNS_CONTROL = 14
 TNS_MAX = 19

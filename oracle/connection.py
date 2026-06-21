@@ -25,7 +25,8 @@ from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
                         FIELD_VERSION_12_1, FIELD_VERSION_21_1,
                         encode_fast_auth, find_fast_auth_rpa)
 from oracle.tns import (decode_packet, encode_data_packet,
-                        encode_pipeline_begin, encode_pipeline_end)
+                        encode_pipeline_begin, encode_pipeline_end,
+                        encode_end_to_end_piggyback)
 from oracle.tns_consts import (
     CONN_STATE_AUTH_NEGOTIATE, CONN_STATE_AUTHENTICATED,
     CONN_STATE_CONNECTED, CONN_STATE_DISCONNECTED, DictionaryType,
@@ -504,6 +505,11 @@ class OracleConnect:
         self._supports_oob = False      # set from the accept (#144)
         self._supports_eor = False      # end-of-response framing (#155/#132)
         self._large_packets = False     # 4-byte packet length (#155, ver >= 315)
+        # End-to-end application tracing (#183): current module / action /
+        # client_identifier values, and the subset changed since the last flush
+        # (sent as a SET_END_TO_END_ATTR piggyback in front of the next execute).
+        self._e2e_values: dict = {}
+        self._e2e_pending: dict = {}
         # Two-phase commit (#131): the opaque transaction context the server
         # returns from tpc_begin, replayed on prepare/commit/rollback/end.
         self._transaction_context = None
@@ -1006,8 +1012,12 @@ class OracleConnect:
             'arraydmlrowcounts': ArrayDmlRowCounts,
             'return_binds': ReturnBinds or None,
         }
+        # End-to-end tracing (#183): flush any pending module/action/
+        # client_identifier change as a piggyback in front of this execute. Its
+        # seq is allocated before the execute's, matching oracledb.
+        Pre = self._flush_end_to_end_bytes()
         Data = encode_dictionary(self._make_dict(DictionaryType.exec, query=QueryDict))
-        self.send(TNS_DATA, Data)
+        self.send(TNS_DATA, Pre + Data)
         # Arm row-count extraction for this response only (#18).
         set_decode_dml_rowcounts(ArrayDmlRowCounts)
         # Arm RETURNING out-bind decoding for this response only (#120).
@@ -2340,6 +2350,62 @@ class OracleConnect:
         # regardless, but the flag is accepted and surfaced for compatibility.
         from oracle.cursor import Cursor
         return Cursor(self, scrollable=scrollable)
+
+    # --- End-to-end application tracing (#183) ---
+
+    def _set_e2e(self, name: str, value) -> None:
+        # Record a new end-to-end attribute value and mark it to flush before
+        # the next execute (oracledb sends only what changed). The
+        # SET_END_TO_END_ATTR piggyback (func 135) is a 12c+ message — a pre-12c
+        # server closes the connection on it — so gate it (oracledb thin is
+        # itself 12.1+ only). #183.
+        if self.field_version < FIELD_VERSION_12_1:
+            from oracle.exceptions import NotSupportedError
+            raise NotSupportedError(
+                "end-to-end tracing attributes require an Oracle 12.1+ server")
+        self._e2e_values[name] = value
+        self._e2e_pending[name] = value
+
+    def _flush_end_to_end_bytes(self) -> bytes:
+        # Build the SET_END_TO_END_ATTR piggyback for the attributes changed
+        # since the last flush, then clear the pending set. Empty when nothing
+        # changed. Allocate the piggyback's seq here so it precedes the execute.
+        if not self._e2e_pending:
+            return b""
+        Seq = self._next_seq()
+        Bytes = encode_end_to_end_piggyback(Seq, self.field_version,
+                                            self._e2e_pending)
+        self._e2e_pending = {}
+        return Bytes
+
+    @property
+    def module(self):
+        """The session's MODULE for end-to-end tracing (V$SESSION.MODULE /
+        SYS_CONTEXT('USERENV','MODULE')). Set it before running a statement;
+        the change is sent with the next execute. oracledb-compatible (#183)."""
+        return self._e2e_values.get('module')
+
+    @module.setter
+    def module(self, value) -> None:
+        self._set_e2e('module', value)
+
+    @property
+    def action(self):
+        """The session's ACTION for end-to-end tracing (#183)."""
+        return self._e2e_values.get('action')
+
+    @action.setter
+    def action(self, value) -> None:
+        self._set_e2e('action', value)
+
+    @property
+    def client_identifier(self):
+        """The session's CLIENT_IDENTIFIER for end-to-end tracing (#183)."""
+        return self._e2e_values.get('client_identifier')
+
+    @client_identifier.setter
+    def client_identifier(self, value) -> None:
+        self._set_e2e('client_identifier', value)
 
     def __enter__(self):
         if self.sock is None:
