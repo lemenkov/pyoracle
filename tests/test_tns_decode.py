@@ -1037,6 +1037,26 @@ class TestFv2OutBinds(unittest.TestCase):
         self.assertEqual(_o7_bind_oac(dt.Var(str)),
                          bytes.fromhex("01010000027fff00000000011f01"))
 
+    def test_oac_datetime_declares_temporal_type(self):
+        # A datetime/date inline bind must declare the matching Oracle temporal
+        # type (#172) — the value encoder emits 7/11/13 binary bytes, so a
+        # VARCHAR OAC would make the server fail the implicit conversion
+        # (ORA-01858). type byte + max-size must match the value width.
+        import datetime
+        from oracle.tns import (_o7_bind_oac, TNS_TYPE_DATE, TNS_TYPE_TIMESTAMP,
+                                TNS_TYPE_TIMESTAMPTZ)
+        # OAC layout: type, 01, 00, 00, encode_sb4(max_size), ...; encode_sb4 is
+        # length-prefixed (01 07) so the width value sits at offset 5.
+        date_oac = _o7_bind_oac(datetime.datetime(2026, 6, 21, 1, 2, 3))
+        self.assertEqual((date_oac[0], date_oac[5]), (TNS_TYPE_DATE, 7))
+        ts_oac = _o7_bind_oac(datetime.datetime(2026, 6, 21, 1, 2, 3, 500000))
+        self.assertEqual((ts_oac[0], ts_oac[5]), (TNS_TYPE_TIMESTAMP, 11))
+        tz_oac = _o7_bind_oac(
+            datetime.datetime(2026, 6, 21, tzinfo=datetime.timezone.utc))
+        self.assertEqual((tz_oac[0], tz_oac[5]), (TNS_TYPE_TIMESTAMPTZ, 13))
+        self.assertEqual(_o7_bind_oac(datetime.date(2026, 6, 21))[0],
+                         TNS_TYPE_DATE)
+
     def test_outnum_request_matches_capture(self):
         from oracle.tns import encode_o7_block
         import oracle.datatypes as dt
