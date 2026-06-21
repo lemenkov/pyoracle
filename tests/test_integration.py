@@ -1541,6 +1541,28 @@ class FetchFlowIntegration(_IntegrationBase):
             "SELECT SYS_CONTEXT('USERENV','ACTION'), "
             "SYS_CONTEXT('USERENV','MODULE') FROM dual")
         self.assertEqual(self.cur.fetchone(), ("ACT2", "PYOMOD"))
+        # clientinfo (#184) shows in USERENV.CLIENT_INFO.
+        self.conn.clientinfo = "PYOINFO"
+        self.cur.execute(
+            "SELECT SYS_CONTEXT('USERENV','CLIENT_INFO') FROM dual")
+        self.assertEqual(self.cur.fetchone(), ("PYOINFO",))
+        self.assertEqual(self.conn.clientinfo, "PYOINFO")
+        # dbop (#184) is monitored via V$SQL_MONITOR (not USERENV); just confirm
+        # the piggyback is accepted and the connection stays usable.
+        self.conn.dbop = "PYODBOP"
+        self.cur.execute("SELECT 1 FROM dual")
+        self.assertEqual(self.cur.fetchone(), (1,))
+        self.assertEqual(self.conn.dbop, "PYODBOP")
+
+    def test_module_alone(self):
+        # Setting module without action must not malform the piggyback — Oracle
+        # requires both together, so a module-only flush carries action too
+        # (#184). 12c+ only.
+        if self.conn.field_version < FIELD_VERSION_12_1:
+            self.skipTest("end-to-end tracing requires 12c+")
+        self.conn.module = "SOLOMOD"
+        self.cur.execute("SELECT SYS_CONTEXT('USERENV','MODULE') FROM dual")
+        self.assertEqual(self.cur.fetchone(), ("SOLOMOD",))
 
 
 @unittest.skipUnless(_USER, _SKIP_REASON)

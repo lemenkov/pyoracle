@@ -852,3 +852,24 @@ class TestEndToEndPiggyback(unittest.TestCase):
         # flags = MODULE(0x08) | ACTION(0x10) | CLIENT_IDENTIFIER(0x01) = 0x19
         self.assertIn("0119", out.hex())
         self.assertTrue(out.startswith(bytes([0x11, 0x87, 7])))
+
+
+class TestEndToEndClientInfoDbop(unittest.TestCase):
+    # client_info / dbop on the same piggyback (#184).
+    def test_client_info_and_dbop(self):
+        from oracle.tns import encode_end_to_end_piggyback
+        out = encode_end_to_end_piggyback(
+            99, 24, {"client_info": "PYOINFO", "dbop": "PYODBOP"})
+        # flags = CLIENT_INFO(0x100) | DBOP(0x200) = 0x300
+        self.assertIn("0300", out.hex())
+        # both values present, in field order (client_info before dbop)
+        self.assertIn(b"PYOINFO".hex(), out.hex())
+        self.assertIn(b"PYODBOP".hex(), out.hex())
+        self.assertLess(out.hex().index(b"PYOINFO".hex()),
+                        out.hex().index(b"PYODBOP".hex()))
+
+    def test_dbop_alone_flag(self):
+        from oracle.tns import encode_end_to_end_piggyback
+        out = encode_end_to_end_piggyback(99, 24, {"dbop": "OP"})
+        self.assertIn("0200", out.hex())          # DBOP flag
+        self.assertTrue(out.hex().endswith(b"OP".hex()))

@@ -2372,11 +2372,21 @@ class OracleConnect:
         # changed. Allocate the piggyback's seq here so it precedes the execute.
         if not self._e2e_pending:
             return b""
+        Pending = self._pending_e2e_with_module_action()
         Seq = self._next_seq()
-        Bytes = encode_end_to_end_piggyback(Seq, self.field_version,
-                                            self._e2e_pending)
+        Bytes = encode_end_to_end_piggyback(Seq, self.field_version, Pending)
         self._e2e_pending = {}
         return Bytes
+
+    def _pending_e2e_with_module_action(self) -> dict:
+        # The server rejects a module update that does not also carry action
+        # (Oracle's SET_MODULE always sets both — a module-only piggyback is
+        # ORA-03137). So when module flushes, send action too, at its current
+        # value (None -> empty), matching oracledb. #184.
+        Pending = dict(self._e2e_pending)
+        if 'module' in Pending and 'action' not in Pending:
+            Pending['action'] = self._e2e_values.get('action')
+        return Pending
 
     @property
     def module(self):
@@ -2406,6 +2416,26 @@ class OracleConnect:
     @client_identifier.setter
     def client_identifier(self, value) -> None:
         self._set_e2e('client_identifier', value)
+
+    @property
+    def clientinfo(self):
+        """The session's CLIENT_INFO for end-to-end tracing
+        (SYS_CONTEXT('USERENV','CLIENT_INFO')); oracledb-compatible (#184)."""
+        return self._e2e_values.get('client_info')
+
+    @clientinfo.setter
+    def clientinfo(self, value) -> None:
+        self._set_e2e('client_info', value)
+
+    @property
+    def dbop(self):
+        """The session's database operation for monitoring (DBMS_SQL_MONITOR /
+        SYS_CONTEXT('USERENV','DBOP')); oracledb-compatible (#184)."""
+        return self._e2e_values.get('dbop')
+
+    @dbop.setter
+    def dbop(self, value) -> None:
+        self._set_e2e('dbop', value)
 
     def __enter__(self):
         if self.sock is None:
