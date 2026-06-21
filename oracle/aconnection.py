@@ -1719,9 +1719,13 @@ class AsyncOracleConnect:
     def _flush_end_to_end_bytes(self) -> bytes:
         if not self._e2e_pending:
             return b""
+        # A module update must also carry action or the server rejects it
+        # (ORA-03137) — see OracleConnect._pending_e2e_with_module_action (#184).
+        Pending = dict(self._e2e_pending)
+        if 'module' in Pending and 'action' not in Pending:
+            Pending['action'] = self._e2e_values.get('action')
         Seq = self._next_seq()
-        Bytes = encode_end_to_end_piggyback(Seq, self.field_version,
-                                            self._e2e_pending)
+        Bytes = encode_end_to_end_piggyback(Seq, self.field_version, Pending)
         self._e2e_pending = {}
         return Bytes
 
@@ -1752,6 +1756,24 @@ class AsyncOracleConnect:
     @client_identifier.setter
     def client_identifier(self, value) -> None:
         self._set_e2e('client_identifier', value)
+
+    @property
+    def clientinfo(self):
+        """Session CLIENT_INFO for end-to-end tracing (#184)."""
+        return self._e2e_values.get('client_info')
+
+    @clientinfo.setter
+    def clientinfo(self, value) -> None:
+        self._set_e2e('client_info', value)
+
+    @property
+    def dbop(self):
+        """Session database operation for monitoring (#184)."""
+        return self._e2e_values.get('dbop')
+
+    @dbop.setter
+    def dbop(self, value) -> None:
+        self._set_e2e('dbop', value)
 
     # ----- async context manager -----
 
