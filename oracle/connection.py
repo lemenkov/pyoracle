@@ -2334,10 +2334,12 @@ class OracleConnect:
             self.sock = None
         self.conn_state = CONN_STATE_DISCONNECTED
 
-    def cursor(self):
-        # PEP 249 cursor factory.
+    def cursor(self, scrollable: bool = False):
+        # PEP 249 cursor factory. `scrollable` (oracledb parity, #161) opens a
+        # scrollable cursor; pyoracle buffers the result set so scroll() works
+        # regardless, but the flag is accepted and surfaced for compatibility.
         from oracle.cursor import Cursor
-        return Cursor(self)
+        return Cursor(self, scrollable=scrollable)
 
     def __enter__(self):
         if self.sock is None:

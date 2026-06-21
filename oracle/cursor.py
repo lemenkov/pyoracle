@@ -34,7 +34,7 @@ class Cursor:
 
     arraysize: int = 1
 
-    def __init__(self, connection):
+    def __init__(self, connection, scrollable: bool = False):
         self._connection = connection
         self._description: list[tuple] | None = None
         self._annotations: list[dict | None] | None = None
@@ -44,9 +44,24 @@ class Cursor:
         self._closed: bool = False
         self._lastrowid = None
         self._rowfactory = None
+        # Scrollable cursor (#161, oracledb parity). pyoracle buffers the whole
+        # result set on execute, so scroll() works in every mode regardless of
+        # this flag; it is accepted + exposed for oracledb compatibility.
+        self._scrollable = bool(scrollable)
         # Pending implicit result sets (#121): (row_format, cursor_id) queue
         # left by a DBMS_SQL.RETURN_RESULT block, consumed via nextset().
         self._implicit_results: list = []
+
+    @property
+    def scrollable(self) -> bool:
+        """Whether this cursor was opened scrollable (#161). pyoracle's
+        result-set buffer makes scroll() available on any cursor, so this is
+        primarily for oracledb API compatibility."""
+        return self._scrollable
+
+    @scrollable.setter
+    def scrollable(self, value: bool) -> None:
+        self._scrollable = bool(value)
 
     def _check_open(self) -> None:
         if self._closed:

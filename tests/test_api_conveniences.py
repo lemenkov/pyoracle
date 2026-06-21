@@ -183,3 +183,28 @@ class TestVersion(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestScrollableCursor(unittest.TestCase):
+    # Scrollable cursor API parity (#161): the cursor accepts and exposes the
+    # `scrollable` flag. pyoracle buffers the result set so scroll() works
+    # regardless; the flag is for oracledb compatibility.
+    def test_default_not_scrollable(self):
+        cur = Cursor(types.SimpleNamespace(sock=object()))
+        self.assertIs(cur.scrollable, False)
+
+    def test_opened_scrollable(self):
+        cur = Cursor(types.SimpleNamespace(sock=object()), scrollable=True)
+        self.assertIs(cur.scrollable, True)
+
+    def test_setter(self):
+        cur = Cursor(types.SimpleNamespace(sock=object()))
+        cur.scrollable = True
+        self.assertIs(cur.scrollable, True)
+        cur.scrollable = 0
+        self.assertIs(cur.scrollable, False)
+
+    def test_connection_cursor_passes_flag(self):
+        conn = OracleConnect()
+        self.assertIs(conn.cursor(scrollable=True).scrollable, True)
+        self.assertIs(conn.cursor().scrollable, False)
