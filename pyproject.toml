@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyoracle"
-version = "1.6.0"
+version = "1.7.0"
 description = "Python module to interact with a proprietary database"
 readme = "README.md"
 license = "MIT"
