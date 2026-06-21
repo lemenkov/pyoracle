@@ -34,6 +34,8 @@ from oracle.tns import encode_dictionary
 from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
 from oracle.tns import set_decode_dml_rowcounts, set_decode_return_binds
+from oracle.tns import (encode_data_packet, encode_pipeline_begin,
+                        encode_pipeline_end)
 from oracle.tns import encode_tpc_switch, encode_tpc_change_state
 from oracle.connection import (
     Xid, _decode_tpc_context, _decode_tpc_state,
@@ -69,6 +71,8 @@ from oracle.tns_consts import (
     TNS_GSO_CAN_RECV_ATTENTION, TNS_VERSION_MIN_LARGE_SDU,
     TNS_REDIRECT, TNS_REFUSE, TNS_RESEND,
     TTI_DTY, TTI_OER, TTI_PRO, TTI_RPA, TTI_SESS, TTI_WRN,
+    TNS_DATA_FLAGS_BEGIN_PIPELINE, TNS_DATA_FLAGS_END_OF_REQUEST,
+    TNS_PIPELINE_MODE_CONTINUE_ON_ERROR,
 )
 
 
@@ -1378,12 +1382,167 @@ class AsyncOracleConnect:
 
     # --- Request pipelining (#132), async port ---
 
+    def _pipeline_wire_eligible(self, pipeline) -> bool:
+        # See OracleConnect._pipeline_wire_eligible (#158): the single-round-trip
+        # wire path needs EOR framing (23ai) and covers only the exec-family ops.
+        from oracle.pipeline import PipelineOpType as T
+        WireOps = (T.EXECUTE, T.EXECUTE_MANY, T.FETCH_ONE, T.FETCH_MANY,
+                   T.FETCH_ALL)
+        if not self._supports_eor or not pipeline.operations:
+            return False
+        return all(Op.op_type in WireOps for Op in pipeline.operations)
+
+    def _encode_pipeline_op(self, Op, TokenNum: int):
+        # Async copy of OracleConnect._encode_pipeline_op (#158).
+        from oracle.cursor import _resolve_parameters
+        from oracle.connection import _PIPELINE_FETCH_ALL_PREFETCH
+        from oracle.pipeline import PipelineOpType as T
+        Bind = _resolve_parameters(Op.statement, Op.parameters)
+        Batch = []
+        if Op.op_type == T.EXECUTE_MANY:
+            Rows = [_resolve_parameters(Op.statement, P)
+                    for P in (Op.parameters or [])]
+            Bind = Rows[0] if Rows else []
+            Batch = Rows[1:]
+        Head = Op.statement.strip().upper()
+        if Head.startswith('SELECT'):
+            Type = 'select'
+        elif Head.startswith('BEGIN') or Head.startswith('DECLARE'):
+            Type = 'block'
+        else:
+            Type = 'change'
+        if Op.op_type == T.FETCH_ONE:
+            Fetch = 1
+        elif Op.op_type == T.FETCH_MANY:
+            Fetch = Op.num_rows or self.fetch
+        elif Op.op_type == T.FETCH_ALL:
+            Fetch = _PIPELINE_FETCH_ALL_PREFETCH
+        else:
+            Fetch = self.fetch
+        QueryDict = {
+            'type': Type,
+            'auto': 1 if self.autocommit else 0,
+            'fetch': Fetch,
+            'server_version': self.server_version,
+            'cursor': 0,
+            'query': Op.statement,
+            'bind': Bind,
+            'batch': Batch,
+            'def': [],
+            'batcherrors': False,
+            'arraydmlrowcounts': False,
+            'return_binds': None,
+        }
+        Data = encode_dictionary(self._make_dict(
+            DictionaryType.exec, query=QueryDict, token_num=TokenNum))
+        return (Data, Bind)
+
+    async def _pipeline_send_op(self, Data: bytes, FinalFlags: int,
+                                FirstFlags: int = 0) -> None:
+        # Async copy of OracleConnect._pipeline_send_op (#158).
+        BodyMax = self.sdu - 10
+        First = True
+        while len(Data) > BodyMax:
+            Flags = 0x0020 | (FirstFlags if First else 0)
+            self._writer.write(encode_data_packet(Data[:BodyMax], Flags,
+                                                  self._large_packets))
+            Data = Data[BodyMax:]
+            First = False
+        Flags = FinalFlags | (FirstFlags if First else 0)
+        self._writer.write(encode_data_packet(Data, Flags, self._large_packets))
+
+    async def _pipeline_recv_response(self) -> bytes:
+        # Async copy of OracleConnect._pipeline_recv_response (#158): read one
+        # op's response (TOKEN + body + EOR) as a single response unit without
+        # the coalescing recv() does, skipping any interjected break marker.
+        Body = b""
+        while True:
+            if len(self._pending) >= 8:
+                (Flag, Type, Chunk, Rest) = assemble_packet(
+                    self._pending, self.sdu, self._large_packets)
+                if Chunk is not None:
+                    self._pending = Rest if Rest is not None else b""
+                    if Type == TNS_MARKER:
+                        continue
+                    Body += Chunk
+                    if Flag:
+                        return Body
+                    continue
+            More = await self._reader.read(self.sdu)
+            if not More:
+                from oracle.exceptions import OperationalError
+                raise OperationalError(
+                    "connection closed during pipeline read")
+            self._pending = self._pending + More
+
+    async def _run_pipeline_pipelined(self, pipeline,
+                                      continue_on_error: bool) -> list:
+        # Async copy of OracleConnect._run_pipeline_pipelined (#158).
+        from oracle.pipeline import PipelineOpResult, PipelineOpType as T
+        from oracle.connection import _apply_rowfactory
+        Ops = pipeline.operations
+        BeginSeq = self._next_seq()
+        Built = [self._encode_pipeline_op(Op, K)
+                 for K, Op in enumerate(Ops, start=1)]
+        EndSeq = self._next_seq()
+        Begin = encode_pipeline_begin(BeginSeq, self.field_version, 1,
+                                      TNS_PIPELINE_MODE_CONTINUE_ON_ERROR)
+        await self._pipeline_send_op(
+            Begin + Built[0][0], TNS_DATA_FLAGS_END_OF_REQUEST,
+            FirstFlags=TNS_DATA_FLAGS_BEGIN_PIPELINE)
+        for (Data, _Bind) in Built[1:]:
+            await self._pipeline_send_op(Data, TNS_DATA_FLAGS_END_OF_REQUEST)
+        await self.send(TNS_DATA,
+                        encode_pipeline_end(EndSeq, self.field_version))
+        await self._writer.drain()
+        Raw = []
+        for (_Data, Bind) in Built:
+            Body = await self._pipeline_recv_response()
+            set_decode_dml_rowcounts(False)
+            set_decode_return_binds(None)
+            Raw.append(decode_packet(Body, (None, None, [], Bind),
+                                     self.field_version))
+        # Discard the trailing end-pipeline (func 200) response.
+        await self._pipeline_recv_response()
+        Results = []
+        FirstError = None
+        Cur = self.cursor()
+        for (Op, (_Data, Bind), RawResult) in zip(Ops, Built, Raw):
+            Result = PipelineOpResult(Op)
+            Results.append(Result)
+            try:
+                Drained = await self._drain_cursor(RawResult)
+                await Cur._apply_result(Bind, Drained)
+                if Op.op_type == T.FETCH_ONE:
+                    Row = await Cur.fetchone()
+                    Result.rows = _apply_rowfactory(
+                        [] if Row is None else [Row], Op.rowfactory)
+                    Result.columns = Cur.description
+                elif Op.op_type == T.FETCH_MANY:
+                    Result.rows = _apply_rowfactory(
+                        await Cur.fetchmany(Op.num_rows), Op.rowfactory)
+                    Result.columns = Cur.description
+                elif Op.op_type == T.FETCH_ALL:
+                    Result.rows = _apply_rowfactory(
+                        await Cur.fetchall(), Op.rowfactory)
+                    Result.columns = Cur.description
+            except DatabaseError as exc:
+                Result.error = exc
+                if FirstError is None:
+                    FirstError = exc
+        if FirstError is not None and not continue_on_error:
+            raise FirstError
+        return Results
+
     async def run_pipeline(self, pipeline,
                            continue_on_error: bool = False) -> list:
-        """Async port of OracleConnect.run_pipeline (#132): run the queued
-        operations in order and return a PipelineOpResult for each. Serial for
-        now (same API/results as a pipelined run; the single-round-trip wire
-        optimisation is a follow-up)."""
+        """Async port of OracleConnect.run_pipeline (#132/#158): run the queued
+        operations in order and return a PipelineOpResult for each. On 23ai
+        (EOR framing) the exec-family ops run as one token-tagged round trip;
+        otherwise each op runs serially with identical results."""
+        if self._pipeline_wire_eligible(pipeline):
+            return await self._run_pipeline_pipelined(pipeline,
+                                                      continue_on_error)
         from oracle.pipeline import PipelineOpResult, PipelineOpType as T
         from oracle.connection import _apply_rowfactory
         results = []

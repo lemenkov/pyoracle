@@ -2580,7 +2580,7 @@ the format-id (`03 4e5c3e`) where oracledb pads to four bytes. Verified on 23ai
 (suspend/resume across sessions, cross-session isolation, rollback), sync +
 async.
 
-## 32. Request pipelining (#132)
+## 32. Request pipelining (#132, #158)
 
 `pipeline = oracle.create_pipeline()` collects operations
 (`add_execute` / `add_executemany` / `add_fetchone` / `add_fetchmany` /
@@ -2590,26 +2590,39 @@ async.
 With `continue_on_error` a failing op records its error and the rest still run;
 otherwise the first error is raised after its result is recorded. Sync + async.
 
-The driver currently runs the operations **serially** — the API, ordering and
-results are exactly those of a pipelined run; the single-round-trip wire
-optimisation is a follow-up. The wire framing for that optimisation is already
-in place and byte-validated against an oracledb-thin async-pipeline capture on
-23ai:
+On a 23ai server that negotiated end-of-response framing (#155) a pipeline of
+exec-family ops (execute / executemany / fetchone / fetchmany / fetchall) is
+sent as **one token-tagged burst and its responses read back in a single round
+trip** (#158). Other servers — or a pipeline carrying a commit / callproc /
+callfunc op — run each op **serially**; the API, ordering and results are
+identical either way. The wire flow, byte-validated against both an
+oracledb-thin async-pipeline capture and pyoracle's own capture on 23ai:
 
 - **Token framing** — at field version 24 each function-call header carries a
   ub8 token number after the sequence byte (`_fun_header`). An ordinary call
   uses token 0 (`encode_sb4(0)` = the historical single `0x00`); a pipelined
-  call numbers itself 1..N.
+  call numbers itself 1..N (threaded through `encode_dictionary_exec` via the
+  dict's `token_num`). Each op is built fresh (no cursor cache); a pipelined
+  `fetchall` asks for a large prefetch so its rows come back inline, and any
+  overflow is drained with ordinary `TTI_FETCH` calls once the burst is read.
 - **Begin-pipeline piggyback** (`TNS_FUNC_PIPELINE_BEGIN` = 199, message type
-  `0x11`) rides on the first pipelined message, carrying the error mode
-  (`1` continue / `2` abort); the packet sets the `BEGIN_PIPELINE` (0x1000) data
-  flag, and each result-bearing call sets `END_OF_REQUEST` (0x800).
-- **End-of-pipeline** (`TNS_FUNC_PIPELINE_END` = 200) closes the burst.
+  `0x11`) rides on the first pipelined message, carrying the error mode. The
+  wire always sends **continue mode** (`1`) so the server returns a response for
+  every op (a partial burst would desync the stream); the caller's abort
+  semantics are applied client-side. The first packet sets the `BEGIN_PIPELINE`
+  (0x1000) data flag, and every op packet sets `END_OF_REQUEST` (0x800). Op
+  packets are framed with `encode_data_packet` (explicit data flags), not the
+  ordinary `encode_packet` path.
+- **End-of-pipeline** (`TNS_FUNC_PIPELINE_END` = 200, ordinary data flags 0)
+  closes the burst and **draws its own terminating response after the N op
+  responses** — read and discard it, or the next call reads a stale packet.
 - **Response correlation** — the server prefixes each op's response with a
   `TOKEN` (33) marker carrying the matching ub8 token and ends it with the
-  end-of-response (29) marker (§1.1), so the stacked responses can be split and
-  matched back to their ops.
-
-This rides on the end-of-response framing from #155 and is only available on a
-23ai server that negotiated it; otherwise pyoracle falls back to serial
-execution (which is what it does today on every tier).
+  end-of-response (29) marker (§1.1). The pipelined reader assembles packets
+  directly (the ordinary `recv` coalesces consecutive complete packets, which
+  would merge op responses) and stops each response at its first
+  response-final packet.
+- **Per-op errors** — in continue mode the server interjects a bare break
+  marker (`01 00 01`) before an erroring op's response but does **not** wait for
+  a reset and keeps streaming; the pipelined reader skips the marker silently
+  (unlike the break/reset handshake of §27 / #45).

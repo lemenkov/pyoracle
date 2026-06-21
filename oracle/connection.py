@@ -24,6 +24,8 @@ from oracle.exceptions import OperationalError
 from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
                         FIELD_VERSION_12_1, FIELD_VERSION_21_1,
                         encode_fast_auth, find_fast_auth_rpa)
+from oracle.tns import (decode_packet, encode_data_packet,
+                        encode_pipeline_begin, encode_pipeline_end)
 from oracle.tns_consts import (
     CONN_STATE_AUTH_NEGOTIATE, CONN_STATE_AUTHENTICATED,
     CONN_STATE_CONNECTED, CONN_STATE_DISCONNECTED, DictionaryType,
@@ -42,6 +44,8 @@ from oracle.tns_consts import (
     TPC_BEGIN_RESUME, TPC_TXN_FLAGS_SESSIONLESS,
     TNS_TPC_SESSIONLESS_FORMAT_ID, TNS_SESSIONLESS_TXN_ID_MAX,
     PURITY_DEFAULT, PURITY_NEW,
+    TNS_DATA_FLAGS_BEGIN_PIPELINE, TNS_DATA_FLAGS_END_OF_REQUEST,
+    TNS_PIPELINE_MODE_CONTINUE_ON_ERROR, TNS_PIPELINE_MODE_ABORT_ON_ERROR,
 )
 from oracle.exceptions import DatabaseError
 import logging
@@ -62,6 +66,11 @@ logger = logging.getLogger(__name__)
 # misconfigured listener that redirects in a loop fails fast instead of
 # spinning forever.
 _MAX_REDIRECTS = 5
+
+# A pipelined fetchall (#158) can't interleave follow-up TTI_FETCH calls inside
+# the burst, so its execute asks for a large prefetch to pull the whole result
+# set inline; any overflow is drained serially once the burst is read.
+_PIPELINE_FETCH_ALL_PREFETCH = 32760
 
 def _format_version(Packed: int) -> str | None:
     # Oracle packs the release into a single integer: major (8 bits),
@@ -1865,14 +1874,18 @@ class OracleConnect:
 
     def run_pipeline(self, pipeline, continue_on_error: bool = False) -> list:
         """Run a Pipeline's queued operations and return a PipelineOpResult for
-        each (#132). The operations run in order; `continue_on_error` records a
-        failing op's error and keeps going, otherwise the first error is raised
-        after its result is recorded.
+        each (#132/#158). The operations run in order; `continue_on_error`
+        records a failing op's error and keeps going, otherwise the first error
+        is raised after its result is recorded.
 
-        The operations currently run serially — the API, ordering and results
-        are exactly those of a pipelined run; the single-round-trip 23ai wire
-        optimisation (the token-tagged burst this driver already knows how to
-        frame) is a follow-up."""
+        On a 23ai server that negotiated end-of-response framing (#155) the
+        execute/fetch ops are sent as one token-tagged burst and their
+        responses read back in a single round trip (#158). Older servers — or a
+        pipeline carrying ops the wire path does not cover (commit, callproc,
+        callfunc) — fall back to running each op serially; the API, ordering and
+        results are identical either way."""
+        if self._pipeline_wire_eligible(pipeline):
+            return self._run_pipeline_pipelined(pipeline, continue_on_error)
         from oracle.pipeline import PipelineOpType as T
         results = []
         Cur = self.cursor()
@@ -1882,6 +1895,185 @@ class OracleConnect:
             if Result.error is not None and not continue_on_error:
                 raise Result.error
         return results
+
+    def _pipeline_wire_eligible(self, pipeline) -> bool:
+        # The single-round-trip wire path (#158) needs end-of-response framing
+        # (23ai) and covers only the exec-family ops, whose token framing is
+        # verified against a capture. A pipeline with a commit / callproc /
+        # callfunc op runs serially instead (correct results, no optimisation).
+        from oracle.pipeline import PipelineOpType as T
+        WireOps = (T.EXECUTE, T.EXECUTE_MANY, T.FETCH_ONE, T.FETCH_MANY,
+                   T.FETCH_ALL)
+        if not self._supports_eor or not pipeline.operations:
+            return False
+        return all(Op.op_type in WireOps for Op in pipeline.operations)
+
+    def _encode_pipeline_op(self, Op, TokenNum: int):
+        # Build one pipelined op's exec request (token-tagged, no cursor cache)
+        # and return (Data, Bind). FETCH ops set a prefetch large enough to pull
+        # their rows inline in the execute response (the pipelined burst can't
+        # interleave follow-up TTI_FETCH calls); any overflow is drained
+        # serially after the burst.
+        from oracle.cursor import _resolve_parameters
+        from oracle.pipeline import PipelineOpType as T
+        Bind = _resolve_parameters(Op.statement, Op.parameters)
+        Batch = []
+        if Op.op_type == T.EXECUTE_MANY:
+            Rows = [_resolve_parameters(Op.statement, P)
+                    for P in (Op.parameters or [])]
+            Bind = Rows[0] if Rows else []
+            Batch = Rows[1:]
+        Head = Op.statement.strip().upper()
+        if Head.startswith('SELECT'):
+            Type = 'select'
+        elif Head.startswith('BEGIN') or Head.startswith('DECLARE'):
+            Type = 'block'
+        else:
+            Type = 'change'
+        if Op.op_type == T.FETCH_ONE:
+            Fetch = 1
+        elif Op.op_type == T.FETCH_MANY:
+            Fetch = Op.num_rows or self.fetch
+        elif Op.op_type == T.FETCH_ALL:
+            Fetch = _PIPELINE_FETCH_ALL_PREFETCH
+        else:
+            Fetch = self.fetch
+        QueryDict = {
+            'type': Type,
+            'auto': 1 if self.autocommit else 0,
+            'fetch': Fetch,
+            'server_version': self.server_version,
+            'cursor': 0,
+            'query': Op.statement,
+            'bind': Bind,
+            'batch': Batch,
+            'def': [],
+            'batcherrors': False,
+            'arraydmlrowcounts': False,
+            'return_binds': None,
+        }
+        Data = encode_dictionary(self._make_dict(
+            DictionaryType.exec, query=QueryDict, token_num=TokenNum))
+        return (Data, Bind)
+
+    def _pipeline_send_op(self, Data: bytes, FinalFlags: int,
+                          FirstFlags: int = 0) -> None:
+        # Send one pipelined op's request as DATA packet(s): an oversized op
+        # fragments at the SDU with the 0x0020 "more" flag, the final fragment
+        # carries FinalFlags (END_OF_REQUEST), and the very first packet of the
+        # whole burst additionally carries FirstFlags (BEGIN_PIPELINE).
+        BodyMax = self.sdu - 10
+        First = True
+        while len(Data) > BodyMax:
+            Flags = 0x0020 | (FirstFlags if First else 0)
+            self.sock.send(encode_data_packet(Data[:BodyMax], Flags,
+                                               self._large_packets))
+            Data = Data[BodyMax:]
+            First = False
+        Flags = FinalFlags | (FirstFlags if First else 0)
+        self.sock.send(encode_data_packet(Data, Flags, self._large_packets))
+
+    def _pipeline_recv_response(self) -> bytes:
+        # Read exactly one op's response (TOKEN + body + EOR) as a single
+        # response unit, buffering any following op responses in self._pending.
+        # The connection's normal recv() coalesces consecutive complete packets
+        # into one blob — fatal here, since each op response must be decoded on
+        # its own — so the pipelined read assembles packets directly and stops
+        # at the first response-final packet.
+        Body = b""
+        while True:
+            if len(self._pending) >= 8:
+                (Flag, Type, Chunk, Rest) = assemble_packet(
+                    self._pending, self.sdu, self._large_packets)
+                if Chunk is not None:
+                    self._pending = Rest if Rest is not None else b""
+                    if Type == TNS_MARKER:
+                        # A pipelined op that errors makes the server interject a
+                        # bare break marker (01 00 01) between op responses — but
+                        # it does NOT wait for a reset and keeps streaming the
+                        # remaining responses, so (unlike #45) skip the marker
+                        # silently and read on to the erroring op's real response.
+                        continue
+                    Body += Chunk
+                    if Flag:
+                        return Body
+                    continue
+            More = self.sock.recv(self.sdu)
+            if not More:
+                raise OperationalError(
+                    "connection closed during pipeline read")
+            self._pending = self._pending + More
+
+    def _run_pipeline_pipelined(self, pipeline, continue_on_error: bool) -> list:
+        # The single-round-trip wire path (#158). Send a begin-pipeline
+        # piggyback + every op (token 1..N, END_OF_REQUEST per op) + an
+        # end-pipeline message as one burst, then read the N token-tagged
+        # responses back-to-back. The wire always runs in CONTINUE_ON_ERROR
+        # mode so the server returns a response for every op (no partial-burst
+        # desync); the caller's abort semantics are enforced client-side.
+        from oracle.pipeline import PipelineOpResult, PipelineOpType as T
+        Ops = pipeline.operations
+        # Phase 1 — build the burst. The begin piggyback takes the first seq and
+        # shares op 1's token; each op then claims its own seq via _make_dict.
+        BeginSeq = self._next_seq()
+        Built = [self._encode_pipeline_op(Op, K)
+                 for K, Op in enumerate(Ops, start=1)]
+        EndSeq = self._next_seq()
+        Begin = encode_pipeline_begin(BeginSeq, self.field_version, 1,
+                                      TNS_PIPELINE_MODE_CONTINUE_ON_ERROR)
+        # Phase 2 — send. First packet: begin + op 1 (BEGIN_PIPELINE |
+        # END_OF_REQUEST); each later op: END_OF_REQUEST; then the ordinary
+        # end-pipeline message (data flags 0).
+        self._pipeline_send_op(
+            Begin + Built[0][0], TNS_DATA_FLAGS_END_OF_REQUEST,
+            FirstFlags=TNS_DATA_FLAGS_BEGIN_PIPELINE)
+        for (Data, _Bind) in Built[1:]:
+            self._pipeline_send_op(Data, TNS_DATA_FLAGS_END_OF_REQUEST)
+        self.send(TNS_DATA, encode_pipeline_end(EndSeq, self.field_version))
+        # Phase 3 — read every op's response before any draining, so no
+        # follow-up TTI_FETCH is interleaved with the queued responses.
+        Raw = []
+        for (_Data, Bind) in Built:
+            Body = self._pipeline_recv_response()
+            set_decode_dml_rowcounts(False)
+            set_decode_return_binds(None)
+            Raw.append(decode_packet(Body, (None, None, [], Bind),
+                                     self.field_version))
+        # The end-pipeline message (func 200) draws its own terminating
+        # response after the N op responses; read and discard it so the next
+        # call on this connection is not left reading a stale packet.
+        self._pipeline_recv_response()
+        # Phase 4 — the line is clean now; drain any query that signalled "more
+        # rows" with serial TTI_FETCH calls, then interpret each result.
+        Results = []
+        FirstError = None
+        Cur = self.cursor()
+        for (Op, (_Data, Bind), RawResult) in zip(Ops, Built, Raw):
+            Result = PipelineOpResult(Op)
+            Results.append(Result)
+            try:
+                Drained = self._drain_cursor(RawResult)
+                Cur._apply_result(Bind, Drained)
+                if Op.op_type == T.FETCH_ONE:
+                    Row = Cur.fetchone()
+                    Result.rows = _apply_rowfactory(
+                        [] if Row is None else [Row], Op.rowfactory)
+                    Result.columns = Cur.description
+                elif Op.op_type == T.FETCH_MANY:
+                    Result.rows = _apply_rowfactory(
+                        Cur.fetchmany(Op.num_rows), Op.rowfactory)
+                    Result.columns = Cur.description
+                elif Op.op_type == T.FETCH_ALL:
+                    Result.rows = _apply_rowfactory(Cur.fetchall(),
+                                                    Op.rowfactory)
+                    Result.columns = Cur.description
+            except DatabaseError as exc:
+                Result.error = exc
+                if FirstError is None:
+                    FirstError = exc
+        if FirstError is not None and not continue_on_error:
+            raise FirstError
+        return Results
 
     # --- Advanced Queuing (#128) ---
 

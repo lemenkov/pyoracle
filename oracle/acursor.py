@@ -133,6 +133,13 @@ class AsyncCursor:
         if ReturnBinds:                       # DML RETURNING ... INTO (#120)
             Kw['ReturnBinds'] = ReturnBinds
         Result = await self._connection.execute(operation, **Kw)
+        return await self._apply_result(Bind, Result, BatchErrors=BatchErrors)
+
+    async def _apply_result(self, Bind: list, Result,
+                            BatchErrors: bool = False) -> 'AsyncCursor':
+        # Interpret a decoded execute Result into this cursor (rows / rowcount /
+        # OUT binds). Split out of _run (#158) so the request-pipelining wire
+        # path can reuse the post-processing on a response it read out-of-band.
         try:
             OraCode = Result[1]
             RetFormat = Result[3]

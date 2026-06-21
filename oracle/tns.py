@@ -1256,6 +1256,15 @@ def _packet_header(Size: int, Type: int, Large: bool) -> bytes:
         return struct.pack(">IBBh", Size, Type, 0, 0)
     return struct.pack(">HhBBh", Size, 0, Type, 0, 0)
 
+def encode_data_packet(Body: bytes, DataFlags: int, Large: bool = False) -> bytes:
+    # A single TNS_DATA packet carrying explicit data flags. Request pipelining
+    # (#158) sets BEGIN_PIPELINE (0x1000) on the first packet of a burst and
+    # END_OF_REQUEST (0x0800) on each op packet — the ordinary encode_packet
+    # path always writes 0 (or 0x0020 on an oversized fragment), so the
+    # pipelined sender builds its packets here instead.
+    return (_packet_header(len(Body) + 10, TNS_DATA, Large)
+            + struct.pack(">H", DataFlags) + Body)
+
 def encode_packet(Type: int, Data: bytes, Length: int, Large: bool = False) -> tuple[bytes, bytes | None]:
     if Type == TNS_DATA:
         PacketSize = len(Data) + 10
@@ -2023,6 +2032,11 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
     DefLen = len(Def)
     DefFlag = 1 if DefLen > 0 else 0
     Tseq = Dictionary['seq']
+    # Request pipelining (#158): a pipelined execute numbers itself 1..N so the
+    # server tags each response with a matching TOKEN (33) marker. Ordinary
+    # (non-pipelined) executes leave this 0 — encode_sb4(0) is the historical
+    # single zero byte, so the bytes are unchanged.
+    TokenNum = Dictionary.get('token_num', 0)
 
     if Cursor == 0:
         (Opt, LMax, Max, All8) = set_opts(Type, 1, BindFlag, BatchLen, Auto)
@@ -2121,7 +2135,7 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
     else:
         raise Exception("Unhandled tokens combination", Bind, Batch, Def, Query)
 
-    Head = _fun_header(TTI_ALL8, Tseq, FieldVersion) + encode_sb4(Opt) + encode_sb4(Cursor) + bytes([QueryFlag]) + encode_sb4(QueryLen) + bytes([All8Flag]) + \
+    Head = _fun_header(TTI_ALL8, Tseq, FieldVersion, TokenNum) + encode_sb4(Opt) + encode_sb4(Cursor) + bytes([QueryFlag]) + encode_sb4(QueryLen) + bytes([All8Flag]) + \
             encode_sb4(All8Len) + bytes([0,0]) + encode_sb4(LMax) + encode_sb4(Fetch) + encode_sb4(Max) + bytes([BindFlag]) + encode_sb4(BindLen) + \
             bytes([0,0,0,0,0]) + bytes([DefFlag]) + encode_sb4(DefLen)
 
