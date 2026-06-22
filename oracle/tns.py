@@ -1421,7 +1421,7 @@ def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
 # pyoracle's advertised client version, packed the way python-oracledb encodes
 # SESSION_CLIENT_VERSION: (major << 24) | (minor << 20) | (patch << 12). Keep the
 # string in sync with pyproject.toml. (4.0.1 -> 67112960 in the reference capture.)
-_CLIENT_VERSION = "1.7.0"
+_CLIENT_VERSION = "1.8.0"
 
 
 def _packed_client_version(Version: str) -> int:
