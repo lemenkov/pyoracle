@@ -873,3 +873,36 @@ class TestEndToEndClientInfoDbop(unittest.TestCase):
         out = encode_end_to_end_piggyback(99, 24, {"dbop": "OP"})
         self.assertIn("0200", out.hex())          # DBOP flag
         self.assertTrue(out.hex().endswith(b"OP".hex()))
+
+
+class TestScrollableExecEncoding(unittest.TestCase):
+    # Server-side scrollable cursor wire encoding (#181, groundwork for 1.9.0).
+    # The scroll request rides in the execute al8i4 array: al8i4[9] exec flags
+    # (SCROLLABLE | NO_CANCEL_ON_EOF), al8i4[10] orientation, al8i4[11] position.
+    # Bytes byte-validated against a 23ai oracledb-thin capture.
+    def _exec(self, scroll=None, scrollable=False):
+        # Run in a copied context so encode_dictionary_exec's fv24
+        # _ENCODE_FIELD_VERSION.set() doesn't leak into other encoder tests.
+        import contextvars
+        from oracle.tns import encode_dictionary_exec
+        d = {'seq': 0x0a, 'field_version': 24,
+             'query': {'type': 'select', 'auto': 0, 'fetch': 100,
+                       'server_version': 0x18000000, 'cursor': 100, 'query': '',
+                       'bind': [], 'batch': [], 'def': [], 'batcherrors': None,
+                       'arraydmlrowcounts': None, 'return_binds': None,
+                       'scroll': scroll, 'scrollable': scrollable}}
+        return contextvars.copy_context().run(encode_dictionary_exec, d)
+
+    def test_absolute_matches_capture(self):
+        from oracle.tns_consts import TNS_FETCH_ORIENTATION_ABSOLUTE
+        self.assertIn("0280820120010500",
+                      self._exec(scroll=(TNS_FETCH_ORIENTATION_ABSOLUTE, 5)).hex())
+
+    def test_open_current_matches_capture(self):
+        from oracle.tns_consts import TNS_FETCH_ORIENTATION_CURRENT
+        self.assertIn("0280820101010100",
+                      self._exec(scroll=(TNS_FETCH_ORIENTATION_CURRENT, 1)).hex())
+
+    def test_non_scrollable_unchanged(self):
+        # Default path carries no scroll exec flags (no regression).
+        self.assertNotIn("028082", self._exec().hex())

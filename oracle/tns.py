@@ -64,6 +64,7 @@ from oracle.tns_consts import (
     TTI_MSG_TYPE_PIGGYBACK, TTI_TOKEN,
     TNS_FUNC_PIPELINE_BEGIN, TNS_FUNC_PIPELINE_END,
     TTI_OCCA,
+    TNS_EXEC_FLAGS_SCROLLABLE, TNS_EXEC_FLAGS_NO_CANCEL_ON_EOF,
     TNS_FUNC_SET_END_TO_END_ATTR, TNS_END_TO_END_CLIENT_IDENTIFIER,
     TNS_END_TO_END_MODULE, TNS_END_TO_END_ACTION, TNS_END_TO_END_CLIENT_INFO,
     TNS_END_TO_END_DBOP,
@@ -2172,6 +2173,19 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
             if not ArrayDmlRowCounts and len(All8) > 9:
                 All8 = list(All8)
                 All8[9] = 0x8000
+
+    # Server-side scrollable cursor (#181): mark the cursor scrollable (and keep
+    # it open past EOF) on the opening execute, and carry the scroll request
+    # (orientation + 1-based position) on a scroll re-execute. al8i4[9] holds the
+    # exec flags, al8i4[10] the orientation, al8i4[11] the position — validated
+    # against a 23ai oracledb-thin capture (al8i4[9] reads 0x8082 = the 23ai
+    # query flag | NO_CANCEL_ON_EOF | SCROLLABLE).
+    Scroll = Dictionary['query'].get('scroll')          # (orient, pos) or None
+    if (Dictionary['query'].get('scrollable') or Scroll) and len(All8) > 11:
+        All8 = list(All8)
+        All8[9] |= TNS_EXEC_FLAGS_SCROLLABLE | TNS_EXEC_FLAGS_NO_CANCEL_ON_EOF
+        if Scroll:
+            All8[10], All8[11] = Scroll
 
     All8Len = len(All8)
     All8Flag = 1 if All8Len > 0 else 0
