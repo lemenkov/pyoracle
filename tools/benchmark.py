@@ -11,7 +11,11 @@ come from the same PYORACLE_TEST_* environment variables.
     PYORACLE_TEST_PORT=1521 PYORACLE_TEST_SERVICE=XE \
         python3 tools/benchmark.py [scale]
 
-`scale` (default 10000) is the row/iteration count the throughput scenarios use.
+`scale` (default 50000) is the row/iteration count the throughput scenarios use.
+It is deliberately large: the Arrow fetch path has a fixed per-call setup cost,
+so at a small scale it looks slower than `fetchall` even though it is faster
+once that cost is amortised (~0.95x of `fetchall` time by 50k rows). Use a
+representative scale when comparing.
 Each scenario prints one stable line — name, count, seconds, rate — so runs are
 easy to diff across changes (guards perf regressions; quantifies future work
 such as the Arrow fetch fast path). Numbers are wall-clock against whatever
@@ -42,7 +46,10 @@ def _report(name, count, seconds, unit="rows"):
 
 
 def bench_connect(scale):
-    n = max(scale // 200, 20)
+    # Connect latency, not throughput — cap the count so it doesn't scale with
+    # `scale` (a connect storm can exhaust the server's session/process limit
+    # and isn't what this measures).
+    n = min(max(scale // 200, 20), 50)
     start = time.perf_counter()
     for _ in range(n):
         oracle.connect(**_KW).close()
@@ -60,13 +67,32 @@ def _setup(conn):
     cur.execute(f"CREATE TABLE {_TABLE} (id NUMBER, name VARCHAR2(40))")
 
 
-def bench_insert(conn, scale):
+def bench_insert(scale):
+    # Per-row bind latency (not bulk throughput — use executemany for that).
+    # On 12c+ each re-parse opens a server cursor that is not reused, so a long
+    # loop trips ORA-01000 (#191) and the leaked cursors persist for the life of
+    # the connection. So run on a dedicated connection (closing it frees them,
+    # keeping the throughput scenarios clean) and stop gracefully if it trips.
+    conn = oracle.connect(**_KW)
+    conn.autocommit = False
     cur = conn.cursor()
+    done = 0
     start = time.perf_counter()
-    for i in range(scale):
-        cur.execute(f"INSERT INTO {_TABLE} VALUES (:1, :2)", [i, f"row{i}"])
-    conn.commit()
-    _report("insert (per-row bind)", scale, time.perf_counter() - start)
+    try:
+        for i in range(min(scale, 2000)):
+            try:
+                cur.execute(f"INSERT INTO {_TABLE} VALUES (:1, :2)",
+                            [i, f"row{i}"])
+                done += 1
+            except oracle.DatabaseError as exc:
+                if getattr(exc, "code", None) != 1000:
+                    raise
+                print(f"  (per-row insert stopped at {done}: ORA-01000, #191)")
+                break
+        conn.commit()
+    finally:
+        conn.close()
+    _report("insert (per-row bind)", done, time.perf_counter() - start)
 
 
 def bench_executemany(conn, scale):
@@ -102,7 +128,7 @@ def bench_fetch_df(conn, scale):
 
 
 def main():
-    scale = int(sys.argv[1]) if len(sys.argv) > 1 else 10_000
+    scale = int(sys.argv[1]) if len(sys.argv) > 1 else 50_000
     print(f"pyoracle benchmark  service={_KW['service_name']} scale={scale}")
     print("-" * 64)
     bench_connect(scale)
@@ -110,7 +136,7 @@ def main():
     conn.autocommit = False
     try:
         _setup(conn)
-        bench_insert(conn, scale)
+        bench_insert(scale)
         bench_executemany(conn, scale)
         bench_fetch(conn, scale)
         bench_fetch_df(conn, scale)
