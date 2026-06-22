@@ -931,8 +931,14 @@ def decode_token_rpa_piggyback(Data: bytes, Acc: tuple) -> object:
         (Num, Rest) = decode_ub4(Rest)
     except IndexError:
         return (True, Acc)
+    # On fv2 (9i) Num over-counts and the params end at the real status token, so
+    # stop early on a known token byte. From fv4 up Num is exact, and a scrollable
+    # cursor's position parameter has a value whose length byte (0x04) collides
+    # with the OER token — so there we must consume exactly Num and not break on a
+    # token-valued param byte, or the OER decodes off by those bytes (#181).
+    BreakOnToken = _DECODE_FIELD_VERSION.get() < FIELD_VERSION_10_2
     for _ in range(max(Num, 0)):
-        if not Rest or Rest[0] in _KNOWN_TTI_TOKENS:
+        if not Rest or (BreakOnToken and Rest[0] in _KNOWN_TTI_TOKENS):
             break
         try:
             (_, Rest) = decode_ub4(Rest)

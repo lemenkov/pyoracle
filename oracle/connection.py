@@ -34,6 +34,10 @@ from oracle.tns_consts import (
     FIELD_VERSION_23_1, FIELD_VERSION_23_4, MAX_SEQ_NUM,
     TNS_ACCEPT, TNS_CONNECT, TNS_DATA, TNS_MARKER,
     TNS_MARKER_TYPE_INTERRUPT, TNS_GSO_CAN_RECV_ATTENTION,
+    TNS_FETCH_ORIENTATION_CURRENT, TNS_FETCH_ORIENTATION_NEXT,
+    TNS_FETCH_ORIENTATION_FIRST, TNS_FETCH_ORIENTATION_LAST,
+    TNS_FETCH_ORIENTATION_PRIOR, TNS_FETCH_ORIENTATION_ABSOLUTE,
+    TNS_FETCH_ORIENTATION_RELATIVE,
     TNS_VERSION_MIN_LARGE_SDU, TNS_VERSION_MIN_OOB_CHECK,
     TNS_ACCEPT_FLAG_HAS_END_OF_RESPONSE,
     TNS_REDIRECT, TNS_REFUSE, TNS_RESEND, TTI_AUTH, TTI_DTY, TTI_PRO,
@@ -947,7 +951,8 @@ class OracleConnect:
 
     def execute(self, Query: str, Bind: list | None = None, Def: list | None = None,
                 Batch: list | None = None, BatchErrors: bool = False,
-                ArrayDmlRowCounts: bool = False, ReturnBinds=None) -> object:
+                ArrayDmlRowCounts: bool = False, ReturnBinds=None,
+                scrollable: bool = False) -> object:
         if Bind is None:
             Bind = []
         if Def is None:
@@ -1018,6 +1023,11 @@ class OracleConnect:
             'batcherrors': BatchErrors,
             'arraydmlrowcounts': ArrayDmlRowCounts,
             'return_binds': ReturnBinds or None,
+            # Server-side scrollable cursor open (#181): mark the cursor
+            # scrollable and position it at CURRENT (a describe-only open — the
+            # rows come from later scroll_fetch re-executes).
+            'scrollable': scrollable,
+            'scroll': (TNS_FETCH_ORIENTATION_CURRENT, 1) if scrollable else None,
         }
         # Piggybacks in front of this execute (each gets a seq before the
         # execute's): close any drained server cursors queued from prior calls
@@ -1077,6 +1087,12 @@ class OracleConnect:
                 Oldest = next(iter(self._cursor_cache))
                 self._cursor_cache.pop(Oldest, None)
             Stored = True
+        if scrollable:
+            # A scrollable open is describe-only: don't drain (the rows come from
+            # scroll_fetch) and don't queue the cursor for close — it must stay
+            # open for the scroll re-executes (#181). The cursor closes it when
+            # the user closes / re-executes the cursor.
+            return Result
         Drained = self._drain_cursor(Result)
         # Queue the statement's own server cursor for close unless it was cached
         # for reuse (#191). The result set is fully buffered by now, and this is
@@ -1086,6 +1102,31 @@ class OracleConnect:
                 and isinstance(Drained[2], int) and Drained[2] > 0):
             self._cursors_to_close.append(Drained[2])
         return Drained
+
+    def scroll_fetch(self, CursorId: int, Orientation: int, Position: int,
+                     RowFormat: list) -> tuple:
+        """Re-execute an open scrollable cursor (#181) with a fetch orientation
+        and 1-based position, returning (rows, at_eof). The response carries
+        RXD rows but no DCB, so the prior RowFormat is seeded into the decoder
+        (as fetch_more does). A re-execute returning no rows means the scroll
+        ran off the end (the cursor stays open thanks to NO_CANCEL_ON_EOF)."""
+        QueryDict = {
+            'type': 'select', 'auto': 0, 'fetch': self.fetch,
+            'server_version': self.server_version, 'cursor': CursorId,
+            'query': '', 'bind': [], 'batch': [], 'def': [],
+            'batcherrors': None, 'arraydmlrowcounts': None, 'return_binds': None,
+            'scrollable': True, 'scroll': (Orientation, Position),
+        }
+        Pre = self._flush_cursor_closes_bytes() + self._flush_end_to_end_bytes()
+        Data = encode_dictionary(self._make_dict(DictionaryType.exec,
+                                                 query=QueryDict))
+        self.send(TNS_DATA, Data if not Pre else Pre + Data)
+        Result = self._handle_response((None, RowFormat, []))
+        if not isinstance(Result, tuple) or len(Result) < 6:
+            return ([], True)
+        (CallStatus, OraCode, _, _, Rows, *_) = Result
+        AtEof = (OraCode == 1403) or not Rows
+        return (list(Rows or []), AtEof)
 
     def _fv2_raise_for_error(self, Packet: bytes) -> None:
         # Raise the server's error if `Packet` is a 9i OER carrying a real ORA
