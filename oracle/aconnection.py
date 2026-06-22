@@ -34,7 +34,8 @@ from oracle.tns import encode_dictionary
 from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
 from oracle.tns import set_decode_dml_rowcounts, set_decode_return_binds
-from oracle.tns import encode_end_to_end_piggyback
+from oracle.tns import (encode_end_to_end_piggyback,
+                        encode_close_cursors_piggyback)
 from oracle.tns import (encode_data_packet, encode_pipeline_begin,
                         encode_pipeline_end)
 from oracle.tns import encode_tpc_switch, encode_tpc_change_state
@@ -147,6 +148,7 @@ class AsyncOracleConnect:
         # bind signature has to be part of the key.
         self._cursor_cache: dict[tuple[str, bytes], int] = {}
         self._cursor_cache_max = 32
+        self._cursors_to_close: list[int] = []     # drained cursors to free (#191)
         # Ordered attribute layout per SQL object type (#115), keyed by
         # (owner, type_name); see OracleConnect._object_type_layout.
         self._object_type_cache: dict[tuple[str, str], list] = {}
@@ -602,7 +604,8 @@ class AsyncOracleConnect:
             'arraydmlrowcounts': ArrayDmlRowCounts,
             'return_binds': ReturnBinds or None,
         }
-        Pre = self._flush_end_to_end_bytes()       # tracing piggyback (#183)
+        Pre = (self._flush_cursor_closes_bytes()   # close drained cursors (#191)
+               + self._flush_end_to_end_bytes())   # tracing piggyback (#183)
         Data = encode_dictionary(self._make_dict(DictionaryType.exec, query=QueryDict))
         await self.send(TNS_DATA, Pre + Data)
         # Arm row-count extraction for this response only (#18).
@@ -634,6 +637,7 @@ class AsyncOracleConnect:
                 Timer.cancel()
             self._break_in_progress = False
             self._timed_out = False
+        Stored = False
         if (CacheKey is not None and Type == 'change' and not Def
                 and isinstance(Result, tuple) and len(Result) >= 3
                 and isinstance(Result[2], int) and Result[2] > 0
@@ -646,7 +650,13 @@ class AsyncOracleConnect:
             while len(self._cursor_cache) > self._cursor_cache_max:
                 Oldest = next(iter(self._cursor_cache))
                 self._cursor_cache.pop(Oldest, None)
-        return await self._drain_cursor(Result)
+            Stored = True
+        Drained = await self._drain_cursor(Result)
+        # Queue the statement's own server cursor for close unless cached (#191).
+        if (not Stored and isinstance(Drained, tuple) and len(Drained) >= 3
+                and isinstance(Drained[2], int) and Drained[2] > 0):
+            self._cursors_to_close.append(Drained[2])
+        return Drained
 
     async def _send_o3logon_phase2(self, Packet: bytes) -> None:
         # Async port of OracleConnect._send_o3logon_phase2 (#90): decrypt the
@@ -1715,6 +1725,17 @@ class AsyncOracleConnect:
                 "end-to-end tracing attributes require an Oracle 12.1+ server")
         self._e2e_values[name] = value
         self._e2e_pending[name] = value
+
+    def _flush_cursor_closes_bytes(self) -> bytes:
+        # OCCA piggyback closing drained server cursors (#191); see
+        # OracleConnect._flush_cursor_closes_bytes.
+        if not self._cursors_to_close:
+            return b""
+        Seq = self._next_seq()
+        Data = encode_close_cursors_piggyback(
+            Seq, self.field_version, self._cursors_to_close)
+        self._cursors_to_close = []
+        return Data
 
     def _flush_end_to_end_bytes(self) -> bytes:
         if not self._e2e_pending:

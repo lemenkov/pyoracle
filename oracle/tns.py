@@ -63,6 +63,7 @@ from oracle.tns_consts import (
     TTI_END_OF_RESPONSE, TNS_CCAP_END_OF_RESPONSE,
     TTI_MSG_TYPE_PIGGYBACK, TTI_TOKEN,
     TNS_FUNC_PIPELINE_BEGIN, TNS_FUNC_PIPELINE_END,
+    TTI_OCCA,
     TNS_FUNC_SET_END_TO_END_ATTR, TNS_END_TO_END_CLIENT_IDENTIFIER,
     TNS_END_TO_END_MODULE, TNS_END_TO_END_ACTION, TNS_END_TO_END_CLIENT_INFO,
     TNS_END_TO_END_DBOP,
@@ -1534,6 +1535,22 @@ def _e2e_header(Modified: bool, Value: bytes | None) -> bytes:
     if Modified:
         return bytes([1]) + encode_sb4(len(Value) if Value else 0)
     return bytes([0]) + encode_sb4(0)
+
+
+def encode_close_cursors_piggyback(Seq: int, FieldVersion: int,
+                                   Cursors: list) -> bytes:
+    """Build the CLOSE_CURSORS (OCCA, func 105) piggyback that frees a batch of
+    server cursors (#191). Rides in front of the next call's message; the server
+    closes the listed cursors before processing that call. Mirrors oracledb's
+    _write_close_cursors_piggyback — note the ub8 token at fv24, which the older
+    encode_dictionary_pig path omitted (it was never exercised on 12c+)."""
+    Out = bytes([TTI_MSG_TYPE_PIGGYBACK, TTI_OCCA, Seq])
+    if FieldVersion > FIELD_VERSION_23_1:
+        Out += encode_sb4(0)                       # ub8 token (0)
+    Out += bytes([1]) + encode_sb4(len(Cursors))   # pointer + count
+    for C in Cursors:
+        Out += encode_sb4(C)
+    return Out
 
 
 def encode_end_to_end_piggyback(Seq: int, FieldVersion: int,

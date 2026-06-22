@@ -1564,6 +1564,29 @@ class FetchFlowIntegration(_IntegrationBase):
         self.cur.execute("SELECT SYS_CONTEXT('USERENV','MODULE') FROM dual")
         self.assertEqual(self.cur.fetchone(), ("SOLOMOD",))
 
+    def test_repeated_execute_no_cursor_leak(self):
+        # #191: repeated execute() of one statement must not leak server
+        # cursors. Pre-fix this tripped ORA-01000 after ~300 executes on 12c+
+        # (cache off); the drained cursor is now freed by an OCCA piggyback in
+        # front of the next call. 400 > the typical OPEN_CURSORS, so this would
+        # fail on 12c+ without the fix.
+        if self.conn.field_version < FIELD_VERSION_10_2:
+            self.skipTest("fv2 (9i) uses a separate execute path")
+        t = "PYO_LEAK191"
+        try:
+            self.cur.execute(f"DROP TABLE {t}")
+        except oracle.DatabaseError:
+            pass
+        self.cur.execute(f"CREATE TABLE {t} (id NUMBER)")
+        try:
+            for i in range(400):
+                self.cur.execute(f"INSERT INTO {t} VALUES (:1)", [i])
+            self.conn.commit()
+            self.cur.execute(f"SELECT COUNT(*) FROM {t}")
+            self.assertEqual(self.cur.fetchone()[0], 400)
+        finally:
+            self.cur.execute(f"DROP TABLE {t}")
+
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class LOBIntegration(_IntegrationBase):
@@ -2953,6 +2976,26 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                     "SYS_CONTEXT('USERENV','ACTION'), "
                     "SYS_CONTEXT('USERENV','CLIENT_IDENTIFIER') FROM dual")
                 self.assertEqual(await Cur.fetchone(), ("AMOD", "AACT", "ACLID"))
+
+    async def test_async_repeated_execute_no_cursor_leak(self):
+        # #191 on the async path.
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            if Conn.field_version < FIELD_VERSION_10_2:
+                return
+            Cur = Conn.cursor()
+            try:
+                await Cur.execute("DROP TABLE PYO_LEAK191A")
+            except oracle.DatabaseError:
+                pass
+            await Cur.execute("CREATE TABLE PYO_LEAK191A (id NUMBER)")
+            try:
+                for i in range(400):
+                    await Cur.execute("INSERT INTO PYO_LEAK191A VALUES (:1)", [i])
+                await Conn.commit()
+                await Cur.execute("SELECT COUNT(*) FROM PYO_LEAK191A")
+                self.assertEqual((await Cur.fetchone())[0], 400)
+            finally:
+                await Cur.execute("DROP TABLE PYO_LEAK191A")
 
     async def test_async_executemany(self):
         async with await oracle.connect_async(**self._kwargs()) as Conn:
