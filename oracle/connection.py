@@ -26,7 +26,8 @@ from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
                         encode_fast_auth, find_fast_auth_rpa)
 from oracle.tns import (decode_packet, encode_data_packet,
                         encode_pipeline_begin, encode_pipeline_end,
-                        encode_end_to_end_piggyback)
+                        encode_end_to_end_piggyback,
+                        encode_close_cursors_piggyback)
 from oracle.tns_consts import (
     CONN_STATE_AUTH_NEGOTIATE, CONN_STATE_AUTHENTICATED,
     CONN_STATE_CONNECTED, CONN_STATE_DISCONNECTED, DictionaryType,
@@ -538,6 +539,12 @@ class OracleConnect:
         # via insertion order (Python's regular dict).
         self._cursor_cache: dict[tuple[str, bytes], int] = {}
         self._cursor_cache_max = 32
+        # Server cursors awaiting close (#191). On 12c+ the cache is off so every
+        # execute opens a fresh server cursor; once a call is fully drained that
+        # cursor is dead weight, and never closing them trips ORA-01000. We batch
+        # their handles here and close them with an OCCA piggyback in front of
+        # the next call (so at most one such cursor is open at a time).
+        self._cursors_to_close: list[int] = []
         # Ordered attribute layout per SQL object type (#115), keyed by
         # (owner, type_name). Populated on demand from ALL_TYPE_ATTRS the first
         # time an object of that type is fetched.
@@ -1012,10 +1019,10 @@ class OracleConnect:
             'arraydmlrowcounts': ArrayDmlRowCounts,
             'return_binds': ReturnBinds or None,
         }
-        # End-to-end tracing (#183): flush any pending module/action/
-        # client_identifier change as a piggyback in front of this execute. Its
-        # seq is allocated before the execute's, matching oracledb.
-        Pre = self._flush_end_to_end_bytes()
+        # Piggybacks in front of this execute (each gets a seq before the
+        # execute's): close any drained server cursors queued from prior calls
+        # (#191), then flush any pending end-to-end tracing change (#183).
+        Pre = self._flush_cursor_closes_bytes() + self._flush_end_to_end_bytes()
         Data = encode_dictionary(self._make_dict(DictionaryType.exec, query=QueryDict))
         self.send(TNS_DATA, Pre + Data)
         # Arm row-count extraction for this response only (#18).
@@ -1053,6 +1060,7 @@ class OracleConnect:
         # Stash the cursor id the server returned so the next execute of
         # the same SQL can skip parsing. Same scoping as the lookup:
         # DML only, no Def overrides.
+        Stored = False
         if (CacheKey is not None and Type == 'change' and not Def
                 and isinstance(Result, tuple) and len(Result) >= 3
                 and isinstance(Result[2], int) and Result[2] > 0
@@ -1068,7 +1076,16 @@ class OracleConnect:
             while len(self._cursor_cache) > self._cursor_cache_max:
                 Oldest = next(iter(self._cursor_cache))
                 self._cursor_cache.pop(Oldest, None)
-        return self._drain_cursor(Result)
+            Stored = True
+        Drained = self._drain_cursor(Result)
+        # Queue the statement's own server cursor for close unless it was cached
+        # for reuse (#191). The result set is fully buffered by now, and this is
+        # the main statement cursor — REF CURSOR / implicit-result cursors carry
+        # their own distinct ids and are untouched.
+        if (not Stored and isinstance(Drained, tuple) and len(Drained) >= 3
+                and isinstance(Drained[2], int) and Drained[2] > 0):
+            self._cursors_to_close.append(Drained[2])
+        return Drained
 
     def _fv2_raise_for_error(self, Packet: bytes) -> None:
         # Raise the server's error if `Packet` is a 9i OER carrying a real ORA
@@ -1737,11 +1754,8 @@ class OracleConnect:
             if self.conn_state == CONN_STATE_AUTHENTICATED:
                 if not self.autocommit:
                     self.rollback()
-                # Close all cached cursors via piggyback
-                if self.cursors:
-                    from oracle.tns_consts import TTI_OCCA
-                    Data = encode_dictionary(self._make_dict(DictionaryType.pig, req=TTI_OCCA, cursor=list(self.cursors.values())))
-                    self.send(TNS_DATA, Data)
+                # Any server cursors still queued for close (#191) are freed by
+                # the session teardown below — no explicit OCCA needed.
                 # Logoff (the TTI_LOGOFF function call + its response)
                 Data = encode_dictionary(self._make_dict(DictionaryType.close))
                 self.send(TNS_DATA, Data)
@@ -2377,6 +2391,19 @@ class OracleConnect:
         Bytes = encode_end_to_end_piggyback(Seq, self.field_version, Pending)
         self._e2e_pending = {}
         return Bytes
+
+    def _flush_cursor_closes_bytes(self) -> bytes:
+        # Build an OCCA (close-cursors) piggyback for the server cursors queued
+        # for close (#191), then clear the queue. Empty when nothing is queued.
+        # Rides in front of the next call, like the tracing piggyback; its seq is
+        # allocated here so it precedes the call's.
+        if not self._cursors_to_close:
+            return b""
+        Seq = self._next_seq()
+        Data = encode_close_cursors_piggyback(
+            Seq, self.field_version, self._cursors_to_close)
+        self._cursors_to_close = []
+        return Data
 
     def _pending_e2e_with_module_action(self) -> dict:
         # The server rejects a module update that does not also carry action
