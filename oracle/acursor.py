@@ -129,7 +129,9 @@ class AsyncCursor:
             if Conn is not None and getattr(Conn, '_writer', None) is not None:
                 try:
                     Conn._cursors_to_close.append(self._scroll_cursor_id)
-                except (AttributeError, Exception):
+                except Exception:
+                    # Best-effort cleanup (see sync Cursor._release_scroll_cursor):
+                    # the server frees the cursor on session end regardless.
                     pass
         self._scroll_active = False
         self._scroll_cursor_id = 0

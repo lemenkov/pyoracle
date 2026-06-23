@@ -977,6 +977,9 @@ def decode_token_rpa_piggyback(Data: bytes, Acc: tuple) -> object:
                 (C, R2) = decode_ub4(R2)
                 Counts.append(C)
         except IndexError:
+            # Speculative decode: if reading the count/values runs off the end of
+            # the buffer this wasn't a row-count block after all — leave Rest/Acc
+            # untouched (the `else` only commits R2 on a clean parse).
             pass
         else:
             Rest = R2

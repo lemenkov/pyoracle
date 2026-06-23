@@ -1147,7 +1147,7 @@ class OracleConnect:
             set_decode_prev_row(None)
         if not isinstance(Result, tuple) or len(Result) < 6:
             return ([], True, 0)
-        (CallStatus, OraCode, _, RetFormat, Rows, *_) = Result
+        (_, OraCode, _, RetFormat, Rows, *_) = Result
         AtEof = (OraCode == 1403) or not Rows
         ServerRowCount = RetFormat[0] if (isinstance(RetFormat, tuple)
                                           and RetFormat) else 0
@@ -2326,6 +2326,8 @@ class OracleConnect:
                     self.sdu, self._large_packets)
                 self.sock.send(Packet)
         except OSError:
+            # Best-effort interrupt: if the socket is already gone the call we're
+            # trying to break is dead anyway, so there's nothing to recover.
             pass
 
     def recv(self, Acc: bytes, Data: bytes) -> tuple[int, bytes] | bool:
