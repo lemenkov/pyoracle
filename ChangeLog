@@ -1,0 +1,110 @@
+Entries are sorted chronologically from oldest to youngest within each release,
+releases are sorted from youngest to oldest.
+
+version <next>:
+- Server-side scrollable cursors: lazy scroll() + fetch-on-demand (#181)
+
+version 1.8.0:
+- End-to-end application tracing: connection.module / action / client_identifier (#183)
+- End-to-end application tracing: connection.clientinfo / dbop (#184)
+- Decoder fuzzing harness (#165)
+- Performance benchmark harness (#166)
+- Close drained server cursors, fixing the 12c+ cursor leak (#191)
+
+version 1.7.0:
+- Scrollable cursors: scrollable= option + cursor.scrollable property (#161)
+- Arrow / DataFrame bulk fetch: cursor.fetch_df_all / fetch_df_batches (#162)
+- Oracle 9i (field version 2) becomes a clean, supported test tier (#168-#173)
+
+version 1.6.0:
+- Sessionless transactions (#133)
+- Bind REF (object reference) values (#139)
+- Protocol-version-319 / large-SDU handshake with end-of-response framing (#155)
+- Pipelining: connection.run_pipeline single-round-trip execution (#132, #158)
+
+version 1.5.0:
+- DRCP / implicit connection pooling (#130)
+- Query cancellation and call_timeout via an in-band INTERRUPT break (#144)
+- Advanced Queuing: JSON-payload queues (#150)
+
+version 1.4.0:
+- Proxy authentication: connect as proxy_user[schema] (#126)
+- Advanced Queuing: enqueue/dequeue for RAW and object payloads (#128)
+- Two-phase commit / XA (#131)
+
+version 1.3.0:
+- Decode and bind SQL OBJECT (ADT) values (#115, #116)
+- VARRAY and nested-table collection types (#117, #118)
+- Decode REF (object reference) values as oracle.DbRef (#119)
+- DML RETURNING ... INTO bind support (#120)
+- Implicit result sets and cursor.nextset() (#121)
+- PL/SQL associative-array (index-by table) binds (#122)
+- Query cancellation and call_timeout via an OOB break (#123)
+- XMLType read and bind (#124)
+
+version 1.2.0:
+- Oracle 23ai fast-auth and field-version-24 wire framing (#89)
+- Expose 23ai column annotations on the cursor (#89)
+
+version 1.1.0:
+- Oracle 9i support: O3LOGON auth and the TTI_ALL7 query dialect (#90, #97-#102)
+- Skip Tests and CodeQL CI for docs-only changes
+
+version 1.0.0:
+- Native BFILE read over TTI_LOBOPS (#46)
+- Bind large CLOB/BLOB into PL/SQL via temporary LOBs (#91)
+- Decode large JSON documents (#88)
+
+version 0.9.0:
+- Oracle 10g support: unsalted AES logon and 10g query / REF-cursor decode (#47, #84, #86)
+- Fix the break/reset handshake that desynced the connection after errors (#45)
+
+version 0.8.0:
+- Native binary OSON bind for JSON columns (#70)
+- Native binary and SPARSE VECTOR bind and decode (#62, #68)
+- Decode wide JSON objects and extended scalar nodes (#69)
+
+version 0.7.0:
+- Decode 23ai SQL-domain column metadata (#53)
+
+version 0.6.0:
+- Oracle 23ai added to the supported matrix (#52)
+- Native JSON (OSON) column read and bind (#30, #50)
+- Native VECTOR column read and bind, including BINARY vectors (#55, #60)
+- Native BOOLEAN column read and bind (#54)
+
+version 0.5.0:
+- Negotiate the TTC field version: full Oracle 12c+ / 21c support (#27)
+- changepassword() over the wire (#21)
+- Follow TNS_REDIRECT to the server's new address (#23)
+- executemany batcherrors and arraydmlrowcounts (#18)
+- Advertise AL32UTF8, fixing emoji / NCHAR round-trips
+- Fix multi-packet (greater than SDU) request fragmentation (#8)
+
+version 0.4.0:
+- OUT / IN OUT binds via var() and callproc; callfunc (sync and async)
+- executemany as single-round-trip array DML
+- REF CURSOR OUT binds returned as a nested cursor
+- Execute anonymous PL/SQL blocks with bind variables
+- cursor.scroll, rowfactory and lastrowid; server_version, stmtcachesize
+- Decode LONG / LONG RAW / ROWID / UROWID; BINARY_FLOAT/DOUBLE and INTERVAL binds
+- Resolve named-region TIMESTAMP WITH TIME ZONE via zoneinfo
+- Require TLS 1.2 and stop logging passwords
+
+version 0.3.1:
+- Fix the build backend
+
+version 0.3:
+- LOB column read, inline and out-of-line via TTI_LOBOPS
+- LOB binds beyond the 4 KiB ceiling
+- Follow-up FETCH flow for multi-response result sets
+
+version 0.2:
+- PEP 249 DB-API 2.0 Cursor surface
+- Bind variables and multi-row result decoding
+- Decode fetched column values into Python types
+- TLS support on the connect path
+- Fix TIMESTAMP WITH TIME ZONE conversion and the close handshake
+
+version 0.1:
+- Initial release
