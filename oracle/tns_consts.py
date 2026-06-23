@@ -52,6 +52,13 @@ TNS_PIPELINE_MODE_ABORT_ON_ERROR = 2
 # orientation, al8i4[11] the 1-based fetch position (ABSOLUTE / RELATIVE).
 TNS_EXEC_FLAGS_SCROLLABLE = 0x02
 TNS_EXEC_FLAGS_NO_CANCEL_ON_EOF = 0x80
+# Exec-options word bit for a re-execute that re-runs the statement. A scroll
+# re-execute must NOT set it: oracledb-thin's scroll re-execute uses FETCH-only
+# options (0x8040), and leaving EXECUTE (0x20) on makes the server re-run the
+# query — resetting the result set so the scroll orientation positions from the
+# top and every orientation comes back empty. set_opts always forces 0x20 on for
+# a Flag=0 select, so encode_dictionary_exec clears it for a scroll re-execute.
+TNS_EXEC_OPTION_EXECUTE = 0x20
 TNS_FETCH_ORIENTATION_CURRENT = 0x01
 TNS_FETCH_ORIENTATION_NEXT = 0x02
 TNS_FETCH_ORIENTATION_FIRST = 0x04
