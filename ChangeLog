@@ -1,7 +1,7 @@
 Entries are sorted chronologically from oldest to youngest within each release,
 releases are sorted from youngest to oldest.
 
-version <next>:
+version 1.9.0:
 - Server-side scrollable cursors: lazy scroll() + fetch-on-demand (#181)
 
 version 1.8.0:
