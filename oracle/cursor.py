@@ -155,7 +155,10 @@ class Cursor:
             if Conn is not None and getattr(Conn, 'sock', None) is not None:
                 try:
                     Conn._cursors_to_close.append(self._scroll_cursor_id)
-                except (AttributeError, Exception):
+                except Exception:
+                    # Best-effort cleanup: queueing the cursor for close is an
+                    # optimisation, not correctness — if the connection is mid
+                    # teardown the server frees it on session end anyway.
                     pass
         self._scroll_active = False
         self._scroll_cursor_id = 0

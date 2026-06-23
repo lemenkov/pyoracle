@@ -940,7 +940,7 @@ class AsyncOracleConnect:
             set_decode_prev_row(None)
         if not isinstance(Result, tuple) or len(Result) < 6:
             return ([], True, 0)
-        (CallStatus, OraCode, _, RetFormat, Rows, *_) = Result
+        (_, OraCode, _, RetFormat, Rows, *_) = Result
         AtEof = (OraCode == 1403) or not Rows
         ServerRowCount = RetFormat[0] if (isinstance(RetFormat, tuple)
                                           and RetFormat) else 0
@@ -1334,6 +1334,8 @@ class AsyncOracleConnect:
                         self.sdu, self._large_packets)
                     Target.send(Packet)
             except OSError:
+                # Best-effort interrupt (see sync OracleConnect): a dead socket
+                # means the call being broken is already gone.
                 pass
 
     # --- Two-phase commit / XA (#131), async port of OracleConnect ---
