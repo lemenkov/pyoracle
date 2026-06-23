@@ -677,6 +677,70 @@ is masked to 0 so it doesn't reach the caller as an error. Works for
 any large non-LOB SELECT; LOB column data still needs a per-column
 row decoder (`§11.9`).
 
+### 5.2.1 Server-side scrollable cursors
+
+A scrollable cursor (`cursor(scrollable=True)`, #181) keeps the server cursor
+open and fetches rows from arbitrary positions instead of draining forward once.
+The whole feature rides the **OALL8 execute** message — there is no dedicated
+scroll function. The scroll request lives in the `al8i4` array (the 13-element
+All8 list):
+
+- `al8i4[9]` — exec flags; OR in `SCROLLABLE (0x02)` and `NO_CANCEL_ON_EOF
+  (0x80)` (so the cursor survives past EOF and can scroll back). On 23ai this
+  joins the `0x8000` query flag → `0x8082`.
+- `al8i4[10]` — fetch orientation: `CURRENT 0x01`, `NEXT 0x02`, `FIRST 0x04`,
+  `LAST 0x08`, `PRIOR 0x10`, `ABSOLUTE 0x20`, `RELATIVE 0x40`.
+- `al8i4[11]` — 1-based fetch position (for ABSOLUTE / RELATIVE).
+
+**Open** — a normal parse+execute (cursor 0, SQL present) with the al8i4 scroll
+fields and orientation `CURRENT`/1. It keeps the fv24 query options `0x8061`
+(`NOT_PLSQL | FETCH | EXECUTE | PARSE`) and prefetches only a small batch
+(oracledb's `prefetchrows`, default 2) so the cursor stays mid-stream rather than
+draining to EOF.
+
+**Scroll re-execute** — a no-parse OALL8 against the open cursor (cursor id set,
+empty query) with the new orientation/position in al8i4. Two things differ from
+the open and from every other execute, both required or the server rejects the
+call as malformed (`ORA-03137 [12316]`):
+
+1. **Exec options `0x8040`** (`NOT_PLSQL | FETCH`, **no** `EXECUTE 0x20`). With
+   EXECUTE set the server re-runs the query and resets to the top, so the
+   orientation positions from row 1 and every scroll comes back empty. `set_opts`
+   structurally forces the `0x20` bit on for a `Flag=0` select, so
+   `encode_dictionary_exec` clears it for a scroll re-execute.
+2. **No length-prefixed SQL.** The empty query must emit *no* bytes — the 12c+
+   path otherwise writes a zero-length prefix (`0x00`), which shifts the server's
+   read of the al8i4 array by one byte. This path is unique to scroll: every
+   other 12c+ execute carries real SQL (the statement cache is disabled on 12c+,
+   so there are no empty-query re-executes elsewhere).
+
+The response echoes the cursor's **cumulative row position** in the OER
+`rowcount` field — the absolute row number of the last row in the batch. The
+client places its buffer window from it: `buffer_min = rowcount − batch_len + 1`
+(oracledb's `_post_process_scroll`).
+
+**Fetch-on-demand.** When the client buffer drains, the next batch is fetched as
+another **positioned scroll re-execute** with orientation `CURRENT` at the next
+absolute row — **not** a plain `TTI_FETCH`. Mixing a `TTI_FETCH` in advances the
+physical cursor but desyncs the server's scroll reference, so a later `RELATIVE`
+scroll returns the wrong rows. Every batch, forward or repositioned, is a
+re-execute.
+
+**Column compression on reposition (row-header bit vector).** When a scroll
+lands on a row whose column value equals the last row already returned, the
+server omits the value and flags the column "reuse previous" in the row-header
+bit vector (`§6.1`) rather than a standalone `TTI_BVC`. A common trigger is
+`LAST` after the buffer already reached EOF (the last row repeats). The bit
+vector must be passed to the row decoder; duplicate detection is per-response, so
+across a re-execute the client seeds the previous fetch's last row to resolve the
+reused column.
+
+**Tiers.** Server-side scroll works on 10g+ (the OALL8 path: fv4/fv6/fv16/fv24
+all verified). 9i (field version 2) speaks the older TTI_ALL7 dialect and has no
+OALL8 scroll, so `scrollable=True` there falls back to a client-side buffered
+scroll over the fully-fetched result set (#161): `scroll()` is a local index
+move, available in every mode.
+
 ### 5.3 OAC (Oracle Access Column) Descriptor
 
 Each bind variable or column is described by an OAC structure:
@@ -758,6 +822,13 @@ Rxhrid(bytes_with_length)
 When `BitVectorLength` is non-zero, a single repeated length byte
 follows and then `BitVectorLength` raw bytes of bit vector. The
 trailing `rxhrid` is a `bytes_with_length` (ub4 count + chunked DALC).
+
+That embedded bit vector carries the same column-reuse semantics as a standalone
+`TTI_BVC` (`§6.3`) and **must be passed to the following RXD**, not skipped —
+otherwise the RXD reads the next token as a column value and desyncs (it surfaces
+as an "unknown token" on the bogus `TTI_ROW 0x0a`). The server uses it when a row
+repeats the previous row's value, most notably on a scrollable cursor's `LAST`
+re-execute after EOF (`§5.2.1`).
 
 ### 6.2 Row Data (TTI_RXD)
 

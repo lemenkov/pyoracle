@@ -314,6 +314,77 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
             self.assertEqual(_fun_header(Token, 5, FIELD_VERSION_23_4),
                              bytes([TTI_FUN, Token, 5, 0]))
 
+    def _scroll_query(self, **over):
+        Q = {'type': 'select', 'auto': 0, 'fetch': 2, 'server_version': 0,
+             'cursor': 0, 'query': '', 'bind': [], 'batch': [], 'def': [],
+             'batcherrors': False, 'arraydmlrowcounts': False,
+             'return_binds': None, 'scrollable': False, 'scroll': None}
+        Q.update(over)
+        return Q
+
+    def _scroll_exec(self, query, seq=7):
+        from oracle.tns_consts import FIELD_VERSION_23_4
+        return encode_dictionary({'type': DictionaryType.exec, 'seq': seq,
+                                  'field_version': FIELD_VERSION_23_4,
+                                  'env': {'user': 'pyo'},
+                                  'query': query}).hex()
+
+    def test_exec_scrollable_open(self):
+        # Server-side scrollable open (#181): cursor 0 + SQL + scroll CURRENT/1.
+        # Keeps the fv24 query options 0x8061 (NOT_PLSQL|FETCH|EXECUTE|PARSE) and
+        # carries the scroll request in the al8i4 tail: al8i4[9]=0x8082
+        # (0x8000 fv24 flag | NO_CANCEL_ON_EOF 0x80 | SCROLLABLE 0x02),
+        # al8i4[10]=orientation CURRENT (0x01), al8i4[11]=position 1. Byte-for-byte
+        # against a live 23ai oracledb-thin capture.
+        from oracle.tns_consts import TNS_FETCH_ORIENTATION_CURRENT
+        Hex = self._scroll_exec(self._scroll_query(
+            query='SELECT id FROM scroll_demo ORDER BY id',
+            scrollable=True, scroll=(TNS_FETCH_ORIENTATION_CURRENT, 1)))
+        self.assertEqual(Hex,
+            "035e07000280610001012601010d0000000102047fffffff000000000000"
+            "0000000000010000000000000000000000000000002653454c4543542069"
+            "642046524f4d207363726f6c6c5f64656d6f204f524445522042592069640"
+            "1010000000000000101000280820101010100")
+        self.assertIn("028061", Hex)                 # FETCH|EXECUTE|PARSE
+        self.assertTrue(Hex.endswith("0280820101010100"))
+
+    def test_exec_scroll_reexecute(self):
+        # Scroll re-execute (#181): open cursor (id 100), empty query, ABSOLUTE 5.
+        # Two things differ from the open: the exec options are 0x8040
+        # (NOT_PLSQL|FETCH only — the EXECUTE 0x20 bit is cleared so the server
+        # scrolls instead of re-running the query), and the empty query emits NO
+        # length-prefixed SQL byte (a stray 0x00 there shifts the al8i4 array and
+        # the server rejects the call as malformed, ORA-03137 [12316]). al8i4 tail
+        # is ABSOLUTE (0x20) / position 5. Byte-for-byte against a 23ai capture.
+        from oracle.tns_consts import TNS_FETCH_ORIENTATION_ABSOLUTE
+        Hex = self._scroll_exec(self._scroll_query(
+            cursor=100, query='', scrollable=True,
+            scroll=(TNS_FETCH_ORIENTATION_ABSOLUTE, 5)))
+        self.assertEqual(Hex,
+            "035e07000280400164000001010d0000000102047fffffff000000000000"
+            "00000000000100000000000000000000000000000000010200000000000101"
+            "000280820120010500")
+        self.assertIn("028040", Hex)                 # FETCH only, EXECUTE cleared
+        self.assertNotIn("028060", Hex)              # would be EXECUTE|FETCH
+        self.assertTrue(Hex.endswith("0280820120010500"))
+
+    def test_exec_scroll_reexecute_omits_empty_sql_byte(self):
+        # The empty-query re-execute (#181) must be exactly one byte shorter than
+        # the same frame would be with a zero-length SQL prefix — that stray 0x00
+        # was the ORA-03137 [12316] bug. Compare against a non-scroll cursor
+        # re-execute path is not possible (12c+ never sends an empty query
+        # elsewhere), so assert the al8i4 array butts directly against the 12c
+        # middle block (…000101000280820120010500, no 00 before 028082's run).
+        from oracle.tns_consts import TNS_FETCH_ORIENTATION_ABSOLUTE
+        Hex = self._scroll_exec(self._scroll_query(
+            cursor=100, query='', scrollable=True,
+            scroll=(TNS_FETCH_ORIENTATION_ABSOLUTE, 5)))
+        # The 13-element al8i4 array begins at All8[0]=00 then All8[1]=Fetch(0102)
+        # …; right before it is the 12c middle's trailing 00 then the query (none).
+        # With the bug there would be an extra 00 between them.
+        self.assertIn("0001010002808201", Hex)       # …DefLen 00 + middle + al8i4
+        self.assertNotIn("000101000002808201", Hex)  # extra 00 (the bug)
+
     @patch('os.getpid')
     @patch('socket.gethostname')
     def test_tns_sess_0(self, mock_gethostname, mock_getpid):
@@ -873,3 +944,36 @@ class TestEndToEndClientInfoDbop(unittest.TestCase):
         out = encode_end_to_end_piggyback(99, 24, {"dbop": "OP"})
         self.assertIn("0200", out.hex())          # DBOP flag
         self.assertTrue(out.hex().endswith(b"OP".hex()))
+
+
+class TestScrollableExecEncoding(unittest.TestCase):
+    # Server-side scrollable cursor wire encoding (#181, groundwork for 1.9.0).
+    # The scroll request rides in the execute al8i4 array: al8i4[9] exec flags
+    # (SCROLLABLE | NO_CANCEL_ON_EOF), al8i4[10] orientation, al8i4[11] position.
+    # Bytes byte-validated against a 23ai oracledb-thin capture.
+    def _exec(self, scroll=None, scrollable=False):
+        # Run in a copied context so encode_dictionary_exec's fv24
+        # _ENCODE_FIELD_VERSION.set() doesn't leak into other encoder tests.
+        import contextvars
+        from oracle.tns import encode_dictionary_exec
+        d = {'seq': 0x0a, 'field_version': 24,
+             'query': {'type': 'select', 'auto': 0, 'fetch': 100,
+                       'server_version': 0x18000000, 'cursor': 100, 'query': '',
+                       'bind': [], 'batch': [], 'def': [], 'batcherrors': None,
+                       'arraydmlrowcounts': None, 'return_binds': None,
+                       'scroll': scroll, 'scrollable': scrollable}}
+        return contextvars.copy_context().run(encode_dictionary_exec, d)
+
+    def test_absolute_matches_capture(self):
+        from oracle.tns_consts import TNS_FETCH_ORIENTATION_ABSOLUTE
+        self.assertIn("0280820120010500",
+                      self._exec(scroll=(TNS_FETCH_ORIENTATION_ABSOLUTE, 5)).hex())
+
+    def test_open_current_matches_capture(self):
+        from oracle.tns_consts import TNS_FETCH_ORIENTATION_CURRENT
+        self.assertIn("0280820101010100",
+                      self._exec(scroll=(TNS_FETCH_ORIENTATION_CURRENT, 1)).hex())
+
+    def test_non_scrollable_unchanged(self):
+        # Default path carries no scroll exec flags (no regression).
+        self.assertNotIn("028082", self._exec().hex())

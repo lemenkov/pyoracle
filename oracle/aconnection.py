@@ -33,7 +33,8 @@ from oracle.tns import decode_token_rpa
 from oracle.tns import encode_dictionary
 from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
-from oracle.tns import set_decode_dml_rowcounts, set_decode_return_binds
+from oracle.tns import (set_decode_dml_rowcounts, set_decode_return_binds,
+                        set_decode_prev_row)
 from oracle.tns import (encode_end_to_end_piggyback,
                         encode_close_cursors_piggyback)
 from oracle.tns import (encode_data_packet, encode_pipeline_begin,
@@ -74,7 +75,7 @@ from oracle.tns_consts import (
     TNS_REDIRECT, TNS_REFUSE, TNS_RESEND,
     TTI_DTY, TTI_OER, TTI_PRO, TTI_RPA, TTI_SESS, TTI_WRN,
     TNS_DATA_FLAGS_BEGIN_PIPELINE, TNS_DATA_FLAGS_END_OF_REQUEST,
-    TNS_PIPELINE_MODE_CONTINUE_ON_ERROR,
+    TNS_PIPELINE_MODE_CONTINUE_ON_ERROR, TNS_FETCH_ORIENTATION_CURRENT,
 )
 
 
@@ -542,7 +543,9 @@ class AsyncOracleConnect:
     async def execute(self, Query: str, Bind: list | None = None,
                       Def: list | None = None, Batch: list | None = None,
                       BatchErrors: bool = False,
-                      ArrayDmlRowCounts: bool = False, ReturnBinds=None) -> object:
+                      ArrayDmlRowCounts: bool = False, ReturnBinds=None,
+                      scrollable: bool = False,
+                      Prefetch: int | None = None) -> object:
         """Same shape as `OracleConnect.execute` but async.
 
         Cursor caching for DML works the same way as in the sync path —
@@ -578,6 +581,10 @@ class AsyncOracleConnect:
             Type = 'block'
         else:
             Type = 'change'
+        # Scrollable cursors only apply to queries (#181); never flag a non-SELECT.
+        if Type != 'select':
+            scrollable = False
+            Prefetch = None
         CachedCursor = 0
         CacheKey = None
         # The cursor cache reuses a parsed handle and skips re-sending the
@@ -593,7 +600,9 @@ class AsyncOracleConnect:
         QueryDict = {
             'type': Type,
             'auto': 1 if self.autocommit else 0,
-            'fetch': self.fetch,
+            # Scrollable open prefetches only `Prefetch` rows so the cursor stays
+            # mid-stream (#181), as in the sync path.
+            'fetch': self.fetch if Prefetch is None else Prefetch,
             'server_version': self.server_version,
             'cursor': CachedCursor,
             'query': SendQuery,
@@ -603,6 +612,10 @@ class AsyncOracleConnect:
             'batcherrors': BatchErrors,
             'arraydmlrowcounts': ArrayDmlRowCounts,
             'return_binds': ReturnBinds or None,
+            # Server-side scrollable cursor open (#181): mark scrollable + open
+            # at CURRENT (describe-only — rows come from scroll_fetch).
+            'scrollable': scrollable,
+            'scroll': (TNS_FETCH_ORIENTATION_CURRENT, 1) if scrollable else None,
         }
         Pre = (self._flush_cursor_closes_bytes()   # close drained cursors (#191)
                + self._flush_end_to_end_bytes())   # tracing piggyback (#183)
@@ -651,6 +664,12 @@ class AsyncOracleConnect:
                 Oldest = next(iter(self._cursor_cache))
                 self._cursor_cache.pop(Oldest, None)
             Stored = True
+        if scrollable:
+            # A scrollable open is describe-only: don't drain (rows come from
+            # scroll_fetch) and don't queue the cursor for close — it must stay
+            # open for the scroll re-executes (#181). The cursor frees it on
+            # close / re-execute.
+            return Result
         Drained = await self._drain_cursor(Result)
         # Queue the statement's own server cursor for close unless cached (#191).
         if (not Stored and isinstance(Drained, tuple) and len(Drained) >= 3
@@ -894,6 +913,38 @@ class AsyncOracleConnect:
                                                   cursor=CursorId, fetch=Rows))
         await self.send(TNS_DATA, Data)
         return await self._handle_response(Acc=(None, RowFormat, []))
+
+    async def scroll_fetch(self, CursorId: int, Orientation: int, Position: int,
+                           RowFormat: list, Fetch: int | None = None,
+                           PrevRow: list | None = None) -> tuple:
+        """Async twin of ``OracleConnect.scroll_fetch`` (#181): re-execute an
+        open scrollable cursor with a fetch orientation + 1-based position,
+        returning ``(rows, at_eof, server_rowcount)``."""
+        QueryDict = {
+            'type': 'select', 'auto': 0,
+            'fetch': self.fetch if Fetch is None else Fetch,
+            'server_version': self.server_version, 'cursor': CursorId,
+            'query': '', 'bind': [], 'batch': [], 'def': [],
+            'batcherrors': None, 'arraydmlrowcounts': None, 'return_binds': None,
+            'scrollable': True, 'scroll': (Orientation, Position),
+        }
+        Pre = (self._flush_cursor_closes_bytes()
+               + self._flush_end_to_end_bytes())
+        Data = encode_dictionary(self._make_dict(DictionaryType.exec,
+                                                 query=QueryDict))
+        await self.send(TNS_DATA, Pre + Data)
+        set_decode_prev_row(PrevRow)   # reused-column fallback for row 1 (#181)
+        try:
+            Result = await self._handle_response((None, RowFormat, []))
+        finally:
+            set_decode_prev_row(None)
+        if not isinstance(Result, tuple) or len(Result) < 6:
+            return ([], True, 0)
+        (CallStatus, OraCode, _, RetFormat, Rows, *_) = Result
+        AtEof = (OraCode == 1403) or not Rows
+        ServerRowCount = RetFormat[0] if (isinstance(RetFormat, tuple)
+                                          and RetFormat) else 0
+        return (list(Rows or []), AtEof, ServerRowCount)
 
     async def fetch_all_rows(self, CursorId: int, RowFormat: list) -> list:
         # Async drain of a server cursor (e.g. a REF CURSOR). Mirrors

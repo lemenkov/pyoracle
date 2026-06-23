@@ -64,6 +64,8 @@ from oracle.tns_consts import (
     TTI_MSG_TYPE_PIGGYBACK, TTI_TOKEN,
     TNS_FUNC_PIPELINE_BEGIN, TNS_FUNC_PIPELINE_END,
     TTI_OCCA,
+    TNS_EXEC_FLAGS_SCROLLABLE, TNS_EXEC_FLAGS_NO_CANCEL_ON_EOF,
+    TNS_EXEC_OPTION_EXECUTE,
     TNS_FUNC_SET_END_TO_END_ATTR, TNS_END_TO_END_CLIENT_IDENTIFIER,
     TNS_END_TO_END_MODULE, TNS_END_TO_END_ACTION, TNS_END_TO_END_CLIENT_INFO,
     TNS_END_TO_END_DBOP,
@@ -142,6 +144,20 @@ def set_decode_return_binds(Positions) -> None:
     """Arm return-bind decoding for the next response (#120). `Positions` is the
     set/list of 0-based OUT-bind positions, or empty/None to disarm."""
     _DECODE_RETURN_BINDS.set(tuple(sorted(Positions)) if Positions else ())
+
+# The last row of the previous fetch, seeded for a scroll re-execute (#181). When
+# a scroll repositions onto a row whose column values equal the last row already
+# returned, the server omits those values and flags them in the row-header bit
+# vector as "reuse previous". Duplicate detection is per-response in the decoder
+# (Rows starts empty each call), so the cursor seeds this with the prior batch's
+# last row; decode_token_rxd falls back to it for a reused column when no
+# in-response previous row exists. Empty/None disarms (the default).
+_DECODE_PREV_ROW = contextvars.ContextVar("decode_prev_row", default=None)
+
+def set_decode_prev_row(Row) -> None:
+    """Seed the previous-fetch row for the next scroll re-execute decode (#181),
+    or pass None to disarm."""
+    _DECODE_PREV_ROW.set(list(Row) if Row else None)
 
 def assemble_packet(Data: bytes, Length: int, Large: bool = False) -> tuple[bool, int | None, bytes | None, bytes | None]:
     # Two on-wire packet-header layouts share an 8-byte size and put the type at
@@ -930,8 +946,14 @@ def decode_token_rpa_piggyback(Data: bytes, Acc: tuple) -> object:
         (Num, Rest) = decode_ub4(Rest)
     except IndexError:
         return (True, Acc)
+    # On fv2 (9i) Num over-counts and the params end at the real status token, so
+    # stop early on a known token byte. From fv4 up Num is exact, and a scrollable
+    # cursor's position parameter has a value whose length byte (0x04) collides
+    # with the OER token — so there we must consume exactly Num and not break on a
+    # token-valued param byte, or the OER decodes off by those bytes (#181).
+    BreakOnToken = _DECODE_FIELD_VERSION.get() < FIELD_VERSION_10_2
     for _ in range(max(Num, 0)):
-        if not Rest or Rest[0] in _KNOWN_TTI_TOKENS:
+        if not Rest or (BreakOnToken and Rest[0] in _KNOWN_TTI_TOKENS):
             break
         try:
             (_, Rest) = decode_ub4(Rest)
@@ -1036,7 +1058,11 @@ def decode_token_rxd(Data: bytes, Acc: object) -> tuple:
         return decode_packet(Rest, (Cursor, RowFormat, Rows + [Record]))
     Row = []
     if RowFormat:
-        PrevRow = Rows[-1] if Rows else None
+        # Reused (bit-unset) columns copy the previous row. Within a response
+        # that's the last accumulated row; for the first row of a scroll
+        # re-execute it's the prior batch's last row, seeded via _DECODE_PREV_ROW
+        # (#181) since duplicate detection is otherwise per-response.
+        PrevRow = Rows[-1] if Rows else _DECODE_PREV_ROW.get()
         for Idx, Col in enumerate(RowFormat):
             if BitVec is not None and not _bvc_bit_set(BitVec, Idx):
                 Row.append(PrevRow[Idx] if PrevRow else None)
@@ -1235,11 +1261,22 @@ def decode_token_rxh(Data: bytes, Acc: object) -> tuple:
     (_, Rest) = decode_ub4(Rest)             # num iters
     (_, Rest) = decode_ub4(Rest)             # buffer length
     (NumBytes, Rest) = decode_ub4(Rest)      # bit vector length
+    BitVec = None
     if NumBytes > 0:
+        # The row header can carry a column bit vector (oracledb's
+        # _get_bit_vector): an unset bit means the column repeats the previous
+        # row's value and carries no bytes in the following RXD. It must be
+        # passed to the RXD decoder, not skipped — skipping it makes the RXD read
+        # the next token as a column value and desync (a scroll re-execute that
+        # repositions onto a row whose value equals the last one returned uses
+        # this compression, e.g. LAST after fetching to EOF). #181.
         Rest = Rest[1:]                      # skip repeated length
-        Rest = Rest[NumBytes:]               # skip bit vector
+        BitVec = bytes(Rest[:NumBytes])
+        Rest = Rest[NumBytes:]
     Rest = _skip_bytes_with_length(Rest)     # rxhrid
-    return decode_packet(Rest, (Cursor, RowFormat, Rows))
+    Acc = ((Cursor, RowFormat, Rows) if BitVec is None
+           else (Cursor, RowFormat, Rows, BitVec))
+    return decode_packet(Rest, Acc)
 
 def decode_token_wrn(Data: bytes, Acc: object) -> tuple:
     # Warning message (section 3.1)
@@ -2173,6 +2210,28 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
                 All8 = list(All8)
                 All8[9] = 0x8000
 
+    # Server-side scrollable cursor (#181): mark the cursor scrollable (and keep
+    # it open past EOF) on the opening execute, and carry the scroll request
+    # (orientation + 1-based position) on a scroll re-execute. al8i4[9] holds the
+    # exec flags, al8i4[10] the orientation, al8i4[11] the position — validated
+    # against a 23ai oracledb-thin capture (al8i4[9] reads 0x8082 = the 23ai
+    # query flag | NO_CANCEL_ON_EOF | SCROLLABLE).
+    Scroll = Dictionary['query'].get('scroll')          # (orient, pos) or None
+    if (Dictionary['query'].get('scrollable') or Scroll) and len(All8) > 11:
+        All8 = list(All8)
+        All8[9] |= TNS_EXEC_FLAGS_SCROLLABLE | TNS_EXEC_FLAGS_NO_CANCEL_ON_EOF
+        if Scroll:
+            All8[10], All8[11] = Scroll
+            # A scroll re-execute (open cursor, no new parse) is a FETCH-only
+            # call: oracledb-thin sends exec options 0x8040, but set_opts forces
+            # the EXECUTE bit (0x20) on for a Flag=0 select. Leaving it on makes
+            # the server re-run the query and reset the result set, so the scroll
+            # orientation positions from the top and every fetch returns empty
+            # (#181). Clear it on a re-execute (Cursor != 0); the opening execute
+            # (Cursor == 0) keeps PARSE+EXECUTE+FETCH (oracledb 0x8061).
+            if Cursor != 0:
+                Opt &= ~TNS_EXEC_OPTION_EXECUTE
+
     All8Len = len(All8)
     All8Flag = 1 if All8Len > 0 else 0
     All8s = reduce( lambda x,y: x+y, [ encode_sb4(A) for A in All8])
@@ -2233,7 +2292,14 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
         Middle += bytes([0, 0, 0, 0, 0])                      # 12.2 al8sqlsig / SQL id
         if FieldVersion >= FIELD_VERSION_12_2_EXT1:
             Middle += bytes([0, 0])                           # 12.2_EXT1 chunk ids
-        return Head + Middle + _bytes_with_length(Query) + All8s + Tokens
+        # The length-prefixed SQL is written only when there is SQL to parse. On
+        # a no-parse re-execute (Cursor != 0, empty query — e.g. a #181 scroll
+        # re-execute) oracledb omits the SQL bytes entirely; emitting the
+        # zero-length prefix (a stray 0x00) shifts the server's read of the
+        # al8i4 array by one byte and it rejects the call as malformed
+        # (ORA-03137 [12316]).
+        Sql = _bytes_with_length(Query) if QueryLen else b""
+        return Head + Middle + Sql + All8s + Tokens
 
     return Head + bytes([0, 0, 1]) + ServerVersion + Query + All8s + Tokens
 

@@ -8,7 +8,8 @@ from oracle.tns import decode_token_rpa
 from oracle.tns import encode_dictionary
 from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
-from oracle.tns import set_decode_dml_rowcounts, set_decode_return_binds
+from oracle.tns import (set_decode_dml_rowcounts, set_decode_return_binds,
+                        set_decode_prev_row)
 from oracle.tns import encode_tpc_switch, encode_tpc_change_state
 from oracle.tns import encode_aq_enq, encode_aq_deq, encode_aq_array
 from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe, encode_o7_exec,
@@ -34,6 +35,10 @@ from oracle.tns_consts import (
     FIELD_VERSION_23_1, FIELD_VERSION_23_4, MAX_SEQ_NUM,
     TNS_ACCEPT, TNS_CONNECT, TNS_DATA, TNS_MARKER,
     TNS_MARKER_TYPE_INTERRUPT, TNS_GSO_CAN_RECV_ATTENTION,
+    TNS_FETCH_ORIENTATION_CURRENT, TNS_FETCH_ORIENTATION_NEXT,
+    TNS_FETCH_ORIENTATION_FIRST, TNS_FETCH_ORIENTATION_LAST,
+    TNS_FETCH_ORIENTATION_PRIOR, TNS_FETCH_ORIENTATION_ABSOLUTE,
+    TNS_FETCH_ORIENTATION_RELATIVE,
     TNS_VERSION_MIN_LARGE_SDU, TNS_VERSION_MIN_OOB_CHECK,
     TNS_ACCEPT_FLAG_HAS_END_OF_RESPONSE,
     TNS_REDIRECT, TNS_REFUSE, TNS_RESEND, TTI_AUTH, TTI_DTY, TTI_PRO,
@@ -947,7 +952,8 @@ class OracleConnect:
 
     def execute(self, Query: str, Bind: list | None = None, Def: list | None = None,
                 Batch: list | None = None, BatchErrors: bool = False,
-                ArrayDmlRowCounts: bool = False, ReturnBinds=None) -> object:
+                ArrayDmlRowCounts: bool = False, ReturnBinds=None,
+                scrollable: bool = False, Prefetch: int | None = None) -> object:
         if Bind is None:
             Bind = []
         if Def is None:
@@ -985,6 +991,12 @@ class OracleConnect:
             Type = 'block'
         else:
             Type = 'change'
+        # Scrollable cursors only apply to queries (#181). A scrollable cursor
+        # may still run DDL/DML (e.g. CREATE/INSERT before the SELECT); never put
+        # scroll flags on a non-SELECT or skip draining it.
+        if Type != 'select':
+            scrollable = False
+            Prefetch = None
         Auto = 1 if self.autocommit else 0
         # Cursor cache lookup: if we've executed this SQL before and the
         # server returned a non-zero cursor id, reuse that handle and
@@ -1008,7 +1020,10 @@ class OracleConnect:
         QueryDict = {
             'type': Type,
             'auto': Auto,
-            'fetch': self.fetch,
+            # A scrollable open prefetches only `Prefetch` rows (oracledb's
+            # prefetchrows) so the cursor stays mid-stream — draining it to EOF
+            # on the open breaks the subsequent scroll re-execute (#181).
+            'fetch': self.fetch if Prefetch is None else Prefetch,
             'server_version': self.server_version,
             'cursor': CachedCursor,
             'query': SendQuery,
@@ -1018,6 +1033,11 @@ class OracleConnect:
             'batcherrors': BatchErrors,
             'arraydmlrowcounts': ArrayDmlRowCounts,
             'return_binds': ReturnBinds or None,
+            # Server-side scrollable cursor open (#181): mark the cursor
+            # scrollable and position it at CURRENT (a describe-only open — the
+            # rows come from later scroll_fetch re-executes).
+            'scrollable': scrollable,
+            'scroll': (TNS_FETCH_ORIENTATION_CURRENT, 1) if scrollable else None,
         }
         # Piggybacks in front of this execute (each gets a seq before the
         # execute's): close any drained server cursors queued from prior calls
@@ -1077,6 +1097,12 @@ class OracleConnect:
                 Oldest = next(iter(self._cursor_cache))
                 self._cursor_cache.pop(Oldest, None)
             Stored = True
+        if scrollable:
+            # A scrollable open is describe-only: don't drain (the rows come from
+            # scroll_fetch) and don't queue the cursor for close — it must stay
+            # open for the scroll re-executes (#181). The cursor closes it when
+            # the user closes / re-executes the cursor.
+            return Result
         Drained = self._drain_cursor(Result)
         # Queue the statement's own server cursor for close unless it was cached
         # for reuse (#191). The result set is fully buffered by now, and this is
@@ -1086,6 +1112,46 @@ class OracleConnect:
                 and isinstance(Drained[2], int) and Drained[2] > 0):
             self._cursors_to_close.append(Drained[2])
         return Drained
+
+    def scroll_fetch(self, CursorId: int, Orientation: int, Position: int,
+                     RowFormat: list, Fetch: int | None = None,
+                     PrevRow: list | None = None) -> tuple:
+        """Re-execute an open scrollable cursor (#181) with a fetch orientation
+        and 1-based position, returning ``(rows, at_eof, server_rowcount)``. The
+        response carries RXD rows but no DCB, so the prior RowFormat is seeded
+        into the decoder (as fetch_more does). ``server_rowcount`` is the
+        cursor's cumulative row position after this batch (the absolute row
+        number of the last row returned) — the caller uses it to place the
+        buffer (oracledb's ``_post_process_scroll``). A re-execute returning no
+        rows means the scroll ran off the end (the cursor stays open thanks to
+        NO_CANCEL_ON_EOF). ``Fetch`` overrides the prefetch row count for this
+        batch (default: the connection's ``fetch``)."""
+        QueryDict = {
+            'type': 'select', 'auto': 0,
+            'fetch': self.fetch if Fetch is None else Fetch,
+            'server_version': self.server_version, 'cursor': CursorId,
+            'query': '', 'bind': [], 'batch': [], 'def': [],
+            'batcherrors': None, 'arraydmlrowcounts': None, 'return_binds': None,
+            'scrollable': True, 'scroll': (Orientation, Position),
+        }
+        Pre = self._flush_cursor_closes_bytes() + self._flush_end_to_end_bytes()
+        Data = encode_dictionary(self._make_dict(DictionaryType.exec,
+                                                 query=QueryDict))
+        self.send(TNS_DATA, Data if not Pre else Pre + Data)
+        # Seed the prior batch's last row so a reused (bit-unset) column on the
+        # first row of this re-execute resolves to its real value (#181).
+        set_decode_prev_row(PrevRow)
+        try:
+            Result = self._handle_response((None, RowFormat, []))
+        finally:
+            set_decode_prev_row(None)
+        if not isinstance(Result, tuple) or len(Result) < 6:
+            return ([], True, 0)
+        (CallStatus, OraCode, _, RetFormat, Rows, *_) = Result
+        AtEof = (OraCode == 1403) or not Rows
+        ServerRowCount = RetFormat[0] if (isinstance(RetFormat, tuple)
+                                          and RetFormat) else 0
+        return (list(Rows or []), AtEof, ServerRowCount)
 
     def _fv2_raise_for_error(self, Packet: bytes) -> None:
         # Raise the server's error if `Packet` is a 9i OER carrying a real ORA

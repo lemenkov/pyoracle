@@ -20,7 +20,8 @@ from oracle.exceptions import (
     DatabaseError, InterfaceError, NotSupportedError, ProgrammingError,
     from_ora_code,
 )
-from oracle.tns_consts import AL32UTF8_CHARSET, FIELD_VERSION_12_1
+from oracle.tns_consts import (AL32UTF8_CHARSET, FIELD_VERSION_10_2,
+                               FIELD_VERSION_12_1)
 
 
 class AsyncCursor:
@@ -33,6 +34,7 @@ class AsyncCursor:
     """
 
     arraysize: int = 1
+    prefetchrows: int = 2   # rows prefetched on a scrollable open (#181)
 
     def __init__(self, connection, scrollable: bool = False):
         self._connection = connection
@@ -44,7 +46,17 @@ class AsyncCursor:
         self._closed: bool = False
         self._lastrowid = None
         self._rowfactory = None
-        self._scrollable = bool(scrollable)   # #161, oracledb parity
+        # Scrollable cursor: scrollable=True fetches a SELECT lazily from a
+        # kept-open server cursor (#181); scrollable=False buffers the whole set
+        # and scroll() is a local reposition (#161). See oracle.cursor.Cursor.
+        self._scrollable = bool(scrollable)
+        self._scroll_active: bool = False
+        self._scroll_cursor_id: int = 0
+        self._scroll_rowformat: list | None = None
+        self._scroll_buf_min: int = 0
+        self._scroll_buf_max: int = 0
+        self._scroll_consumed: int = 0
+        self._scroll_eof: bool = False
         self._implicit_results: list = []     # #121, consumed via nextset()
 
     @property
@@ -76,6 +88,9 @@ class AsyncCursor:
 
     @property
     def rowcount(self) -> int:
+        # Lazy scrollable cursor: rows consumed so far (oracledb). See sync.
+        if self._scroll_active:
+            return self._scroll_consumed
         return self._rowcount
 
     @property
@@ -99,14 +114,29 @@ class AsyncCursor:
         return self._lastrowid
 
     async def close(self) -> None:
+        self._release_scroll_cursor()
         self._closed = True
         self._description = None
         self._annotations = None
         self._rows = []
         self._row_index = 0
 
+    def _release_scroll_cursor(self) -> None:
+        # Queue the kept-open scrollable cursor for close (#181); reuses the #191
+        # close-piggyback queue so it rides the next call (no extra round trip).
+        if self._scroll_active and self._scroll_cursor_id:
+            Conn = self._connection
+            if Conn is not None and getattr(Conn, '_writer', None) is not None:
+                try:
+                    Conn._cursors_to_close.append(self._scroll_cursor_id)
+                except (AttributeError, Exception):
+                    pass
+        self._scroll_active = False
+        self._scroll_cursor_id = 0
+
     async def execute(self, operation: str, parameters=None) -> 'AsyncCursor':
         self._check_open()
+        self._release_scroll_cursor()    # free any prior scrollable cursor (#181)
         Bind = _resolve_parameters(operation, parameters)
         Bind = await self._promote_large_lob_binds(operation, Bind)
         return await self._run(operation, Bind)
@@ -144,6 +174,12 @@ class AsyncCursor:
         ReturnBinds = _returning_bind_positions(operation, len(Bind or []))
         if ReturnBinds:                       # DML RETURNING ... INTO (#120)
             Kw['ReturnBinds'] = ReturnBinds
+        # Server-side scrollable open (#181), 10g+ only; 9i (fv2) falls back to
+        # the buffered scroll (#161).
+        if (self._scrollable
+                and self._connection.field_version >= FIELD_VERSION_10_2):
+            Kw['scrollable'] = True
+            Kw['Prefetch'] = max(int(self.prefetchrows), 1)
         Result = await self._connection.execute(operation, **Kw)
         return await self._apply_result(Bind, Result, BatchErrors=BatchErrors)
 
@@ -199,6 +235,13 @@ class AsyncCursor:
             self._annotations = [_col_annotations(C) for C in ColMeta]
             self._rows = await self._resolve_rows(Rows)
             self._rowcount = len(self._rows)
+            if (self._scrollable
+                    and self._connection.field_version >= FIELD_VERSION_10_2):
+                # Server-side scroll window (#181), 10g+; 9i stays buffered (#161).
+                CursorId = (Result[2] if len(Result) > 2
+                            and isinstance(Result[2], int) else 0)
+                self._init_scroll_window(CursorId, ColMeta, ServerRowCount,
+                                         len(self._rows), OraCode == 1403)
         else:
             self._lastrowid = LastRowid
             self._description = None
@@ -373,14 +416,60 @@ class AsyncCursor:
         `oracle.cursor.Cursor.getarraydmlrowcounts`."""
         return list(getattr(self, '_arraydmlrowcounts', []))
 
+    # --- Server-side scroll window helpers (#181), see oracle.cursor.Cursor ---
+
+    def _init_scroll_window(self, cursor_id: int, colmeta: list,
+                            server_rowcount, batch_len: int,
+                            eof: bool) -> None:
+        self._scroll_active = True
+        self._scroll_cursor_id = cursor_id
+        self._scroll_rowformat = colmeta
+        self._scroll_set_window(server_rowcount, batch_len)
+        self._scroll_eof = eof
+
+    def _scroll_set_window(self, server_rowcount, batch_len: int) -> None:
+        if batch_len <= 0:
+            self._scroll_buf_min = self._scroll_buf_max = 0
+            self._scroll_consumed = 0
+            self._row_index = 0
+            return
+        Srv = server_rowcount if isinstance(server_rowcount, int) else batch_len
+        self._scroll_buf_min = Srv - batch_len + 1
+        self._scroll_buf_max = self._scroll_buf_min + batch_len
+        self._scroll_consumed = self._scroll_buf_min - 1
+        self._row_index = 0
+
+    async def _scroll_refill(self) -> None:
+        # Continue with orient CURRENT at the next absolute row (oracledb fetches
+        # every batch as a positioned scroll re-execute, not a TTI_FETCH — #181).
+        from oracle.tns_consts import TNS_FETCH_ORIENTATION_CURRENT
+        Conn = self._connection
+        Size = max(int(self.arraysize), 1)
+        Prev = self._rows[-1] if self._rows else None
+        Rows, Eof, ServerRowCount = await Conn.scroll_fetch(
+            self._scroll_cursor_id, TNS_FETCH_ORIENTATION_CURRENT,
+            self._scroll_consumed + 1, self._scroll_rowformat, Fetch=Size,
+            PrevRow=Prev)
+        Batch = await self._resolve_rows(Rows)
+        self._rows = Batch
+        # _scroll_set_window resets to empty for an off-the-end batch so a later
+        # scroll() can't buffer-hit a stale window (mirrors sync).
+        self._scroll_set_window(ServerRowCount, len(Batch))
+        self._scroll_eof = Eof or not Batch
+
     async def fetchone(self) -> tuple | None:
         self._check_open()
         if self._description is None:
             raise InterfaceError("no result set; call execute() with a SELECT first")
         if self._row_index >= len(self._rows):
-            return None
+            if self._scroll_active and not self._scroll_eof:
+                await self._scroll_refill()
+            if self._row_index >= len(self._rows):
+                return None
         Row = self._rows[self._row_index]
         self._row_index += 1
+        if self._scroll_active:
+            self._scroll_consumed = self._scroll_buf_min + self._row_index - 1
         if self._rowfactory is not None:
             return self._rowfactory(*Row)
         return tuple(Row)
@@ -434,12 +523,17 @@ class AsyncCursor:
 
     async def scroll(self, value: int = 0, mode: str = "relative") -> None:
         """Scroll the result-set cursor to a new position. See
-        `oracle.cursor.Cursor.scroll`. The reposition is local (the whole
-        result set is buffered on execute), so this awaits nothing on the wire
-        but stays `async def` for API symmetry."""
+        `oracle.cursor.Cursor.scroll`. With scrollable=True the reposition is
+        server-side and rows are fetched lazily (#181); otherwise it is a local
+        move over the buffered result set (#161)."""
         self._check_open()
         if self._description is None:
             raise InterfaceError("no result set; call execute() with a SELECT first")
+        if self._scroll_active:
+            return await self._scroll_server(value, mode)
+        self._scroll_buffered(value, mode)
+
+    def _scroll_buffered(self, value: int, mode: str) -> None:
         Count = len(self._rows)
         if mode == "relative":
             Target = self._row_index + value
@@ -454,6 +548,50 @@ class AsyncCursor:
         if Target < 1 or Target > Count:
             raise IndexError("scroll operation would leave the result set")
         self._row_index = Target - 1
+
+    async def _scroll_server(self, value: int, mode: str) -> None:
+        from oracle.tns_consts import (
+            TNS_FETCH_ORIENTATION_ABSOLUTE, TNS_FETCH_ORIENTATION_RELATIVE,
+            TNS_FETCH_ORIENTATION_FIRST, TNS_FETCH_ORIENTATION_LAST,
+        )
+        if mode == "relative":
+            Orientation = TNS_FETCH_ORIENTATION_RELATIVE
+            Desired = self._scroll_consumed + value
+        elif mode == "absolute":
+            Orientation = TNS_FETCH_ORIENTATION_ABSOLUTE
+            Desired = value
+        elif mode == "first":
+            Orientation = TNS_FETCH_ORIENTATION_FIRST
+            Desired = 1
+        elif mode == "last":
+            Orientation = TNS_FETCH_ORIENTATION_LAST
+            Desired = 0
+        else:
+            raise ProgrammingError(f"invalid scroll mode: {mode!r}")
+        if mode in ("relative", "absolute") and Desired < 1:
+            raise IndexError("scroll operation would leave the result set")
+        if (mode != "last"
+                and self._scroll_buf_min <= Desired < self._scroll_buf_max):
+            self._row_index = Desired - self._scroll_buf_min
+            self._scroll_consumed = Desired - 1
+            return
+        Conn = self._connection
+        Size = max(int(self.arraysize), 1)
+        Prev = self._rows[-1] if self._rows else None
+        Rows, Eof, ServerRowCount = await Conn.scroll_fetch(
+            self._scroll_cursor_id, Orientation, Desired,
+            self._scroll_rowformat, Fetch=Size, PrevRow=Prev)
+        Batch = await self._resolve_rows(Rows)
+        if not Batch:
+            self._rows = []
+            self._scroll_buf_min = self._scroll_buf_max = 0
+            self._scroll_consumed = 0
+            self._row_index = 0
+            self._scroll_eof = True
+            return
+        self._rows = Batch
+        self._scroll_set_window(ServerRowCount, len(Batch))
+        self._scroll_eof = Eof
 
     def setinputsizes(self, sizes) -> None:
         pass

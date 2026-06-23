@@ -1494,6 +1494,60 @@ class FetchFlowIntegration(_IntegrationBase):
         sc.scroll(mode="first")
         self.assertEqual(sc.fetchone(), (1,))
 
+    def test_scrollable_lazy_fetch_on_demand(self):
+        # Server-side scrollable cursor (#181), 10g+: rows are pulled lazily from
+        # a kept-open cursor in arraysize batches (here prefetchrows=2,
+        # arraysize=3 over 10 rows forces several positioned re-executes), and
+        # scroll() repositions server-side. 9i has no OALL8 scroll and falls back
+        # to the buffered path (covered by test_scrollable_cursor).
+        if self.conn.field_version < FIELD_VERSION_10_2:
+            self.skipTest("server-side scroll needs 10g+ (9i uses buffered scroll)")
+        self._populate(10)
+        sc = self.conn.cursor(scrollable=True)
+        sc.prefetchrows = 2
+        sc.arraysize = 3
+        sc.execute(f"SELECT id FROM {self.TABLE} ORDER BY id")
+        self.assertTrue(sc._scroll_active)              # lazy path engaged
+        # fetch-on-demand across batch boundaries
+        self.assertEqual([r[0] for r in sc.fetchmany(5)], [1, 2, 3, 4, 5])
+        sc.scroll(8, mode="absolute")
+        self.assertEqual([r[0] for r in sc.fetchall()], [8, 9, 10])
+        sc.scroll(mode="first")
+        self.assertEqual([r[0] for r in sc.fetchall()], list(range(1, 11)))
+
+    def test_scrollable_scroll_off_end_and_back(self):
+        # Scrolling past the end (#181) leaves the cursor empty (next fetchone is
+        # None), and a later scroll repositions back into the result set.
+        if self.conn.field_version < FIELD_VERSION_10_2:
+            self.skipTest("server-side scroll needs 10g+")
+        self._populate(5)
+        sc = self.conn.cursor(scrollable=True)
+        sc.prefetchrows = 2
+        sc.arraysize = 2
+        sc.execute(f"SELECT id FROM {self.TABLE} ORDER BY id")
+        sc.scroll(99, mode="absolute")
+        self.assertIsNone(sc.fetchone())
+        sc.scroll(mode="first")
+        self.assertEqual(sc.fetchone(), (1,))
+
+    def test_scrollable_last_after_eof_duplicate_value(self):
+        # LAST after the buffer already reached EOF with arraysize >= row count
+        # (#181): the server repositions onto the last row, whose value equals the
+        # one just returned, so it omits the value and flags "reuse previous" in
+        # the row-header bit vector. Exercises decode_token_rxh's bit-vector pass
+        # + the previous-row seed (this used to desync / crash on token 0x0a).
+        if self.conn.field_version < FIELD_VERSION_10_2:
+            self.skipTest("server-side scroll needs 10g+")
+        self._populate(6)
+        sc = self.conn.cursor(scrollable=True)
+        sc.prefetchrows = 2
+        sc.arraysize = 50                              # >= row count
+        sc.execute(f"SELECT id FROM {self.TABLE} ORDER BY id")
+        sc.scroll(mode="first")
+        self.assertEqual([r[0] for r in sc.fetchall()], list(range(1, 7)))
+        sc.scroll(mode="last")
+        self.assertEqual(sc.fetchone(), (6,))          # correct value, no crash
+
     def test_fetch_df_all_and_batches(self):
         # Arrow / DataFrame bulk fetch (#162): fetch_df_all returns a
         # pyarrow.Table column-major; fetch_df_batches streams it in chunks.
@@ -2938,6 +2992,38 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                         await Cur.scroll(-1, mode="relative")
                 finally:
                     await Cur.execute("DROP TABLE PYORACLE_ASYNC_SCROLL")
+
+    async def test_async_scrollable_lazy(self):
+        # Server-side lazy scrollable cursor on the async path (#181), 10g+:
+        # fetch-on-demand across batches + scroll modes + the LAST-after-EOF
+        # duplicate-value (bit-vector reuse) case.
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            if Conn.field_version < FIELD_VERSION_10_2:
+                self.skipTest("server-side scroll needs 10g+")
+            async with Conn.cursor(scrollable=True) as Cur:
+                Cur.prefetchrows = 2
+                Cur.arraysize = 3
+                await Cur.execute("CREATE TABLE PYORACLE_ASYNC_LAZY (id NUMBER)")
+                try:
+                    for i in range(1, 9):
+                        await Cur.execute(
+                            "INSERT INTO PYORACLE_ASYNC_LAZY VALUES (:1)", [i])
+                    await Cur.execute(
+                        "SELECT id FROM PYORACLE_ASYNC_LAZY ORDER BY id")
+                    self.assertTrue(Cur._scroll_active)
+                    got = [r[0] for r in await Cur.fetchmany(5)]   # crosses batches
+                    self.assertEqual(got, [1, 2, 3, 4, 5])
+                    await Cur.scroll(6, mode="absolute")
+                    self.assertEqual((await Cur.fetchone())[0], 6)
+                    # LAST-after-EOF duplicate value via a big arraysize.
+                    Cur.arraysize = 50
+                    await Cur.scroll(mode="first")
+                    self.assertEqual([r[0] for r in await Cur.fetchall()],
+                                     list(range(1, 9)))
+                    await Cur.scroll(mode="last")
+                    self.assertEqual((await Cur.fetchone())[0], 8)
+                finally:
+                    await Cur.execute("DROP TABLE PYORACLE_ASYNC_LAZY")
 
     async def test_async_fetch_df(self):
         # Arrow / DataFrame bulk fetch (#162) on the async path.

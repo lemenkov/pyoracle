@@ -46,6 +46,27 @@ TNS_DATA_FLAGS_END_OF_REQUEST = 0x0800   # a pipelined call expecting a result
 TNS_PIPELINE_MODE_CONTINUE_ON_ERROR = 1
 TNS_PIPELINE_MODE_ABORT_ON_ERROR = 2
 
+# Server-side scrollable cursors (#181). The execute al8i4 array carries the
+# scroll request: al8i4[9] gains the SCROLLABLE + NO_CANCEL_ON_EOF exec flags
+# (keep the cursor open past EOF so it can scroll back), al8i4[10] the fetch
+# orientation, al8i4[11] the 1-based fetch position (ABSOLUTE / RELATIVE).
+TNS_EXEC_FLAGS_SCROLLABLE = 0x02
+TNS_EXEC_FLAGS_NO_CANCEL_ON_EOF = 0x80
+# Exec-options word bit for a re-execute that re-runs the statement. A scroll
+# re-execute must NOT set it: oracledb-thin's scroll re-execute uses FETCH-only
+# options (0x8040), and leaving EXECUTE (0x20) on makes the server re-run the
+# query — resetting the result set so the scroll orientation positions from the
+# top and every orientation comes back empty. set_opts always forces 0x20 on for
+# a Flag=0 select, so encode_dictionary_exec clears it for a scroll re-execute.
+TNS_EXEC_OPTION_EXECUTE = 0x20
+TNS_FETCH_ORIENTATION_CURRENT = 0x01
+TNS_FETCH_ORIENTATION_NEXT = 0x02
+TNS_FETCH_ORIENTATION_FIRST = 0x04
+TNS_FETCH_ORIENTATION_LAST = 0x08
+TNS_FETCH_ORIENTATION_PRIOR = 0x10
+TNS_FETCH_ORIENTATION_ABSOLUTE = 0x20
+TNS_FETCH_ORIENTATION_RELATIVE = 0x40
+
 # End-to-end application tracing attributes (#183): a SET_END_TO_END_ATTR
 # piggyback (func TTI_SCID=135) tells the server which of module / action /
 # client_identifier / client_info / dbop changed and carries the new values.

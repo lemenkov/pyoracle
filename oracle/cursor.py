@@ -9,7 +9,11 @@ from oracle.exceptions import (
     from_ora_code,
 )
 from oracle.tns_consts import (
-    AL32UTF8_CHARSET, FIELD_VERSION_12_1, TNS_TYPE_CLOB, UTF8_CHARSET,
+    AL32UTF8_CHARSET, FIELD_VERSION_10_2, FIELD_VERSION_12_1,
+    TNS_TYPE_CLOB, UTF8_CHARSET,
+    TNS_FETCH_ORIENTATION_ABSOLUTE, TNS_FETCH_ORIENTATION_RELATIVE,
+    TNS_FETCH_ORIENTATION_FIRST, TNS_FETCH_ORIENTATION_LAST,
+    TNS_FETCH_ORIENTATION_CURRENT,
 )
 
 
@@ -33,6 +37,10 @@ class Cursor:
     # is still available for callers that prefer it.
 
     arraysize: int = 1
+    # Rows the server prefetches on a scrollable open (oracledb's prefetchrows
+    # default). Kept small so the open does not drain the cursor to EOF, which
+    # would break the subsequent scroll re-execute (#181).
+    prefetchrows: int = 2
 
     def __init__(self, connection, scrollable: bool = False):
         self._connection = connection
@@ -44,10 +52,24 @@ class Cursor:
         self._closed: bool = False
         self._lastrowid = None
         self._rowfactory = None
-        # Scrollable cursor (#161, oracledb parity). pyoracle buffers the whole
-        # result set on execute, so scroll() works in every mode regardless of
-        # this flag; it is accepted + exposed for oracledb compatibility.
+        # Scrollable cursor. With scrollable=True a SELECT is fetched lazily from
+        # a kept-open server cursor: scroll() repositions server-side and
+        # fetchone/many pull batches on demand (#181). With scrollable=False the
+        # whole result set is buffered on execute and scroll() is a local
+        # reposition (#161) — kept for backwards compatibility.
         self._scrollable = bool(scrollable)
+        # Server-side scroll state (only used when scrollable and a SELECT is
+        # open). _scroll_active gates the lazy path; the buffer window spans
+        # absolute rows [_scroll_buf_min, _scroll_buf_max), and _scroll_consumed
+        # is the absolute row number of the last row returned (oracledb's
+        # rowcount), used to compute relative-scroll targets.
+        self._scroll_active: bool = False
+        self._scroll_cursor_id: int = 0
+        self._scroll_rowformat: list | None = None
+        self._scroll_buf_min: int = 0
+        self._scroll_buf_max: int = 0
+        self._scroll_consumed: int = 0
+        self._scroll_eof: bool = False
         # Pending implicit result sets (#121): (row_format, cursor_id) queue
         # left by a DBMS_SQL.RETURN_RESULT block, consumed via nextset().
         self._implicit_results: list = []
@@ -84,6 +106,12 @@ class Cursor:
 
     @property
     def rowcount(self) -> int:
+        # For a lazy server-side scrollable cursor, rowcount tracks the number of
+        # rows consumed so far (the absolute position of the last row returned),
+        # matching oracledb; otherwise it is the buffered result-set size / DML
+        # affected-row count.
+        if self._scroll_active:
+            return self._scroll_consumed
         return self._rowcount
 
     @property
@@ -110,14 +138,32 @@ class Cursor:
         return self._lastrowid
 
     def close(self) -> None:
+        self._release_scroll_cursor()
         self._closed = True
         self._description = None
         self._annotations = None
         self._rows = []
         self._row_index = 0
 
+    def _release_scroll_cursor(self) -> None:
+        # Queue the kept-open server-side scrollable cursor for close (#181). It
+        # was deliberately not drained or queued on the open, so it lingers until
+        # the cursor is closed or re-executed; reuse the #191 close-piggyback
+        # queue so it rides the next call rather than a dedicated round trip.
+        if self._scroll_active and self._scroll_cursor_id:
+            Conn = self._connection
+            if Conn is not None and getattr(Conn, 'sock', None) is not None:
+                try:
+                    Conn._cursors_to_close.append(self._scroll_cursor_id)
+                except (AttributeError, Exception):
+                    pass
+        self._scroll_active = False
+        self._scroll_cursor_id = 0
+
     def execute(self, operation: str, parameters=None) -> 'Cursor':
         self._check_open()
+        # Re-executing frees any cursor left open by a prior scrollable SELECT.
+        self._release_scroll_cursor()
         Bind = _resolve_parameters(operation, parameters)
         Bind = self._promote_large_lob_binds(operation, Bind)
         return self._run(operation, Bind)
@@ -156,6 +202,14 @@ class Cursor:
         ReturnBinds = _returning_bind_positions(operation, len(Bind or []))
         if ReturnBinds:                       # DML RETURNING ... INTO (#120)
             Kw['ReturnBinds'] = ReturnBinds
+        # Server-side scrollable open (#181): mark the cursor scrollable and cap
+        # the open's prefetch to prefetchrows so it stays mid-stream. Gated to
+        # 10g+ (the OALL8 path); 9i (fv2) speaks the TTI_ALL7 dialect and falls
+        # back to the buffered scroll (#161).
+        if (self._scrollable
+                and self._connection.field_version >= FIELD_VERSION_10_2):
+            Kw['scrollable'] = True
+            Kw['Prefetch'] = max(int(self.prefetchrows), 1)
         Result = self._connection.execute(operation, **Kw)
         return self._apply_result(Bind, Result, BatchErrors=BatchErrors)
 
@@ -228,6 +282,17 @@ class Cursor:
             # count, not the total result set size; len(rows) is the answer
             # callers expect from cursor.rowcount.
             self._rowcount = len(self._rows)
+            if (self._scrollable
+                    and self._connection.field_version >= FIELD_VERSION_10_2):
+                # Server-side scrollable open (#181): the cursor stays open and
+                # this Result holds only the first prefetched batch. Record the
+                # window so scroll()/fetchone can reposition + pull more lazily.
+                # Gated to 10g+ to match _run; on 9i the open drained and scroll
+                # stays buffered (#161).
+                CursorId = (Result[2] if len(Result) > 2
+                            and isinstance(Result[2], int) else 0)
+                self._init_scroll_window(CursorId, ColMeta, ServerRowCount,
+                                         len(self._rows), OraCode == 1403)
         else:
             # DDL / DML / non-result-set statement. OER carries the affected
             # row count in its success-iters field; surface it, along with the
@@ -358,14 +423,68 @@ class Cursor:
         """
         return list(getattr(self, '_arraydmlrowcounts', []))
 
+    # --- Server-side scroll window helpers (#181) ---
+
+    def _init_scroll_window(self, cursor_id: int, colmeta: list,
+                            server_rowcount, batch_len: int,
+                            eof: bool) -> None:
+        # Arm the lazy server-side scroll path after a scrollable open.
+        self._scroll_active = True
+        self._scroll_cursor_id = cursor_id
+        self._scroll_rowformat = colmeta
+        self._scroll_set_window(server_rowcount, batch_len)
+        self._scroll_eof = eof
+
+    def _scroll_set_window(self, server_rowcount, batch_len: int) -> None:
+        # Place the buffer window from the server's cumulative rowcount (the
+        # absolute 1-based row number of the last row in the batch) and the batch
+        # size, mirroring oracledb's _post_process_scroll. _scroll_consumed is
+        # the absolute position of the last row already returned to the caller.
+        if batch_len <= 0:
+            self._scroll_buf_min = self._scroll_buf_max = 0
+            self._scroll_consumed = 0
+            self._row_index = 0
+            return
+        Srv = server_rowcount if isinstance(server_rowcount, int) else batch_len
+        self._scroll_buf_min = Srv - batch_len + 1
+        self._scroll_buf_max = self._scroll_buf_min + batch_len
+        self._scroll_consumed = self._scroll_buf_min - 1
+        self._row_index = 0
+
+    def _scroll_refill(self) -> None:
+        # Continue a drained scroll buffer with the next batch. oracledb fetches
+        # every batch as a positioned scroll re-execute (orient CURRENT at the
+        # next absolute row), NOT a plain TTI_FETCH — mixing in a TTI_FETCH
+        # desyncs the server's scroll reference and corrupts a later RELATIVE
+        # scroll. So continue with CURRENT at consumed + 1 (#181).
+        Conn = self._connection
+        Size = max(int(self.arraysize), 1)
+        Prev = self._rows[-1] if self._rows else None
+        Rows, Eof, ServerRowCount = Conn.scroll_fetch(
+            self._scroll_cursor_id, TNS_FETCH_ORIENTATION_CURRENT,
+            self._scroll_consumed + 1, self._scroll_rowformat, Fetch=Size,
+            PrevRow=Prev)
+        Batch = [_resolve_objects(Conn, _resolve_lobs(Conn, R)) for R in Rows]
+        self._rows = Batch
+        # _scroll_set_window resets the window to empty when Batch is empty
+        # (off the end), so a later scroll() can't buffer-hit a stale window.
+        self._scroll_set_window(ServerRowCount, len(Batch))
+        self._scroll_eof = Eof or not Batch
+
     def fetchone(self) -> tuple | None:
         self._check_open()
         if self._description is None:
             raise InterfaceError("no result set; call execute() with a SELECT first")
         if self._row_index >= len(self._rows):
-            return None
+            # Lazy server-side scrollable cursor: pull the next batch on demand.
+            if self._scroll_active and not self._scroll_eof:
+                self._scroll_refill()
+            if self._row_index >= len(self._rows):
+                return None
         Row = self._rows[self._row_index]
         self._row_index += 1
+        if self._scroll_active:
+            self._scroll_consumed = self._scroll_buf_min + self._row_index - 1
         if self._rowfactory is not None:
             return self._rowfactory(*Row)
         return tuple(Row)
@@ -451,13 +570,20 @@ class Cursor:
 
         After the call the next ``fetchone()`` returns the row at the new
         position. ``IndexError`` is raised if the target falls outside the
-        result set. pyoracle buffers the whole result set on execute, so any
-        SELECT cursor is scrollable (the scroll is a local reposition, not a
-        server round trip).
+        result set. With ``scrollable=True`` the reposition happens server-side
+        and rows are fetched lazily (#181); otherwise the whole result set is
+        already buffered and the reposition is local (#161).
         """
         self._check_open()
         if self._description is None:
             raise InterfaceError("no result set; call execute() with a SELECT first")
+        if self._scroll_active:
+            return self._scroll_server(value, mode)
+        return self._scroll_buffered(value, mode)
+
+    def _scroll_buffered(self, value: int, mode: str) -> None:
+        # #161 fallback: the whole result set is in self._rows, so scroll() is a
+        # local index move. Used for non-scrollable cursors.
         Count = len(self._rows)
         if mode == "relative":
             Target = self._row_index + value
@@ -472,6 +598,56 @@ class Cursor:
         if Target < 1 or Target > Count:
             raise IndexError("scroll operation would leave the result set")
         self._row_index = Target - 1
+
+    def _scroll_server(self, value: int, mode: str) -> None:
+        # #181 server-side scroll: map the mode to a fetch orientation + desired
+        # 1-based row, satisfy it from the current buffer when possible, else
+        # re-execute the open cursor at the new position (oracledb's
+        # _create_scroll_message / _post_process_scroll).
+        if mode == "relative":
+            Orientation = TNS_FETCH_ORIENTATION_RELATIVE
+            Desired = self._scroll_consumed + value
+        elif mode == "absolute":
+            Orientation = TNS_FETCH_ORIENTATION_ABSOLUTE
+            Desired = value
+        elif mode == "first":
+            Orientation = TNS_FETCH_ORIENTATION_FIRST
+            Desired = 1
+        elif mode == "last":
+            Orientation = TNS_FETCH_ORIENTATION_LAST
+            Desired = 0
+        else:
+            raise ProgrammingError(f"invalid scroll mode: {mode!r}")
+        # A target before the first row leaves the result set (PEP 249); raise
+        # locally rather than sending an invalid position to the server.
+        if mode in ("relative", "absolute") and Desired < 1:
+            raise IndexError("scroll operation would leave the result set")
+        # Buffer hit: the target row is already in the current window — just move
+        # the index, no server round trip.
+        if (mode != "last"
+                and self._scroll_buf_min <= Desired < self._scroll_buf_max):
+            self._row_index = Desired - self._scroll_buf_min
+            self._scroll_consumed = Desired - 1
+            return
+        Conn = self._connection
+        Size = max(int(self.arraysize), 1)
+        Prev = self._rows[-1] if self._rows else None
+        Rows, Eof, ServerRowCount = Conn.scroll_fetch(
+            self._scroll_cursor_id, Orientation, Desired,
+            self._scroll_rowformat, Fetch=Size, PrevRow=Prev)
+        Batch = [_resolve_objects(Conn, _resolve_lobs(Conn, R)) for R in Rows]
+        if not Batch:
+            # Scrolled off the end (oracledb resets the window; the next
+            # fetchone returns None).
+            self._rows = []
+            self._scroll_buf_min = self._scroll_buf_max = 0
+            self._scroll_consumed = 0
+            self._row_index = 0
+            self._scroll_eof = True
+            return
+        self._rows = Batch
+        self._scroll_set_window(ServerRowCount, len(Batch))
+        self._scroll_eof = Eof
 
     def setinputsizes(self, sizes) -> None:
         # PEP 249 allows this to be a no-op when sizing isn't required.

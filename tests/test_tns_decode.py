@@ -163,6 +163,45 @@ class TestTnsCommandDecoders(unittest.TestCase):
             [3, 'gamma', Decimal('0.01'), datetime.datetime(2022, 12, 25), 'EF03', 1],
         ])
 
+    def test_decode_rxh_bit_vector_reuse(self):
+        # Scroll re-execute LAST response from a live 23ai server (#181): the
+        # cursor repositions onto a row whose value equals the last row already
+        # returned, so the server omits the value and flags the column "reuse
+        # previous" in the row-HEADER bit vector (not a standalone BVC token).
+        # decode_token_rxh must pass that bit vector to the RXD or the RXD reads
+        # the next token as a value and desyncs (it used to crash on the bogus
+        # TTI_ROW token 0x0a). With no in-response previous row, the reused column
+        # falls back to the seeded previous-fetch row (_DECODE_PREV_ROW).
+        import contextvars
+        from oracle.tns import decode_packet, set_decode_prev_row
+        from oracle.tns_consts import FIELD_VERSION_23_4
+        RowFormat = [{'column_name': b'ID', 'data_type': 2, 'data_length': 22,
+                      'data_scale': -127, 'precision': 0, 'max_size': 0,
+                      'charset': 0, 'null_ok': 1, 'domain_schema': None,
+                      'domain_name': None, 'annotations': None}]
+        Resp = bytes.fromhex(
+            "060200000132000101010000070801060000010700010a04c9710f0c0000000401"
+            "01020eae010a000000010700030000000000030160d4020400000302dfa3010900"
+            "002200000000000000010a0103001d")
+
+        # Seeded with the prior batch's last row [10]: the reused column resolves
+        # to 10 (the LAST row), and crucially it does not raise.
+        def run_seeded():
+            set_decode_prev_row([10])
+            try:
+                return decode_packet(Resp, (None, RowFormat, []),
+                                     FIELD_VERSION_23_4)
+            finally:
+                set_decode_prev_row(None)
+        Result = contextvars.copy_context().run(run_seeded)
+        self.assertEqual(Result[4], [[10]])
+
+        # Without a seed the reused column has no source and decodes to None —
+        # but it must still stay aligned (no exception / desync).
+        Result2 = contextvars.copy_context().run(
+            decode_packet, Resp, (None, RowFormat, []), FIELD_VERSION_23_4)
+        self.assertEqual(Result2[4], [[None]])
+
     def test_decode_refcursor_out_10g(self):
         # REF CURSOR OUT bind from a callproc, captured from a live 10.2.0.5
         # server (PROC OUT SYS_REFCURSOR opening SELECT 1 a, 'x' b ...). The
