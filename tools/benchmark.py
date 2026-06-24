@@ -63,6 +63,7 @@ def _setup(conn):
     try:
         cur.execute(f"DROP TABLE {_TABLE}")
     except oracle.DatabaseError:
+        # table may not exist on the first run; ignore
         pass
     cur.execute(f"CREATE TABLE {_TABLE} (id NUMBER, name VARCHAR2(40))")
 
@@ -73,12 +74,11 @@ def bench_insert(scale):
     # loop trips ORA-01000 (#191) and the leaked cursors persist for the life of
     # the connection. So run on a dedicated connection (closing it frees them,
     # keeping the throughput scenarios clean) and stop gracefully if it trips.
-    conn = oracle.connect(**_KW)
-    conn.autocommit = False
-    cur = conn.cursor()
     done = 0
     start = time.perf_counter()
-    try:
+    with oracle.connect(**_KW) as conn:        # closing frees the leaked cursors
+        conn.autocommit = False
+        cur = conn.cursor()
         for i in range(min(scale, 2000)):
             try:
                 cur.execute(f"INSERT INTO {_TABLE} VALUES (:1, :2)",
@@ -90,8 +90,6 @@ def bench_insert(scale):
                 print(f"  (per-row insert stopped at {done}: ORA-01000, #191)")
                 break
         conn.commit()
-    finally:
-        conn.close()
     _report("insert (per-row bind)", done, time.perf_counter() - start)
 
 
@@ -132,9 +130,8 @@ def main():
     print(f"pyoracle benchmark  service={_KW['service_name']} scale={scale}")
     print("-" * 64)
     bench_connect(scale)
-    conn = oracle.connect(**_KW)
-    conn.autocommit = False
-    try:
+    with oracle.connect(**_KW) as conn:
+        conn.autocommit = False
         _setup(conn)
         bench_insert(scale)
         bench_executemany(conn, scale)
@@ -142,8 +139,6 @@ def main():
         bench_fetch_df(conn, scale)
         conn.cursor().execute(f"DROP TABLE {_TABLE}")
         conn.commit()
-    finally:
-        conn.close()
 
 
 if __name__ == "__main__":
