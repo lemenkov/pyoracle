@@ -52,14 +52,18 @@ _FV2_UNSUPPORTED = (
     ("cache_evicts", "the cursor cache is a fv4+ feature; 9i re-parses"),
     ("reuses_cursor", "the cursor cache is a fv4+ feature; 9i re-parses"),
     ("pipeline", "the pipeline test uses array DML, unsupported on Oracle 9i"),
-    # Non-AL32UTF8 / national-charset handling on 9i is deferred (#174): its DB
-    # is WE8ISO8859P1, so UTF-8 / national / supplementary-plane values do not
-    # round-trip until that work lands.
-    ("varchar_utf8", "9i charset handling deferred (#174)"),
-    ("varchar_supplementary", "9i charset handling deferred (#174)"),
-    ("nvarchar", "9i national-charset handling deferred (#174)"),
-    ("nchar", "9i national-charset handling deferred (#174)"),
-    ("nclob", "9i national-charset handling deferred (#174)"),
+    # The 9i test DB is WE8ISO8859P1 (Latin-1). #174 made representable VARCHAR2
+    # text round-trip (see test_db_charset_varchar_roundtrip) and full Unicode
+    # work through DB_TYPE_NVARCHAR / DB_TYPE_NCHAR (test_national_char_var_bind,
+    # which runs on every tier). What remains genuinely unsupported on 9i is a
+    # *plain str* bind of non-Latin-1 / supplementary text: it routes through the
+    # DB charset, which cannot hold those characters. Those tests stay skipped.
+    ("varchar_utf8", "plain str non-Latin-1 can't store in 9i WE8ISO8859P1 (#174)"),
+    ("varchar_supplementary",
+     "plain str supplementary char can't store in 9i WE8ISO8859P1 (#174)"),
+    ("nvarchar", "plain str -> NVARCHAR2 via 9i DB charset; use DB_TYPE_NVARCHAR (#174)"),
+    ("nchar", "plain str -> NCHAR via 9i DB charset; use DB_TYPE_NCHAR (#174)"),
+    ("nclob", "9i national-charset LOB handling deferred (#174)"),
 )
 
 
@@ -885,6 +889,31 @@ class BindIntegration(_IntegrationBase):
         # supplementary-plane character.
         self.cur.execute(f"CREATE TABLE {self.TABLE} (v NVARCHAR2(40))")
         val = "nat ünî 中 😀"
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (:1)", [val])
+        self.cur.execute(f"SELECT v FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchall(), [(val,)])
+
+    def test_national_char_var_bind(self):
+        # Bind full Unicode into NVARCHAR2 via the national bind type (#174).
+        # Works on every tier: 9i rides it natively as AL16UTF16, where a plain
+        # str bind would route through the (non-Unicode) DB charset and lose
+        # characters; 10g+ get the same csfrm-2 OAC.
+        import oracle
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (v NVARCHAR2(40))")
+        val = "café—Ω—日本"
+        var = self.cur.var(oracle.DB_TYPE_NVARCHAR)
+        var.setvalue(0, val)
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (:1)", [var])
+        self.cur.execute(f"SELECT v FROM {self.TABLE}")
+        self.assertEqual(self.cur.fetchall(), [(val,)])
+
+    def test_db_charset_varchar_roundtrip(self):
+        # VARCHAR2 non-ASCII that the database charset can represent round-trips
+        # (#174). On 9i (WE8ISO8859P1) the server converts the AL32UTF8 session
+        # bytes to its Latin-1 DB charset and back; decoding by the column's DB
+        # charset instead of the session charset used to mojibake it.
+        self.cur.execute(f"CREATE TABLE {self.TABLE} (v VARCHAR2(40))")
+        val = "café déjà vu"           # Latin-1-representable
         self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (:1)", [val])
         self.cur.execute(f"SELECT v FROM {self.TABLE}")
         self.assertEqual(self.cur.fetchall(), [(val,)])

@@ -1023,10 +1023,14 @@ class TestFv2Block(unittest.TestCase):
         self.assertEqual(got[3:6], bytes.fromhex("020429"))
         # The bind VALUE must NOT be appended inline (it goes in a separate RXD).
         self.assertNotIn(b"hello9i", got)
-        # Byte-identical to the capture except the bind OAC max_size (we declare
-        # VARCHAR 4000 = 02 0fa0; JDBC declares 32767 = 02 7fff).
-        self.assertEqual(got.replace(bytes.fromhex("020fa0"),
-                                     bytes.fromhex("027fff")), self.INBIND_REQ)
+        # Byte-identical to the capture except two intentional bind-OAC
+        # differences: the max_size (we declare VARCHAR 4000 = 02 0fa0; JDBC
+        # declares 32767 = 02 7fff) and the charset (we declare our AL32UTF8
+        # session charset 02 0369; the capture has the JDBC client's DB charset
+        # 01 1f, #174).
+        Normalised = got.replace(bytes.fromhex("020fa0"), bytes.fromhex("027fff")) \
+                        .replace(bytes.fromhex("020369"), bytes.fromhex("011f"))
+        self.assertEqual(Normalised, self.INBIND_REQ)
 
     def test_inbind_value_frame_matches_capture(self):
         from oracle.tns import encode_tokens_rxd
@@ -1072,9 +1076,10 @@ class TestFv2OutBinds(unittest.TestCase):
         from oracle.tns import _o7_bind_oac
         import oracle.datatypes as dt
         # VARCHAR OUT buffer is 0x7fff (matching JDBC), not the 4000 of an
-        # inline str IN bind.
+        # inline str IN bind. The OAC declares AL32UTF8 (02 0369), the driver's
+        # session charset, where the JDBC capture declared its DB charset (#174).
         self.assertEqual(_o7_bind_oac(dt.Var(str)),
-                         bytes.fromhex("01010000027fff00000000011f01"))
+                         bytes.fromhex("01010000027fff0000000002036901"))
 
     def test_oac_datetime_declares_temporal_type(self):
         # A datetime/date inline bind must declare the matching Oracle temporal

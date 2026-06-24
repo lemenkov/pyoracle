@@ -454,7 +454,8 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
         (TypeOid, Rest) = _read_chunked_bytes(Rest)
     (_, Rest) = decode_ub4(Rest)              # version
     (Charset, Rest) = decode_ub4(Rest)        # charset id
-    Rest = Rest[1:]                           # skip the csfrm byte
+    Csfrm = Rest[0]                           # charset form (1 DB / 2 national)
+    Rest = Rest[1:]
     (MaxSize, Rest) = decode_ub4(Rest)
     if Is12c:
         (_, Rest) = decode_ub4(Rest)          # oaccolid (12.2+)
@@ -514,6 +515,7 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
         'precision': Precision,
         'max_size': MaxSize,
         'charset': Charset,
+        'csfrm': Csfrm,
         'null_ok': NullOk,
         'domain_schema': DomainSchema or None,
         'domain_name': DomainName or None,
@@ -2341,16 +2343,28 @@ def _o7_bind_oac(Value: object) -> bytes:
     # OAC — the server infers it from the block and signals it in the bind
     # prompt; see decode_fv2_block_out.
     from oracle.datatypes import Var
+    # Char binds declare AL32UTF8 (csfrm 1) — the driver negotiates an AL32UTF8
+    # session and sends UTF-8, which the 9i server converts to its DB charset —
+    # or AL16UTF16 for national (csfrm 2) binds, which ride as UTF-16BE (see
+    # encode_token_rxd). The charset field is ignored for non-char types. #174.
+    def _oac(Type, MaxSize, Csfrm):
+        if Type in (TNS_TYPE_VARCHAR, TNS_TYPE_CHAR):
+            Charset = AL16UTF16_CHARSET if Csfrm == 2 else AL32UTF8_CHARSET
+        else:
+            Charset = 31     # ignored by the server for non-char types (NUMBER /
+                             # DATE / RAW / INTERVAL); keep the historical value
+        return (bytes([Type, 0x01, 0, 0]) + encode_sb4(MaxSize)
+                + bytes([0, 0, 0, 0]) + encode_sb4(Charset) + bytes([Csfrm]))
     if isinstance(Value, Var):
         VType = Value.dbtype.tns_type
+        Vcsfrm = getattr(Value.dbtype, 'csfrm', 1)
         if VType == TNS_TYPE_NUMBER:
             Type, MaxSize, Csfrm = 0x06, 22, 1
         elif VType == TNS_TYPE_RAW:
             Type, MaxSize, Csfrm = TNS_TYPE_RAW, Value.size, 0
         else:
-            Type, MaxSize, Csfrm = VType, Value.size, 1
-        return (bytes([Type, 0x01, 0, 0]) + encode_sb4(MaxSize)
-                + bytes([0, 0, 0, 0]) + encode_sb4(31) + bytes([Csfrm]))
+            Type, MaxSize, Csfrm = VType, Value.size, Vcsfrm
+        return _oac(Type, MaxSize, Csfrm)
     if isinstance(Value, str):
         Type, MaxSize, Csfrm = TNS_TYPE_VARCHAR, 4000, 1
     elif isinstance(Value, (bytes, bytearray)):
@@ -2382,8 +2396,7 @@ def _o7_bind_oac(Value: object) -> bytes:
         Type, MaxSize, Csfrm = TNS_TYPE_VARCHAR, 1, 1
     else:
         Type, MaxSize, Csfrm = TNS_TYPE_VARCHAR, 4000, 1
-    return (bytes([Type, 0x01, 0, 0]) + encode_sb4(MaxSize)
-            + bytes([0, 0, 0, 0]) + encode_sb4(31) + bytes([Csfrm]))
+    return _oac(Type, MaxSize, Csfrm)
 
 def encode_o7_parse(Seq: int, Sql: str, Binds: list | None = None) -> bytes:
     # Call 1: TTI_ALL7 parse. The SQL is carried inline, sb4-length-prefixed,
@@ -3331,6 +3344,12 @@ def encode_token_rxd(Token: object) -> bytes:
             return bytes([1, 0])            # REF CURSOR slot placeholder
         if Token._value is None:
             return bytes([0])
+        if (getattr(Token.dbtype, 'csfrm', 1) == 2
+                and isinstance(Token._value, str)):
+            # National-charset bind (NVARCHAR2 / NCHAR, #174): the value rides as
+            # AL16UTF16 (UTF-16 big-endian), independent of the DB charset.
+            # encode_chr length-frames the raw bytes (it only re-encodes str).
+            return encode_chr(Token._value.encode('utf-16-be'))
         return encode_token_rxd(Token._value)
     if isinstance(Token, TempLob):
         # Temp-LOB locator bind (#91): the LOB-descriptor prefix `01 28 28`
@@ -3437,11 +3456,18 @@ def encode_token_oac(Token: object) -> bytes:
         # Associative-array bind (#122): the OAC declares the array capacity in
         # the max-num-elements field and sets the ARRAY flag (handled by A).
         A = Token.num_elements if Token.is_array else 0
+        # National (csfrm 2) char Vars declare AL16UTF16 so encode_token_raw
+        # sets csfrm 2 and the value rides as UTF-16BE (#174); ordinary char
+        # Vars keep AL32UTF8.
+        CharCs = (AL16UTF16_CHARSET if getattr(Token.dbtype, 'csfrm', 1) == 2
+                  else AL32UTF8_CHARSET)
         if DT == TNS_TYPE_NUMBER:
             return encode_token_raw(TNS_TYPE_NUMBER, 22, 0, 0, 0, A)
         if DT == TNS_TYPE_VARCHAR:
             return encode_token_raw(TNS_TYPE_VARCHAR, Token.size, 16,
-                                    AL32UTF8_CHARSET, 0, A)
+                                    CharCs, 0, A)
+        if DT == TNS_TYPE_CHAR:
+            return encode_token_raw(TNS_TYPE_CHAR, Token.size, 16, CharCs, 0, A)
         if DT == TNS_TYPE_RAW:
             return encode_token_raw(TNS_TYPE_RAW, Token.size, 16, 0, 0, A)
         if DT == TNS_TYPE_DATE:

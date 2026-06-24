@@ -10,9 +10,10 @@ import datetime
 from decimal import Decimal
 
 from oracle.tns_consts import (
-    TNS_TYPE_BDOUBLE, TNS_TYPE_BFLOAT, TNS_TYPE_DATE, TNS_TYPE_INTERVALDS,
-    TNS_TYPE_INTERVALYM, TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_REFCURSOR,
-    TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_VARCHAR,
+    TNS_TYPE_BDOUBLE, TNS_TYPE_BFLOAT, TNS_TYPE_CHAR, TNS_TYPE_DATE,
+    TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_NUMBER, TNS_TYPE_RAW,
+    TNS_TYPE_REFCURSOR, TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ,
+    TNS_TYPE_VARCHAR,
 )
 
 
@@ -46,12 +47,16 @@ class TempLob:
 class _DbType:
     """An Oracle bind type usable as a `cursor.var()` / OUT-bind type spec."""
 
-    __slots__ = ("name", "tns_type", "default_size")
+    __slots__ = ("name", "tns_type", "default_size", "csfrm")
 
-    def __init__(self, name: str, tns_type: int, default_size: int):
+    def __init__(self, name: str, tns_type: int, default_size: int,
+                 csfrm: int = 1):
         self.name = name
         self.tns_type = tns_type
         self.default_size = default_size
+        # Character-set form: 1 = database charset (default), 2 = national
+        # charset (NCHAR / NVARCHAR2 → AL16UTF16). #174.
+        self.csfrm = csfrm
 
     def __repr__(self) -> str:
         return self.name
@@ -62,6 +67,12 @@ class _DbType:
 # scalar OUT value (matching the value-sized OAC in tns.encode_token_oac).
 DB_TYPE_NUMBER = NUMBER = _DbType("DB_TYPE_NUMBER", TNS_TYPE_NUMBER, 22)
 DB_TYPE_VARCHAR = STRING = _DbType("DB_TYPE_VARCHAR", TNS_TYPE_VARCHAR, 32767)
+# National-charset string types (#174): csfrm 2 → AL16UTF16. Bind a str through
+# cursor.var(oracle.DB_TYPE_NVARCHAR) / DB_TYPE_NCHAR to target an NVARCHAR2 /
+# NCHAR column. Needed on 9i (a non-Unicode DB charset can't store all of
+# Unicode, but the national charset can); harmless on 10g+.
+DB_TYPE_NVARCHAR = _DbType("DB_TYPE_NVARCHAR", TNS_TYPE_VARCHAR, 32767, csfrm=2)
+DB_TYPE_NCHAR = _DbType("DB_TYPE_NCHAR", TNS_TYPE_CHAR, 32767, csfrm=2)
 DB_TYPE_RAW = _DbType("DB_TYPE_RAW", TNS_TYPE_RAW, 32767)
 DB_TYPE_DATE = _DbType("DB_TYPE_DATE", TNS_TYPE_DATE, 7)
 DB_TYPE_CURSOR = CURSOR = _DbType("DB_TYPE_CURSOR", TNS_TYPE_REFCURSOR, 1)
