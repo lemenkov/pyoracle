@@ -346,16 +346,27 @@ msgtype=2 | charset_in (UB2 LE) | charset_out (UB2 LE) | flag (UB1) |
   datatype table | 0
 ```
 
-- **charset_in / charset_out**: NLS (database) and national charset ids.
-  pyoracle advertises **AL32UTF8 (873)** for both. This must be 873 (real
-  UTF-8), **not** Oracle's legacy "UTF8" (871) — 871 is CESU-8, which encodes
-  supplementary-plane characters (emoji, rare CJK, U+10000 and above) as a
-  six-byte surrogate pair instead of a four-byte sequence, and Python's `utf-8`
-  codec then decodes them to replacement characters. Advertising 873 for
-  `charset_out` makes the server convert national (AL16UTF16) `NCHAR` /
-  `NVARCHAR` / `NCLOB` data to AL32UTF8 on the wire — lossless, since both
-  cover all of Unicode — so the same UTF-8 decode path handles national columns
-  without a separate AL16UTF16 step. (#29)
+- **charset_in / charset_out**: the client's database and national charset ids.
+  pyoracle advertises **AL32UTF8 (873)** for both — establishing an AL32UTF8
+  *session* charset, independent of the server's actual database charset. This
+  must be 873 (real UTF-8), **not** Oracle's legacy "UTF8" (871) — 871 is
+  CESU-8, which encodes supplementary-plane characters (emoji, rare CJK, U+10000
+  and above) as a six-byte surrogate pair instead of a four-byte sequence, and
+  Python's `utf-8` codec then decodes them to replacement characters. (#29)
+
+  Because the session charset is AL32UTF8, the server converts to/from it
+  regardless of the database charset — so on a non-UTF-8 database (e.g. a 9i
+  `WE8ISO8859P1` instance) the wire is still AL32UTF8, and bind/decode never need
+  to know the database charset. The decoder picks the codec by the column's
+  **character-set form** (csfrm), not its reported database charset id (#174):
+  ordinary CHAR/VARCHAR2/CLOB (csfrm 1) arrive in the AL32UTF8 session charset
+  (decode as UTF-8); national NCHAR/NVARCHAR2/NCLOB (csfrm 2) arrive as
+  **AL16UTF16** (decode as UTF-16BE — the server does *not* fold national data
+  into the session charset). String binds mirror this: ordinary binds declare
+  AL32UTF8 and send UTF-8; a national bind (`DB_TYPE_NVARCHAR` / `DB_TYPE_NCHAR`)
+  declares AL16UTF16 and sends UTF-16BE. The pre-10g (fv2) bind path follows the
+  same rule — it formerly declared the database charset on the OAC while sending
+  UTF-8, which a non-UTF-8 9i server then mis-converted (#174).
 - **compile_caps / runtime_caps**: two length-prefixed byte arrays. Each index
   is a named feature slot (`TNS_CCAP_*` / `TNS_RCAP_*`). The most important is
   the **field version** at compile-cap index 7 (`TNS_CCAP_FIELD_VERSION`): it

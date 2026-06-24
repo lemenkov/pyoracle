@@ -585,5 +585,35 @@ class TestBindDispatch(unittest.TestCase):
         self.assertEqual(encode_token_oac(1.5)[0], TNS_TYPE_NUMBER)
 
 
+class TestCharsetAwareDecode(unittest.TestCase):
+    """String decode picks the charset by csfrm, not the column's DB charset
+    (#174): the driver negotiates an AL32UTF8 session, so the server returns
+    ordinary (csfrm 1) char data as UTF-8 regardless of the DB charset, and
+    national (csfrm 2) data as AL16UTF16."""
+
+    def test_csfrm1_decodes_as_utf8_not_db_charset(self):
+        from oracle.tns_consts import TNS_TYPE_VARCHAR, ISO_LATIN_1_CHARSET
+        # A 9i column on a WE8ISO8859P1 (id 31) DB reports charset 31, but the
+        # server sends the value in the AL32UTF8 session charset. 'é' = c3 a9
+        # (UTF-8) must decode to 'é', not iso-8859-1 'Ã©'.
+        Col = {'data_type': TNS_TYPE_VARCHAR, 'charset': ISO_LATIN_1_CHARSET,
+               'csfrm': 1}
+        self.assertEqual(decode_value(Col, b'caf\xc3\xa9'), 'café')
+
+    def test_csfrm2_decodes_as_al16utf16(self):
+        from oracle.tns_consts import TNS_TYPE_VARCHAR, AL16UTF16_CHARSET
+        # National (csfrm 2) data arrives as UTF-16BE. 'AÄ' = 0041 00c4.
+        Col = {'data_type': TNS_TYPE_VARCHAR, 'charset': AL16UTF16_CHARSET,
+               'csfrm': 2}
+        self.assertEqual(decode_value(Col, b'\x00A\x00\xc4'), 'AÄ')
+
+    def test_missing_csfrm_falls_back_to_column_charset(self):
+        from oracle.tns_consts import TNS_TYPE_VARCHAR, ISO_LATIN_1_CHARSET
+        # Decode paths that don't record csfrm keep the old column-charset
+        # behaviour (no KeyError, no surprise re-interpretation).
+        Col = {'data_type': TNS_TYPE_VARCHAR, 'charset': ISO_LATIN_1_CHARSET}
+        self.assertEqual(decode_value(Col, b'caf\xe9'), 'café')
+
+
 if __name__ == "__main__":
     unittest.main()

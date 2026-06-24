@@ -57,6 +57,22 @@ _CHARSET_PYTHON_NAME = {
 }
 
 
+def _string_charset(Column: dict) -> int:
+    # Pick the charset a CHAR/VARCHAR2/LONG value arrives in (#174). The driver
+    # negotiates an AL32UTF8 session, so the server returns ordinary (csfrm 1)
+    # char data as UTF-8 regardless of the database charset (e.g. a 9i
+    # WE8ISO8859P1 DB) — decoding by the column's *database* charset would
+    # mojibake it. National (csfrm 2) data arrives as AL16UTF16. When csfrm is
+    # unknown (older decode paths that don't record it), fall back to the
+    # column's reported charset.
+    Csfrm = Column.get('csfrm')
+    if Csfrm == 2:
+        return AL16UTF16_CHARSET
+    if Csfrm == 1:
+        return AL32UTF8_CHARSET
+    return Column.get('charset', AL32UTF8_CHARSET)
+
+
 def decode_number(Data: bytes) -> int | Decimal | None:
     # Oracle NUMBER is a base-100 floating point format. Byte 0 is the biased
     # exponent (with the sign bit in the top bit, *inverted* for negatives);
@@ -262,7 +278,7 @@ def decode_value(Column: dict, Data: bytes | list) -> object:
     if DataType == TNS_TYPE_NUMBER:
         return decode_number(Data)
     if DataType in (TNS_TYPE_VARCHAR, TNS_TYPE_CHAR, TNS_TYPE_LONG):
-        return decode_string(Data, Column.get('charset', AL32UTF8_CHARSET))
+        return decode_string(Data, _string_charset(Column))
     if DataType == TNS_TYPE_LONGRAW:
         return bytes(Data)
     if DataType in (TNS_TYPE_DATE, TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ,

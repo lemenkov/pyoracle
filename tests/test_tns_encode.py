@@ -876,7 +876,10 @@ class TestO3logonMessages(unittest.TestCase):
     def test_9i_parse_with_binds(self):
         # fv2 TTI_ALL7 parse with a string + number bind: option word 0x29, a
         # bind-count field before the SQL, per-bind OAC + one RXD of values
-        # after it. Exact bytes from a live 9.2.0.4 JDBC-thin capture (#100).
+        # after it. Matches a live 9.2.0.4 JDBC-thin capture (#100), except the
+        # str bind's OAC declares our AL32UTF8 session charset (02 0369) where
+        # JDBC declared its DB charset (01 1f); the number bind's charset field
+        # is unused and keeps 01 1f (#174).
         from oracle.tns import encode_o7_parse
         self.assertEqual(
             encode_o7_parse(
@@ -885,8 +888,27 @@ class TestO3logonMessages(unittest.TestCase):
             "034700028029010101012e000001010701010200000001010273656c"
             "6563742069642066726f6d20743937207768657265206e616d65203d"
             "203a3120616e64206964203d203a3201010101000000000001010000"
-            "020fa000000000011f0106010000011600000000011f010705636172"
-            "6f6c02c104")
+            "020fa0000000000203690106010000011600000000011f0107056361"
+            "726f6c02c104")
+
+    def test_9i_charset_aware_binds(self):
+        # DB-charset-aware fv2 binds (#174). A plain str bind declares the
+        # AL32UTF8 session charset (02 0369, csfrm 1) and its value rides as
+        # UTF-8; a national Var (DB_TYPE_NVARCHAR) declares AL16UTF16 (02 07d0,
+        # csfrm 2) and its value rides as UTF-16BE.
+        from oracle.tns import _o7_bind_oac, encode_token_rxd
+        import oracle.datatypes as dt
+        # ordinary str -> AL32UTF8 / csfrm 1, value UTF-8
+        Oac = _o7_bind_oac("café")
+        self.assertEqual(Oac[-4:], bytes.fromhex("02036901"))   # charset 873 csfrm 1
+        self.assertEqual(encode_token_rxd("café"), bytes.fromhex("05636166c3a9"))
+        # national NVARCHAR -> AL16UTF16 (2000) / csfrm 2, value UTF-16BE
+        NVar = dt.Var(dt.DB_TYPE_NVARCHAR)
+        NVar.setvalue(0, "AÄ")
+        NOac = _o7_bind_oac(NVar)
+        self.assertEqual(NOac[-4:], bytes.fromhex("0207d002"))  # charset 2000 csfrm 2
+        # 'AÄ' UTF-16BE = 0041 00c4, framed with a length byte
+        self.assertEqual(encode_token_rxd(NVar), bytes.fromhex("04004100c4"))
 
 
 class TestEndToEndPiggyback(unittest.TestCase):
