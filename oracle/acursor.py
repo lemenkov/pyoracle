@@ -533,7 +533,7 @@ class AsyncCursor:
             raise InterfaceError("no result set; call execute() with a SELECT first")
         if self._scroll_active:
             return await self._scroll_server(value, mode)
-        self._scroll_buffered(value, mode)
+        return self._scroll_buffered(value, mode)
 
     def _scroll_buffered(self, value: int, mode: str) -> None:
         Count = len(self._rows)

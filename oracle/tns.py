@@ -167,9 +167,8 @@ def assemble_packet(Data: bytes, Length: int, Large: bool = False) -> tuple[bool
     # `Zero` (the hdr-cksum at bytes 6-7) is read the same way in both.
     if Large:
         (PacketSize, Type, Flags, Zero) = struct.unpack(">IBBh", Data[:8])
-        PacketFlags = 0
     else:
-        (PacketSize, PacketFlags, Type, Flags, Zero) = struct.unpack(">HhBBh", Data[:8])
+        (PacketSize, _, Type, Flags, Zero) = struct.unpack(">HhBBh", Data[:8])
     if Type == TNS_DATA and Zero == 0:
         BodySize = PacketSize - 10
         Rest = Data[10:]
@@ -819,8 +818,7 @@ def decode_token_oac(Data: bytes, Acc: object) -> tuple[int, int, int, int, byte
     (ToId, R4) = decode_dalc(R3)
     (VSN, R5) = decode_ub4(R4)
     (Charset, R6) = decode_ub4(R5)
-    _FormOfUse = R6[0]                      # csfrm byte — skipped (R6[1:] below)
-    (Mxlc, R7) = decode_ub4(R6[1:])
+    (Mxlc, R7) = decode_ub4(R6[1:])        # R6[0] is the csfrm byte — skipped
     return (DataType, MaxDataLength, DataScale, Charset, R7)
 
 def decode_token_rpa(Data: bytes, Acc: object) -> tuple:
@@ -1370,8 +1368,9 @@ def encode_dictionary(Dictionary: dict) -> bytes | tuple[bytes, bytes]:
             return encode_dictionary_stop(Dictionary)
         case DictionaryType.tran:
             return encode_dictionary_tran(Dictionary)
-        case _:
-            raise Exception("unsupported dict type", Dictionary['type'])
+    # No case matched (the match has no value-less path); raising here rather
+    # than via `case _` keeps every branch a value-return for flow analysis.
+    raise Exception("unsupported dict type", Dictionary['type'])
 
 ##
 ## Supplementary functions
@@ -3202,8 +3201,9 @@ def encode_sb4(Val: int) -> bytes:
             return bytes([3, Bytes[1], Bytes[2], Bytes[3]])
         case v if v <= 0xFFFFFFFF:
             return bytes([4, Bytes[0], Bytes[1], Bytes[2], Bytes[3]])
-        case _:
-            raise Exception("Can't encode value", Val)
+    # Out of ub4 range (or negative); raise here rather than via `case _` so
+    # every branch is a value-return for flow analysis.
+    raise Exception("Can't encode value", Val)
 
 def decode_dalc(Bytes: bytes) -> tuple[bytes | list, bytes]:
     # Data with Attached Length Code (PROTOCOL.md §12.2). 0x00 = empty,

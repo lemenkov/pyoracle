@@ -12,17 +12,16 @@ from __future__ import annotations
 import pyarrow as pa
 
 from oracle.tns_consts import (
-    TNS_TYPE_BDOUBLE, TNS_TYPE_BFLOAT, TNS_TYPE_CHAR, TNS_TYPE_CLOB,
-    TNS_TYPE_DATE, TNS_TYPE_FLOAT, TNS_TYPE_LONG, TNS_TYPE_LONGRAW,
+    TNS_TYPE_BDOUBLE, TNS_TYPE_BFLOAT,
+    TNS_TYPE_DATE, TNS_TYPE_FLOAT, TNS_TYPE_LONGRAW,
     TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPLTZ,
-    TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_VARCHAR, TNS_TYPE_VARNUM,
+    TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_VARNUM,
 )
 
 # Oracle TNS type -> Arrow type, used only to give an empty / all-NULL column a
 # meaningful schema. A column that has at least one value is built by pyarrow's
 # own inference, which handles the int / Decimal / float mix Oracle NUMBER
 # decodes into (and yields decimal128 / int64 / double as appropriate).
-_STRING_TYPES = (TNS_TYPE_VARCHAR, TNS_TYPE_CHAR, TNS_TYPE_LONG, TNS_TYPE_CLOB)
 _BINARY_TYPES = (TNS_TYPE_RAW, TNS_TYPE_LONGRAW)
 _TIMESTAMP_TYPES = (TNS_TYPE_DATE, TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ,
                     TNS_TYPE_TIMESTAMPLTZ)

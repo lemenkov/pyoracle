@@ -107,6 +107,7 @@ class TestDecoderFuzz(unittest.TestCase):
             try:
                 decode_packet(bytes([i]), _ACC)
             except Exception:
+                # fuzzing: a malformed 1-byte packet is expected to raise
                 pass
 
 

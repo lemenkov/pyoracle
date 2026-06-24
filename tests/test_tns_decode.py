@@ -1068,13 +1068,13 @@ class TestFv2OutBinds(unittest.TestCase):
 
     def test_var_oac_number_is_varnum(self):
         from oracle.tns import _o7_bind_oac
-        import oracle.datatypes as dt
+        from oracle import datatypes as dt
         self.assertEqual(_o7_bind_oac(dt.Var(int)),
                          bytes.fromhex("06010000011600000000011f01"))
 
     def test_var_oac_string_size_32767(self):
         from oracle.tns import _o7_bind_oac
-        import oracle.datatypes as dt
+        from oracle import datatypes as dt
         # VARCHAR OUT buffer is 0x7fff (matching JDBC), not the 4000 of an
         # inline str IN bind. The OAC declares AL32UTF8 (02 0369), the driver's
         # session charset, where the JDBC capture declared its DB charset (#174).
@@ -1115,7 +1115,7 @@ class TestFv2OutBinds(unittest.TestCase):
 
     def test_outnum_request_matches_capture(self):
         from oracle.tns import encode_o7_block
-        import oracle.datatypes as dt
+        from oracle import datatypes as dt
         self.assertEqual(encode_o7_block(0, "BEGIN :1 := 42; END;",
                                          [dt.Var(int)]), self.OUTNUM_REQ)
 

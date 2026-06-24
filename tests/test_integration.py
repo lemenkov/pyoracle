@@ -898,7 +898,6 @@ class BindIntegration(_IntegrationBase):
         # Works on every tier: 9i rides it natively as AL16UTF16, where a plain
         # str bind would route through the (non-Unicode) DB charset and lose
         # characters; 10g+ get the same csfrm-2 OAC.
-        import oracle
         self.cur.execute(f"CREATE TABLE {self.TABLE} (v NVARCHAR2(40))")
         val = "café—Ω—日本"
         var = self.cur.var(oracle.DB_TYPE_NVARCHAR)
@@ -1659,6 +1658,7 @@ class FetchFlowIntegration(_IntegrationBase):
         try:
             self.cur.execute(f"DROP TABLE {t}")
         except oracle.DatabaseError:
+            # table may not exist; drop is best-effort cleanup
             pass
         self.cur.execute(f"CREATE TABLE {t} (id NUMBER)")
         try:
@@ -2440,6 +2440,7 @@ class RefBindIntegration(_IntegrationBase):
             try:
                 self.cur.execute(s)
             except DatabaseError:
+                # best-effort teardown of leftover objects
                 pass
         self.cur.execute(
             f"CREATE TYPE {self.TYPE} AS OBJECT (id NUMBER, name VARCHAR2(40))")
@@ -2456,6 +2457,7 @@ class RefBindIntegration(_IntegrationBase):
                 try:
                     cleanup.execute(s)
                 except Exception:
+                    # best-effort teardown of leftover objects
                     pass
             cleanup.close()
         finally:
@@ -2556,6 +2558,7 @@ class SessionlessTransactionIntegration(unittest.TestCase):
             try:
                 c.close()
             except Exception:
+                # best-effort close; the test already passed/failed
                 pass
 
     def test_suspend_resume_commit_across_sessions(self):
@@ -3101,6 +3104,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
             try:
                 await Cur.execute("DROP TABLE PYO_LEAK191A")
             except oracle.DatabaseError:
+                # best-effort drop of a table that may not exist
                 pass
             await Cur.execute("CREATE TABLE PYO_LEAK191A (id NUMBER)")
             try:
@@ -3232,6 +3236,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
             try:
                 await cur.execute(f"DROP TABLE {table}")
             except oracle.DatabaseError:
+                # best-effort drop of a table that may not exist
                 pass
             await cur.execute(f"CREATE TABLE {table} (id NUMBER)")
             p = oracle.create_pipeline()
@@ -3257,6 +3262,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                 try:
                     await cur.execute(s)
                 except oracle.DatabaseError:
+                    # best-effort drop of a table that may not exist
                     pass
             await cur.execute(
                 f"CREATE TYPE {TYPE} AS OBJECT (id NUMBER, name VARCHAR2(40))")
@@ -3277,6 +3283,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                 try:
                     await cur.execute(s)
                 except oracle.DatabaseError:
+                    # best-effort drop of a table that may not exist
                     pass
         finally:
             await Conn.close()
