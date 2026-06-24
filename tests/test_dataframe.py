@@ -10,15 +10,16 @@ from decimal import Decimal
 
 import pyarrow as pa
 
-from oracle.dataframe import build_table
+from oracle.dataframe import build_table, _explicit_type
 from oracle.tns_consts import (
-    TNS_TYPE_DATE, TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_VARCHAR,
+    TNS_TYPE_BFLOAT, TNS_TYPE_DATE, TNS_TYPE_NUMBER, TNS_TYPE_RAW,
+    TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_VARCHAR,
 )
 
 
-def _desc(name, type_code, scale=None):
+def _desc(name, type_code, scale=None, precision=None):
     # (name, type_code, display_size, internal_size, precision, scale, null_ok)
-    return (name, type_code, None, None, None, scale, True)
+    return (name, type_code, None, None, precision, scale, True)
 
 
 class TestBuildTable(unittest.TestCase):
@@ -64,6 +65,42 @@ class TestBuildTable(unittest.TestCase):
         t = build_table([[1], [Decimal("2.5")], [3]], desc)
         self.assertEqual([v for v in t.column("V").to_pylist()],
                          [Decimal("1.0"), Decimal("2.5"), Decimal("3.0")])
+
+    def test_explicit_type_mapping(self):
+        # The exact Arrow type derived from the describe metadata (#190).
+        self.assertEqual(_explicit_type(TNS_TYPE_NUMBER, 10, 2),
+                         pa.decimal128(10, 2))           # NUMBER(10,2) -> Decimal
+        self.assertEqual(_explicit_type(TNS_TYPE_NUMBER, 8, 0), pa.int64())
+        self.assertEqual(_explicit_type(TNS_TYPE_BFLOAT, None, None),
+                         pa.float32())
+        self.assertEqual(_explicit_type(TNS_TYPE_VARCHAR, None, None),
+                         pa.string())
+        self.assertEqual(_explicit_type(TNS_TYPE_RAW, None, None), pa.binary())
+        self.assertEqual(_explicit_type(TNS_TYPE_DATE, None, None),
+                         pa.timestamp("us"))
+        # Unconstrained NUMBER (no precision / -127 scale marker), a >18-digit
+        # integer, and TZ-aware timestamps stay on inference (None).
+        self.assertIsNone(_explicit_type(TNS_TYPE_NUMBER, None, None))
+        self.assertIsNone(_explicit_type(TNS_TYPE_NUMBER, 0, -127))
+        self.assertIsNone(_explicit_type(TNS_TYPE_NUMBER, 20, 0))
+        self.assertIsNone(_explicit_type(TNS_TYPE_TIMESTAMPTZ, None, None))
+
+    def test_constrained_number_uses_explicit_decimal128(self):
+        # NUMBER(10,2) -> decimal128(10,2) directly (skips inference), with
+        # NULLs and Decimals of varying stored scale rescaled to fit.
+        desc = [_desc("P", TNS_TYPE_NUMBER, 2, 10)]
+        t = build_table([[Decimal("5")], [Decimal("1380.5")], [None],
+                         [Decimal("-7.25")]], desc)
+        self.assertEqual(t.schema.field("P").type, pa.decimal128(10, 2))
+        self.assertEqual(t.column("P").to_pylist(),
+                         [Decimal("5.00"), Decimal("1380.50"), None,
+                          Decimal("-7.25")])
+
+    def test_constrained_integer_uses_int64(self):
+        desc = [_desc("I", TNS_TYPE_NUMBER, 0, 8)]
+        t = build_table([[5], [-7], [None]], desc)
+        self.assertEqual(t.schema.field("I").type, pa.int64())
+        self.assertEqual(t.column("I").to_pylist(), [5, -7, None])
 
 
 if __name__ == "__main__":

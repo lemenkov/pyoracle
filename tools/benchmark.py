@@ -11,11 +11,11 @@ come from the same PYORACLE_TEST_* environment variables.
     PYORACLE_TEST_PORT=1521 PYORACLE_TEST_SERVICE=XE \
         python3 tools/benchmark.py [scale]
 
-`scale` (default 50000) is the row/iteration count the throughput scenarios use.
-It is deliberately large: the Arrow fetch path has a fixed per-call setup cost,
-so at a small scale it looks slower than `fetchall` even though it is faster
-once that cost is amortised (~0.95x of `fetchall` time by 50k rows). Use a
-representative scale when comparing.
+`scale` (default 50000) is the row/iteration count the throughput scenarios use;
+use a representative scale when comparing. Both fetch scenarios are dominated by
+the per-row value decode they share, so `fetch_df_all` (which builds an Arrow
+Table on top) runs close to `fetchall`; the table includes a NUMBER(p,s) column
+because that is where the Arrow build benefits most from explicit typing (#190).
 Each scenario prints one stable line — name, count, seconds, rate — so runs are
 easy to diff across changes (guards perf regressions; quantifies future work
 such as the Arrow fetch fast path). Numbers are wall-clock against whatever
@@ -65,7 +65,10 @@ def _setup(conn):
     except oracle.DatabaseError:
         # table may not exist on the first run; ignore
         pass
-    cur.execute(f"CREATE TABLE {_TABLE} (id NUMBER, name VARCHAR2(40))")
+    # Include a NUMBER(p,s) column: it decodes to Decimal, the case where
+    # fetch_df's Arrow build benefits most from explicit typing (#190).
+    cur.execute(
+        f"CREATE TABLE {_TABLE} (id NUMBER, name VARCHAR2(40), price NUMBER(10,2))")
 
 
 def bench_insert(scale):
@@ -81,8 +84,8 @@ def bench_insert(scale):
         cur = conn.cursor()
         for i in range(min(scale, 2000)):
             try:
-                cur.execute(f"INSERT INTO {_TABLE} VALUES (:1, :2)",
-                            [i, f"row{i}"])
+                cur.execute(f"INSERT INTO {_TABLE} VALUES (:1, :2, :3)",
+                            [i, f"row{i}", i])
                 done += 1
             except oracle.DatabaseError as exc:
                 if getattr(exc, "code", None) != 1000:
@@ -97,9 +100,9 @@ def bench_executemany(conn, scale):
     cur = conn.cursor()
     cur.execute(f"DELETE FROM {_TABLE}")
     conn.commit()
-    rows = [(i, f"row{i}") for i in range(scale)]
+    rows = [(i, f"row{i}", i) for i in range(scale)]
     start = time.perf_counter()
-    cur.executemany(f"INSERT INTO {_TABLE} VALUES (:1, :2)", rows)
+    cur.executemany(f"INSERT INTO {_TABLE} VALUES (:1, :2, :3)", rows)
     conn.commit()
     _report("executemany", scale, time.perf_counter() - start)
 
@@ -108,7 +111,7 @@ def bench_fetch(conn, scale):
     cur = conn.cursor()
     start = time.perf_counter()
     cur.execute(
-        f"SELECT id, name FROM {_TABLE} "
+        f"SELECT id, name, price FROM {_TABLE} "
         f"WHERE ROWNUM <= {scale} ORDER BY id")
     rows = cur.fetchall()
     _report("fetchall (tuples)", len(rows), time.perf_counter() - start)
@@ -118,7 +121,7 @@ def bench_fetch_df(conn, scale):
     cur = conn.cursor()
     start = time.perf_counter()
     cur.execute(
-        f"SELECT id, name FROM {_TABLE} "
+        f"SELECT id, name, price FROM {_TABLE} "
         f"WHERE ROWNUM <= {scale} ORDER BY id")
     table = cur.fetch_df_all()
     _report("fetch_df_all (arrow)", table.num_rows,
