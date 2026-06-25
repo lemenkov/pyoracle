@@ -1,6 +1,11 @@
 Entries are sorted chronologically from oldest to youngest within each release,
 releases are sorted from youngest to oldest.
 
+version 1.10.1:
+- SODA: save() / saveAndGet() upsert (#212)
+- SODA: streaming getCursor() for unbounded result sets (#213)
+- SODA: read document content larger than 32767 bytes (#211)
+
 version 1.10.0:
 - DB-charset-aware string encoding; national-charset (NCHAR/NVARCHAR) bind types (#174)
 - Arrow fetch: explicit column types from the describe, skipping pyarrow inference (#190)

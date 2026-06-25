@@ -145,9 +145,11 @@ What works:
 - SODA (Simple Oracle Document Access), 18c+: `conn.getSodaDatabase()`
   returns a `SodaDatabase` for JSON document collections —
   `createCollection` / `openCollection` / `getCollectionNames`, document
-  `insertOne` / `insertOneAndGet` / `insertMany`, query-by-example
+  `insertOne` / `insertOneAndGet` / `insertMany`, upsert `save` /
+  `saveAndGet`, query-by-example
   `find().filter(...).getDocuments()` / `getOne()` / `count()` /
-  `skip` / `limit`, `replaceOne` / `replaceOneAndGet` / `remove`, and
+  `skip` / `limit` and streaming `getCursor()`,
+  `replaceOne` / `replaceOneAndGet` / `remove`, and
   `createIndex` / `dropIndex` / `getDataGuide`. Built on `DBMS_SODA`.
   Sync and async
 
@@ -185,7 +187,7 @@ live 11g, 21c and 23ai; 10g and 9i are validated locally, and 12c–19c share th
 | **Array DML** — `executemany`, `getbatcherrors`, `getarraydmlrowcounts` (12.1+) | ✅ |
 | **Result handling** — large-result `TTI_FETCH` drain, server-side scrollable cursors (`scroll()`, with a client-buffered fallback), `rowfactory`, `lastrowid` | ✅ |
 | **Arrow / DataFrame fetch** — `cursor.fetch_df_all` / `fetch_df_batches` (pyarrow `Table` / record batches) | ✅ |
-| **SODA** — document store over `DBMS_SODA`: collections, documents, query-by-example, insert / read / update / delete / bulk, indexing + data guide (18c+) | ✅ |
+| **SODA** — document store over `DBMS_SODA`: collections, documents, query-by-example (with streaming), insert / read / upsert / update / delete / bulk, indexing + data guide (18c+) | ✅ |
 | **Connection** — pool (warm sessions + idle health-check), statement cache, `changepassword`, TLS | ✅ |
 | **Authentication** — O3LOGON (8i / 9i) and O5LOGON (10g+, 128 / 192 / 256-bit) | ✅ |
 | **Async** — full `asyncio` API (connection, cursor, pool) at parity with the sync API | ✅ |
