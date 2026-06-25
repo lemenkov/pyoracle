@@ -62,16 +62,42 @@ _INSERT_ONE_AND_GET = (
     "media_type => :mt); r := c.insert_one_and_get(d); "
     ":rkey := r.get_key(); :rver := r.get_version(); :rmt := r.get_media_type();"
     " :rcreated := r.get_created_on; :rmodified := r.get_last_modified; END;")
-_GET_ONE = (
-    "DECLARE c SODA_COLLECTION_T; d SODA_DOCUMENT_T; b BLOB; BEGIN "
-    "c := DBMS_SODA.open_collection(:name); "
-    "d := c.find().key(:key).get_one(); "
-    "IF d IS NULL THEN :missing := 1; ELSE :missing := 0; "
-    "b := d.get_blob(); :clen := DBMS_LOB.GETLENGTH(b); "
-    ":content := DBMS_LOB.SUBSTR(b, 32767, 1); "
-    ":rkey := d.get_key(); :rver := d.get_version(); :rmt := d.get_media_type();"
-    " :rcreated := d.get_created_on; :rmodified := d.get_last_modified; "
-    "END IF; END;")
+# A SODA_OPERATION_T built from the optional terms the SodaOperation carries —
+# key, QBE filter, skip, limit (each applied only when set). Shared by getOne /
+# getDocuments / count (#201). NB: a SODA cursor type is SODA_CURSOR_T.
+_OP_BUILD = (
+    "op := c.find(); "
+    "IF :key IS NOT NULL THEN op := op.key(:key); END IF; "
+    "IF :filter IS NOT NULL THEN op := op.filter(:filter); END IF; "
+    "IF :skip > 0 THEN op := op.skip(:skip); END IF; "
+    "IF :lim > 0 THEN op := op.limit(:lim); END IF; ")
+# NB getOne does NOT use SODA's op.get_one(): with a bind-variable filter that
+# method returns a stale result on a repeated call (it caches the first call's
+# filter), whereas op.get_cursor() re-evaluates correctly. So getOne runs the
+# cursor path with a limit of 1 and takes the first row — which also matches
+# oracledb's "first matching document" semantics.
+# count() takes only key/filter — SODA rejects it alongside skip/limit.
+_COUNT = (
+    "DECLARE c SODA_COLLECTION_T; op SODA_OPERATION_T; BEGIN "
+    "c := DBMS_SODA.open_collection(:name); op := c.find(); "
+    "IF :key IS NOT NULL THEN op := op.key(:key); END IF; "
+    "IF :filter IS NOT NULL THEN op := op.filter(:filter); END IF; "
+    ":n := op.count(); END;")
+_GET_DOCS = (
+    "DECLARE c SODA_COLLECTION_T; op SODA_OPERATION_T; cur SODA_CURSOR_T; "
+    "d SODA_DOCUMENT_T; b BLOB; i PLS_INTEGER := 0; BEGIN "
+    "c := DBMS_SODA.open_collection(:name); " + _OP_BUILD +
+    "cur := op.get_cursor(); "
+    "WHILE cur.has_next() AND i < :cap LOOP d := cur.next(); i := i + 1; "
+    "b := d.get_blob(); :keys(i) := d.get_key(); "
+    ":clens(i) := DBMS_LOB.GETLENGTH(b); "
+    ":contents(i) := DBMS_LOB.SUBSTR(b, 32767, 1); "
+    ":vers(i) := d.get_version(); :mts(i) := d.get_media_type(); "
+    ":creates(i) := d.get_created_on; :mods(i) := d.get_last_modified; END LOOP; "
+    ":num := i; :overflow := CASE WHEN cur.has_next() THEN 1 ELSE 0 END; END;")
+# getDocuments() materialises into host arrays, so it needs a capacity. With no
+# limit set, cap at this many and raise on overflow rather than truncate.
+_DEFAULT_FETCH_CAP = 1000
 
 
 def _names_query(start_name, limit):
@@ -104,6 +130,15 @@ def _norm_metadata(metadata):
     if isinstance(metadata, (dict, list)):
         return json.dumps(metadata)
     return metadata
+
+
+def _norm_filter(qbe):
+    # A QBE filter as a JSON string: dict/list -> serialised, str -> as-is.
+    if qbe is None:
+        return None
+    if isinstance(qbe, (dict, list)):
+        return json.dumps(qbe)
+    return qbe
 
 
 def _encode_content(content) -> bytes:
@@ -181,29 +216,71 @@ def _content_or_raise(content, length):
 # --------------------------------------------------------------------------
 
 class SodaOperation:
-    """A SODA read operation builder (#200): `collection.find()` returns one;
-    chain a terminal like `.key(k).getOne()`. QBE filters / counts / multi-doc
-    reads extend this in the #163 follow-ups."""
+    """A SODA read operation builder (#200, #201): `collection.find()` returns
+    one; chain terms — `.key(k)`, `.filter(qbe)`, `.skip(n)`, `.limit(n)` — and a
+    terminal — `.getOne()`, `.getDocuments()`, `.count()`."""
 
     def __init__(self, collection: "SodaCollection"):
         self._collection = collection
         self._connection = collection._connection
         self._key = None
+        self._filter = None
+        self._skip = 0
+        self._limit = 0
 
     def key(self, value: str) -> "SodaOperation":
         self._key = value
         return self
 
+    def filter(self, value) -> "SodaOperation":
+        """Restrict to documents matching a QBE filter (a dict or JSON
+        string)."""
+        self._filter = _norm_filter(value)
+        return self
+
+    def skip(self, n: int) -> "SodaOperation":
+        self._skip = n
+        return self
+
+    def limit(self, n: int) -> "SodaOperation":
+        self._limit = n
+        return self
+
+    def _in_binds(self) -> dict:
+        return {"name": self._collection.name, "key": self._key,
+                "filter": self._filter, "skip": self._skip, "lim": self._limit}
+
     def getOne(self) -> "SodaDocument | None":
-        """The single document matched by `.key(...)`, or None if there is
-        none."""
+        """The first matched document, or None if there is none."""
         cur = self._connection.cursor()
-        b = _new_doc_out_binds(cur)
-        b.update({"name": self._collection.name, "key": self._key})
-        cur.execute(_GET_ONE, b)
-        if b["missing"].getvalue():
-            return None
-        return _doc_from_binds(b, with_content=True)
+        b = _new_docs_array_binds(cur, 1)
+        binds = self._in_binds()
+        binds["lim"] = 1               # one row; see the note by the templates
+        b.update(binds)
+        b["cap"] = 1
+        cur.execute(_GET_DOCS, b)
+        docs = _docs_from_arrays(b)
+        return docs[0] if docs else None
+
+    def count(self) -> int:
+        """The number of documents matched by `.key(...)` / `.filter(...)`."""
+        cur = self._connection.cursor()
+        n = cur.var(DB_TYPE_NUMBER)
+        cur.execute(_COUNT, {"name": self._collection.name, "key": self._key,
+                             "filter": self._filter, "n": n})
+        return int(n.getvalue())
+
+    def getDocuments(self) -> "list[SodaDocument]":
+        """Every matched document. Without `.limit(...)` this materialises up to
+        a fixed cap and raises if more match, rather than truncating."""
+        cur = self._connection.cursor()
+        cap = self._limit if self._limit else _DEFAULT_FETCH_CAP
+        b = _new_docs_array_binds(cur, cap)
+        b.update(self._in_binds())
+        b["cap"] = cap
+        cur.execute(_GET_DOCS, b)
+        _check_fetch_overflow(b, cap)
+        return _docs_from_arrays(b)
 
 
 class SodaCollection:
@@ -338,30 +415,107 @@ def _doc_from_binds(b: dict, with_content: bool) -> SodaDocument:
         lastModified=b["rmodified"].getvalue())
 
 
+def _new_docs_array_binds(cur, cap: int) -> dict:
+    # The OUT host arrays the getDocuments cursor loop fills (one element per
+    # document) plus the row count and the overflow flag.
+    return {
+        "keys": cur.arrayvar(DB_TYPE_VARCHAR, cap),
+        "contents": cur.arrayvar(DB_TYPE_RAW, cap),
+        "clens": cur.arrayvar(DB_TYPE_NUMBER, cap),
+        "vers": cur.arrayvar(DB_TYPE_VARCHAR, cap),
+        "mts": cur.arrayvar(DB_TYPE_VARCHAR, cap),
+        "creates": cur.arrayvar(DB_TYPE_VARCHAR, cap),
+        "mods": cur.arrayvar(DB_TYPE_VARCHAR, cap),
+        "num": cur.var(DB_TYPE_NUMBER),
+        "overflow": cur.var(DB_TYPE_NUMBER),
+    }
+
+
+def _check_fetch_overflow(b: dict, cap: int) -> None:
+    if b["overflow"].getvalue():
+        raise NotSupportedError(
+            f"more than {cap} documents match; set .limit() to bound the result "
+            f"(streaming getCursor is a follow-up)")
+
+
+def _docs_from_arrays(b: dict) -> list:
+    n = int(b["num"].getvalue())
+    keys, contents = b["keys"].getvalue(), b["contents"].getvalue()
+    clens, vers = b["clens"].getvalue(), b["vers"].getvalue()
+    mts, creates, mods = (b["mts"].getvalue(), b["creates"].getvalue(),
+                          b["mods"].getvalue())
+    docs = []
+    for i in range(n):
+        docs.append(SodaDocument(
+            content=_content_or_raise(contents[i], clens[i]), key=keys[i],
+            version=vers[i], mediaType=mts[i] or _DEFAULT_MEDIA_TYPE,
+            createdOn=creates[i], lastModified=mods[i]))
+    return docs
+
+
 # --------------------------------------------------------------------------
 # Async (mirrors the sync surface; same PL/SQL, awaited)
 # --------------------------------------------------------------------------
 
 class AsyncSodaOperation:
-    """Async counterpart to `SodaOperation` (#200)."""
+    """Async counterpart to `SodaOperation` (#200, #201)."""
 
     def __init__(self, collection: "AsyncSodaCollection"):
         self._collection = collection
         self._connection = collection._connection
         self._key = None
+        self._filter = None
+        self._skip = 0
+        self._limit = 0
 
     def key(self, value: str) -> "AsyncSodaOperation":
         self._key = value
         return self
 
+    def filter(self, value) -> "AsyncSodaOperation":
+        self._filter = _norm_filter(value)
+        return self
+
+    def skip(self, n: int) -> "AsyncSodaOperation":
+        self._skip = n
+        return self
+
+    def limit(self, n: int) -> "AsyncSodaOperation":
+        self._limit = n
+        return self
+
+    def _in_binds(self) -> dict:
+        return {"name": self._collection.name, "key": self._key,
+                "filter": self._filter, "skip": self._skip, "lim": self._limit}
+
     async def getOne(self) -> "SodaDocument | None":
         cur = self._connection.cursor()
-        b = _new_doc_out_binds(cur)
-        b.update({"name": self._collection.name, "key": self._key})
-        await cur.execute(_GET_ONE, b)
-        if b["missing"].getvalue():
-            return None
-        return _doc_from_binds(b, with_content=True)
+        b = _new_docs_array_binds(cur, 1)
+        binds = self._in_binds()
+        binds["lim"] = 1
+        b.update(binds)
+        b["cap"] = 1
+        await cur.execute(_GET_DOCS, b)
+        docs = _docs_from_arrays(b)
+        return docs[0] if docs else None
+
+    async def count(self) -> int:
+        cur = self._connection.cursor()
+        n = cur.var(DB_TYPE_NUMBER)
+        await cur.execute(_COUNT, {"name": self._collection.name,
+                                   "key": self._key, "filter": self._filter,
+                                   "n": n})
+        return int(n.getvalue())
+
+    async def getDocuments(self) -> "list[SodaDocument]":
+        cur = self._connection.cursor()
+        cap = self._limit if self._limit else _DEFAULT_FETCH_CAP
+        b = _new_docs_array_binds(cur, cap)
+        b.update(self._in_binds())
+        b["cap"] = cap
+        await cur.execute(_GET_DOCS, b)
+        _check_fetch_overflow(b, cap)
+        return _docs_from_arrays(b)
 
 
 class AsyncSodaCollection:

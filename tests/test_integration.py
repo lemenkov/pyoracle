@@ -2292,6 +2292,37 @@ class SodaIntegration(_IntegrationBase):
         with self.assertRaises(oracle.NotSupportedError):
             col.find().key(saved.key).getOne()   # read guards against truncation
 
+    def test_qbe_find(self):
+        col = self.soda.createCollection("it_qbe")
+        for age in (20, 25, 30, 35, 40):
+            col.insertOne({"age": age})
+        self.assertEqual(col.find().count(), 5)
+        F = {"age": {"$gte": 30}}
+        self.assertEqual(col.find().filter(F).count(), 3)
+        ages = sorted(d.getContent()["age"]
+                      for d in col.find().filter(F).getDocuments())
+        self.assertEqual(ages, [30, 35, 40])
+        # getOne with a filter; a repeated call must re-evaluate the filter
+        # (regression: SODA's get_one() caches a bind filter, so getOne runs the
+        # cursor path).
+        self.assertEqual(
+            col.find().filter({"age": 25}).getOne().getContent()["age"], 25)
+        self.assertIsNone(col.find().filter({"age": 999}).getOne())
+        self.assertEqual(len(col.find().limit(2).getDocuments()), 2)
+
+    def test_getdocuments_overflow_guard(self):
+        col = self.soda.createCollection("it_over")
+        for i in range(5):
+            col.insertOne({"i": i})
+        import oracle.soda as _soda
+        saved = _soda._DEFAULT_FETCH_CAP
+        _soda._DEFAULT_FETCH_CAP = 2          # force overflow without a .limit()
+        try:
+            with self.assertRaises(oracle.NotSupportedError):
+                col.find().getDocuments()
+        finally:
+            _soda._DEFAULT_FETCH_CAP = saved
+
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class SqlDomainIntegration(_IntegrationBase):
@@ -3187,6 +3218,12 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(got.getContent()["x"], 1)
             self.assertIsNone(
                 await col.find().key("AABBCCDDEEFF00112233445566").getOne())
+            # QBE on the async path (#201)
+            await col.insertOne({"x": 2})
+            self.assertEqual(await col.find().filter({"x": {"$gte": 1}}).count(), 2)
+            docs = await col.find().filter({"x": 2}).getDocuments()
+            self.assertEqual([d.getContent()["x"] for d in docs], [2])
+            self.assertIsNone(await col.find().filter({"x": 999}).getOne())
             self.assertTrue(await col.drop())
             self.assertFalse(await col.drop())
 

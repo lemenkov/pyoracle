@@ -9,7 +9,7 @@ import unittest
 from oracle.exceptions import NotSupportedError
 from oracle.soda import (SodaDocument, _check_soda_supported, _content_or_raise,
                          _doc_to_bind, _encode_content, _names_query,
-                         _norm_metadata)
+                         _norm_filter, _norm_metadata)
 
 
 class _FakeConn:
@@ -82,6 +82,12 @@ class TestSodaDocument(unittest.TestCase):
         key, content, mt = _doc_to_bind({"a": 1})
         self.assertIsNone(key)
         self.assertEqual((content, mt), (b'{"a": 1}', "application/json"))
+
+    def test_norm_filter(self):
+        self.assertIsNone(_norm_filter(None))
+        self.assertEqual(_norm_filter({"age": {"$gte": 30}}),
+                         '{"age": {"$gte": 30}}')           # dict -> JSON
+        self.assertEqual(_norm_filter('{"a":1}'), '{"a":1}')   # str passthrough
 
     def test_content_read_limit(self):
         # bytes within the inline limit pass through; over it raises rather than
