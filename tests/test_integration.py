@@ -2351,6 +2351,32 @@ class SodaIntegration(_IntegrationBase):
         self.assertEqual(col.find().key(k).remove(), 1)
         self.assertEqual(col.find().count(), 2)
 
+    def test_indexing_and_data_guide(self):
+        col = self.soda.createCollection("it_idx")
+        for age in (20, 30, 40):
+            col.insertOne({"name": "u", "age": age})
+        # no data-guide index yet -> None (not an error)
+        self.assertIsNone(col.getDataGuide())
+        # functional index, dropped by name (present then absent)
+        col.createIndex({"name": "IT_IDX_AGE",
+                         "fields": [{"path": "age", "datatype": "number"}]})
+        self.assertTrue(col.dropIndex("IT_IDX_AGE"))
+        self.assertFalse(col.dropIndex("IT_IDX_AGE"))
+        # data-guide search index -> getDataGuide returns the structure. The
+        # JSON search indextype needs Oracle Text, which 21c XE lacks (ORA-29833),
+        # so only assert the data guide where it can be built.
+        try:
+            col.createIndex({"name": "IT_SIDX", "dataguide": "on",
+                             "search_on": "text_value"})
+        except oracle.DatabaseError as exc:
+            if getattr(exc, "code", None) == 29833:
+                self.skipTest("JSON search index needs Oracle Text (absent on "
+                              "21c XE)")
+            raise
+        dg = col.getDataGuide().getContent()
+        self.assertEqual(dg["type"], "object")
+        self.assertIn("age", dg["properties"])
+
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class SqlDomainIntegration(_IntegrationBase):
@@ -3258,6 +3284,11 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
             g = await col.find().key(saved.key).replaceOneAndGet({"x": 6})
             self.assertEqual(g.key, saved.key)
             self.assertEqual(await col.find().key(saved.key).remove(), 1)
+            # indexing + data guide on the async path (#203)
+            self.assertIsNone(await col.getDataGuide())
+            await col.createIndex({"name": "AIDX",
+                                   "fields": [{"path": "x", "datatype": "number"}]})
+            self.assertTrue(await col.dropIndex("AIDX"))
             self.assertTrue(await col.drop())
             self.assertFalse(await col.drop())
 
