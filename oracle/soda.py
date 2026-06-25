@@ -27,7 +27,11 @@ large-content reads are a follow-up.
 import json
 
 from oracle.datatypes import DB_TYPE_NUMBER, DB_TYPE_RAW, DB_TYPE_VARCHAR
-from oracle.exceptions import NotSupportedError
+from oracle.exceptions import DatabaseError, NotSupportedError
+
+# get_data_guide raises this when the collection has no data-guide-enabled
+# search index; oracledb returns None in that case, so we map it.
+_ORA_NO_DATA_GUIDE = 40582
 
 # DBMS_SODA / SODA shipped in Oracle 18c (server major version 18).
 _SODA_MIN_MAJOR = 18
@@ -125,6 +129,22 @@ _INSERT_MANY = (
     "c := DBMS_SODA.open_collection(:name); "
     "FOR i IN 1..:cnt LOOP d := SODA_DOCUMENT_T(b_content => :contents(i)); "
     "n := c.insert_one(d); END LOOP; END;")
+# Indexing + data guide (#203). create_index / drop_index are functions (1 =
+# created / dropped); get_data_guide returns a CLOB (the data-guide JSON) or
+# NULL when the collection has no data-guide-enabled search index.
+_CREATE_INDEX = (
+    "DECLARE c SODA_COLLECTION_T; res NUMBER; BEGIN "
+    "c := DBMS_SODA.open_collection(:name); res := c.create_index(:spec); END;")
+_DROP_INDEX = (
+    "DECLARE c SODA_COLLECTION_T; res NUMBER; BEGIN "
+    "c := DBMS_SODA.open_collection(:name); res := c.drop_index(:ix_name); "
+    ":dropped := res; END;")
+_GET_DATA_GUIDE = (
+    "DECLARE c SODA_COLLECTION_T; cl CLOB; BEGIN "
+    "c := DBMS_SODA.open_collection(:name); cl := c.get_data_guide(); "
+    "IF cl IS NULL THEN :missing := 1; ELSE :missing := 0; "
+    ":clen := DBMS_LOB.GETLENGTH(cl); :content := DBMS_LOB.SUBSTR(cl, 32767, 1);"
+    " END IF; END;")
 
 
 def _names_query(start_name, limit):
@@ -224,6 +244,21 @@ def _doc_to_bind(doc) -> tuple:
     if isinstance(doc, SodaDocument):
         return doc.key, _encode_content(doc._content), doc.mediaType
     return None, _encode_content(doc), _DEFAULT_MEDIA_TYPE
+
+
+def _data_guide_doc(b: dict):
+    # Build the getDataGuide result: None when there is no data guide, else a
+    # SodaDocument holding the (text) data-guide JSON. Guards the same 32767-char
+    # inline read limit as document content.
+    if b["missing"].getvalue():
+        return None
+    text = b["content"].getvalue()
+    length = b["clen"].getvalue()
+    if length and int(length) > _MAX_INLINE:
+        raise NotSupportedError(
+            f"data guide is {int(length)} characters; reading over "
+            f"{_MAX_INLINE} is not yet supported")
+    return SodaDocument(content=text.encode("utf-8") if text else None)
 
 
 def _content_or_raise(content, length):
@@ -410,6 +445,35 @@ class SodaCollection:
         arr = cur.arrayvar(DB_TYPE_RAW, contents)
         cur.execute(_INSERT_MANY,
                     {"name": self.name, "cnt": len(contents), "contents": arr})
+
+    def createIndex(self, spec) -> None:
+        """Create an index on the collection from a spec (a dict or JSON
+        string)."""
+        cur = self._connection.cursor()
+        cur.execute(_CREATE_INDEX,
+                    {"name": self.name, "spec": _norm_metadata(spec)})
+
+    def dropIndex(self, name: str) -> bool:
+        """Drop a named index. Returns True if one was dropped."""
+        cur = self._connection.cursor()
+        dropped = cur.var(DB_TYPE_NUMBER)
+        cur.execute(_DROP_INDEX,
+                    {"name": self.name, "ix_name": name, "dropped": dropped})
+        return bool(dropped.getvalue())
+
+    def getDataGuide(self) -> "SodaDocument | None":
+        """The collection's data guide as a `SodaDocument`, or None if it has no
+        data-guide-enabled search index."""
+        cur = self._connection.cursor()
+        b = {"name": self.name, "content": cur.var(DB_TYPE_VARCHAR),
+             "clen": cur.var(DB_TYPE_NUMBER), "missing": cur.var(DB_TYPE_NUMBER)}
+        try:
+            cur.execute(_GET_DATA_GUIDE, b)
+        except DatabaseError as exc:
+            if getattr(exc, "code", None) == _ORA_NO_DATA_GUIDE:
+                return None
+            raise
+        return _data_guide_doc(b)
 
     def find(self) -> SodaOperation:
         """Begin a read operation (chain `.key(k).getOne()`)."""
@@ -676,6 +740,31 @@ class AsyncSodaCollection:
         await cur.execute(_INSERT_MANY,
                           {"name": self.name, "cnt": len(contents),
                            "contents": arr})
+
+    async def createIndex(self, spec) -> None:
+        cur = self._connection.cursor()
+        await cur.execute(_CREATE_INDEX,
+                          {"name": self.name, "spec": _norm_metadata(spec)})
+
+    async def dropIndex(self, name: str) -> bool:
+        cur = self._connection.cursor()
+        dropped = cur.var(DB_TYPE_NUMBER)
+        await cur.execute(_DROP_INDEX,
+                          {"name": self.name, "ix_name": name,
+                           "dropped": dropped})
+        return bool(dropped.getvalue())
+
+    async def getDataGuide(self) -> "SodaDocument | None":
+        cur = self._connection.cursor()
+        b = {"name": self.name, "content": cur.var(DB_TYPE_VARCHAR),
+             "clen": cur.var(DB_TYPE_NUMBER), "missing": cur.var(DB_TYPE_NUMBER)}
+        try:
+            await cur.execute(_GET_DATA_GUIDE, b)
+        except DatabaseError as exc:
+            if getattr(exc, "code", None) == _ORA_NO_DATA_GUIDE:
+                return None
+            raise
+        return _data_guide_doc(b)
 
     def find(self) -> AsyncSodaOperation:
         return AsyncSodaOperation(self)
