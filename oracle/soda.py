@@ -345,17 +345,43 @@ class SodaOperation:
                              "filter": self._filter, "n": n})
         return int(n.getvalue())
 
+    def _run_get_docs(self, skip: int, lim: int, cap: int) -> dict:
+        cur = self._connection.cursor()
+        b = _new_docs_array_binds(cur, cap)
+        b.update({"name": self._collection.name, "key": self._key,
+                  "filter": self._filter, "skip": skip, "lim": lim, "cap": cap})
+        cur.execute(_GET_DOCS, b)
+        return b
+
     def getDocuments(self) -> "list[SodaDocument]":
         """Every matched document. Without `.limit(...)` this materialises up to
-        a fixed cap and raises if more match, rather than truncating."""
-        cur = self._connection.cursor()
+        a fixed cap and raises if more match, rather than truncating; use
+        `getCursor()` to stream without a cap."""
         cap = self._limit if self._limit else _DEFAULT_FETCH_CAP
-        b = _new_docs_array_binds(cur, cap)
-        b.update(self._in_binds())
-        b["cap"] = cap
-        cur.execute(_GET_DOCS, b)
+        b = self._run_get_docs(self._skip, self._limit, cap)
         _check_fetch_overflow(b, cap)
         return _docs_from_arrays(b)
+
+    def getCursor(self, batchSize: int = 100):
+        """Stream the matched documents in batches of `batchSize` (offset
+        pagination), so an arbitrarily large result set fetches without the
+        getDocuments cap. Returns an iterator of SodaDocument; honours `skip` /
+        `limit` if set."""
+        batch = max(1, batchSize)
+        yielded, offset = 0, 0
+        while True:
+            if self._limit and yielded >= self._limit:
+                return
+            lim = batch if not self._limit else min(batch, self._limit - yielded)
+            docs = _docs_from_arrays(
+                self._run_get_docs(self._skip + offset, lim, batch))
+            if not docs:
+                return
+            yield from docs
+            yielded += len(docs)
+            offset += len(docs)
+            if len(docs) < lim:               # short batch -> end of result set
+                return
 
     def replaceOne(self, doc) -> bool:
         """Replace the matched document's content. Returns True if one was
@@ -675,15 +701,39 @@ class AsyncSodaOperation:
                                    "n": n})
         return int(n.getvalue())
 
-    async def getDocuments(self) -> "list[SodaDocument]":
+    async def _run_get_docs(self, skip: int, lim: int, cap: int) -> dict:
         cur = self._connection.cursor()
-        cap = self._limit if self._limit else _DEFAULT_FETCH_CAP
         b = _new_docs_array_binds(cur, cap)
-        b.update(self._in_binds())
-        b["cap"] = cap
+        b.update({"name": self._collection.name, "key": self._key,
+                  "filter": self._filter, "skip": skip, "lim": lim, "cap": cap})
         await cur.execute(_GET_DOCS, b)
+        return b
+
+    async def getDocuments(self) -> "list[SodaDocument]":
+        cap = self._limit if self._limit else _DEFAULT_FETCH_CAP
+        b = await self._run_get_docs(self._skip, self._limit, cap)
         _check_fetch_overflow(b, cap)
         return _docs_from_arrays(b)
+
+    async def getCursor(self, batchSize: int = 100):
+        """Async streaming counterpart to the sync `getCursor`: `async for doc in
+        op.getCursor(): ...`."""
+        batch = max(1, batchSize)
+        yielded, offset = 0, 0
+        while True:
+            if self._limit and yielded >= self._limit:
+                return
+            lim = batch if not self._limit else min(batch, self._limit - yielded)
+            docs = _docs_from_arrays(
+                await self._run_get_docs(self._skip + offset, lim, batch))
+            if not docs:
+                return
+            for doc in docs:
+                yield doc
+            yielded += len(docs)
+            offset += len(docs)
+            if len(docs) < lim:
+                return
 
     async def replaceOne(self, doc) -> bool:
         _, content, _ = _doc_to_bind(doc)

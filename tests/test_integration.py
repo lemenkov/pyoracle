@@ -2366,6 +2366,22 @@ class SodaIntegration(_IntegrationBase):
         self.assertEqual(col.find().key(g.key).getOne().getContent()["v"], 99)
         self.assertEqual(col.find().count(), 2)
 
+    def test_streaming_getcursor(self):
+        col = self.soda.createCollection("it_cur")
+        for i in range(25):
+            col.insertOne({"i": i})
+        # streams every document exactly once across batches (no dup / skip)
+        got = [d.getContent()["i"] for d in col.find().getCursor(batchSize=10)]
+        self.assertEqual(sorted(got), list(range(25)))
+        self.assertEqual(len(got), len(set(got)))
+        # honours filter and limit
+        self.assertEqual(
+            sorted(d.getContent()["i"] for d in col.find()
+                   .filter({"i": {"$gte": 20}}).getCursor(batchSize=2)),
+            [20, 21, 22, 23, 24])
+        self.assertEqual(len(list(col.find().limit(7).getCursor(batchSize=3))), 7)
+        self.assertEqual(list(col.find().filter({"i": 999}).getCursor()), [])
+
     def test_indexing_and_data_guide(self):
         col = self.soda.createCollection("it_idx")
         for age in (20, 30, 40):
@@ -3305,6 +3321,13 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sg2.key, sg.key)
             self.assertEqual(
                 (await col.find().key(sg.key).getOne()).getContent()["y"], 2)
+            # streaming getCursor on the async path (#213)
+            for i in range(6):
+                await col.insertOne({"z": i})
+            streamed = [d async for d in
+                        col.find().filter({"z": {"$exists": True}})
+                        .getCursor(batchSize=2)]
+            self.assertEqual(len(streamed), 6)
             # indexing + data guide on the async path (#203)
             self.assertIsNone(await col.getDataGuide())
             await col.createIndex({"name": "AIDX",
