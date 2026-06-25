@@ -2351,6 +2351,21 @@ class SodaIntegration(_IntegrationBase):
         self.assertEqual(col.find().key(k).remove(), 1)
         self.assertEqual(col.find().count(), 2)
 
+    def test_save_upsert(self):
+        col = self.soda.createCollection("it_save")
+        # save without a key inserts
+        col.save({"v": 1})
+        self.assertEqual(col.find().count(), 1)
+        # saveAndGet returns the stored document
+        g = col.saveAndGet(self.soda.createDocument({"v": 2}))
+        self.assertTrue(g.key)
+        self.assertEqual(col.find().count(), 2)
+        # saving a document with an existing key replaces it (count unchanged)
+        g2 = col.saveAndGet(self.soda.createDocument({"v": 99}, key=g.key))
+        self.assertEqual(g2.key, g.key)
+        self.assertEqual(col.find().key(g.key).getOne().getContent()["v"], 99)
+        self.assertEqual(col.find().count(), 2)
+
     def test_indexing_and_data_guide(self):
         col = self.soda.createCollection("it_idx")
         for age in (20, 30, 40):
@@ -3284,6 +3299,12 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
             g = await col.find().key(saved.key).replaceOneAndGet({"x": 6})
             self.assertEqual(g.key, saved.key)
             self.assertEqual(await col.find().key(saved.key).remove(), 1)
+            # save upsert on the async path (#212)
+            sg = await col.saveAndGet(soda.createDocument({"y": 1}))
+            sg2 = await col.saveAndGet(soda.createDocument({"y": 2}, key=sg.key))
+            self.assertEqual(sg2.key, sg.key)
+            self.assertEqual(
+                (await col.find().key(sg.key).getOne()).getContent()["y"], 2)
             # indexing + data guide on the async path (#203)
             self.assertIsNone(await col.getDataGuide())
             await col.createIndex({"name": "AIDX",
