@@ -129,6 +129,19 @@ _INSERT_MANY = (
     "c := DBMS_SODA.open_collection(:name); "
     "FOR i IN 1..:cnt LOOP d := SODA_DOCUMENT_T(b_content => :contents(i)); "
     "n := c.insert_one(d); END LOOP; END;")
+# save() is an upsert by key. DBMS_SODA's native save is ORA-03001
+# "unimplemented feature" in thin mode, so emulate it: replace the document
+# with that key if one exists, else insert. Returns the resulting document's
+# key / version / metadata (the saveAndGet shape).
+_SAVE = (
+    "DECLARE c SODA_COLLECTION_T; d SODA_DOCUMENT_T; r SODA_DOCUMENT_T; BEGIN "
+    "c := DBMS_SODA.open_collection(:name); "
+    "d := SODA_DOCUMENT_T(key => :key, b_content => :content, media_type => :mt);"
+    " IF :key IS NOT NULL THEN r := c.find().key(:key).replace_one_and_get(d); "
+    "ELSE r := NULL; END IF; "
+    "IF r IS NULL THEN r := c.insert_one_and_get(d); END IF; "
+    ":rkey := r.get_key(); :rver := r.get_version(); :rmt := r.get_media_type();"
+    " :rcreated := r.get_created_on; :rmodified := r.get_last_modified; END;")
 # Indexing + data guide (#203). create_index / drop_index are functions (1 =
 # created / dropped); get_data_guide returns a CLOB (the data-guide JSON) or
 # NULL when the collection has no data-guide-enabled search index.
@@ -446,6 +459,24 @@ class SodaCollection:
         cur.execute(_INSERT_MANY,
                     {"name": self.name, "cnt": len(contents), "contents": arr})
 
+    def _save(self, doc) -> SodaDocument:
+        key, content, mt = _doc_to_bind(doc)
+        cur = self._connection.cursor()
+        b = _new_doc_out_binds(cur, content=False)
+        b.update({"name": self.name, "key": key, "content": content, "mt": mt})
+        cur.execute(_SAVE, b)
+        return _doc_from_binds(b, with_content=False)
+
+    def save(self, doc) -> None:
+        """Insert a document, or replace the existing one with the same key
+        (upsert)."""
+        self._save(doc)
+
+    def saveAndGet(self, doc) -> SodaDocument:
+        """Upsert like `save`, returning a `SodaDocument` with the resulting
+        key / version / metadata."""
+        return self._save(doc)
+
     def createIndex(self, spec) -> None:
         """Create an index on the collection from a spec (a dict or JSON
         string)."""
@@ -740,6 +771,20 @@ class AsyncSodaCollection:
         await cur.execute(_INSERT_MANY,
                           {"name": self.name, "cnt": len(contents),
                            "contents": arr})
+
+    async def _save(self, doc) -> SodaDocument:
+        key, content, mt = _doc_to_bind(doc)
+        cur = self._connection.cursor()
+        b = _new_doc_out_binds(cur, content=False)
+        b.update({"name": self.name, "key": key, "content": content, "mt": mt})
+        await cur.execute(_SAVE, b)
+        return _doc_from_binds(b, with_content=False)
+
+    async def save(self, doc) -> None:
+        await self._save(doc)
+
+    async def saveAndGet(self, doc) -> SodaDocument:
+        return await self._save(doc)
 
     async def createIndex(self, spec) -> None:
         cur = self._connection.cursor()
