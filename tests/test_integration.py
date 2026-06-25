@@ -3721,6 +3721,20 @@ class CallprocIntegration(_IntegrationBase):
         self.cur.callproc(self.PROC, [s])
         self.assertEqual(s.getvalue(), "pyoracle")
 
+    def test_null_scalar_out_bind(self):
+        # A NULL scalar OUT bind: the IOV return code is a variable-length int
+        # (ub4(-1) = 2 bytes for NULL vs one 0x00 byte for non-NULL), so a fixed
+        # 1-byte skip desynced the decoder (#205). A mix of NULL and non-NULL
+        # OUT binds in one block must all decode.
+        a, b, c = (self.cur.var(str) for _ in range(3))
+        self.cur.execute("BEGIN :1 := 'x'; :2 := NULL; :3 := 'z'; END;",
+                         [a, b, c])
+        self.assertEqual((a.getvalue(), b.getvalue(), c.getvalue()),
+                         ("x", None, "z"))
+        only = self.cur.var(str)
+        self.cur.execute("BEGIN :1 := NULL; END;", [only])
+        self.assertIsNone(only.getvalue())
+
     def test_execute_out_var(self):
         y = self.cur.var(oracle.NUMBER)
         self.cur.execute("BEGIN :y := 7 * 6; END;", [y])

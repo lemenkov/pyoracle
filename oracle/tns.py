@@ -613,12 +613,16 @@ def _read_iov(Data: bytes, Binds: list | None = None
                 Elements = []
                 for _ in range(Count):
                     (Val, Rest) = decode_dalc(Rest)
-                    Rest = Rest[1:]              # per-element indicator byte
+                    (_, Rest) = decode_ub4(Rest)  # per-element return code
                     Elements.append(b"" if Val == [] else bytes(Val))
                 OutValues.append({'_array': True, 'values': Elements})
             else:
                 (Val, Rest) = decode_dalc(Rest)
-                Rest = Rest[1:]                  # per-value indicator byte
+                # The per-value return code is a variable-length integer, not a
+                # fixed byte: a non-NULL value's code is ub4(0) = one 0x00 byte,
+                # but a NULL value's is ub4(-1) = 0x81 0x01 (two bytes). Skipping
+                # a fixed byte desynced the decoder on a NULL OUT bind.
+                (_, Rest) = decode_ub4(Rest)
                 OutValues.append(b"" if Val == [] else bytes(Val))
     return (Directions, OutValues, Rest)
 
