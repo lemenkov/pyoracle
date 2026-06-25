@@ -2262,6 +2262,36 @@ class SodaIntegration(_IntegrationBase):
             ":1 := c.find().count(); END;", [v])
         self.assertEqual(v.getvalue(), 0)
 
+    def test_document_insert_and_read(self):
+        col = self.soda.createCollection("it_docs")
+        # insertOneAndGet returns server-assigned key / version / media type
+        saved = col.insertOneAndGet(self.soda.createDocument({"name": "alice",
+                                                              "age": 30}))
+        self.assertTrue(saved.key)
+        self.assertTrue(saved.version)
+        self.assertEqual(saved.mediaType, "application/json")
+        self.assertIsNone(saved.getContentAsBytes())     # no content returned
+
+        # read it back by key -> content parsed as JSON
+        got = col.find().key(saved.key).getOne()
+        self.assertEqual(got.key, saved.key)
+        content = got.getContent()
+        self.assertEqual(content["name"], "alice")
+        self.assertEqual(content["age"], 30)
+        self.assertIsInstance(got.getContentAsString(), str)
+
+        # insertOne accepts a bare value; a valid-but-absent key reads as None
+        col.insertOne({"name": "bob"})
+        self.assertIsNone(col.find().key("AABBCCDDEEFF00112233445566").getOne())
+
+    def test_large_document_insert_and_read_guard(self):
+        col = self.soda.createCollection("it_big")
+        big = {"blob": "x" * 40000}              # > 32767-byte inline read limit
+        saved = col.insertOneAndGet(big)         # insert is fine (temp LOB)
+        self.assertTrue(saved.key)
+        with self.assertRaises(oracle.NotSupportedError):
+            col.find().key(saved.key).getOne()   # read guards against truncation
+
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class SqlDomainIntegration(_IntegrationBase):
@@ -3150,6 +3180,13 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
             self.assertIn("contentColumn", await col.get_metadata())
             self.assertEqual(await soda.getCollectionNames(), ["it_async"])
             self.assertIsNone(await soda.openCollection("no_such_coll"))
+            # document insert + read by key on the async path (#200)
+            saved = await col.insertOneAndGet(soda.createDocument({"x": 1}))
+            self.assertTrue(saved.key)
+            got = await col.find().key(saved.key).getOne()
+            self.assertEqual(got.getContent()["x"], 1)
+            self.assertIsNone(
+                await col.find().key("AABBCCDDEEFF00112233445566").getOne())
             self.assertTrue(await col.drop())
             self.assertFalse(await col.drop())
 
