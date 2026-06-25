@@ -8,14 +8,19 @@ No proprietary client libraries or SDKs are required.
 
 ## Status
 
-This project is in early development. The wire protocol is being
-reverse-engineered and implemented incrementally as a clean-room
-effort — see [`CONTRIBUTING.md`](CONTRIBUTING.md) for the rules
-contributors are expected to follow (no Oracle proprietary sources,
-no decompiled binaries, no copied error-message catalogs; public
-references and packet captures are fine).
+pyoracle is a functional pure-Python driver: the core DB-API 2.0 and SQL
+surface is stable, and it already covers async connection pooling, server-side
+scrollable cursors, 23ai types (JSON / `BOOLEAN` / `VECTOR`), and the SODA
+document store. It is usable for the features listed below; the feature matrix
+spells out what is and isn't supported.
 
-What works so far:
+The wire protocol is reverse-engineered and implemented incrementally as a
+clean-room effort — see [`CONTRIBUTING.md`](CONTRIBUTING.md) for the rules
+contributors are expected to follow (no Oracle proprietary sources, no
+decompiled binaries, no copied error-message catalogs; public references and
+packet captures are fine).
+
+What works:
 
 - TNS transport layer (packet framing, fragmentation, SDU negotiation)
 - TTC presentation layer (token encoding/decoding)
