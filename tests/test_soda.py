@@ -7,7 +7,7 @@
 import unittest
 
 from oracle.exceptions import NotSupportedError
-from oracle.soda import (SodaDocument, _check_soda_supported, _content_or_raise,
+from oracle.soda import (SodaDocument, _check_soda_supported,
                          _doc_to_bind, _encode_content, _names_query,
                          _norm_filter, _norm_metadata)
 
@@ -88,14 +88,6 @@ class TestSodaDocument(unittest.TestCase):
         self.assertEqual(_norm_filter({"age": {"$gte": 30}}),
                          '{"age": {"$gte": 30}}')           # dict -> JSON
         self.assertEqual(_norm_filter('{"a":1}'), '{"a":1}')   # str passthrough
-
-    def test_content_read_limit(self):
-        # bytes within the inline limit pass through; over it raises rather than
-        # silently truncating (#200).
-        self.assertEqual(_content_or_raise(b"abc", 3), b"abc")
-        self.assertIsNone(_content_or_raise(None, 0))
-        with self.assertRaises(NotSupportedError):
-            _content_or_raise(b"x" * 32767, 40000)
 
 
 if __name__ == "__main__":

@@ -2284,13 +2284,25 @@ class SodaIntegration(_IntegrationBase):
         col.insertOne({"name": "bob"})
         self.assertIsNone(col.find().key("AABBCCDDEEFF00112233445566").getOne())
 
-    def test_large_document_insert_and_read_guard(self):
+    def test_large_document_round_trip(self):
         col = self.soda.createCollection("it_big")
-        big = {"blob": "x" * 40000}              # > 32767-byte inline read limit
-        saved = col.insertOneAndGet(big)         # insert is fine (temp LOB)
-        self.assertTrue(saved.key)
-        with self.assertRaises(oracle.NotSupportedError):
-            col.find().key(saved.key).getOne()   # read guards against truncation
+        # content past the 32767-byte inline window reads back whole, chunked
+        # out of the BLOB (#211); insert uses the temp-LOB bind.
+        payload = "x" * 120000
+        k1 = col.insertOneAndGet({"tag": "A", "blob": payload}).key
+        col.insertOneAndGet({"tag": "B", "blob": "y" * 90000})
+        self.assertEqual(col.find().key(k1).getOne().getContent()["blob"],
+                         payload)
+        # a batch with two large documents keeps each one's content distinct
+        docs = {d.getContent()["tag"]: d.getContent()["blob"]
+                for d in col.find().getDocuments()}
+        self.assertEqual(docs["A"], payload)
+        self.assertEqual(docs["B"], "y" * 90000)
+        # boundary: exactly at and one past the inline window
+        for n in (32767, 32768):
+            k = col.insertOneAndGet({"p": "z" * n}).key
+            self.assertEqual(col.find().key(k).getOne().getContent()["p"],
+                             "z" * n)
 
     def test_qbe_find(self):
         col = self.soda.createCollection("it_qbe")
