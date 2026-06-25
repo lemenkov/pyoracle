@@ -32,12 +32,12 @@ What works so far:
   row, invoked with the column values as positional arguments), and
   `Cursor.lastrowid` (ROWID of the last row an INSERT / UPDATE / DELETE
   touched). Sync and async
-- Scrollable result sets: `Cursor.scroll(value, mode)` with `mode` in
-  `relative` / `absolute` / `first` / `last` repositions the cursor
-  anywhere in the result set (the next `fetchone()` returns the row at the
-  new position; out-of-range raises `IndexError`). The whole result set is
-  buffered on execute, so the scroll is a local reposition rather than a
-  server round trip. Sync and async
+- Scrollable cursors: open with `conn.cursor(scrollable=True)`, then
+  `Cursor.scroll(value, mode)` with `mode` in `relative` / `absolute` /
+  `first` / `last` repositions the cursor and the next `fetchone()` returns
+  the row at the new position (out-of-range raises `IndexError`). On 10g+
+  the cursor is opened server-side and rows are fetched on demand as you
+  scroll; 9i uses a client-buffered fallback. Sync and async
 - Bind variables: `cur.execute(sql, [v1, v2])` (positional) or
   `cur.execute(sql, {"name": v})` (named, `:name` placeholders, case-
   insensitive); accepted bind types are `int`, `float`, `Decimal`,
@@ -94,6 +94,11 @@ What works so far:
 - Follow-up `TTI_FETCH` flow for result sets larger than a single
   server response — `OracleConnect.execute` automatically drains the
   cursor when the EXEC OER signals `call_status = 1`
+- Arrow / DataFrame bulk fetch: `cur.fetch_df_all()` returns the result
+  set as a `pyarrow.Table`, `cur.fetch_df_batches(size=N)` yields it as
+  record batches (column types derived from the describe, so a NUMBER /
+  Decimal column lands as the right Arrow type without inference). Sync
+  and async
 - LOB content: CLOB / BLOB columns in a SELECT round-trip as `str` /
   `bytes` of any size. `Cursor.execute` automatically issues a
   `TTI_LOBOPS` READ for each non-empty LOB cell, materialising the
@@ -104,8 +109,14 @@ What works so far:
   `TTI_LOBOPS` (`FILE_OPEN` → `READ` → `FILE_CLOSE`). The only
   privilege the user needs is READ on the relevant DIRECTORY object —
   no server-side PL/SQL helper or CREATE PROCEDURE is installed
-- Transaction control (commit, rollback, ping)
-- Multiple character set support
+- Transaction control (commit, rollback, ping); sessionless transactions
+  (start / suspend / resume by transaction id)
+- End-to-end application tracing: `connection.module` / `action` /
+  `client_identifier` / `clientinfo` / `dbop` flow to the server for
+  monitoring (V$SESSION etc.)
+- Multiple character set support, including the national charset: bind
+  full Unicode through `DB_TYPE_NVARCHAR` / `DB_TYPE_NCHAR` regardless of
+  the database charset, and read NVARCHAR2 / NCHAR / NCLOB back as `str`
 - Cursor caching for DML: repeat `execute()` of the same INSERT /
   UPDATE / DELETE reuses the server-side cursor handle and skips
   the parse step. Cache size capped at 32 entries per connection
@@ -126,6 +137,14 @@ What works so far:
   `acquire/release/idle health-check` semantics as the sync `Pool`.
   Shares the protocol code with the sync APIs; the duplication is
   just the I/O layer
+- SODA (Simple Oracle Document Access), 18c+: `conn.getSodaDatabase()`
+  returns a `SodaDatabase` for JSON document collections —
+  `createCollection` / `openCollection` / `getCollectionNames`, document
+  `insertOne` / `insertOneAndGet` / `insertMany`, query-by-example
+  `find().filter(...).getDocuments()` / `getOne()` / `count()` /
+  `skip` / `limit`, `replaceOne` / `replaceOneAndGet` / `remove`, and
+  `createIndex` / `dropIndex` / `getDataGuide`. Built on `DBMS_SODA`.
+  Sync and async
 
 ## Compatibility
 
@@ -159,19 +178,27 @@ live 11g, 21c and 23ai; 10g and 9i are validated locally, and 12c–19c share th
 | **PL/SQL** — anonymous blocks, `callproc`, `callfunc`, OUT / IN OUT binds, REF CURSOR OUT | ✅ |
 | **Transactions** — commit, rollback, autocommit, ping | ✅ |
 | **Array DML** — `executemany`, `getbatcherrors`, `getarraydmlrowcounts` (12.1+) | ✅ |
-| **Result handling** — large-result `TTI_FETCH` drain, scrollable cursor (client-buffered), `rowfactory`, `lastrowid` | ✅ |
+| **Result handling** — large-result `TTI_FETCH` drain, server-side scrollable cursors (`scroll()`, with a client-buffered fallback), `rowfactory`, `lastrowid` | ✅ |
+| **Arrow / DataFrame fetch** — `cursor.fetch_df_all` / `fetch_df_batches` (pyarrow `Table` / record batches) | ✅ |
+| **SODA** — document store over `DBMS_SODA`: collections, documents, query-by-example, insert / read / update / delete / bulk, indexing + data guide (18c+) | ✅ |
 | **Connection** — pool (warm sessions + idle health-check), statement cache, `changepassword`, TLS | ✅ |
 | **Authentication** — O3LOGON (8i / 9i) and O5LOGON (10g+, 128 / 192 / 256-bit) | ✅ |
 | **Async** — full `asyncio` API (connection, cursor, pool) at parity with the sync API | ✅ |
-| **Character sets** — AL32UTF8 and others | ✅ |
-| Advanced Queuing (AQ), Continuous Query Notification (CQN), implicit results, DRCP, sharding, SODA, XA / distributed transactions | ❌ not implemented |
+| **Character sets** — AL32UTF8 and others; national-charset (`DB_TYPE_NVARCHAR` / `NCHAR`) binds | ✅ |
+| Advanced Queuing (AQ), Continuous Query Notification (CQN), implicit results, DRCP, sharding, XA / distributed transactions | ❌ not implemented |
 
-Everything above works across all supported server versions, with two
-version-scoped exceptions: the **23ai types** need 23ai (`VECTOR` / `BOOLEAN`) or
-21c+ (JSON); and on **Oracle 9i** the advanced features behind the modern
-`TTI_ALL8` path aren't available — but the full common surface (every scalar
-type, LOBs incl. BFILE, PL/SQL with IN / OUT / IN OUT binds, LONG, DML and
-transactions) runs on 9i through the legacy dialect.
+Most of the above works across every supported server version; a few features
+are inherently version-scoped: the **23ai types** need 23ai (`VECTOR` /
+`BOOLEAN`) or 21c+ (JSON), **SODA** needs 18c+, and **array DML** needs 12.1+.
+
+**Oracle 9i** (the legacy field-version-2 / `TTI_ALL7` dialect) runs the common
+surface — DB-API, scalar and national-charset binds, DATE / TIMESTAMP / INTERVAL,
+RAW, small LONG, LOB reads, single-row DML, PL/SQL blocks with IN / OUT / IN OUT
+binds, transactions, and the full async API — but not the features later versions
+layer on top: `BINARY_FLOAT` / `BINARY_DOUBLE`, large streamed LOB / LONG binds,
+array DML, REF CURSOR, the cursor cache, and `changepassword`. Its DB charset
+also can't store text it doesn't cover, so use `DB_TYPE_NVARCHAR` / `NCHAR` for
+full Unicode there rather than a plain `str` bind.
 
 ## Requirements
 
