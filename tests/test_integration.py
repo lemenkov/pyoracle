@@ -2323,6 +2323,34 @@ class SodaIntegration(_IntegrationBase):
         finally:
             _soda._DEFAULT_FETCH_CAP = saved
 
+    def test_update_delete_bulk(self):
+        col = self.soda.createCollection("it_udb")
+        # insertMany (one round trip)
+        col.insertMany([{"n": 1}, {"n": 2}, {"n": 3}])
+        self.assertEqual(col.find().count(), 3)
+        saved = col.insertOneAndGet({"v": 1})
+
+        # replaceOne by key (match + no match)
+        self.assertTrue(col.find().key(saved.key).replaceOne({"v": 2}))
+        self.assertEqual(col.find().key(saved.key).getOne().getContent()["v"], 2)
+        self.assertFalse(
+            col.find().key("AABBCCDDEEFF00112233445566").replaceOne({"v": 9}))
+
+        # replaceOneAndGet -> new version; None when nothing matches
+        got = col.find().key(saved.key).replaceOneAndGet({"v": 3})
+        self.assertEqual(got.key, saved.key)
+        self.assertTrue(got.version)
+        self.assertIsNone(
+            col.find().key("AABBCCDDEEFF00112233445566").replaceOneAndGet({}))
+
+        # remove by filter -> count removed
+        self.assertEqual(col.find().filter({"v": {"$exists": True}}).remove(), 1)
+        self.assertEqual(col.find().count(), 3)
+        # remove by key
+        k = col.find().limit(1).getDocuments()[0].key
+        self.assertEqual(col.find().key(k).remove(), 1)
+        self.assertEqual(col.find().count(), 2)
+
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class SqlDomainIntegration(_IntegrationBase):
@@ -3224,6 +3252,12 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
             docs = await col.find().filter({"x": 2}).getDocuments()
             self.assertEqual([d.getContent()["x"] for d in docs], [2])
             self.assertIsNone(await col.find().filter({"x": 999}).getOne())
+            # update / delete / bulk on the async path (#202)
+            await col.insertMany([{"x": 3}, {"x": 4}])
+            self.assertTrue(await col.find().key(saved.key).replaceOne({"x": 5}))
+            g = await col.find().key(saved.key).replaceOneAndGet({"x": 6})
+            self.assertEqual(g.key, saved.key)
+            self.assertEqual(await col.find().key(saved.key).remove(), 1)
             self.assertTrue(await col.drop())
             self.assertFalse(await col.drop())
 

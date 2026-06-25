@@ -98,6 +98,33 @@ _GET_DOCS = (
 # getDocuments() materialises into host arrays, so it needs a capacity. With no
 # limit set, cap at this many and raise on overflow rather than truncate.
 _DEFAULT_FETCH_CAP = 1000
+# Update / delete / bulk (#202). replace_one returns a NUMBER (1 replaced / 0
+# not); replace_one_and_get returns the new SODA_DOCUMENT_T (NULL if nothing
+# matched); remove returns the deleted count. DBMS_SODA's bulk insert_many and
+# save are ORA-03001 "unimplemented feature" in thin mode, so insertMany loops
+# insert_one over a host array of contents instead.
+_REPLACE_ONE = (
+    "DECLARE c SODA_COLLECTION_T; op SODA_OPERATION_T; d SODA_DOCUMENT_T; "
+    "res NUMBER; BEGIN c := DBMS_SODA.open_collection(:name); " + _OP_BUILD +
+    "d := SODA_DOCUMENT_T(b_content => :content); res := op.replace_one(d); "
+    ":replaced := res; END;")
+_REPLACE_ONE_AND_GET = (
+    "DECLARE c SODA_COLLECTION_T; op SODA_OPERATION_T; d SODA_DOCUMENT_T; "
+    "r SODA_DOCUMENT_T; BEGIN c := DBMS_SODA.open_collection(:name); " + _OP_BUILD +
+    "d := SODA_DOCUMENT_T(b_content => :content); r := op.replace_one_and_get(d); "
+    "IF r IS NULL THEN :missing := 1; ELSE :missing := 0; "
+    ":rkey := r.get_key(); :rver := r.get_version(); :rmt := r.get_media_type(); "
+    ":rcreated := r.get_created_on; :rmodified := r.get_last_modified; "
+    "END IF; END;")
+_REMOVE = (
+    "DECLARE c SODA_COLLECTION_T; op SODA_OPERATION_T; BEGIN "
+    "c := DBMS_SODA.open_collection(:name); " + _OP_BUILD +
+    ":n := op.remove(); END;")
+_INSERT_MANY = (
+    "DECLARE c SODA_COLLECTION_T; d SODA_DOCUMENT_T; n NUMBER; BEGIN "
+    "c := DBMS_SODA.open_collection(:name); "
+    "FOR i IN 1..:cnt LOOP d := SODA_DOCUMENT_T(b_content => :contents(i)); "
+    "n := c.insert_one(d); END LOOP; END;")
 
 
 def _names_query(start_name, limit):
@@ -282,6 +309,40 @@ class SodaOperation:
         _check_fetch_overflow(b, cap)
         return _docs_from_arrays(b)
 
+    def replaceOne(self, doc) -> bool:
+        """Replace the matched document's content. Returns True if one was
+        replaced, False if nothing matched."""
+        _, content, _ = _doc_to_bind(doc)
+        cur = self._connection.cursor()
+        replaced = cur.var(DB_TYPE_NUMBER)
+        b = self._in_binds()
+        b.update({"content": content, "replaced": replaced})
+        cur.execute(_REPLACE_ONE, b)
+        return bool(replaced.getvalue())
+
+    def replaceOneAndGet(self, doc) -> "SodaDocument | None":
+        """Replace the matched document and return a `SodaDocument` with the new
+        key / version / metadata (no content), or None if nothing matched."""
+        _, content, _ = _doc_to_bind(doc)
+        cur = self._connection.cursor()
+        b = _new_doc_out_binds(cur, content=False)
+        b["missing"] = cur.var(DB_TYPE_NUMBER)
+        b.update(self._in_binds())
+        b["content"] = content
+        cur.execute(_REPLACE_ONE_AND_GET, b)
+        if b["missing"].getvalue():
+            return None
+        return _doc_from_binds(b, with_content=False)
+
+    def remove(self) -> int:
+        """Remove the matched documents; returns the number removed."""
+        cur = self._connection.cursor()
+        n = cur.var(DB_TYPE_NUMBER)
+        b = self._in_binds()
+        b["n"] = n
+        cur.execute(_REMOVE, b)
+        return int(n.getvalue())
+
 
 class SodaCollection:
     """A SODA collection (#163). Obtain one from `SodaDatabase.createCollection`
@@ -337,6 +398,18 @@ class SodaCollection:
         b.update({"name": self.name, "key": key, "content": content, "mt": mt})
         cur.execute(_INSERT_ONE_AND_GET, b)
         return _doc_from_binds(b, with_content=False)
+
+    def insertMany(self, docs) -> None:
+        """Insert several documents (each a `SodaDocument` or a bare value) in a
+        single round trip. Each document's content is subject to the 32767-byte
+        inline limit (#200)."""
+        contents = [_doc_to_bind(d)[1] for d in docs]
+        if not contents:
+            return
+        cur = self._connection.cursor()
+        arr = cur.arrayvar(DB_TYPE_RAW, contents)
+        cur.execute(_INSERT_MANY,
+                    {"name": self.name, "cnt": len(contents), "contents": arr})
 
     def find(self) -> SodaOperation:
         """Begin a read operation (chain `.key(k).getOne()`)."""
@@ -517,6 +590,35 @@ class AsyncSodaOperation:
         _check_fetch_overflow(b, cap)
         return _docs_from_arrays(b)
 
+    async def replaceOne(self, doc) -> bool:
+        _, content, _ = _doc_to_bind(doc)
+        cur = self._connection.cursor()
+        replaced = cur.var(DB_TYPE_NUMBER)
+        b = self._in_binds()
+        b.update({"content": content, "replaced": replaced})
+        await cur.execute(_REPLACE_ONE, b)
+        return bool(replaced.getvalue())
+
+    async def replaceOneAndGet(self, doc) -> "SodaDocument | None":
+        _, content, _ = _doc_to_bind(doc)
+        cur = self._connection.cursor()
+        b = _new_doc_out_binds(cur, content=False)
+        b["missing"] = cur.var(DB_TYPE_NUMBER)
+        b.update(self._in_binds())
+        b["content"] = content
+        await cur.execute(_REPLACE_ONE_AND_GET, b)
+        if b["missing"].getvalue():
+            return None
+        return _doc_from_binds(b, with_content=False)
+
+    async def remove(self) -> int:
+        cur = self._connection.cursor()
+        n = cur.var(DB_TYPE_NUMBER)
+        b = self._in_binds()
+        b["n"] = n
+        await cur.execute(_REMOVE, b)
+        return int(n.getvalue())
+
 
 class AsyncSodaCollection:
     """Async counterpart to `SodaCollection` (#163 / #200)."""
@@ -564,6 +666,16 @@ class AsyncSodaCollection:
         b.update({"name": self.name, "key": key, "content": content, "mt": mt})
         await cur.execute(_INSERT_ONE_AND_GET, b)
         return _doc_from_binds(b, with_content=False)
+
+    async def insertMany(self, docs) -> None:
+        contents = [_doc_to_bind(d)[1] for d in docs]
+        if not contents:
+            return
+        cur = self._connection.cursor()
+        arr = cur.arrayvar(DB_TYPE_RAW, contents)
+        await cur.execute(_INSERT_MANY,
+                          {"name": self.name, "cnt": len(contents),
+                           "contents": arr})
 
     def find(self) -> AsyncSodaOperation:
         return AsyncSodaOperation(self)
