@@ -12,16 +12,15 @@ a `SodaDatabase`, whose collections are `SodaCollection` objects holding
 `SodaDocument` objects.
 
 SODA needs an Oracle 18c+ server (``DBMS_SODA``); `getSodaDatabase` raises
-``NotSupportedError`` below that. This module covers collection management (#199)
-and the document model — insert + read by key (#200). QBE find, update and
-delete land in the follow-up sub-tickets of #163.
+``NotSupportedError`` below that. The surface covers collection management,
+documents (insert / read / upsert / bulk), query-by-example find with streaming,
+update / delete, and indexing + data guide.
 
 A document's content is bound into ``DBMS_SODA`` as bytes; a value over the
-32767-byte PL/SQL limit rides pyoracle's transparent temp-LOB bind (#91), so
-*inserting* large documents works. *Reading* content back comes through a single
-``DBMS_LOB.SUBSTR`` and is therefore capped at 32767 bytes — a document whose
-stored content exceeds that raises rather than silently truncating; chunked
-large-content reads are a follow-up.
+32767-byte PL/SQL limit rides pyoracle's transparent temp-LOB bind (#91).
+Reading content back returns the inline 32767-byte window from the batch read,
+and slices anything larger out of the BLOB in 32767-byte chunks via a follow-up
+round trip per oversized document.
 """
 
 import json
@@ -102,6 +101,19 @@ _GET_DOCS = (
 # getDocuments() materialises into host arrays, so it needs a capacity. With no
 # limit set, cap at this many and raise on overflow rather than truncate.
 _DEFAULT_FETCH_CAP = 1000
+# Read a single document's full content when it is larger than the 32767-byte
+# inline window the batch read returns (#211): re-open by key and slice the BLOB
+# into a RAW host array, one 32767-byte chunk per element, in one round trip.
+# The caller sizes the array from the length the batch already reported.
+_READ_CONTENT = (
+    "DECLARE c SODA_COLLECTION_T; d SODA_DOCUMENT_T; b BLOB; len NUMBER; "
+    "off NUMBER := 1; i PLS_INTEGER := 0; BEGIN "
+    "c := DBMS_SODA.open_collection(:name); "
+    "d := c.find().key(:key).get_one(); b := d.get_blob(); "
+    "len := DBMS_LOB.GETLENGTH(b); "
+    "WHILE off <= len LOOP i := i + 1; "
+    ":chunks(i) := DBMS_LOB.SUBSTR(b, 32767, off); off := off + 32767; "
+    "END LOOP; :n := i; END;")
 # Update / delete / bulk (#202). replace_one returns a NUMBER (1 replaced / 0
 # not); replace_one_and_get returns the new SODA_DOCUMENT_T (NULL if nothing
 # matched); remove returns the deleted count. DBMS_SODA's bulk insert_many and
@@ -274,18 +286,6 @@ def _data_guide_doc(b: dict):
     return SodaDocument(content=text.encode("utf-8") if text else None)
 
 
-def _content_or_raise(content, length):
-    # Guard against a silently truncated read: the single SUBSTR maxes at
-    # _MAX_INLINE bytes (#200 limitation).
-    if length is not None and int(length) > _MAX_INLINE:
-        raise NotSupportedError(
-            f"SODA document content is {int(length)} bytes; reading content "
-            f"over {_MAX_INLINE} bytes is not yet supported")
-    if content is None:
-        return None
-    return bytes(content)
-
-
 # --------------------------------------------------------------------------
 # Sync
 # --------------------------------------------------------------------------
@@ -334,7 +334,7 @@ class SodaOperation:
         b.update(binds)
         b["cap"] = 1
         cur.execute(_GET_DOCS, b)
-        docs = _docs_from_arrays(b)
+        docs = self._build_docs(b)
         return docs[0] if docs else None
 
     def count(self) -> int:
@@ -353,6 +353,23 @@ class SodaOperation:
         cur.execute(_GET_DOCS, b)
         return b
 
+    def _read_full_content(self, key: str, clen: int) -> bytes:
+        nchunks = (int(clen) + _MAX_INLINE - 1) // _MAX_INLINE
+        cur = self._connection.cursor()
+        chunks = cur.arrayvar(DB_TYPE_RAW, nchunks)
+        cnt = cur.var(DB_TYPE_NUMBER)
+        cur.execute(_READ_CONTENT, {"name": self._collection.name, "key": key,
+                                    "chunks": chunks, "n": cnt})
+        parts = chunks.getvalue()
+        return b"".join(bytes(p) for p in parts[:int(cnt.getvalue())]
+                        if p is not None)
+
+    def _build_docs(self, b: dict) -> list:
+        docs, large = _parse_doc_arrays(b)
+        for doc, key, clen in large:
+            doc._content = self._read_full_content(key, clen)
+        return docs
+
     def getDocuments(self) -> "list[SodaDocument]":
         """Every matched document. Without `.limit(...)` this materialises up to
         a fixed cap and raises if more match, rather than truncating; use
@@ -360,7 +377,7 @@ class SodaOperation:
         cap = self._limit if self._limit else _DEFAULT_FETCH_CAP
         b = self._run_get_docs(self._skip, self._limit, cap)
         _check_fetch_overflow(b, cap)
-        return _docs_from_arrays(b)
+        return self._build_docs(b)
 
     def getCursor(self, batchSize: int = 100):
         """Stream the matched documents in batches of `batchSize` (offset
@@ -373,7 +390,7 @@ class SodaOperation:
             if self._limit and yielded >= self._limit:
                 return
             lim = batch if not self._limit else min(batch, self._limit - yielded)
-            docs = _docs_from_arrays(
+            docs = self._build_docs(
                 self._run_get_docs(self._skip + offset, lim, batch))
             if not docs:
                 return
@@ -406,7 +423,7 @@ class SodaOperation:
         cur.execute(_REPLACE_ONE_AND_GET, b)
         if b["missing"].getvalue():
             return None
-        return _doc_from_binds(b, with_content=False)
+        return _doc_from_binds(b)
 
     def remove(self) -> int:
         """Remove the matched documents; returns the number removed."""
@@ -471,7 +488,7 @@ class SodaCollection:
         b = _new_doc_out_binds(cur, content=False)
         b.update({"name": self.name, "key": key, "content": content, "mt": mt})
         cur.execute(_INSERT_ONE_AND_GET, b)
-        return _doc_from_binds(b, with_content=False)
+        return _doc_from_binds(b)
 
     def insertMany(self, docs) -> None:
         """Insert several documents (each a `SodaDocument` or a bare value) in a
@@ -491,7 +508,7 @@ class SodaCollection:
         b = _new_doc_out_binds(cur, content=False)
         b.update({"name": self.name, "key": key, "content": content, "mt": mt})
         cur.execute(_SAVE, b)
-        return _doc_from_binds(b, with_content=False)
+        return _doc_from_binds(b)
 
     def save(self, doc) -> None:
         """Insert a document, or replace the existing one with the same key
@@ -597,13 +614,11 @@ def _new_doc_out_binds(cur, content: bool = True) -> dict:
     return binds
 
 
-def _doc_from_binds(b: dict, with_content: bool) -> SodaDocument:
-    content = None
-    if with_content:
-        content = _content_or_raise(b["content"].getvalue(),
-                                    b["clen"].getvalue())
+def _doc_from_binds(b: dict) -> SodaDocument:
+    # The metadata-only document an insert / replace / save returns (key,
+    # version, media type, timestamps — no content).
     return SodaDocument(
-        content=content, key=b["rkey"].getvalue(), version=b["rver"].getvalue(),
+        content=None, key=b["rkey"].getvalue(), version=b["rver"].getvalue(),
         mediaType=b["rmt"].getvalue() or _DEFAULT_MEDIA_TYPE,
         createdOn=b["rcreated"].getvalue(),
         lastModified=b["rmodified"].getvalue())
@@ -632,19 +647,28 @@ def _check_fetch_overflow(b: dict, cap: int) -> None:
             f"(streaming getCursor is a follow-up)")
 
 
-def _docs_from_arrays(b: dict) -> list:
+def _parse_doc_arrays(b: dict) -> tuple:
+    # Build the documents from a getDocuments batch. A document whose content
+    # fits the inline window gets it directly; one larger than that gets None
+    # content now and is returned in the second list as (doc, key, length) for
+    # the caller to backfill via a chunked read (#211).
     n = int(b["num"].getvalue())
     keys, contents = b["keys"].getvalue(), b["contents"].getvalue()
     clens, vers = b["clens"].getvalue(), b["vers"].getvalue()
     mts, creates, mods = (b["mts"].getvalue(), b["creates"].getvalue(),
                           b["mods"].getvalue())
-    docs = []
+    docs, large = [], []
     for i in range(n):
-        docs.append(SodaDocument(
-            content=_content_or_raise(contents[i], clens[i]), key=keys[i],
+        clen = int(clens[i]) if clens[i] is not None else 0
+        inline = bytes(contents[i]) if contents[i] is not None else None
+        doc = SodaDocument(
+            content=None if clen > _MAX_INLINE else inline, key=keys[i],
             version=vers[i], mediaType=mts[i] or _DEFAULT_MEDIA_TYPE,
-            createdOn=creates[i], lastModified=mods[i]))
-    return docs
+            createdOn=creates[i], lastModified=mods[i])
+        docs.append(doc)
+        if clen > _MAX_INLINE:
+            large.append((doc, keys[i], clen))
+    return docs, large
 
 
 # --------------------------------------------------------------------------
@@ -690,7 +714,7 @@ class AsyncSodaOperation:
         b.update(binds)
         b["cap"] = 1
         await cur.execute(_GET_DOCS, b)
-        docs = _docs_from_arrays(b)
+        docs = await self._build_docs(b)
         return docs[0] if docs else None
 
     async def count(self) -> int:
@@ -709,11 +733,29 @@ class AsyncSodaOperation:
         await cur.execute(_GET_DOCS, b)
         return b
 
+    async def _read_full_content(self, key: str, clen: int) -> bytes:
+        nchunks = (int(clen) + _MAX_INLINE - 1) // _MAX_INLINE
+        cur = self._connection.cursor()
+        chunks = cur.arrayvar(DB_TYPE_RAW, nchunks)
+        cnt = cur.var(DB_TYPE_NUMBER)
+        await cur.execute(_READ_CONTENT,
+                          {"name": self._collection.name, "key": key,
+                           "chunks": chunks, "n": cnt})
+        parts = chunks.getvalue()
+        return b"".join(bytes(p) for p in parts[:int(cnt.getvalue())]
+                        if p is not None)
+
+    async def _build_docs(self, b: dict) -> list:
+        docs, large = _parse_doc_arrays(b)
+        for doc, key, clen in large:
+            doc._content = await self._read_full_content(key, clen)
+        return docs
+
     async def getDocuments(self) -> "list[SodaDocument]":
         cap = self._limit if self._limit else _DEFAULT_FETCH_CAP
         b = await self._run_get_docs(self._skip, self._limit, cap)
         _check_fetch_overflow(b, cap)
-        return _docs_from_arrays(b)
+        return await self._build_docs(b)
 
     async def getCursor(self, batchSize: int = 100):
         """Async streaming counterpart to the sync `getCursor`: `async for doc in
@@ -724,7 +766,7 @@ class AsyncSodaOperation:
             if self._limit and yielded >= self._limit:
                 return
             lim = batch if not self._limit else min(batch, self._limit - yielded)
-            docs = _docs_from_arrays(
+            docs = await self._build_docs(
                 await self._run_get_docs(self._skip + offset, lim, batch))
             if not docs:
                 return
@@ -754,7 +796,7 @@ class AsyncSodaOperation:
         await cur.execute(_REPLACE_ONE_AND_GET, b)
         if b["missing"].getvalue():
             return None
-        return _doc_from_binds(b, with_content=False)
+        return _doc_from_binds(b)
 
     async def remove(self) -> int:
         cur = self._connection.cursor()
@@ -810,7 +852,7 @@ class AsyncSodaCollection:
         b = _new_doc_out_binds(cur, content=False)
         b.update({"name": self.name, "key": key, "content": content, "mt": mt})
         await cur.execute(_INSERT_ONE_AND_GET, b)
-        return _doc_from_binds(b, with_content=False)
+        return _doc_from_binds(b)
 
     async def insertMany(self, docs) -> None:
         contents = [_doc_to_bind(d)[1] for d in docs]
@@ -828,7 +870,7 @@ class AsyncSodaCollection:
         b = _new_doc_out_binds(cur, content=False)
         b.update({"name": self.name, "key": key, "content": content, "mt": mt})
         await cur.execute(_SAVE, b)
-        return _doc_from_binds(b, with_content=False)
+        return _doc_from_binds(b)
 
     async def save(self, doc) -> None:
         await self._save(doc)
