@@ -1769,6 +1769,14 @@ class AsyncOracleConnect:
         from oracle.acursor import AsyncCursor
         return AsyncCursor(self, scrollable=scrollable)
 
+    def getSodaDatabase(self):
+        """Return an `AsyncSodaDatabase` for document-store (SODA) access (#163).
+        Raises NotSupportedError on a pre-18c server. The factory is synchronous
+        (like oracledb); the collection/document operations are coroutines."""
+        from oracle.soda import AsyncSodaDatabase, _check_soda_supported
+        _check_soda_supported(self)
+        return AsyncSodaDatabase(self)
+
     # --- End-to-end application tracing (#183), async port ---
 
     def _set_e2e(self, name: str, value) -> None:

@@ -2430,6 +2430,13 @@ class OracleConnect:
         from oracle.cursor import Cursor
         return Cursor(self, scrollable=scrollable)
 
+    def getSodaDatabase(self):
+        """Return a `SodaDatabase` for document-store (SODA) access (#163).
+        Raises NotSupportedError on a pre-18c server (no DBMS_SODA)."""
+        from oracle.soda import SodaDatabase, _check_soda_supported
+        _check_soda_supported(self)
+        return SodaDatabase(self)
+
     # --- End-to-end application tracing (#183) ---
 
     def _set_e2e(self, name: str, value) -> None:

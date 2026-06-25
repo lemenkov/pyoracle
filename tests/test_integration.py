@@ -2207,6 +2207,63 @@ class JSONIntegration(_IntegrationBase):
 
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
+class SodaIntegration(_IntegrationBase):
+    # SODA collection management (#163 / #199), backed by DBMS_SODA. Needs an
+    # Oracle 18c+ server; skipped below that.
+    def setUp(self):
+        super().setUp()
+        if (self.conn.server_version >> 24) < 18:
+            self.conn.close()
+            self.skipTest("SODA needs an Oracle 18c+ server (DBMS_SODA)")
+        self.soda = self.conn.getSodaDatabase()
+        self._drop_all_collections()
+
+    def _drop_all_collections(self):
+        for n in self.soda.getCollectionNames():
+            c = self.soda.openCollection(n)
+            if c:
+                c.drop()
+
+    def tearDown(self):
+        try:
+            self._drop_all_collections()
+        except Exception:
+            # best-effort collection cleanup; tearDown still closes the conn
+            pass
+        super().tearDown()
+
+    def test_create_open_list_drop(self):
+        col = self.soda.createCollection("it_a")
+        self.assertEqual(col.name, "it_a")
+        self.assertIn("contentColumn", col.metadata)
+        self.assertEqual(self.soda.openCollection("it_a").name, "it_a")
+        self.assertIsNone(self.soda.openCollection("no_such_coll"))
+        self.soda.createCollection("it_b")
+        self.assertEqual(self.soda.getCollectionNames(), ["it_a", "it_b"])
+        self.assertEqual(self.soda.getCollectionNames(limit=1), ["it_a"])
+        self.assertEqual(self.soda.getCollectionNames("it_b"), ["it_b"])
+        self.assertTrue(col.drop())        # dropped
+        self.assertFalse(col.drop())       # already gone
+
+    def test_truncate(self):
+        col = self.soda.createCollection("it_trunc")
+        # insert one document via DBMS_SODA directly (the document API is a later
+        # #163 sub-ticket); truncate must then empty the collection.
+        self.cur.execute(
+            "DECLARE c SODA_COLLECTION_T; d SODA_DOCUMENT_T; n NUMBER; BEGIN "
+            "c := DBMS_SODA.open_collection('it_trunc'); "
+            "d := SODA_DOCUMENT_T(b_content => utl_raw.cast_to_raw('{\"a\":1}')); "
+            "n := c.insert_one(d); END;")
+        col.truncate()
+        v = self.cur.var(oracle.NUMBER)
+        self.cur.execute(
+            "DECLARE c SODA_COLLECTION_T; BEGIN "
+            "c := DBMS_SODA.open_collection('it_trunc'); "
+            ":1 := c.find().count(); END;", [v])
+        self.assertEqual(v.getvalue(), 0)
+
+
+@unittest.skipUnless(_USER, _SKIP_REASON)
 class SqlDomainIntegration(_IntegrationBase):
     # 23ai SQL-domain columns (#53). At field version 17 a column with a SQL
     # domain carries its schema+name in the per-column describe; before the fix
@@ -3077,6 +3134,24 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(sizes, [3, 3, 1])
                 finally:
                     await Cur.execute(f"DROP TABLE {table}")
+
+    async def test_async_soda_collections(self):
+        # SODA collection management (#163 / #199) on the async path; 18c+ only.
+        async with await oracle.connect_async(**self._kwargs()) as Conn:
+            if (Conn.server_version >> 24) < 18:
+                self.skipTest("SODA needs an Oracle 18c+ server (DBMS_SODA)")
+            soda = Conn.getSodaDatabase()
+            for n in await soda.getCollectionNames():
+                c = await soda.openCollection(n)
+                if c:
+                    await c.drop()
+            col = await soda.createCollection("it_async")
+            self.assertEqual(col.name, "it_async")
+            self.assertIn("contentColumn", await col.get_metadata())
+            self.assertEqual(await soda.getCollectionNames(), ["it_async"])
+            self.assertIsNone(await soda.openCollection("no_such_coll"))
+            self.assertTrue(await col.drop())
+            self.assertFalse(await col.drop())
 
     async def test_async_end_to_end_tracing(self):
         # End-to-end tracing (#183) on the async path; 12c+ only.
