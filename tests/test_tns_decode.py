@@ -736,6 +736,19 @@ class TestFv2Describe(unittest.TestCase):
         "44415445000002000000011600000000000001050105055a51494e5400000400"
         "0000000101000300000000000000000000000000000101")
 
+    # Real describe RPA for `SELECT usernameX, usernameY FROM t9d` where t9d is
+    # `(usernameX VARCHAR2(8) NOT NULL, usernameY VARCHAR2(8))`. The two columns
+    # have identical-length names and differ ONLY in nullability, isolating the
+    # per-column null_ok byte: NOT NULL -> 00, nullable -> 01. This is the case
+    # every DUAL-alias fixture above misses (a literal is always nullable, so its
+    # null_ok is 0x01 and the old two-ub4 read slipped by only when it hit 0x00).
+    # A NOT-NULL column previously garbled the name to b'\x08USERNAM' and desynced
+    # the stream (a multi-column NOT-NULL fetch then died with ORA-03115). #97.
+    DESCRIBE_NOTNULL = bytes.fromhex(
+        "08010201800000010800000000011f010009010909555345524e414d455800"
+        "0001800000010800000000011f010109010909555345524e414d4559000004"
+        "00000000010100030000000000000000000000000000010100000000")
+
     def test_decode_columns(self):
         from oracle.tns import decode_fv2_describe
         cols = decode_fv2_describe(self.DESCRIBE)
@@ -744,6 +757,17 @@ class TestFv2Describe(unittest.TestCase):
         self.assertEqual(got, [
             (b'ZQNUM', 2), (b'ZQVC', 1), (b'ZQCHR', 96),
             (b'ZQDATE', 12), (b'ZQINT', 2)])
+        # literals over DUAL are always nullable
+        self.assertEqual([c['null_ok'] for c in cols], [1, 1, 1, 1, 1])
+
+    def test_decode_notnull_columns(self):
+        # Regression: a NOT-NULL column (null_ok byte 0x00) must not slip the
+        # stream, and null_ok must be reported per column.
+        from oracle.tns import decode_fv2_describe
+        cols = decode_fv2_describe(self.DESCRIBE_NOTNULL)
+        self.assertEqual([(c['column_name'], c['data_type'], c['null_ok'])
+                          for c in cols],
+                         [(b'USERNAMEX', 1, 0), (b'USERNAMEY', 1, 1)])
 
 
 class TestFv2ExecResponse(unittest.TestCase):
