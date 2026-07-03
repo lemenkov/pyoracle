@@ -2631,14 +2631,26 @@ def _decode_oac_fv2(Rest: bytes) -> tuple[dict, bytes]:
 def decode_fv2_describe(Data: bytes) -> list[dict]:
     # Parse the TTI_RPA (0x08) answering the 0x62 describe-columns call into a
     # list of column dicts (docs/PROTOCOL.md §19.1). Layout:
-    #   08 01 <numcols> then per column: <OAC-fv2> ub4(NL) ub4(NL) DALC(name) 00 00
+    #   08 01 <numcols> then per column:
+    #     <OAC-fv2> null_ok(1B) namelen_bytes(1B) ub4(namelen_chars) DALC(name) 00 00
+    #
+    # The first byte after the OAC is null_ok (0x00 = NOT NULL, 0x01 = nullable),
+    # NOT part of the name length. The historic "two ub4 name-lengths" reading
+    # only survived because every offline fixture was `SELECT <literal> AS name
+    # FROM dual` — a literal is always nullable, so null_ok=0x01 read as a width-1
+    # ub4 whose value happened to equal the name length. A real NOT-NULL column
+    # sends null_ok=0x00, which decode_ub4 misreads as width-0/value-0 (one byte),
+    # slipping the whole column stream and garbling the name (b'\x08USERNAM') — and
+    # a multi-column NOT-NULL select then fails the fetch with ORA-03115. Read
+    # null_ok + the 1-byte byte-length explicitly, then the genuine ub4 char-length.
     NumCols = Data[2]
     Rest = Data[3:]
     Columns = []
     for _ in range(NumCols):
         (Col, Rest) = _decode_oac_fv2(Rest)
-        (_NlBytes, Rest) = decode_ub4(Rest)   # name length in bytes
-        (_NlChars, Rest) = decode_ub4(Rest)   # name length in chars
+        Col['null_ok'] = 0 if Rest[0] == 0 else 1   # 0x00 NOT NULL, 0x01 nullable
+        Rest = Rest[2:]                              # null_ok(1B) + namelen_bytes(1B)
+        (_NlChars, Rest) = decode_ub4(Rest)          # name length in chars (ub4)
         (Name, Rest) = decode_dalc(Rest)
         Col['column_name'] = Name if isinstance(Name, bytes) else b""
         Columns.append(Col)

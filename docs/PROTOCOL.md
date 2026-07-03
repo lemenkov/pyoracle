@@ -1838,7 +1838,7 @@ metadata **inside the `TTI_RPA` (08)** answering the `0x62` call:
 
 ```
 08 01 <numcols:1B> <column>*  <trailer>
-column = <OAC-fv2> <ub4 namelen> <ub4 namelen> <DALC name> 00 00
+column = <OAC-fv2> <null_ok:1B> <namelen_bytes:1B> <ub4 namelen_chars> <DALC name> 00 00
 ```
 
 The per-column **`OAC-fv2`** is exactly the §5.3 OAC field order **minus the
@@ -1852,16 +1852,28 @@ MaxArrLen(ub4) Flags2(ub4) ToId(DALC) Version(ub4) Charset(ub4) FormOfUse(1B)
 The leading **`DataType` byte is the standard Oracle internal type code** — the
 same numbering as pyoracle's `TNS_TYPE_*` constants (1=VARCHAR2, 2=NUMBER,
 12=DATE, 23=RAW, 96=CHAR, 181=TIMESTAMP) — so the fv2 path **reuses the existing
-type→value decoders**, no new numbering. The column name follows as
-`ub4 namelen, ub4 namelen, DALC` (byte-length and char-length, then the
-DALC-encoded UPPERCASE name), then a two-byte `00 00` inter-column separator.
+type→value decoders**, no new numbering. The OAC is followed by a **`null_ok`
+byte** (`0x00` = NOT NULL, `0x01` = nullable), a **1-byte `namelen_bytes`**, a
+**`ub4 namelen_chars`**, then the **DALC-encoded UPPERCASE name** and a two-byte
+`00 00` inter-column separator.
 
-> Two RE traps worth recording: a single-character column name (e.g. `N`)
-> mis-anchors if you scan for the name by ASCII — parse the OAC deterministically
-> instead; and the **last** column's OAC runs straight into the describe trailer,
-> so only interior columns segment cleanly by eye. Validated against eight live
-> captures (NUMBER/NUMBER(p,s)/VARCHAR2/CHAR/DATE/RAW/FLOAT/TIMESTAMP/NVARCHAR2,
-> 1–5 columns, 1–3 rows).
+> **Do not read the post-OAC fields as two `ub4` name-lengths.** The first byte
+> is `null_ok`, not a length. It only *looks* like a ub4 width byte for nullable
+> columns, where `null_ok = 0x01` reads as "width 1" and its value coincidentally
+> equals the name length. A **NOT NULL** column sends `null_ok = 0x00`, which a
+> ub4 decoder misreads as width-0/value-0 (one byte), slipping the whole column
+> stream: the name garbles (`USERNAME` → `\x08USERNAM`) and a multi-column
+> NOT-NULL fetch then dies with **ORA-03115**. Read `null_ok` + the 1-byte
+> byte-length explicitly, then the genuine `ub4` char-length. `null_ok` feeds
+> `Cursor.description[6]`. The earlier "two ub4 name-lengths" model survived only
+> because the initial captures were all `SELECT <literal> AS name FROM dual` —
+> literals are always nullable, so `null_ok` was always `0x01` and the slip never
+> triggered.
+>
+> Two more RE traps: a single-character column name (e.g. `N`) mis-anchors if you
+> scan for the name by ASCII — parse the OAC deterministically instead; and the
+> **last** column's OAC runs straight into the describe trailer, so only interior
+> columns segment cleanly by eye.
 
 ### 19.2 fv2 row data
 
