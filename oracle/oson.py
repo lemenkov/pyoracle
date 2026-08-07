@@ -284,11 +284,38 @@ def _decode_image(data: bytes) -> object:
     return value
 
 
-def _decode_node(seg: bytes, off: int, field_name, tree: bytes, off_size: int = 2):
+def _decode_child(tree: bytes, off: int, field_name, off_size: int,
+                  memo: dict, stack: set):
+    # Bounded recursion into a container value-offset. Memoise the decoded value
+    # by offset so a shared child (a "diamond" of offsets) is decoded once rather
+    # than exponentially, and reject an offset already on the current path (a
+    # cycle) as OsonError rather than recursing forever. Together these cap the
+    # total work at O(number of nodes) even for a crafted image: a malformed or
+    # hostile OSON image must never hang the client (#165). Valid server images
+    # are acyclic, so this only changes behaviour on bad input; a genuinely
+    # shared subtree decodes to an equal (possibly aliased) value, which is fine
+    # for JSON value semantics.
+    if off in memo:
+        return memo[off]
+    if off in stack:
+        raise OsonError(f"cyclic OSON node offset {off}")
+    stack.add(off)
+    value = _decode_node(tree, off, field_name, tree, off_size, memo, stack)[0]
+    stack.discard(off)
+    memo[off] = value
+    return value
+
+
+def _decode_node(seg: bytes, off: int, field_name, tree: bytes,
+                 off_size: int = 2, memo: dict = None, stack: set = None):
     # Returns (python_value, next_offset). `tree` is the tree segment that
     # container value-offsets are relative to; `field_name` maps an object's
     # field id to its key (None for scalar-only images). `off_size` is the
-    # width (2 or 4) of container value-offsets for this image (#69).
+    # width (2 or 4) of container value-offsets for this image (#69). `memo` /
+    # `stack` bound the offset-following recursion (see _decode_child); they are
+    # created on the top-level call and threaded through the descent.
+    if memo is None:
+        memo, stack = {}, set()
     tag = seg[off]
     if tag <= 0x1F:                           # inline short string
         return seg[off + 1:off + 1 + tag].decode("utf-8"), off + 1 + tag
@@ -322,18 +349,28 @@ def _decode_node(seg: bytes, off: int, field_name, tree: bytes, off_size: int = 
     if (tag & 0xC0) == 0xC0:                   # array container
         count = _uint(seg, off + 1, csz)
         p = off + 1 + csz
+        # The offset array (count * osz bytes) must fit in the image; a crafted
+        # count (e.g. ub4 0xffffffff) would otherwise spin building a
+        # multi-billion-entry list before any offset is followed (#165).
+        if p + osz * count > len(seg):
+            raise OsonError("OSON array count exceeds image")
         elem_offsets = [_uint(seg, p + osz * i, osz)
                         for i in range(count)]
-        return ([_decode_node(tree, o, field_name, tree, off_size)[0]
+        return ([_decode_child(tree, o, field_name, off_size, memo, stack)
                  for o in elem_offsets], p + osz * count)
     if (tag & 0xC0) == 0x80:                   # object container
         count = _uint(seg, off + 1, csz)
         p = off + 1 + csz
+        # Field-id array (count * csz) + value-offset array (count * osz) must
+        # fit in the image, else a crafted count spins as above (#165).
+        if p + (csz + osz) * count > len(seg):
+            raise OsonError("OSON object count exceeds image")
         ids = [_uint(seg, p + csz * i, csz) for i in range(count)]
         p += csz * count
         val_offsets = [_uint(seg, p + osz * i, osz)
                        for i in range(count)]
-        return ({field_name(i): _decode_node(tree, o, field_name, tree, off_size)[0]
+        return ({field_name(i): _decode_child(tree, o, field_name, off_size,
+                                              memo, stack)
                  for i, o in zip(ids, val_offsets)}, p + osz * count)
     if tag in _EXT_SCALAR:                      # extended scalar (#69)
         length, dec = _EXT_SCALAR[tag]
