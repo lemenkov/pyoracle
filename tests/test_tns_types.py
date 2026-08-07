@@ -17,6 +17,7 @@ from oracle.datatypes import (
     DB_TYPE_INTERVAL_YM, DB_TYPE_TIMESTAMP, DB_TYPE_TIMESTAMP_TZ,
     BinaryDouble, BinaryFloat, IntervalYM, Var,
 )
+from oracle.exceptions import DataError
 from oracle.tns import (
     _read_iov, _read_long_column, _read_rowid_column, _read_urowid_column,
     decode_dalc, decode_ub4, encode_sb4, exec_oac_signature,
@@ -276,6 +277,24 @@ class TestIntervalDS(unittest.TestCase):
                    datetime.timedelta(days=400, microseconds=999999)):
             self.assertEqual(
                 decode_interval_ds(encode_token_interval_ds(TD)), TD)
+
+    def test_decode_extreme_valid_days(self):
+        # Oracle's INTERVAL DAY(9) maximum (+/-999_999_999 days) is exactly
+        # timedelta's own limit, so the legal extremes must still decode.
+        for Days in (999999999, -999999999):
+            Raw = ((2**31 + Days).to_bytes(4, 'big') + b'\x3c\x3c\x3c'
+                   + (2**31).to_bytes(4, 'big'))
+            self.assertEqual(decode_interval_ds(Raw),
+                             datetime.timedelta(days=Days))
+
+    def test_decode_out_of_range_raises_dataerror(self):
+        # Raw day counts a real server cannot send (beyond DAY(9)) overflow
+        # timedelta; a corrupt/truncated frame must surface as DataError, not a
+        # raw OverflowError. all-zero -> days=-2**31; all-0xFF -> days~+2**31.
+        for Raw in (b'\x00' * 11, b'\xff' * 11):
+            with self.subTest(raw=Raw.hex()):
+                with self.assertRaises(DataError):
+                    decode_interval_ds(Raw)
 
 
 class TestIntervalYM(unittest.TestCase):

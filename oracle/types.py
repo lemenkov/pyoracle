@@ -14,6 +14,7 @@ from decimal import Decimal
 
 from oracle._tzregions import TZ_REGIONS
 from oracle.datatypes import IntervalYM
+from oracle.exceptions import DataError
 from oracle.tns_consts import (
     AL16UTF16_CHARSET, AL32UTF8_CHARSET, ISO_LATIN_1_CHARSET, UTF8_CHARSET,
     TNS_TYPE_BDOUBLE, TNS_TYPE_BFLOAT, TNS_TYPE_BOOLEAN, TNS_TYPE_CHAR,
@@ -204,8 +205,17 @@ def decode_interval_ds(Data: bytes) -> datetime.timedelta | None:
     Minutes = Data[5] - 60
     Seconds = Data[6] - 60
     Nanos = int.from_bytes(Data[7:11], 'big') - 2**31
-    return datetime.timedelta(days=Days, hours=Hours, minutes=Minutes,
-                              seconds=Seconds, microseconds=Nanos // 1000)
+    try:
+        return datetime.timedelta(days=Days, hours=Hours, minutes=Minutes,
+                                  seconds=Seconds, microseconds=Nanos // 1000)
+    except OverflowError as Exc:
+        # A valid INTERVAL DAY TO SECOND always fits in timedelta -- Oracle's
+        # DAY(9) maximum of +/-999_999_999 days coincides with timedelta's own
+        # limit -- so an overflow here means the raw bytes are out of range: a
+        # corrupt or truncated frame, not a value any server can legally send.
+        # Surface it as DataError rather than leaking the raw OverflowError.
+        raise DataError(
+            f'INTERVAL DAY TO SECOND value out of range (days={Days})') from Exc
 
 
 def decode_interval_ym(Data: bytes) -> IntervalYM | None:
