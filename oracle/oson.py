@@ -230,9 +230,21 @@ def _uint(buf: bytes, pos: int, size: int) -> int:
 
 
 def decode_oson(data: bytes) -> object:
-    """Decode an OSON image to the corresponding Python value."""
+    """Decode an OSON image to the corresponding Python value.
+
+    A structurally short image (a header, node, or segment that indexes past
+    the end) raises OsonError, honouring the module's "malformed -> OsonError"
+    contract instead of leaking the raw IndexError of an out-of-range read.
+    """
     if data[:3] != OSON_MAGIC:
         raise OsonError(f"not an OSON image (magic {data[:3].hex()})")
+    try:
+        return _decode_image(data)
+    except IndexError as exc:
+        raise OsonError("truncated or malformed OSON image") from exc
+
+
+def _decode_image(data: bytes) -> object:
     flags = _u16(data, 4)
     pos = 6
     # Container value-offsets are ub2 when the compact flag is set, else ub4.

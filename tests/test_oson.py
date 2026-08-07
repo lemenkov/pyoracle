@@ -90,6 +90,25 @@ class TestOsonDecode(unittest.TestCase):
         with self.assertRaises(OsonError):
             decode_oson(b"\x00\x01\x02\x03\x04\x05")
 
+    def test_truncated_image_raises_osonerror(self):
+        # A structurally short image must raise OsonError, not leak the raw
+        # IndexError of an out-of-range read (the SeerODBC fuzzer found the C
+        # analog of this as a header overread). Each case is valid magic
+        # followed by a header/body cut short at a different point.
+        MAGIC = "ff4a5a01"
+        cases = {
+            "magic only": MAGIC,
+            "tree flag, no header body": MAGIC + "2004",
+            "ub4-tree-size flag, header cut short": MAGIC + "3004" + "010005",
+            "num_fnames=255, body truncated":
+                MAGIC + "2004" + "ff" + "000000000000",
+            "bare scalar, size overruns": MAGIC + "0000" + "00ff",
+        }
+        for label, hexstr in cases.items():
+            with self.subTest(label=label):
+                with self.assertRaises(OsonError):
+                    decode_oson(bytes.fromhex(hexstr))
+
     def test_value_types(self):
         # Spot-check the concrete Python types, not just equality.
         d = decode_oson(bytes.fromhex(
