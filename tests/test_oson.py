@@ -121,6 +121,34 @@ class TestOsonDecode(unittest.TestCase):
         self.assertIsInstance(d, dict)
 
 
+class TestOsonBoundedDecode(unittest.TestCase):
+    # A malformed OSON image must never hang the client (#165). Two unbounded
+    # vectors are guarded: an out-of-range container count (a crafted ub4 count
+    # would otherwise spin building a multi-billion-entry offset list) and a
+    # cyclic / shared node offset (which would otherwise recurse forever or
+    # blow up exponentially). Both must raise OsonError promptly.
+
+    def test_oversized_container_count_raises(self):
+        # Array nodes with a ub4 count of 0xffffffff, from SeerODBC's fuzz
+        # corpus -- these spun decode_oson for >30s before the count bound.
+        for hx in (
+            "ff4a5a0092fff140ffffffffa5000000250000002500000025000000250000"
+            "002500000025000000257fffffda00000025400000250000002500000000000"
+            "025b500a9ff",
+            "ff4a5a0004a50031ffffffffa5000000250000002500002500004000000460fa"
+            "00315e2400ff4a5a5b00c93e3e3e9b9b9b9aa2259b77fe9b9b",
+        ):
+            with self.subTest(hx=hx[:16]):
+                with self.assertRaises(OsonError):
+                    decode_oson(bytes.fromhex(hx))
+
+    def test_cyclic_node_offset_raises(self):
+        # A tree image whose root array's sole element offset points back to the
+        # array itself (offset 0) -- the cycle guard must reject it.
+        with self.assertRaises(OsonError):
+            decode_oson(bytes.fromhex("ff4a5a01200400000000040000c4010000"))
+
+
 class TestOsonExtendedScalars(unittest.TestCase):
     # Native extended scalar nodes (#69), captured from JSON_SCALAR(<native>)
     # images on 21c. Each is a bare-scalar OSON image (flags 0x0016): a tag byte
