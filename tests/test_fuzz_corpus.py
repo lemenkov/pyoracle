@@ -1,20 +1,23 @@
 # SPDX-FileCopyrightText: 2019 Peter Lemenkov <lemenkov@gmail.com>
 # SPDX-License-Identifier: MIT
 
-"""Replay the vendored SeerODBC response-decoder fuzz corpus through pyoracle's
-per-codec decoders (#165 follow-up).
+"""Replay the vendored SeerODBC fuzz corpora through pyoracle's decoders (#165).
 
-The sibling SeerODBC project fuzzes the shared TNS codecs and feeds each corpus
-blob to *every* decoder; we mirror that here, replaying ~1600 coverage-guided
-inputs through pyoracle's scalar decoders plus decode_oson and decode_dalc. The
-contract is the loose, memory-safety one: a malformed/hostile blob may decode or
-raise any clean exception, but must never hang the client (a decode that spins
-is exactly the decode_oson DoS the count/cycle bounds fixed). A per-call SIGALRM
-turns a spin into a test failure; any raised exception is acceptable.
+The sibling SeerODBC project fuzzes the shared TNS codecs and image decoders,
+feeding each corpus blob to *every* decoder. We mirror that here:
 
-Corpus data + provenance: tests/fuzz_corpus_decoders.txt. The VECTOR image
-corpus is intentionally not replayed here -- decode_vector has its own unbounded
-input to bound first, tracked separately."""
+  * the response-decoder corpus (~1600 blobs) is replayed through the scalar
+    decoders plus decode_oson and decode_dalc; and
+  * the VECTOR/ADT image corpus (~1100 blobs) through decode_vector.
+
+The contract is the loose, memory-safety one: a malformed/hostile blob may
+decode or raise any clean exception, but must never hang the client (a decode
+that spins is exactly the decode_oson / decode_vector DoS the count/cycle bounds
+fixed). A per-call SIGALRM turns a spin into a test failure; any raised
+exception is acceptable.
+
+Corpus data + provenance: tests/fuzz_corpus_decoders.txt,
+tests/fuzz_corpus_images.txt."""
 
 import os
 import signal
@@ -26,17 +29,25 @@ from oracle.types import (
     decode_binary_double, decode_binary_float, decode_date, decode_interval_ds,
     decode_interval_ym, decode_number,
 )
+from oracle.vector import decode_vector
 
-_CORPUS = os.path.join(os.path.dirname(__file__), "fuzz_corpus_decoders.txt")
+_HERE = os.path.dirname(__file__)
+_DECODERS_CORPUS = os.path.join(_HERE, "fuzz_corpus_decoders.txt")
+_IMAGES_CORPUS = os.path.join(_HERE, "fuzz_corpus_images.txt")
 
-# Every decoder of server-controlled column/field bytes that a corpus blob could
-# reach (SeerODBC feeds each blob to all of them; there is no selector byte).
-_BATTERY = (
+# Every decoder of server-controlled column/field bytes a response-corpus blob
+# could reach (SeerODBC feeds each blob to all of them; there is no selector
+# byte).
+_DECODER_BATTERY = (
     decode_number, decode_date, decode_binary_float, decode_binary_double,
     decode_interval_ym, decode_interval_ds, decode_oson, decode_dalc,
 )
+# The image corpus targets the ADT/VECTOR image decoders; decode_vector is the
+# self-describing one pyoracle exposes (object/collection images need a type
+# descriptor, so they are not reachable from raw bytes alone).
+_IMAGE_BATTERY = (decode_vector,)
 
-# decode_oson's bounds make every corpus blob return/raise in well under a
+# The count/cycle bounds make every corpus blob return/raise in well under a
 # millisecond; the cap only fires on a genuine regression to unbounded work.
 _CALL_CAP_SECONDS = 5.0
 _HAS_ALARM = hasattr(signal, "SIGALRM")
@@ -50,9 +61,9 @@ def _on_alarm(signum, frame):
     raise _Timeout()
 
 
-def _load_corpus():
+def _load_corpus(path):
     blobs = []
-    with open(_CORPUS, encoding="utf-8") as handle:
+    with open(path, encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
             if line and not line.startswith("#"):
@@ -60,35 +71,44 @@ def _load_corpus():
     return blobs
 
 
+def _assert_never_hangs(test, blobs, battery):
+    if _HAS_ALARM:
+        previous = signal.signal(signal.SIGALRM, _on_alarm)
+    try:
+        for blob in blobs:
+            for decode in battery:
+                if _HAS_ALARM:
+                    signal.setitimer(signal.ITIMER_REAL, _CALL_CAP_SECONDS)
+                try:
+                    decode(blob)
+                except _Timeout:
+                    test.fail(
+                        f"{decode.__name__} hung on corpus blob: {blob.hex()}")
+                except Exception:  # noqa: BLE001
+                    # Loose contract: any clean exception is acceptable -- the
+                    # connection layer treats a decode failure as a protocol
+                    # error. Only a hang (above) or hard crash is a failure.
+                    pass
+                finally:
+                    if _HAS_ALARM:
+                        signal.setitimer(signal.ITIMER_REAL, 0)
+    finally:
+        if _HAS_ALARM:
+            signal.signal(signal.SIGALRM, previous)
+
+
 class TestFuzzCorpusReplay(unittest.TestCase):
 
-    def test_battery_never_hangs(self):
-        blobs = _load_corpus()
+    def test_decoder_battery_never_hangs(self):
+        blobs = _load_corpus(_DECODERS_CORPUS)
         # Guard against a corpus file that failed to vendor / load.
         self.assertGreater(len(blobs), 1000)
-        if _HAS_ALARM:
-            previous = signal.signal(signal.SIGALRM, _on_alarm)
-        try:
-            for blob in blobs:
-                for decode in _BATTERY:
-                    if _HAS_ALARM:
-                        signal.setitimer(signal.ITIMER_REAL, _CALL_CAP_SECONDS)
-                    try:
-                        decode(blob)
-                    except _Timeout:
-                        self.fail(
-                            f"{decode.__name__} hung on corpus blob: {blob.hex()}")
-                    except Exception:  # noqa: BLE001
-                        # Loose contract: any clean exception is acceptable -- the
-                        # connection layer treats a decode failure as a protocol
-                        # error. Only a hang (above) or hard crash is a failure.
-                        pass
-                    finally:
-                        if _HAS_ALARM:
-                            signal.setitimer(signal.ITIMER_REAL, 0)
-        finally:
-            if _HAS_ALARM:
-                signal.signal(signal.SIGALRM, previous)
+        _assert_never_hangs(self, blobs, _DECODER_BATTERY)
+
+    def test_vector_image_corpus_never_hangs(self):
+        blobs = _load_corpus(_IMAGES_CORPUS)
+        self.assertGreater(len(blobs), 1000)
+        _assert_never_hangs(self, blobs, _IMAGE_BATTERY)
 
 
 if __name__ == "__main__":
