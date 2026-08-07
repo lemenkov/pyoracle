@@ -86,19 +86,28 @@ def _decode_float(chunk: bytes, fmt: str, bits: int) -> float:
     return struct.unpack(">" + fmt, u.to_bytes(bits // 8, "big"))[0]
 
 
+_VEC_ELEMENT_WIDTH = {_VEC_FLOAT32: 4, _VEC_FLOAT64: 8, _VEC_INT8: 1}
+
+
 def _decode_elements(image: bytes, pos: int, element_type: int, n: int) -> list:
     # Decode `n` consecutive numeric vector elements starting at `pos`.
+    width = _VEC_ELEMENT_WIDTH.get(element_type)
+    if width is None:
+        raise VectorError(
+            f"unsupported VECTOR element type {element_type} "
+            "(only FLOAT32/FLOAT64/INT8/BINARY reverse-engineered so far)")
+    # `n` comes straight from the image's ub4 element count (or ub2 sparse
+    # count); reject a count that cannot fit before iterating, so a crafted
+    # value (e.g. a ~4-billion ub4) can't spin building a huge list (#165).
+    if pos + width * n > len(image):
+        raise VectorError("VECTOR element count exceeds image")
     if element_type == _VEC_FLOAT32:
         return [_decode_float(image[pos + 4 * i:pos + 4 * i + 4], "f", 32)
                 for i in range(n)]
     if element_type == _VEC_FLOAT64:
         return [_decode_float(image[pos + 8 * i:pos + 8 * i + 8], "d", 64)
                 for i in range(n)]
-    if element_type == _VEC_INT8:
-        return [v - 256 if v > 127 else v for v in image[pos:pos + n]]
-    raise VectorError(
-        f"unsupported VECTOR element type {element_type} "
-        "(only FLOAT32/FLOAT64/INT8/BINARY reverse-engineered so far)")
+    return [v - 256 if v > 127 else v for v in image[pos:pos + n]]
 
 
 def decode_vector(image: bytes) -> list:
@@ -120,6 +129,8 @@ def decode_vector(image: bytes) -> list:
         # (docs/PROTOCOL.md §18.2).
         nnz = int.from_bytes(image[pos:pos + 2], "big")
         pos += 2
+        if pos + 4 * nnz > len(image):        # index array must fit (#165)
+            raise VectorError("VECTOR sparse index count exceeds image")
         indices = [int.from_bytes(image[pos + 4 * i:pos + 4 * i + 4], "big")
                    for i in range(nnz)]
         pos += 4 * nnz
@@ -129,6 +140,8 @@ def decode_vector(image: bytes) -> list:
         # `num_elements` is the dimension (bit) count; the payload is the bits
         # packed 8 to a byte. Surface the packed bytes verbatim.
         nbytes = (num_elements + 7) // 8
+        if pos + nbytes > len(image):         # packed bit payload must fit (#165)
+            raise VectorError("VECTOR bit count exceeds image")
         return list(image[pos:pos + nbytes])
     return _decode_elements(image, pos, element_type, num_elements)
 
