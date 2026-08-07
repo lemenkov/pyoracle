@@ -80,6 +80,34 @@ class TestVectorDecode(unittest.TestCase):
             decode_vector(bytes.fromhex("db00001209000000010000000000000000"))
 
 
+class TestVectorBoundedDecode(unittest.TestCase):
+    # A malformed VECTOR image must never hang the client (#165): a count field
+    # (dense ub4 element count, packed-bit count, or sparse index count) that
+    # cannot fit in the image must raise VectorError promptly, never spin
+    # building a multi-billion-entry list.
+
+    def test_oversized_element_count_raises(self):
+        # Dense FLOAT64 images with a huge ub4 num_elements, from SeerODBC's
+        # fuzz corpus -- these spun decode_vector for seconds before the bound.
+        for hx in (
+            "db0100100302f64f4fffffffffffffffffffffffffffffffffffffff69ff",
+            "db01ff040302f601005d0000004f4f01007bd20400000000010000680000",
+        ):
+            with self.subTest(hx=hx[:16]):
+                with self.assertRaises(VectorError):
+                    decode_vector(bytes.fromhex(hx))
+
+    def test_oversized_binary_count_raises(self):
+        # BINARY image claiming 0xffffffff bits with no payload.
+        with self.assertRaises(VectorError):
+            decode_vector(bytes.fromhex("db00000005ffffffff"))
+
+    def test_oversized_sparse_index_count_raises(self):
+        # Sparse image (flag 0x20) claiming 0xffff stored indices with none.
+        with self.assertRaises(VectorError):
+            decode_vector(bytes.fromhex("db0000200200000010ffff"))
+
+
 class TestVectorBind(unittest.TestCase):
     # Bind side (#62): a vector-like value encodes to its native binary image
     # (encode_vector), the inverse of decode_vector.
