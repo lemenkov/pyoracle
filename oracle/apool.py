@@ -103,8 +103,8 @@ class AsyncPool:
         """Open `min` connections up front. Idempotent. Normally called
         for you by the first `acquire()`; `create_pool_async()` calls
         it eagerly so the construction call awaits the opens."""
-        self._ensure_sync_primitives()
-        async with self._available:
+        cond = self._ensure_sync_primitives()
+        async with cond:
             if self._prewarmed or self._closed:
                 return
             self._prewarmed = True
@@ -112,7 +112,7 @@ class AsyncPool:
                 Conn = await self._open_connection()
                 self._free.append(_AsyncPoolEntry(Conn))
 
-    def acquire(self) -> _AsyncPooledConnectionGuard:
+    def acquire(self) -> "_AcquireContext":
         """Return an async context manager that yields a free
         connection (or opens a fresh one, up to `max`). Use as:
 
@@ -124,8 +124,8 @@ class AsyncPool:
     async def release(self, conn: AsyncOracleConnect) -> None:
         """Return a connection to the pool. Idempotent; releasing a
         connection not produced by this pool raises InterfaceError."""
-        self._ensure_sync_primitives()
-        async with self._available:
+        cond = self._ensure_sync_primitives()
+        async with cond:
             CheckoutId = id(conn)
             if CheckoutId not in self._in_use:
                 raise InterfaceError("connection was not acquired from this pool")
@@ -139,14 +139,14 @@ class AsyncPool:
                     pass
                 return
             self._free.append(_AsyncPoolEntry(conn))
-            self._available.notify()
+            cond.notify()
 
     async def close(self) -> None:
         """Close every free connection and mark the pool closed.
         Connections still checked out get closed when their caller
         releases them."""
-        self._ensure_sync_primitives()
-        async with self._available:
+        cond = self._ensure_sync_primitives()
+        async with cond:
             self._closed = True
             while self._free:
                 Entry = self._free.popleft()
@@ -156,7 +156,7 @@ class AsyncPool:
                     # Best-effort: keep draining the rest even if one
                     # connection refuses to close.
                     pass
-            self._available.notify_all()
+            cond.notify_all()
 
     @property
     def opened(self) -> int:
@@ -168,19 +168,20 @@ class AsyncPool:
 
     # ----- internals -----
 
-    def _ensure_sync_primitives(self) -> None:
-        if self._lock is None:
+    def _ensure_sync_primitives(self) -> asyncio.Condition:
+        if self._available is None:
             self._lock = asyncio.Lock()
             self._available = asyncio.Condition(self._lock)
+        return self._available
 
     async def _acquire_one(self) -> AsyncOracleConnect:
         """The body of acquire(), refactored so the
         `_AcquireContext` can drive it explicitly."""
-        self._ensure_sync_primitives()
+        cond = self._ensure_sync_primitives()
         if not self._prewarmed:
             await self.prewarm()
         Deadline = None if self._timeout is None else (time.monotonic() + self._timeout)
-        async with self._available:
+        async with cond:
             while True:
                 if self._closed:
                     raise InterfaceError("pool is closed")
@@ -197,7 +198,7 @@ class AsyncPool:
                     self._in_use.add(id(Conn))
                     return Conn
                 if Deadline is None:
-                    await self._available.wait()
+                    await cond.wait()
                 else:
                     Remaining = Deadline - time.monotonic()
                     if Remaining <= 0:
@@ -207,7 +208,7 @@ class AsyncPool:
                         )
                     try:
                         await asyncio.wait_for(
-                            self._available.wait(), timeout=Remaining,
+                            cond.wait(), timeout=Remaining,
                         )
                     except asyncio.TimeoutError:
                         raise InterfaceError(
