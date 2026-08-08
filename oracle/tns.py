@@ -283,8 +283,10 @@ def decode_packet(Data: bytes, Acc: tuple, FieldVersion: int | None = None) -> t
             return decode_token_uds(Data, Acc)
         case t if t == TTI_WRN:
             return decode_token_wrn(Data, Acc)
-        case _:
-            raise Exception("Can't decode unknown type", Token, Data, Acc)
+    # No case matched — raise here rather than via `case _` so every branch is a
+    # value-return, matching encode_dictionary below and keeping CodeQL's flow
+    # analysis happy (the `case _` wildcard reads as an implicit fall-through).
+    raise Exception("Can't decode unknown type", Token, Data, Acc)
 
 def decode_token_bvc(Data: bytes, Acc: tuple) -> tuple:
     # Bit vector identifying columns whose value is REPEATED from the previous
