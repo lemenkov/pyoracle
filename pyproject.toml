@@ -53,6 +53,5 @@ module = [
     "oracle.tns",
     "oracle.connection",
     "oracle.aconnection",
-    "oracle.lob",
 ]
 ignore_errors = true

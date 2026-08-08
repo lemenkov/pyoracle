@@ -110,8 +110,10 @@ class LOB:
             return 0
         return len(self.raw) - _LOCATOR_OVERHEAD
 
-    def read(self) -> str | bytes:
-        # Sync read. See `aread` below for the async equivalent.
+    def read(self) -> object:
+        # Sync read. Returns str/bytes for a CLOB/BLOB but the decoded value
+        # (e.g. dict/list) for a JSON/VECTOR image LOB, hence `object` for now
+        # (to be narrowed later). See `aread` below for the async equivalent.
         if self.data_type in _DECODED_IMAGE_TYPES:
             return self._decode_image(self._fetch_content())
         if len(self.raw) == _LOCATOR_OVERHEAD:
@@ -141,7 +143,7 @@ class LOB:
         from oracle.vector import decode_vector
         return decode_vector(content)
 
-    async def aread(self) -> str | bytes:
+    async def aread(self) -> object:
         """Async equivalent of `read()`. Use this when the LOB came
         out of an `AsyncCursor`; the `_connection` attached to it is
         an `AsyncOracleConnect` whose `lob_read` / `bfile_read` are
