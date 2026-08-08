@@ -523,7 +523,7 @@ class AsyncOracleConnect:
 
     async def _handle_rpa(self, Data: bytes) -> int | None:
         from oracle.tns_consts import TTI_AUTH
-        Result = decode_token_rpa(Data, None)
+        Result = decode_token_rpa(Data, ())
         if Result[0] == TTI_SESS:
             # First RPA: auth challenge from the server.
             (_, SessKey, Salt, DerivedSalt) = Result
