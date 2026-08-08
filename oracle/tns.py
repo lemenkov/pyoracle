@@ -1339,10 +1339,10 @@ def encode_packet(Type: int, Data: bytes, Length: int, Large: bool = False) -> t
         PacketSize = len(Data) + 8
         return (_packet_header(PacketSize, Type, Large) + Data, None)
 
-def encode_dictionary(Dictionary: dict) -> bytes | tuple[bytes, bytes]:
+def encode_dictionary(Dictionary: dict) -> bytes:
+    # Auth dictionaries yield two values (data, conn_key); callers use
+    # encode_dictionary_auth() directly for that, so this stays single-bytes.
     match Dictionary['type']:
-        case DictionaryType.auth:
-            return encode_dictionary_auth(Dictionary)
         case DictionaryType.chgpwd:
             return encode_dictionary_chgpwd(Dictionary)
         case DictionaryType.close:

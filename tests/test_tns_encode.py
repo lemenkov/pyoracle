@@ -487,7 +487,7 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
      69,55,69,65,53,68,51,68,48,48,54,69,69,65,53,67,55,66,70,52,54,56,70,51,
      56,52,50,55,54,56,55,55,50,55,48,53,53,68,56,55,68,54,57,54,57,1,1])
         ConnKey = bytes([212,243,165,74,231,92,68,245,19,138,89,126,42,178,151,8,104,26,203,93,221,17,183,19])
-        self.assertEqual(encode_dictionary(Dict), (Ret, ConnKey))
+        self.assertEqual(encode_dictionary_auth(Dict), (Ret, ConnKey))
 
     @patch('oracle.crypto.token_bytes')
     def test_tns_auth_1(self, mock_token_bytes):

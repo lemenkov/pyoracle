@@ -1,11 +1,16 @@
 # SPDX-FileCopyrightText: 2019 Peter Lemenkov <lemenkov@gmail.com>
 # SPDX-License-Identifier: MIT
 
+from typing import TYPE_CHECKING, Any, Literal, cast
+
+if TYPE_CHECKING:
+    from oracle.dbobject import DbObjectType
+
 from oracle.crypto import validate
 from oracle.tns import assemble_packet
 from oracle.tns import decode_token_pro
 from oracle.tns import decode_token_rpa
-from oracle.tns import encode_dictionary
+from oracle.tns import encode_dictionary, encode_dictionary_auth
 from oracle.tns import encode_packet
 from oracle.tns import exec_oac_signature
 from oracle.tns import (set_decode_dml_rowcounts, set_decode_return_binds,
@@ -21,7 +26,7 @@ from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe, enc
                         encode_o7_lob_read, decode_fv2_lob_getlen,
                         decode_fv2_lob_chunks, encode_o7_bfile_open,
                         encode_o7_bfile_close, decode_fv2_opened_locator)
-from oracle.exceptions import OperationalError
+from oracle.exceptions import InterfaceError, OperationalError
 from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
                         FIELD_VERSION_12_1, FIELD_VERSION_21_1,
                         encode_fast_auth, find_fast_auth_rpa)
@@ -194,6 +199,7 @@ def _decode_aq_payload(Rest: bytes, queue):
         (Img, Rest) = _read_object_column(Rest, {})
         if Img is None:
             return (None, Rest)
+        Img = cast(Any, Img)             # the decoded object image (has .image)
         Typ = queue.payload_type
         if Typ.is_collection:
             Elements = decode_collection_image(Img.image, Typ.element or {},
@@ -487,7 +493,7 @@ class OracleConnect:
         self.prelim = prelim
         self.app_name = app_name
 
-        self.sock = None
+        self.sock: socket.socket | None = None
         self.seq = 1
         # Bytes received past a marker packet, held for the next recv() so a
         # coalesced break|reset|error is not lost (#45). Empty between calls.
@@ -515,12 +521,12 @@ class OracleConnect:
         self._e2e_pending: dict = {}
         # Two-phase commit (#131): the opaque transaction context the server
         # returns from tpc_begin, replayed on prepare/commit/rollback/end.
-        self._transaction_context = None
+        self._transaction_context: bytes | None = None
         # Sessionless transactions (#133): True between begin/resume and
         # suspend/commit/rollback. Tracked client-side; the server confirms via
         # a keyword-201 sync pair piggybacked on subsequent call responses.
         self._sessionless_txn_active = False
-        self.conn_key = None
+        self.conn_key: bytes | None = None
         self.server_version = 0
         self.session_id = None
         # Negotiated TTC field version. Starts at the client's advertised max
@@ -550,7 +556,7 @@ class OracleConnect:
         # Ordered attribute layout per SQL object type (#115), keyed by
         # (owner, type_name). Populated on demand from ALL_TYPE_ATTRS the first
         # time an object of that type is fetched.
-        self._object_type_cache: dict[tuple[str, str], list] = {}
+        self._object_type_cache: dict[tuple[str, str], "DbObjectType"] = {}
 
     @property
     def stmtcachesize(self) -> int:
@@ -630,19 +636,21 @@ class OracleConnect:
         # send the initial CONNECT. Shared by connect() and the TNS_REDIRECT
         # handler, which re-points host/port and re-opens against the address
         # the server handed back.
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock = sock
         self._apply_socket_timeout()
-        self.sock.connect((self.host, self.port))
+        sock.connect((self.host, self.port))
         if self.ssl:
             try:
-                self.sock = self._wrap_socket_tls(self.sock)
+                sock = self._wrap_socket_tls(sock)
+                self.sock = sock
                 # The TLS handshake produced a fresh socket object; re-arm it.
                 self._apply_socket_timeout()
             except BaseException:
                 # If the TLS wrap fails (bad config, cert verification, etc.)
                 # release the raw TCP socket before surfacing the error.
                 try:
-                    self.sock.close()
+                    sock.close()
                 finally:
                     self.sock = None
                 raise
@@ -788,8 +796,9 @@ class OracleConnect:
                                 # Via decode_packet so the negotiated field
                                 # version is published for the version-gated
                                 # OER decode.
-                                Result = decode_packet(Packet, (None, None, []),
-                                                       self.field_version)
+                                Result = cast(tuple, decode_packet(
+                                    Packet, (None, None, []),
+                                    self.field_version))
                                 ErrCode = Result[1]
                                 Message = Result[5] if len(Result) > 5 else None
                             if ErrCode and ErrCode not in (0, 1403):
@@ -817,7 +826,7 @@ class OracleConnect:
                 case t if t == TNS_REDIRECT:
                     from oracle.tns import parse_redirect_address
                     (NewHost, NewPort) = parse_redirect_address(Packet)
-                    if NewHost is None:
+                    if NewHost is None or NewPort is None:
                         logger.debug("handle_login: unparseable redirect %r",
                                      Packet)
                         return 1
@@ -901,8 +910,8 @@ class OracleConnect:
                 'salt': bytes.fromhex(Salt.decode('utf-8')) if Salt else None,
                 'derived_salt': bytes.fromhex(DerivedSalt.decode('utf-8')) if DerivedSalt else None,
             }
-            Result = encode_dictionary(self._make_dict(DictionaryType.auth, auth=Auth))
-            (Data, ConnKey) = Result
+            (Data, ConnKey) = encode_dictionary_auth(
+                self._make_dict(DictionaryType.auth, auth=Auth))
             self.conn_key = ConnKey
             self.send(TNS_DATA, Data)
             return self.handle_login()
@@ -910,6 +919,7 @@ class OracleConnect:
             # Auth result: (TTI_AUTH, Resp, Ver, SessId)
             (_, Resp, Ver, SessId) = Result
             logger.debug("handle_login: auth result Ver=%s SessId=%s", Ver, SessId)
+            assert self.conn_key is not None
             if validate(bytes.fromhex(Resp.decode('utf-8')), self.conn_key):
                 self.server_version = Ver
                 self.session_id = SessId
@@ -1062,7 +1072,7 @@ class OracleConnect:
         except Exception as exc:
             # If reusing a cached cursor blew up, drop it from the cache
             # so the next attempt re-parses from scratch.
-            if CachedCursor:
+            if CachedCursor and CacheKey is not None:
                 self._cursor_cache.pop(CacheKey, None)
             if self._timed_out:
                 raise OperationalError(
@@ -1447,6 +1457,12 @@ class OracleConnect:
             return Content.decode('utf-16-be', errors='replace')
         return Content
 
+    def _rows(self, result: object) -> list:
+        # The row block of an execute() result (execute is typed `object`); [] if
+        # the result carries no rows.
+        return (result[4] if isinstance(result, tuple)
+                and len(result) > 4 and result[4] else [])
+
     def gettype(self, name: str) -> 'DbObjectType':
         """Look up a SQL object type by name and return a ``DbObjectType``.
 
@@ -1481,7 +1497,7 @@ class OracleConnect:
         Owner = schema
         if Owner is None:
             Result = self.execute("SELECT USER FROM dual")
-            Rows = Result[4] if len(Result) > 4 and Result[4] else []
+            Rows = self._rows(Result)
             Owner = Rows[0][0] if Rows else None
         if not Owner:
             return None
@@ -1492,7 +1508,7 @@ class OracleConnect:
         OidSQL = ("SELECT type_oid, typecode FROM all_types "
                   "WHERE owner = :1 AND type_name = :2")
         OidRes = self.execute(OidSQL, Bind=[Owner, name])
-        OidRows = OidRes[4] if len(OidRes) > 4 and OidRes[4] else []
+        OidRows = self._rows(OidRes)
         Oid = bytes(OidRows[0][0]) if OidRows and OidRows[0][0] else b""
         TypeCode = OidRows[0][1] if OidRows else None
         SQL = ("SELECT attr_name, attr_type_name, length, precision, scale "
@@ -1500,7 +1516,7 @@ class OracleConnect:
                "WHERE owner = :1 AND type_name = :2 "
                "ORDER BY attr_no")
         Result = self.execute(SQL, Bind=[Owner, name])
-        Rows = Result[4] if len(Result) > 4 and Result[4] else []
+        Rows = self._rows(Result)
         Attrs = []
         for Row in Rows:
             TypeName = Row[1]
@@ -1529,7 +1545,7 @@ class OracleConnect:
             "SELECT coll_type, elem_type_name, length, precision, scale, "
             "upper_bound FROM all_coll_types WHERE owner = :1 AND type_name = :2",
             Bind=[owner, name])
-        Rows = Res[4] if len(Res) > 4 and Res[4] else []
+        Rows = self._rows(Res)
         if not Rows:
             return {'is_collection': True}
         (CollType, ElemType, _Len, _Prec, _Scale, Upper) = Rows[0][:6]
@@ -1570,7 +1586,7 @@ class OracleConnect:
         LocLen = (Packet[1] << 8) | Packet[2]
         return Packet[3:3 + LocLen]
 
-    def write_temp_lob(self, Locator: bytes, Data: bytes,
+    def write_temp_lob(self, Locator: bytes, Data: str | bytes,
                        is_blob: bool = False) -> None:
         # Write `Data` into a (temporary) LOB via TTI_LOBOPS WRITE (op 0x0040,
         # #91), starting at offset 1. CLOB content goes on the wire as UTF-16BE;
@@ -1579,7 +1595,7 @@ class OracleConnect:
         # the OER and raise on a real error. 12c+ only (paired with
         # create_temp_lob). The encoder chunks payloads > 0xFC bytes itself.
         from oracle.tns_consts import TNS_LOB_OP_WRITE
-        Payload = Data if is_blob else Data.encode('utf-16-be')
+        Payload = Data if is_blob else cast(str, Data).encode('utf-16-be')
         Dict = self._make_dict(DictionaryType.lobops, locator=Locator,
                                data=Payload, operation=TNS_LOB_OP_WRITE)
         self.send(TNS_DATA, encode_dictionary(Dict))
@@ -1800,7 +1816,7 @@ class OracleConnect:
         Data = encode_dictionary(
             self._make_dict(DictionaryType.chgpwd, auth=Auth))
         self.send(TNS_DATA, Data)
-        Result = self._handle_response()
+        Result = cast(tuple, self._handle_response())
         ErrCode = Result[1] if isinstance(Result, tuple) and len(Result) > 1 else 0
         if ErrCode and ErrCode not in (0, 1403):
             Message = Result[5] if len(Result) > 5 else None
@@ -1829,7 +1845,7 @@ class OracleConnect:
                 # reconnect cycles. Format: 10-byte header (PacketSize,
                 # PacketFlags, Type, Flags, DataFlags=0x0040 EOF).
                 if self.sock is not None:
-                    self.sock.send(struct.pack(">hhBBh", 10, 0, TNS_DATA, 0, 0x0040))
+                    self._sock.send(struct.pack(">hhBBh", 10, 0, TNS_DATA, 0, 0x0040))
         except (OSError, Exception):
             # If the server already hung up or our state is out of sync, we
             # still want to release the local socket.
@@ -1866,7 +1882,7 @@ class OracleConnect:
             (Packet, Rest) = encode_packet(Type, Data, self.sdu,
                                            self._large_packets)
             try:
-                self.sock.send(Packet)
+                self._sock.send(Packet)
             except TimeoutError as exc:
                 raise self._timeout_error("write") from exc
             Data = Rest
@@ -2107,12 +2123,12 @@ class OracleConnect:
         First = True
         while len(Data) > BodyMax:
             Flags = 0x0020 | (FirstFlags if First else 0)
-            self.sock.send(encode_data_packet(Data[:BodyMax], Flags,
+            self._sock.send(encode_data_packet(Data[:BodyMax], Flags,
                                                self._large_packets))
             Data = Data[BodyMax:]
             First = False
         Flags = FinalFlags | (FirstFlags if First else 0)
-        self.sock.send(encode_data_packet(Data, Flags, self._large_packets))
+        self._sock.send(encode_data_packet(Data, Flags, self._large_packets))
 
     def _pipeline_recv_response(self) -> bytes:
         # Read exactly one op's response (TOKEN + body + EOR) as a single
@@ -2139,7 +2155,7 @@ class OracleConnect:
                     if Flag:
                         return Body
                     continue
-            More = self.sock.recv(self.sdu)
+            More = self._sock.recv(self.sdu)
             if not More:
                 raise OperationalError(
                     "connection closed during pipeline read")
@@ -2316,18 +2332,26 @@ class OracleConnect:
         self._break_in_progress = True
         try:
             if self._supports_oob:
-                self.sock.send(b"!", socket.MSG_OOB)
+                self._sock.send(b"!", socket.MSG_OOB)
             else:
                 (Packet, _) = encode_packet(
                     TNS_MARKER, bytes([1, 0, TNS_MARKER_TYPE_INTERRUPT]),
                     self.sdu, self._large_packets)
-                self.sock.send(Packet)
+                self._sock.send(Packet)
         except OSError:
             # Best-effort interrupt: if the socket is already gone the call we're
             # trying to break is dead anyway, so there's nothing to recover.
             pass
 
-    def recv(self, Acc: bytes, Data: bytes) -> tuple[int, bytes] | bool:
+    @property
+    def _sock(self) -> socket.socket:
+        # The connected socket, narrowed non-None for the send/recv paths (it is
+        # None only before connect() / after close()).
+        if self.sock is None:
+            raise InterfaceError("connection is not open")
+        return self.sock
+
+    def recv(self, Acc: bytes, Data: bytes) -> tuple[int, bytes] | Literal[False]:
         # Iterative receive + reassemble. Was previously recursive — for a
         # multi-KiB response (e.g. a LOB content fetch that spans many
         # SDU-sized TCP segments) the recursion depth blew the default
@@ -2347,16 +2371,19 @@ class OracleConnect:
             while len(Acc) >= 8:
                 (Flag, Type, Body, Rest) = assemble_packet(Acc, self.sdu,
                                                             self._large_packets)
-                if Flag is True and Type == TNS_MARKER:
-                    # Preserve everything after the marker (the coalesced
-                    # reset / error DATA) for the next recv() rather than
-                    # discarding it — the break state machine in
-                    # _next_data_packet drives the reset handshake.
-                    self._pending = Rest
-                    return (TNS_MARKER, b"")
-                if Flag is True and Rest == b"":
-                    return (Type, Data + Body)
-                if Flag is True and Rest != b"":
+                if Flag is True:
+                    # A full packet was assembled, so type/body/rest are set.
+                    assert Type is not None and Body is not None \
+                        and Rest is not None
+                    if Type == TNS_MARKER:
+                        # Preserve everything after the marker (the coalesced
+                        # reset / error DATA) for the next recv() rather than
+                        # discarding it — the break state machine in
+                        # _next_data_packet drives the reset handshake.
+                        self._pending = Rest
+                        return (TNS_MARKER, b"")
+                    if Rest == b"":
+                        return (Type, Data + Body)
                     Acc = Rest
                     Data = Data + Body
                     continue
@@ -2371,7 +2398,7 @@ class OracleConnect:
                 # Not enough bytes yet for a full packet — back to recv.
                 break
             try:
-                NetworkData = self.sock.recv(self.sdu)
+                NetworkData = self._sock.recv(self.sdu)
             except TimeoutError as exc:
                 raise self._timeout_error("read") from exc
             if not NetworkData:
@@ -2380,7 +2407,7 @@ class OracleConnect:
             Acc = Acc + NetworkData
 
     def _next_data_packet(self, Acc: bytes = b"", Data: bytes = b"") \
-            -> tuple[int, bytes] | bool:
+            -> tuple[int, bytes] | Literal[False]:
         # Receive the next TNS_DATA packet, transparently completing a server
         # break/reset handshake (#45). The 21c server cancels an errored or
         # interrupted call by sending a break marker (01 00 01) followed by a

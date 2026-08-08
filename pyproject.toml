@@ -51,7 +51,5 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = [
     "oracle.tns",
-    "oracle.connection",
-    "oracle.aconnection",
 ]
 ignore_errors = true
