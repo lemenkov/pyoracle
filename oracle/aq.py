@@ -66,8 +66,10 @@ class MessageProperties:
                 f"correlation={self.correlation!r} priority={self.priority}>")
 
 
-class Queue:
-    """An Oracle Advanced Queue handle (#128). Obtain via connection.queue()."""
+class _QueueBase:
+    """Shared construction + validation for the sync and async AQ handles
+    (#128). The wire methods live on the concrete Queue / AsyncQueue so the two
+    do not share (and cannot clash over) sync-vs-coroutine signatures."""
 
     def __init__(self, connection, name, payload_type=None, is_json=False):
         self._connection = connection
@@ -88,15 +90,6 @@ class Queue:
         self.enqoptions = EnqOptions()
         self.deqoptions = DeqOptions()
 
-    def enqone(self, message: MessageProperties) -> MessageProperties:
-        """Enqueue a single message; returns it with its msgid filled in."""
-        self._connection._aq_enq_one(self, message)
-        return message
-
-    def deqone(self) -> MessageProperties | None:
-        """Dequeue a single message, or None if none is available."""
-        return self._connection._aq_deq_one(self)
-
     def _check_array_json(self):
         # Array enqueue/dequeue of JSON payloads is not supported: the server
         # errors (ORA-00600 from python-oracledb too) on these editions, so it's
@@ -106,6 +99,19 @@ class Queue:
             raise NotSupportedError(
                 "array enqueue/dequeue (enqmany/deqmany) is not supported for "
                 "JSON-payload queues; use enqone/deqone")
+
+
+class Queue(_QueueBase):
+    """An Oracle Advanced Queue handle (#128). Obtain via connection.queue()."""
+
+    def enqone(self, message: MessageProperties) -> MessageProperties:
+        """Enqueue a single message; returns it with its msgid filled in."""
+        self._connection._aq_enq_one(self, message)
+        return message
+
+    def deqone(self) -> MessageProperties | None:
+        """Dequeue a single message, or None if none is available."""
+        return self._connection._aq_deq_one(self)
 
     def enqmany(self, messages: list) -> list:
         """Enqueue several messages (each a MessageProperties)."""
@@ -119,14 +125,14 @@ class Queue:
         return self._connection._aq_deq_many(self, max_messages)
 
 
-class AsyncQueue(Queue):
+class AsyncQueue(_QueueBase):
     """Async Advanced Queue handle (#128). Obtain via AsyncConnection.queue()."""
 
     async def enqone(self, message: MessageProperties) -> MessageProperties:
         await self._connection._aq_enq_one(self, message)
         return message
 
-    async def deqone(self):
+    async def deqone(self) -> MessageProperties | None:
         return await self._connection._aq_deq_one(self)
 
     async def enqmany(self, messages: list) -> list:

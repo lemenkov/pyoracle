@@ -54,7 +54,6 @@ module = [
     "oracle.connection",
     "oracle.aconnection",
     "oracle.apool",
-    "oracle.aq",
     "oracle.lob",
     "oracle.dbobject",
 ]
