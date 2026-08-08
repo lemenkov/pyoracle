@@ -24,6 +24,8 @@
 # "unsupported operand type(s) for |: 'property' and 'NoneType'".
 from __future__ import annotations
 
+import builtins
+
 from oracle.exceptions import NotSupportedError
 from oracle.tns_consts import (
     AL32UTF8_CHARSET,
@@ -155,7 +157,7 @@ class DbRef:
         return self._type_schema
 
     @property
-    def type_oid(self) -> bytes | None:
+    def type_oid(self) -> builtins.bytes | None:
         """The referenced object type's 16-byte OID, if the describe carried it
         (needed to bind the REF back, #139)."""
         return self._type_oid
@@ -257,7 +259,8 @@ class DbObject:
         object.__setattr__(self, '_type_name', type_name)
         object.__setattr__(self, '_dbtype', dbtype)
         object.__setattr__(self, '_is_collection', IsCollection)
-        object.__setattr__(self, '_elements', list(elements) if IsCollection else None)
+        object.__setattr__(self, '_elements',
+                           list(elements or []) if IsCollection else None)
         object.__setattr__(self, '_attrs', {} if IsCollection else dict(attrs or []))
         object.__setattr__(self, '_order',
                            [] if IsCollection else [Name for Name, _ in (attrs or [])])
@@ -385,7 +388,7 @@ def decode_object_image(Image: bytes, Layout: list[dict],
     """
     from oracle.types import decode_value
     Pos = _read_image_header(Image)
-    Attrs = []
+    Attrs: list[tuple[str, object]] = []
     for Attr in Layout:
         (Length, Pos) = _read_length(Image, Pos)
         if Length is None or Length == 0:
@@ -411,7 +414,6 @@ def decode_xmltype(Image: bytes, Charset: int = AL32UTF8_CHARSET) -> tuple:
     flag) ``value`` is the CLOB locator bytes and ``is_lob`` is True (the caller
     reads it through the LOB path).
     """
-    from oracle.tns_consts import CharsetDict
     Pos = _read_image_header(Image)
     Pos += 1                                     # XML version (skip)
     Flag = int.from_bytes(Image[Pos:Pos + 4], 'big')
@@ -420,8 +422,11 @@ def decode_xmltype(Image: bytes, Charset: int = AL32UTF8_CHARSET) -> tuple:
         Pos += 4
     Content = bytes(Image[Pos:])
     if Flag & _XML_TYPE_STRING:
-        return (False, Content.decode(CharsetDict.get(Charset, 'utf-8'),
-                                      'replace'))
+        # Inline XML content arrives as UTF-8 in our AL32UTF8 session; the
+        # `Charset` id is retained for signature parity (#236 — the old
+        # CharsetDict lookup keyed a name->id map by an int, so it always fell
+        # through to 'utf-8' anyway).
+        return (False, Content.decode('utf-8', 'replace'))
     if Flag & _XML_TYPE_LOB:
         if Flag & _XML_TYPE_LEGACY_STORAGE:
             raise NotSupportedError(
@@ -450,7 +455,7 @@ def decode_collection_image(Image: bytes, Element: dict,
         'data_type': Element.get('data_type'),
         'charset': Element.get('charset') or Charset,
     }
-    Out = []
+    Out: list = []
     for _ in range(Count or 0):
         (Length, Pos) = _read_length(Image, Pos)
         if Length is None or Length == 0:

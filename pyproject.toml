@@ -54,6 +54,5 @@ module = [
     "oracle.connection",
     "oracle.aconnection",
     "oracle.lob",
-    "oracle.dbobject",
 ]
 ignore_errors = true
