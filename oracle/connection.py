@@ -899,7 +899,7 @@ class OracleConnect:
             logger.debug("handle_login: could not parse PRO caps", exc_info=True)
 
     def _handle_rpa(self, Data: bytes) -> int | None:
-        Result = decode_token_rpa(Data, None)
+        Result = decode_token_rpa(Data, ())
         if Result[0] == TTI_SESS:
             # Auth challenge: (TTI_SESS, SessKey, Salt, DerivedSalt)
             (_, SessKey, Salt, DerivedSalt) = Result
