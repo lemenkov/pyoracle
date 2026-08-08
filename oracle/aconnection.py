@@ -24,7 +24,7 @@ import logging
 import socket
 import struct
 
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
     from oracle.dbobject import DbObjectType
