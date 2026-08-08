@@ -293,7 +293,7 @@ def decode_fv2_lob(data_type: int, content: bytes, charset: int) -> str | bytes:
     return content or b""
 
 
-def decode_value(Column: dict, Data: bytes | list) -> object:
+def decode_value(Column: dict, Data: bytes | list | None) -> object:
     # Dispatcher: pick the right decoder based on the column's TNS data type.
     # Unknown types are returned as raw bytes so callers can still see them.
     if Data is None or Data == [] or Data == b'':
