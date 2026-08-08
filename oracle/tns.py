@@ -6,6 +6,7 @@ from decimal import Decimal
 from functools import reduce
 from oracle.crypto import o5logon
 from oracle.crypto import encrypt_password
+from oracle.exceptions import DataError
 from oracle.cursor import cursor
 from oracle.datatypes import (
     BinaryDouble, BinaryFloat, IntervalYM, JSON, TempLob, Var)
@@ -3227,13 +3228,18 @@ def decode_dalc(Bytes: bytes) -> tuple[bytes | list, bytes]:
     # length byte is followed by that many data bytes. Both empty and null
     # are reported as [] here; callers that need the distinction look at the
     # enclosing bytes_with_length count.
-    if Bytes[0] == 0 or Bytes[0] == 255:
-        return ([], Bytes[1:])
-    elif Bytes[0] == 254:
-        return decode_chr(Bytes)
-    else:
+    try:
+        if Bytes[0] == 0 or Bytes[0] == 255:
+            return ([], Bytes[1:])
+        if Bytes[0] == 254:
+            return decode_chr(Bytes)
         Length = Bytes[0]
         return (Bytes[1:Length+1], Bytes[Length+1:])
+    except IndexError as Exc:
+        # A truncated field (empty Bytes, or a chunk length in decode_chr that
+        # runs past the buffer) indexes out of range; surface as DataError
+        # rather than leaking a raw IndexError (#230).
+        raise DataError('truncated DALC field') from Exc
 
 def decode_chr(Bytes: bytes) -> tuple[bytes, bytes]:
     if Bytes[0] == 254:

@@ -10,7 +10,7 @@
 import datetime
 import struct
 import zoneinfo
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from oracle._tzregions import TZ_REGIONS
 from oracle.datatypes import IntervalYM
@@ -127,9 +127,15 @@ def decode_number(Data: bytes) -> int | Decimal | None:
     FractionPart = FractionPart.rstrip('0')
     Sign = '' if IsPositive else '-'
 
-    if FractionPart:
-        return Decimal(f'{Sign}{IntegerPart}.{FractionPart}')
-    return int(f'{Sign}{IntegerPart}')
+    try:
+        if FractionPart:
+            return Decimal(f'{Sign}{IntegerPart}.{FractionPart}')
+        return int(f'{Sign}{IntegerPart}')
+    except (ValueError, InvalidOperation) as Exc:
+        # Malformed mantissa/exponent bytes produce a non-numeric digit string
+        # (negative base-100 pairs, an embedded '-'); surface as DataError
+        # rather than leaking a raw ValueError / InvalidOperation (#230).
+        raise DataError(f'malformed Oracle NUMBER: {Data.hex()}') from Exc
 
 
 def decode_date(Data: bytes) -> datetime.datetime | None:
@@ -154,23 +160,33 @@ def decode_date(Data: bytes) -> datetime.datetime | None:
     # tags it with the original session offset. To preserve the same instant
     # we build a UTC datetime first, then convert to the tagged offset so the
     # result both compares equal and prints with the original local time.
-    Tz = None
-    if len(Data) >= 13 and Data[11] != 0 and Data[12] != 0:
-        if Data[11] & _TZ_REGION_ID_FLAG:
-            # Named region id: resolve to an IANA zone and let zoneinfo supply
-            # the (DST-aware) offset for this instant. Unknown id -> naive UTC.
-            Tz = _region_tzinfo(_tz_region_id(Data[11], Data[12]))
-        else:
-            TzHours = Data[11] - _TZ_HOUR_OFFSET
-            TzMinutes = Data[12] - _TZ_MINUTE_OFFSET
-            Tz = datetime.timezone(datetime.timedelta(hours=TzHours, minutes=TzMinutes))
+    try:
+        Tz = None
+        if len(Data) >= 13 and Data[11] != 0 and Data[12] != 0:
+            if Data[11] & _TZ_REGION_ID_FLAG:
+                # Named region id: resolve to an IANA zone and let zoneinfo
+                # supply the (DST-aware) offset for this instant. Unknown id ->
+                # naive UTC.
+                Tz = _region_tzinfo(_tz_region_id(Data[11], Data[12]))
+            else:
+                TzHours = Data[11] - _TZ_HOUR_OFFSET
+                TzMinutes = Data[12] - _TZ_MINUTE_OFFSET
+                Tz = datetime.timezone(
+                    datetime.timedelta(hours=TzHours, minutes=TzMinutes))
 
-    if Tz is None:
-        return datetime.datetime(Year, Month, Day, Hour, Minute, Second, Microsecond)
+        if Tz is None:
+            return datetime.datetime(Year, Month, Day, Hour, Minute, Second,
+                                     Microsecond)
 
-    Utc = datetime.datetime(Year, Month, Day, Hour, Minute, Second, Microsecond,
-                            tzinfo=datetime.timezone.utc)
-    return Utc.astimezone(Tz)
+        Utc = datetime.datetime(Year, Month, Day, Hour, Minute, Second,
+                                Microsecond, tzinfo=datetime.timezone.utc)
+        return Utc.astimezone(Tz)
+    except (ValueError, OverflowError) as Exc:
+        # Out-of-range date/time or TZ-offset fields (bad month/day, an offset
+        # beyond +/-24h) make datetime()/timezone() reject; surface as DataError
+        # rather than leaking a raw ValueError (#230).
+        raise DataError(
+            f'malformed Oracle DATE/TIMESTAMP: {Data.hex()}') from Exc
 
 
 def decode_binary_float(Data: bytes) -> float | None:

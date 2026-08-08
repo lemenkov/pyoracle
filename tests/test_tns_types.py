@@ -30,7 +30,8 @@ from oracle.tns_consts import (
 )
 from oracle.types import (
     decode_binary_double, decode_binary_float, decode_date, decode_interval_ds,
-    decode_interval_ym, decode_value, rowid_to_string, urowid_to_string,
+    decode_interval_ym, decode_number, decode_value, rowid_to_string,
+    urowid_to_string,
 )
 
 
@@ -186,6 +187,37 @@ class TestDecodeDalc(unittest.TestCase):
 
     def test_direct_length(self):
         self.assertEqual(decode_dalc(b"\x03abctail"), (b"abc", b"tail"))
+
+    def test_truncated_raises_dataerror(self):
+        # An empty buffer indexes Bytes[0] out of range; must raise DataError,
+        # not a raw IndexError (#230). (A short direct-length field slices
+        # leniently and returns the partial bytes, which is unchanged.)
+        with self.assertRaises(DataError):
+            decode_dalc(b"")
+
+
+class TestMalformedScalarDecode(unittest.TestCase):
+    # A malformed column value must raise a domain error (DataError), not a raw
+    # ValueError / decimal.InvalidOperation from the underlying parse (#230).
+
+    def test_number_malformed_raises_dataerror(self):
+        # Mantissa bytes that yield a non-numeric digit string (base-100 pairs
+        # out of the 1..100 range) -- from the SeerODBC fuzz corpus.
+        for hx in ("655aff02", "9c00ff"):
+            with self.subTest(hx=hx):
+                with self.assertRaises(DataError):
+                    decode_number(bytes.fromhex(hx))
+
+    def test_date_out_of_range_raises_dataerror(self):
+        # 7-byte DATE with month 0 -> datetime() rejects.
+        with self.assertRaises(DataError):
+            decode_date(bytes.fromhex("787c0001010101"))
+
+    def test_valid_scalars_still_decode(self):
+        # Guard against the try/except swallowing valid values.
+        self.assertEqual(decode_number(bytes.fromhex("c12b")), 42)
+        self.assertEqual(decode_date(bytes.fromhex("787c060f010101")),
+                         datetime.datetime(2024, 6, 15, 0, 0, 0))
 
 
 class TestBinaryFloat(unittest.TestCase):

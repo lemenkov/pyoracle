@@ -148,6 +148,19 @@ class TestOsonBoundedDecode(unittest.TestCase):
         with self.assertRaises(OsonError):
             decode_oson(bytes.fromhex("ff4a5a01200400000000040000c4010000"))
 
+    def test_invalid_utf8_string_raises_osonerror(self):
+        # Bare-scalar image with a 2-byte inline string node of invalid UTF-8
+        # (0xff 0xff) -- must raise OsonError, not a raw UnicodeDecodeError (#230).
+        with self.assertRaises(OsonError):
+            decode_oson(bytes.fromhex("ff4a5a010016000302ffff"))
+
+    def test_object_node_in_scalar_image_raises_osonerror(self):
+        # Bare-scalar image whose node is an object container: there is no
+        # field-name table, so resolving keys would call None(...) -> TypeError;
+        # must raise OsonError instead (#230).
+        with self.assertRaises(OsonError):
+            decode_oson(bytes.fromhex("ff4a5a01001600058401010000"))
+
 
 class TestOsonExtendedScalars(unittest.TestCase):
     # Native extended scalar nodes (#69), captured from JSON_SCALAR(<native>)
