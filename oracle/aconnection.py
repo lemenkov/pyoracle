@@ -95,7 +95,7 @@ class AsyncOracleConnect:
                  prelim: int = 0, sdu: int = 8192, charset: str = "utf-8",
                  app_name: str = "pyoracle",
                  field_version: int = FIELD_VERSION_23_4,
-                 cclass: str = None, purity: int = PURITY_DEFAULT):
+                 cclass: str | None = None, purity: int = PURITY_DEFAULT):
         self.host = host
         self.port = port
         # Proxy auth (#126): split proxy_user[schema] (see OracleConnect).
