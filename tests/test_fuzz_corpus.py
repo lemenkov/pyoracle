@@ -10,11 +10,13 @@ feeding each corpus blob to *every* decoder. We mirror that here:
     decoders plus decode_oson and decode_dalc; and
   * the VECTOR/ADT image corpus (~1100 blobs) through decode_vector.
 
-The contract is the loose, memory-safety one: a malformed/hostile blob may
-decode or raise any clean exception, but must never hang the client (a decode
-that spins is exactly the decode_oson / decode_vector DoS the count/cycle bounds
-fixed). A per-call SIGALRM turns a spin into a test failure; any raised
-exception is acceptable.
+The contract is twofold. Memory-safety (#165): a malformed/hostile blob must
+never hang the client -- a decode that spins is the decode_oson / decode_vector
+DoS the count/cycle bounds fixed, and a per-call SIGALRM turns a spin into a
+failure. Exception hygiene (#230): a malformed blob may decode or raise a
+*domain* exception (a DatabaseError subclass, or the codec's own OsonError /
+VectorError), but never a raw ValueError / IndexError / UnicodeDecodeError /
+decimal.InvalidOperation leaking the implementation.
 
 Corpus data + provenance: tests/fuzz_corpus_decoders.txt,
 tests/fuzz_corpus_images.txt."""
@@ -23,13 +25,14 @@ import os
 import signal
 import unittest
 
-from oracle.oson import decode_oson
+from oracle.exceptions import DatabaseError
+from oracle.oson import OsonError, decode_oson
 from oracle.tns import decode_dalc
 from oracle.types import (
     decode_binary_double, decode_binary_float, decode_date, decode_interval_ds,
     decode_interval_ym, decode_number,
 )
-from oracle.vector import decode_vector
+from oracle.vector import VectorError, decode_vector
 
 _HERE = os.path.dirname(__file__)
 _DECODERS_CORPUS = os.path.join(_HERE, "fuzz_corpus_decoders.txt")
@@ -46,6 +49,10 @@ _DECODER_BATTERY = (
 # self-describing one pyoracle exposes (object/collection images need a type
 # descriptor, so they are not reachable from raw bytes alone).
 _IMAGE_BATTERY = (decode_vector,)
+
+# The exception types a decoder may raise on malformed input (#230): the DB-API
+# hierarchy plus the two codec-specific errors. Anything else is a raw leak.
+_DOMAIN_ERRORS = (DatabaseError, OsonError, VectorError)
 
 # The count/cycle bounds make every corpus blob return/raise in well under a
 # millisecond; the cap only fires on a genuine regression to unbounded work.
@@ -71,7 +78,7 @@ def _load_corpus(path):
     return blobs
 
 
-def _assert_never_hangs(test, blobs, battery):
+def _assert_bounded_and_typed(test, blobs, battery):
     if _HAS_ALARM:
         previous = signal.signal(signal.SIGALRM, _on_alarm)
     try:
@@ -84,11 +91,12 @@ def _assert_never_hangs(test, blobs, battery):
                 except _Timeout:
                     test.fail(
                         f"{decode.__name__} hung on corpus blob: {blob.hex()}")
-                except Exception:  # noqa: BLE001
-                    # Loose contract: any clean exception is acceptable -- the
-                    # connection layer treats a decode failure as a protocol
-                    # error. Only a hang (above) or hard crash is a failure.
-                    pass
+                except _DOMAIN_ERRORS:
+                    pass                       # a clean, catchable decode error
+                except Exception as exc:       # noqa: BLE001
+                    test.fail(
+                        f"{decode.__name__} raised non-domain "
+                        f"{type(exc).__name__} on corpus blob: {blob.hex()}")
                 finally:
                     if _HAS_ALARM:
                         signal.setitimer(signal.ITIMER_REAL, 0)
@@ -99,16 +107,16 @@ def _assert_never_hangs(test, blobs, battery):
 
 class TestFuzzCorpusReplay(unittest.TestCase):
 
-    def test_decoder_battery_never_hangs(self):
+    def test_decoder_battery_bounded_and_typed(self):
         blobs = _load_corpus(_DECODERS_CORPUS)
         # Guard against a corpus file that failed to vendor / load.
         self.assertGreater(len(blobs), 1000)
-        _assert_never_hangs(self, blobs, _DECODER_BATTERY)
+        _assert_bounded_and_typed(self, blobs, _DECODER_BATTERY)
 
-    def test_vector_image_corpus_never_hangs(self):
+    def test_vector_image_corpus_bounded_and_typed(self):
         blobs = _load_corpus(_IMAGES_CORPUS)
         self.assertGreater(len(blobs), 1000)
-        _assert_never_hangs(self, blobs, _IMAGE_BATTERY)
+        _assert_bounded_and_typed(self, blobs, _IMAGE_BATTERY)
 
 
 if __name__ == "__main__":

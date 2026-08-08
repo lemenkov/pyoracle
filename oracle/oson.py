@@ -240,7 +240,7 @@ def decode_oson(data: bytes) -> object:
         raise OsonError(f"not an OSON image (magic {data[:3].hex()})")
     try:
         return _decode_image(data)
-    except IndexError as exc:
+    except (IndexError, UnicodeDecodeError) as exc:
         raise OsonError("truncated or malformed OSON image") from exc
 
 
@@ -365,6 +365,11 @@ def _decode_node(seg: bytes, off: int, field_name, tree: bytes,
         # fit in the image, else a crafted count spins as above (#165).
         if p + (csz + osz) * count > len(seg):
             raise OsonError("OSON object count exceeds image")
+        if field_name is None:
+            # An object node reached in a scalar-only image (no field-name
+            # table); resolving its keys would call None(...) -> TypeError.
+            # Reject cleanly instead (#230).
+            raise OsonError("object node in a scalar-only OSON image")
         ids = [_uint(seg, p + csz * i, csz) for i in range(count)]
         p += csz * count
         val_offsets = [_uint(seg, p + osz * i, osz)
