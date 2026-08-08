@@ -253,17 +253,15 @@ class _IntegrationBase(unittest.TestCase):
     def tearDown(self):
         # The test may have closed self.cur — always reach for a fresh one.
         try:
-            cleanup = self.conn.cursor()
-            try:
-                self._drop_silently(cleanup)
-            except oracle.OperationalError as e:
-                # The setUp/tearDown cleanup is best-effort; ORA-01013
-                # here just means "Oracle cancelled the cleanup
-                # statement", and the next test's setUp will retry.
-                if e.code != 1013:
-                    raise
-            finally:
-                cleanup.close()
+            with self.conn.cursor() as cleanup:
+                try:
+                    self._drop_silently(cleanup)
+                except oracle.OperationalError as e:
+                    # The setUp/tearDown cleanup is best-effort; ORA-01013
+                    # here just means "Oracle cancelled the cleanup
+                    # statement", and the next test's setUp will retry.
+                    if e.code != 1013:
+                        raise
         finally:
             self.conn.close()
 
@@ -3870,13 +3868,11 @@ class CallprocIntegration(_IntegrationBase):
 
     def tearDown(self):
         try:
-            c = self.conn.cursor()
-            try:
-                c.execute(f"DROP PROCEDURE {self.PROC}")
-            except oracle.DatabaseError:
-                pass            # ORA-04043: procedure does not exist
-            finally:
-                c.close()
+            with self.conn.cursor() as c:
+                try:
+                    c.execute(f"DROP PROCEDURE {self.PROC}")
+                except oracle.DatabaseError:
+                    pass            # ORA-04043: procedure does not exist
         finally:
             super().tearDown()
 
