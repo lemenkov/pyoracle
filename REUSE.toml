@@ -19,8 +19,9 @@ SPDX-FileCopyrightText = "2026 Peter Lemenkov <lemenkov@gmail.com>"
 SPDX-License-Identifier = "CC0-1.0"
 
 [[annotations]]
-# PEP 561 marker; conventionally empty so it carries no inline SPDX tag.
+# PEP 561 marker; conventionally empty so it carries no inline SPDX tag. Trivial
+# (empty) file, so CC0-1.0 like the repo's other config.
 path = ["oracle/py.typed"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Peter Lemenkov <lemenkov@gmail.com>"
-SPDX-License-Identifier = "MIT"
+SPDX-License-Identifier = "CC0-1.0"
