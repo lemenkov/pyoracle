@@ -4,6 +4,8 @@
 """Async PEP 249-style cursor. Mirrors `oracle.cursor.Cursor` but with
 `async def` for every method that touches the wire."""
 
+from typing import Any
+
 from oracle.cursor import (
     _assign_out_binds,
     _assign_return_binds,
@@ -171,8 +173,9 @@ class AsyncCursor:
                    Batch: list | None = None, BatchErrors: bool = False,
                    ArrayDmlRowCounts: bool = False) -> 'AsyncCursor':
         _check_object_bind_support(self._connection, Bind, Batch)
-        Kw = {'Bind': Bind, 'Batch': Batch, 'BatchErrors': BatchErrors,
-              'ArrayDmlRowCounts': ArrayDmlRowCounts}
+        Kw: dict[str, Any] = {'Bind': Bind, 'Batch': Batch,
+                              'BatchErrors': BatchErrors,
+                              'ArrayDmlRowCounts': ArrayDmlRowCounts}
         ReturnBinds = _returning_bind_positions(operation, len(Bind or []))
         if ReturnBinds:                       # DML RETURNING ... INTO (#120)
             Kw['ReturnBinds'] = ReturnBinds

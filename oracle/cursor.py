@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import re
+from typing import Any
 
 from oracle.datatypes import TempLob, Var
 from oracle.exceptions import (
@@ -200,8 +201,9 @@ class Cursor:
              BatchErrors: bool = False,
              ArrayDmlRowCounts: bool = False) -> 'Cursor':
         _check_object_bind_support(self._connection, Bind, Batch)
-        Kw = {'Bind': Bind, 'Batch': Batch, 'BatchErrors': BatchErrors,
-              'ArrayDmlRowCounts': ArrayDmlRowCounts}
+        Kw: dict[str, Any] = {'Bind': Bind, 'Batch': Batch,
+                              'BatchErrors': BatchErrors,
+                              'ArrayDmlRowCounts': ArrayDmlRowCounts}
         ReturnBinds = _returning_bind_positions(operation, len(Bind or []))
         if ReturnBinds:                       # DML RETURNING ... INTO (#120)
             Kw['ReturnBinds'] = ReturnBinds

@@ -33,6 +33,9 @@ class DatabaseError(Error):
     def __init__(self, message: str, code: int | None = None):
         super().__init__(message)
         self.code = code
+        # 0-based row index for an array-DML batch error (#18); set by the
+        # batcherrors path, None otherwise. Mirrors python-oracledb's .offset.
+        self.offset: int | None = None
 
 
 class DataError(DatabaseError):
