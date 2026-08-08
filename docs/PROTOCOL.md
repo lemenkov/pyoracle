@@ -1666,7 +1666,9 @@ tag bits:
   (the container's values span a > 64 KiB tree, #88), otherwise the image-level
   width: `ub2` when header flag `0x04` is set (server `JSON_OBJECT` / `JSON()`
   literals), else `ub4` (oracledb-produced, flags `0x2102`). Reading the wrong
-  width walks offset 0 → infinite recursion, so the width is taken per node.
+  width mis-walks the value-offsets (e.g. back to offset 0), so the width is
+  taken per node; a genuinely cyclic offset is bounded at decode time (see the
+  robustness note below).
 - *`tree_seg_size`* — `ub4` when header flag `0x1000` is set (tree > 64 KiB).
 - *`num_fnames`* — `ub2` when header flag `0x0400` is set (> 255 field names),
   else `ub1`.
@@ -1681,6 +1683,14 @@ tag bits:
 > Multi-row JSON `SELECT`s ride the same LOB-locator path as multi-row LOB
 > reads and share the #45 desync limitation under load — single-row reads are
 > reliable.
+
+**Malformed images (#165).** The image arrives from the server, so its counts
+and offsets are untrusted. The decoder bounds the walk rather than trusting
+them: a container `count` whose entries would overrun the image, or a value
+offset that forms a cycle or revisits a shared node (an exponential blow-up),
+raises `OsonError` (#226); a header, node, or segment cut short likewise raises
+`OsonError`, not a raw `IndexError` (#225). python-oracledb trusts the server
+here and guards neither.
 
 ### 17.2 Binds (#50, #70)
 
@@ -1757,6 +1767,11 @@ Captured reference images:
 [170]            BINARY   db 01 0010 05 00000008 8000000000000000 aa
 [170, 1]         BINARY   db 01 0010 05 00000010 8000000000000000 aa 01
 ```
+
+**Malformed images (#165).** `num_elements`, the sparse stored-element count,
+and the packed-bit count arrive from the server and are validated against the
+image length before iterating, so a crafted count (e.g. a ~4-billion `ub4`)
+raises `VectorError` rather than spinning to build an unbounded list (#228).
 
 ### 18.1 Binds (#55 / #62)
 
