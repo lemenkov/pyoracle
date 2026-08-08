@@ -17,3 +17,10 @@ path = ["tests/fixtures/proxy_cert.pem", "tests/fixtures/proxy_key.pem"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Peter Lemenkov <lemenkov@gmail.com>"
 SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+# PEP 561 marker; conventionally empty so it carries no inline SPDX tag.
+path = ["oracle/py.typed"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Peter Lemenkov <lemenkov@gmail.com>"
+SPDX-License-Identifier = "MIT"

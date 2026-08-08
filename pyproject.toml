@@ -33,3 +33,7 @@ Homepage = "https://github.com/lemenkov/pyoracle"
 
 [tool.setuptools.packages.find]
 include = ["oracle*"]
+
+[tool.setuptools.package-data]
+# PEP 561 marker so type checkers (mypy, pyright) treat pyoracle as typed.
+oracle = ["py.typed"]
