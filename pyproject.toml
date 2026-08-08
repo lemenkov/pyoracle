@@ -54,12 +54,8 @@ module = [
     "oracle.connection",
     "oracle.aconnection",
     "oracle.apool",
-    "oracle.dbobject",
     "oracle.aq",
-    "oracle.vector",
-    "oracle.soda",
     "oracle.lob",
-    "oracle.datatypes",
-    "oracle.crypto",
+    "oracle.dbobject",
 ]
 ignore_errors = true
