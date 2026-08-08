@@ -1,6 +1,15 @@
 Entries are sorted chronologically from oldest to youngest within each release,
 releases are sorted from youngest to oldest.
 
+version 1.10.3:
+- Decoders raise domain errors (DataError / OsonError / VectorError) on malformed input instead of leaking raw ValueError / IndexError (#224, #225, #231)
+- Bound the OSON (JSON) and VECTOR image decoders so a malformed or hostile image cannot hang the client (#226, #228)
+- Fix decode_xmltype's dead charset lookup that always decoded UTF-8 (#236)
+- Ship a PEP 561 py.typed marker; the whole package is now type-checked under mypy in CI (#232)
+
+version 1.10.2:
+- Oracle 9i (fv2): fix a describe desync on NOT NULL columns; report null_ok (#217)
+
 version 1.10.1:
 - SODA: save() / saveAndGet() upsert (#212)
 - SODA: streaming getCursor() for unbounded result sets (#213)
