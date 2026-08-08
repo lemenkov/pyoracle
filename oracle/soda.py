@@ -298,7 +298,7 @@ class SodaOperation:
     def __init__(self, collection: "SodaCollection"):
         self._collection = collection
         self._connection = collection._connection
-        self._key = None
+        self._key: str | None = None
         self._filter = None
         self._skip = 0
         self._limit = 0
@@ -681,7 +681,7 @@ class AsyncSodaOperation:
     def __init__(self, collection: "AsyncSodaCollection"):
         self._collection = collection
         self._connection = collection._connection
-        self._key = None
+        self._key: str | None = None
         self._filter = None
         self._skip = 0
         self._limit = 0

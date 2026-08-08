@@ -29,6 +29,7 @@ packed bytes).
 
 import array
 import struct
+from typing import Sequence, cast
 
 VECTOR_MAGIC = 0xDB
 
@@ -110,7 +111,7 @@ def _decode_elements(image: bytes, pos: int, element_type: int, n: int) -> list:
     return [v - 256 if v > 127 else v for v in image[pos:pos + n]]
 
 
-def decode_vector(image: bytes) -> list:
+def decode_vector(image: bytes) -> list | SparseVector:
     """Decode a VECTOR binary image to a list of floats / ints (dense) or a
     SparseVector (sparse, 23ai)."""
     if not image or image[0] != VECTOR_MAGIC:
@@ -222,12 +223,15 @@ def encode_vector(value: object) -> bytes:
     else:
         element_type = _VEC_FLOAT32
     version, flags = _BIND_HEADER[element_type]
+    # Past the SparseVector branch, value is a dense sized sequence (list/tuple/
+    # array.array) — is_vector_bind gated it upstream.
+    seq = cast(Sequence, value)
     if element_type == _VEC_BINARY:
-        body = bytes(int(v) & 0xFF for v in value)
+        body = bytes(int(v) & 0xFF for v in seq)
         count = len(body) * 8
     else:
-        body = _encode_dense_body(value, element_type)
-        count = len(value)
+        body = _encode_dense_body(seq, element_type)
+        count = len(seq)
     return (bytes([VECTOR_MAGIC, version]) + flags.to_bytes(2, "big")
             + bytes([element_type]) + count.to_bytes(4, "big")
             + b"\x00" * 8 + body)

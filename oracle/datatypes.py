@@ -116,7 +116,7 @@ class Var:
                  is_array: bool = False, num_elements: int = 0):
         self.dbtype = _resolve_dbtype(typ)
         self.size = size if size is not None else self.dbtype.default_size
-        self._value = [] if is_array else None
+        self._value: object = [] if is_array else None
         self.has_value = False
         # PL/SQL associative-array (index-by table) bind (#122): is_array marks
         # the bulk-array form; num_elements is the declared maximum capacity.
