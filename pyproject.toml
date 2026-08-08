@@ -53,7 +53,6 @@ module = [
     "oracle.tns",
     "oracle.connection",
     "oracle.aconnection",
-    "oracle.apool",
     "oracle.lob",
     "oracle.dbobject",
 ]
