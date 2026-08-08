@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: © 2026 Peter Lemenkov
+# SPDX-License-Identifier: CC0-1.0
+#
+# Bulk-reformatting commits to skip in `git blame`, so blame points at the last
+# meaningful change rather than the reformat. GitHub applies this file
+# automatically; locally, enable it once with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# style: adopt ruff (format + lint) across oracle/ and tests/
+45f88704d39fe46c647c83f2fceb4195b91ea765
