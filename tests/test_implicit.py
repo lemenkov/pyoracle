@@ -17,11 +17,12 @@ from oracle.tns import _DECODE_FIELD_VERSION, decode_packet
 # A full token-27 (0x1b) response: num_results=1, the ID/NAME describe, a
 # cursor id, then the block's RPA + OER (ORA-0).
 _TOK27 = bytes.fromhex(
-    "1b010100012a01025c0200008101160000000000000000010201020249440000000001"
-    "800000011400000000020369010114023ffe01040104044e414d450000010100010707"
-    "601075ef8d7f000101021fe80000000107080106033b1a650001040102000000000004"
-    "010502f05201010000000104002f000000000003013f71010c00023d560000000b0001"
-    "0100000000000101012f00")
+    '1b010100012a01025c0200008101160000000000000000010201020249440000000001'
+    '800000011400000000020369010114023ffe01040104044e414d450000010100010707'
+    '601075ef8d7f000101021fe80000000107080106033b1a650001040102000000000004'
+    '010502f05201010000000104002f000000000003013f71010c00023d560000000b0001'
+    '0100000000000101012f00'
+)
 
 
 class TestImplicitDecode(unittest.TestCase):
@@ -36,26 +37,28 @@ class TestImplicitDecode(unittest.TestCase):
         sets = _extract_implicit_results(Result)
         self.assertEqual(len(sets), 1)
         (row_format, cursor_id) = sets[0]
-        self.assertEqual([c['column_name'] for c in row_format],
-                         [b'ID', b'NAME'])
+        self.assertEqual([c['column_name'] for c in row_format], [b'ID', b'NAME'])
         self.assertGreater(cursor_id, 0)
 
 
 class TestExtractImplicitResults(unittest.TestCase):
     def test_extracts_record(self):
-        rec = {'implicit_results': [
-            {'cursor_id': 5, 'row_format': [{'column_name': b'A'}]},
-            {'cursor_id': 6, 'row_format': [{'column_name': b'B'}]},
-        ]}
+        rec = {
+            'implicit_results': [
+                {'cursor_id': 5, 'row_format': [{'column_name': b'A'}]},
+                {'cursor_id': 6, 'row_format': [{'column_name': b'B'}]},
+            ]
+        }
         result = (None, None, None, None, [rec])
         sets = _extract_implicit_results(result)
-        self.assertEqual([(rf[0]['column_name'], cid) for rf, cid in sets],
-                         [(b'A', 5), (b'B', 6)])
+        self.assertEqual(
+            [(rf[0]['column_name'], cid) for rf, cid in sets], [(b'A', 5), (b'B', 6)]
+        )
 
     def test_no_implicit_results(self):
         self.assertEqual(_extract_implicit_results((0, 0, 1, None, [])), [])
         self.assertEqual(_extract_implicit_results((0, 0, 1, None, [[1, 2]])), [])
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

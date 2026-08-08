@@ -10,30 +10,35 @@
 
 import unittest
 
-from oracle.connection import _normalize_sessionless_txn_id
+from oracle.connection import Xid, _normalize_sessionless_txn_id
 from oracle.tns import (
-    _ENCODE_FIELD_VERSION, encode_tpc_switch, decode_token_server_piggyback,
+    _ENCODE_FIELD_VERSION,
+    decode_token_server_piggyback,
+    encode_tpc_switch,
 )
-from oracle.connection import Xid
 from oracle.tns_consts import (
-    TTI_FUN, TNS_FUNC_TPC_TXN_SWITCH, TNS_TPC_TXN_START, TNS_TPC_TXN_DETACH,
-    TPC_BEGIN_NEW, TPC_BEGIN_RESUME, TPC_TXN_FLAGS_SESSIONLESS,
+    TNS_FUNC_TPC_TXN_SWITCH,
     TNS_TPC_SESSIONLESS_FORMAT_ID,
+    TNS_TPC_TXN_DETACH,
+    TNS_TPC_TXN_START,
+    TPC_BEGIN_NEW,
+    TPC_BEGIN_RESUME,
+    TPC_TXN_FLAGS_SESSIONLESS,
+    TTI_FUN,
 )
 
 
 def _switch(operation, txnid, flags, timeout):
-    xid = None if txnid is None else Xid(TNS_TPC_SESSIONLESS_FORMAT_ID, txnid,
-                                         b"")
+    xid = None if txnid is None else Xid(TNS_TPC_SESSIONLESS_FORMAT_ID, txnid, b'')
     return encode_tpc_switch(7, 24, operation, xid, flags, timeout, None)
 
 
 class TestNormalizeTxnId(unittest.TestCase):
     def test_str_to_utf8(self):
-        self.assertEqual(_normalize_sessionless_txn_id("abc"), b"abc")
+        self.assertEqual(_normalize_sessionless_txn_id('abc'), b'abc')
 
     def test_bytes_passthrough(self):
-        self.assertEqual(_normalize_sessionless_txn_id(b"\x01\x02"), b"\x01\x02")
+        self.assertEqual(_normalize_sessionless_txn_id(b'\x01\x02'), b'\x01\x02')
 
     def test_none_yields_uuid(self):
         out = _normalize_sessionless_txn_id(None)
@@ -42,7 +47,7 @@ class TestNormalizeTxnId(unittest.TestCase):
 
     def test_too_long_rejected(self):
         with self.assertRaises(ValueError):
-            _normalize_sessionless_txn_id(b"x" * 65)
+            _normalize_sessionless_txn_id(b'x' * 65)
 
     def test_bad_type_rejected(self):
         with self.assertRaises(TypeError):
@@ -61,32 +66,45 @@ class TestEncode(unittest.TestCase):
     # padded to 128 bytes, flags NEW|SESSIONLESS = 0x11 ("01 11"), timeout 0x78.
     # Verified live on 23ai: the server accepts pyoracle's minimal sb4 form of
     # the format-id ("03 4e5c3e"); the oracledb reference pads it to four bytes.
-    _BEGIN = bytes.fromhex(
-        "0367070001010000034e5c3e010a000101800111017801010100000000"
-        "70796f2d736c2d303031") + bytes(118) + bytes([0])
+    _BEGIN = (
+        bytes.fromhex(
+            '0367070001010000034e5c3e010a000101800111017801010100000000'
+            '70796f2d736c2d303031'
+        )
+        + bytes(118)
+        + bytes([0])
+    )
 
     def test_begin_matches_capture(self):
-        out = _switch(TNS_TPC_TXN_START, b"pyo-sl-001",
-                      TPC_BEGIN_NEW | TPC_TXN_FLAGS_SESSIONLESS, 120)
+        out = _switch(
+            TNS_TPC_TXN_START,
+            b'pyo-sl-001',
+            TPC_BEGIN_NEW | TPC_TXN_FLAGS_SESSIONLESS,
+            120,
+        )
         self.assertEqual(out, self._BEGIN)
-        self.assertEqual(out[1], TNS_FUNC_TPC_TXN_SWITCH)   # func 103
+        self.assertEqual(out[1], TNS_FUNC_TPC_TXN_SWITCH)  # func 103
         # the magic format-id 0x4e5c3e is present in the xid descriptor
-        self.assertIn(bytes.fromhex("4e5c3e"), out)
+        self.assertIn(bytes.fromhex('4e5c3e'), out)
 
     def test_resume_flag(self):
-        out = _switch(TNS_TPC_TXN_START, b"pyo-sl-001",
-                      TPC_BEGIN_RESUME | TPC_TXN_FLAGS_SESSIONLESS, 120)
+        out = _switch(
+            TNS_TPC_TXN_START,
+            b'pyo-sl-001',
+            TPC_BEGIN_RESUME | TPC_TXN_FLAGS_SESSIONLESS,
+            120,
+        )
         self.assertEqual(out[0], TTI_FUN)
         # RESUME|SESSIONLESS = 0x14, encoded sb4 "01 14"
-        self.assertIn(bytes.fromhex("0114") + bytes.fromhex("0178"), out)
+        self.assertIn(bytes.fromhex('0114') + bytes.fromhex('0178'), out)
 
     def test_suspend_has_no_xid(self):
         out = _switch(TNS_TPC_TXN_DETACH, None, TPC_TXN_FLAGS_SESSIONLESS, 0)
         self.assertEqual(out[1], TNS_FUNC_TPC_TXN_SWITCH)
         # no magic format-id when detaching (xid is None)
-        self.assertNotIn(bytes.fromhex("4e5c3e"), out)
+        self.assertNotIn(bytes.fromhex('4e5c3e'), out)
         # SESSIONLESS-only flag 0x10
-        self.assertIn(bytes.fromhex("0110"), out)
+        self.assertIn(bytes.fromhex('0110'), out)
 
 
 class TestSyncPiggybackDecode(unittest.TestCase):
@@ -94,14 +112,13 @@ class TestSyncPiggybackDecode(unittest.TestCase):
     # sessionless transaction: keyword 201 (transaction id) carrying the 2-byte
     # sync state 0x83 0x01 (UNSET | version 1). pyoracle consumes it byte for
     # byte and continues with the rest of the response.
-    _SYNC = bytes.fromhex("170501011001011600010202830101c900090105022f65")
+    _SYNC = bytes.fromhex('170501011001011600010202830101c900090105022f65')
 
     def test_consumes_and_continues(self):
         # must not raise "Unhandled server-side piggyback opcode 5"
-        result = decode_token_server_piggyback(self._SYNC, (None, None, [],
-                                                            None))
+        result = decode_token_server_piggyback(self._SYNC, (None, None, [], None))
         self.assertEqual(result, (True, (None, None, [], None)))
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

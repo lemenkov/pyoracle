@@ -12,13 +12,18 @@
 # the connection's _aq_* methods send and parse.
 
 from oracle.tns_consts import (
-    TNS_AQ_DEQ_REMOVE, TNS_AQ_DEQ_NEXT_MSG, TNS_AQ_DEQ_ON_COMMIT,
-    TNS_AQ_DEQ_WAIT_FOREVER, TNS_AQ_ENQ_ON_COMMIT, TNS_AQ_MSG_PERSISTENT,
+    TNS_AQ_DEQ_NEXT_MSG,
+    TNS_AQ_DEQ_ON_COMMIT,
+    TNS_AQ_DEQ_REMOVE,
+    TNS_AQ_DEQ_WAIT_FOREVER,
+    TNS_AQ_ENQ_ON_COMMIT,
+    TNS_AQ_MSG_PERSISTENT,
 )
 
 
 class EnqOptions:
     """Enqueue options for a Queue (#128)."""
+
     def __init__(self):
         self.visibility = TNS_AQ_ENQ_ON_COMMIT
         self.delivery_mode = TNS_AQ_MSG_PERSISTENT
@@ -26,6 +31,7 @@ class EnqOptions:
 
 class DeqOptions:
     """Dequeue options for a Queue (#128)."""
+
     def __init__(self):
         self.consumer_name = None
         self.mode = TNS_AQ_DEQ_REMOVE
@@ -45,8 +51,17 @@ class MessageProperties:
     expiration / priority). For dequeue, these plus msgid / num_attempts /
     enq_time / state are filled in from the server.
     """
-    def __init__(self, payload=None, correlation=None, delay=0,
-                 expiration=-1, priority=0, exceptionq=None, recipients=None):
+
+    def __init__(
+        self,
+        payload=None,
+        correlation=None,
+        delay=0,
+        expiration=-1,
+        priority=0,
+        exceptionq=None,
+        recipients=None,
+    ):
         self.payload = payload
         self.correlation = correlation
         self.delay = delay
@@ -62,8 +77,10 @@ class MessageProperties:
         self.delivery_mode = TNS_AQ_MSG_PERSISTENT
 
     def __repr__(self):
-        return (f"<MessageProperties payload={self.payload!r} "
-                f"correlation={self.correlation!r} priority={self.priority}>")
+        return (
+            f'<MessageProperties payload={self.payload!r} '
+            f'correlation={self.correlation!r} priority={self.priority}>'
+        )
 
 
 class _QueueBase:
@@ -96,9 +113,11 @@ class _QueueBase:
         # gated rather than shipped broken. Single enqone/deqone JSON works.
         if self.is_json:
             from oracle.exceptions import NotSupportedError
+
             raise NotSupportedError(
-                "array enqueue/dequeue (enqmany/deqmany) is not supported for "
-                "JSON-payload queues; use enqone/deqone")
+                'array enqueue/dequeue (enqmany/deqmany) is not supported for '
+                'JSON-payload queues; use enqone/deqone'
+            )
 
 
 class Queue(_QueueBase):

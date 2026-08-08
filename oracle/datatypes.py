@@ -10,9 +10,17 @@ import datetime
 from decimal import Decimal
 
 from oracle.tns_consts import (
-    TNS_TYPE_BDOUBLE, TNS_TYPE_BFLOAT, TNS_TYPE_CHAR, TNS_TYPE_DATE,
-    TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_NUMBER, TNS_TYPE_RAW,
-    TNS_TYPE_REFCURSOR, TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ,
+    TNS_TYPE_BDOUBLE,
+    TNS_TYPE_BFLOAT,
+    TNS_TYPE_CHAR,
+    TNS_TYPE_DATE,
+    TNS_TYPE_INTERVALDS,
+    TNS_TYPE_INTERVALYM,
+    TNS_TYPE_NUMBER,
+    TNS_TYPE_RAW,
+    TNS_TYPE_REFCURSOR,
+    TNS_TYPE_TIMESTAMP,
+    TNS_TYPE_TIMESTAMPTZ,
     TNS_TYPE_VARCHAR,
 )
 
@@ -32,7 +40,7 @@ class TempLob:
     AL32UTF8, BLOB = byte length), matching python-oracledb.
     """
 
-    __slots__ = ("locator", "is_blob", "oac_size")
+    __slots__ = ('locator', 'is_blob', 'oac_size')
 
     def __init__(self, locator: bytes, is_blob: bool, oac_size: int):
         self.locator = locator
@@ -40,17 +48,16 @@ class TempLob:
         self.oac_size = oac_size
 
     def __repr__(self) -> str:
-        kind = "BLOB" if self.is_blob else "CLOB"
-        return f"TempLob({kind}, {len(self.locator)}B locator)"
+        kind = 'BLOB' if self.is_blob else 'CLOB'
+        return f'TempLob({kind}, {len(self.locator)}B locator)'
 
 
 class _DbType:
     """An Oracle bind type usable as a `cursor.var()` / OUT-bind type spec."""
 
-    __slots__ = ("name", "tns_type", "default_size", "csfrm")
+    __slots__ = ('name', 'tns_type', 'default_size', 'csfrm')
 
-    def __init__(self, name: str, tns_type: int, default_size: int,
-                 csfrm: int = 1):
+    def __init__(self, name: str, tns_type: int, default_size: int, csfrm: int = 1):
         self.name = name
         self.tns_type = tns_type
         self.default_size = default_size
@@ -65,28 +72,33 @@ class _DbType:
 # oracledb-compatible type-constant aliases for cursor.var() / OUT binds.
 # The default sizes are the fixed wire widths the server reserves for each
 # scalar OUT value (matching the value-sized OAC in tns.encode_token_oac).
-DB_TYPE_NUMBER = NUMBER = _DbType("DB_TYPE_NUMBER", TNS_TYPE_NUMBER, 22)
-DB_TYPE_VARCHAR = STRING = _DbType("DB_TYPE_VARCHAR", TNS_TYPE_VARCHAR, 32767)
+DB_TYPE_NUMBER = NUMBER = _DbType('DB_TYPE_NUMBER', TNS_TYPE_NUMBER, 22)
+DB_TYPE_VARCHAR = STRING = _DbType('DB_TYPE_VARCHAR', TNS_TYPE_VARCHAR, 32767)
 # National-charset string types (#174): csfrm 2 → AL16UTF16. Bind a str through
 # cursor.var(oracle.DB_TYPE_NVARCHAR) / DB_TYPE_NCHAR to target an NVARCHAR2 /
 # NCHAR column. Needed on 9i (a non-Unicode DB charset can't store all of
 # Unicode, but the national charset can); harmless on 10g+.
-DB_TYPE_NVARCHAR = _DbType("DB_TYPE_NVARCHAR", TNS_TYPE_VARCHAR, 32767, csfrm=2)
-DB_TYPE_NCHAR = _DbType("DB_TYPE_NCHAR", TNS_TYPE_CHAR, 32767, csfrm=2)
-DB_TYPE_RAW = _DbType("DB_TYPE_RAW", TNS_TYPE_RAW, 32767)
-DB_TYPE_DATE = _DbType("DB_TYPE_DATE", TNS_TYPE_DATE, 7)
-DB_TYPE_CURSOR = CURSOR = _DbType("DB_TYPE_CURSOR", TNS_TYPE_REFCURSOR, 1)
-DB_TYPE_TIMESTAMP = _DbType("DB_TYPE_TIMESTAMP", TNS_TYPE_TIMESTAMP, 11)
-DB_TYPE_TIMESTAMP_TZ = _DbType("DB_TYPE_TIMESTAMP_TZ", TNS_TYPE_TIMESTAMPTZ, 13)
-DB_TYPE_BINARY_FLOAT = _DbType("DB_TYPE_BINARY_FLOAT", TNS_TYPE_BFLOAT, 4)
-DB_TYPE_BINARY_DOUBLE = _DbType("DB_TYPE_BINARY_DOUBLE", TNS_TYPE_BDOUBLE, 8)
-DB_TYPE_INTERVAL_DS = _DbType("DB_TYPE_INTERVAL_DS", TNS_TYPE_INTERVALDS, 11)
-DB_TYPE_INTERVAL_YM = _DbType("DB_TYPE_INTERVAL_YM", TNS_TYPE_INTERVALYM, 5)
+DB_TYPE_NVARCHAR = _DbType('DB_TYPE_NVARCHAR', TNS_TYPE_VARCHAR, 32767, csfrm=2)
+DB_TYPE_NCHAR = _DbType('DB_TYPE_NCHAR', TNS_TYPE_CHAR, 32767, csfrm=2)
+DB_TYPE_RAW = _DbType('DB_TYPE_RAW', TNS_TYPE_RAW, 32767)
+DB_TYPE_DATE = _DbType('DB_TYPE_DATE', TNS_TYPE_DATE, 7)
+DB_TYPE_CURSOR = CURSOR = _DbType('DB_TYPE_CURSOR', TNS_TYPE_REFCURSOR, 1)
+DB_TYPE_TIMESTAMP = _DbType('DB_TYPE_TIMESTAMP', TNS_TYPE_TIMESTAMP, 11)
+DB_TYPE_TIMESTAMP_TZ = _DbType('DB_TYPE_TIMESTAMP_TZ', TNS_TYPE_TIMESTAMPTZ, 13)
+DB_TYPE_BINARY_FLOAT = _DbType('DB_TYPE_BINARY_FLOAT', TNS_TYPE_BFLOAT, 4)
+DB_TYPE_BINARY_DOUBLE = _DbType('DB_TYPE_BINARY_DOUBLE', TNS_TYPE_BDOUBLE, 8)
+DB_TYPE_INTERVAL_DS = _DbType('DB_TYPE_INTERVAL_DS', TNS_TYPE_INTERVALDS, 11)
+DB_TYPE_INTERVAL_YM = _DbType('DB_TYPE_INTERVAL_YM', TNS_TYPE_INTERVALYM, 5)
 
 _PYTYPE_TO_DBTYPE = {
-    int: NUMBER, float: NUMBER, Decimal: NUMBER,
-    str: STRING, bytes: DB_TYPE_RAW, bytearray: DB_TYPE_RAW,
-    datetime.date: DB_TYPE_DATE, datetime.datetime: DB_TYPE_DATE,
+    int: NUMBER,
+    float: NUMBER,
+    Decimal: NUMBER,
+    str: STRING,
+    bytes: DB_TYPE_RAW,
+    bytearray: DB_TYPE_RAW,
+    datetime.date: DB_TYPE_DATE,
+    datetime.datetime: DB_TYPE_DATE,
     datetime.timedelta: DB_TYPE_INTERVAL_DS,
 }
 
@@ -96,7 +108,7 @@ def _resolve_dbtype(typ: object) -> _DbType:
         return typ
     if isinstance(typ, type) and typ in _PYTYPE_TO_DBTYPE:
         return _PYTYPE_TO_DBTYPE[typ]
-    raise ValueError(f"unsupported var() type: {typ!r}")
+    raise ValueError(f'unsupported var() type: {typ!r}')
 
 
 class Var:
@@ -109,11 +121,15 @@ class Var:
     result afterwards with `getvalue()`.
     """
 
-    __slots__ = ("dbtype", "size", "_value", "has_value",
-                 "is_array", "num_elements")
+    __slots__ = ('dbtype', 'size', '_value', 'has_value', 'is_array', 'num_elements')
 
-    def __init__(self, typ: object, size: int | None = None,
-                 is_array: bool = False, num_elements: int = 0):
+    def __init__(
+        self,
+        typ: object,
+        size: int | None = None,
+        is_array: bool = False,
+        num_elements: int = 0,
+    ):
         self.dbtype = _resolve_dbtype(typ)
         self.size = size if size is not None else self.dbtype.default_size
         self._value: object = [] if is_array else None
@@ -132,9 +148,8 @@ class Var:
 
     def __repr__(self) -> str:
         if self.is_array:
-            return (f"Var({self.dbtype}[{self.num_elements}], "
-                    f"value={self._value!r})")
-        return f"Var({self.dbtype}, size={self.size}, value={self._value!r})"
+            return f'Var({self.dbtype}[{self.num_elements}], value={self._value!r})'
+        return f'Var({self.dbtype}, size={self.size}, value={self._value!r})'
 
 
 class BinaryFloat(float):
@@ -150,7 +165,7 @@ class BinaryFloat(float):
     __slots__ = ()
 
     def __repr__(self) -> str:
-        return f"BinaryFloat({float.__repr__(self)})"
+        return f'BinaryFloat({float.__repr__(self)})'
 
 
 class BinaryDouble(float):
@@ -161,7 +176,7 @@ class BinaryDouble(float):
     __slots__ = ()
 
     def __repr__(self) -> str:
-        return f"BinaryDouble({float.__repr__(self)})"
+        return f'BinaryDouble({float.__repr__(self)})'
 
 
 class IntervalYM:
@@ -175,7 +190,7 @@ class IntervalYM:
     the server stores and returns the value.
     """
 
-    __slots__ = ("years", "months")
+    __slots__ = ('years', 'months')
 
     def __init__(self, years: int = 0, months: int = 0):
         total = int(years) * 12 + int(months)
@@ -193,7 +208,7 @@ class IntervalYM:
         return hash((self.years, self.months))
 
     def __repr__(self) -> str:
-        return f"IntervalYM(years={self.years}, months={self.months})"
+        return f'IntervalYM(years={self.years}, months={self.months})'
 
 
 # IntervalYM is defined above, so register its Python-type mapping now that the
@@ -212,7 +227,7 @@ class JSON:
     server casts it to the column's JSON type (see docs/PROTOCOL.md §17.2).
     """
 
-    __slots__ = ("value",)
+    __slots__ = ('value',)
 
     def __init__(self, value: object):
         self.value = value
@@ -223,4 +238,4 @@ class JSON:
         return self.value == other.value
 
     def __repr__(self) -> str:
-        return f"JSON({self.value!r})"
+        return f'JSON({self.value!r})'

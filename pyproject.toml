@@ -43,3 +43,20 @@ python_version = "3.10"
 files = ["oracle"]
 # Runtime deps (pycryptodome, pyarrow) ship no stubs; treat them as Any.
 ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.format]
+# The codebase leans single-quoted; normalise to that rather than flipping ~1400
+# strings to double.
+quote-style = "single"
+
+[tool.ruff.lint]
+# Start focused, like the mypy rollout: real correctness (pyflakes) + import
+# order; `ruff format` owns the cosmetic side. The opinionated families (SIM, B,
+# UP, and the churnier pycodestyle rules) can be ratcheted in later.
+select = ["F", "W", "I", "E9"]
+# The wire code uses house-convention CamelCase locals and a few single-letter
+# names; the naming rules (N*) are deliberately not selected.

@@ -20,7 +20,10 @@
 # locator the server returns from FILE_OPEN.
 
 from oracle.tns_consts import (
-    TNS_TYPE_BFILE, TNS_TYPE_BLOB, TNS_TYPE_CLOB, TNS_TYPE_JSON,
+    TNS_TYPE_BFILE,
+    TNS_TYPE_BLOB,
+    TNS_TYPE_CLOB,
+    TNS_TYPE_JSON,
     TNS_TYPE_VECTOR,
 )
 
@@ -32,7 +35,7 @@ _LOCATOR_OVERHEAD = 102
 
 
 class LOB:
-    __slots__ = ("data_type", "raw", "_connection")
+    __slots__ = ('data_type', 'raw', '_connection')
 
     def __init__(self, data_type: int, raw: bytes, connection=None):
         # `data_type` is the column's TNS data type code (112 CLOB, 113 BLOB,
@@ -87,14 +90,14 @@ class LOB:
             DirEnd = DirStart + DirLen
             if DirEnd + 1 >= len(self.raw):
                 return None
-            Directory = self.raw[DirStart:DirEnd].decode("ascii")
+            Directory = self.raw[DirStart:DirEnd].decode('ascii')
             # next byte is a 0x00 separator, then the filename length
             FileLen = self.raw[DirEnd + 1]
             FileStart = DirEnd + 2
             FileEnd = FileStart + FileLen
             if FileEnd > len(self.raw):
                 return None
-            Filename = self.raw[FileStart:FileEnd].decode("ascii")
+            Filename = self.raw[FileStart:FileEnd].decode('ascii')
             return (Directory, Filename)
         except (UnicodeDecodeError, IndexError):
             return None
@@ -117,10 +120,11 @@ class LOB:
         if self.data_type in _DECODED_IMAGE_TYPES:
             return self._decode_image(self._fetch_content())
         if len(self.raw) == _LOCATOR_OVERHEAD:
-            return "" if self.is_character else b""
+            return '' if self.is_character else b''
         if self._connection is None:
             from oracle.exceptions import InterfaceError
-            raise InterfaceError("LOB has no connection to read from")
+
+            raise InterfaceError('LOB has no connection to read from')
         if self.is_file:
             return self._connection.bfile_read_native(self.raw)
         return self._connection.lob_read(self.raw, self.data_type)
@@ -130,7 +134,8 @@ class LOB:
         # JSON column). Shared by the sync read() path.
         if self._connection is None:
             from oracle.exceptions import InterfaceError
-            raise InterfaceError("LOB has no connection to read from")
+
+            raise InterfaceError('LOB has no connection to read from')
         return self._connection.lob_read(self.raw, self.data_type)
 
     def _decode_image(self, content: bytes) -> object:
@@ -139,8 +144,10 @@ class LOB:
         # lob_read returns bytes for these non-CLOB types.
         if self.data_type == TNS_TYPE_JSON:
             from oracle.oson import decode_oson
+
             return decode_oson(content)
         from oracle.vector import decode_vector
+
         return decode_vector(content)
 
     async def aread(self) -> object:
@@ -151,22 +158,27 @@ class LOB:
         if self.data_type in _DECODED_IMAGE_TYPES:
             if self._connection is None:
                 from oracle.exceptions import InterfaceError
-                raise InterfaceError("LOB has no connection to read from")
+
+                raise InterfaceError('LOB has no connection to read from')
             content = await self._connection.lob_read(self.raw, self.data_type)
             return self._decode_image(content)
         if len(self.raw) == _LOCATOR_OVERHEAD:
-            return "" if self.is_character else b""
+            return '' if self.is_character else b''
         if self._connection is None:
             from oracle.exceptions import InterfaceError
-            raise InterfaceError("LOB has no connection to read from")
+
+            raise InterfaceError('LOB has no connection to read from')
         if self.is_file:
             return await self._connection.bfile_read_native(self.raw)
         return await self._connection.lob_read(self.raw, self.data_type)
 
     def __repr__(self) -> str:
-        Kind = "BLOB" if self.is_binary else ("CLOB" if self.is_character
-                                              else f"LOB(type={self.data_type})")
-        return f"<{Kind} {len(self.raw)}B>"
+        Kind = (
+            'BLOB'
+            if self.is_binary
+            else ('CLOB' if self.is_character else f'LOB(type={self.data_type})')
+        )
+        return f'<{Kind} {len(self.raw)}B>'
 
     def __len__(self) -> int:
         return len(self.raw)

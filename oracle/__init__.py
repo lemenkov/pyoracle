@@ -2,37 +2,70 @@
 # SPDX-License-Identifier: MIT
 
 # PEP 249 (DB-API 2.0) module-level attributes.
-apilevel = "2.0"
-threadsafety = 1            # threads may share the module, not connections
-paramstyle = "named"        # bind variables not yet wired through Cursor
+apilevel = '2.0'
+threadsafety = 1  # threads may share the module, not connections
+paramstyle = 'named'  # bind variables not yet wired through Cursor
 
 from oracle.aconnection import AsyncOracleConnect
 from oracle.apool import AsyncPool
+from oracle.aq import DeqOptions, EnqOptions, MessageProperties, Queue
 from oracle.connection import OracleConnect, Xid
-from oracle.tns_consts import (
-    TPC_BEGIN_NEW, TPC_BEGIN_JOIN, TPC_BEGIN_RESUME, TPC_BEGIN_PROMOTE,
-    TPC_END_NORMAL, TPC_END_SUSPEND,
-    PURITY_DEFAULT, PURITY_NEW, PURITY_SELF,
+from oracle.datatypes import (
+    CURSOR,
+    DB_TYPE_BINARY_DOUBLE,
+    DB_TYPE_BINARY_FLOAT,
+    DB_TYPE_CURSOR,
+    DB_TYPE_DATE,
+    DB_TYPE_INTERVAL_DS,
+    DB_TYPE_INTERVAL_YM,
+    DB_TYPE_NCHAR,
+    DB_TYPE_NUMBER,
+    DB_TYPE_NVARCHAR,
+    DB_TYPE_RAW,
+    DB_TYPE_TIMESTAMP,
+    DB_TYPE_TIMESTAMP_TZ,
+    DB_TYPE_VARCHAR,
+    JSON,
+    NUMBER,
+    STRING,
+    BinaryDouble,
+    BinaryFloat,
+    IntervalYM,
+    Var,
 )
 from oracle.dbobject import DbObject, DbObjectType, DbRef
-from oracle.aq import Queue, MessageProperties, EnqOptions, DeqOptions
-from oracle.datatypes import (
-    CURSOR, DB_TYPE_BINARY_DOUBLE, DB_TYPE_BINARY_FLOAT, DB_TYPE_CURSOR,
-    DB_TYPE_DATE, DB_TYPE_INTERVAL_DS, DB_TYPE_INTERVAL_YM, DB_TYPE_NCHAR,
-    DB_TYPE_NUMBER, DB_TYPE_NVARCHAR, DB_TYPE_RAW, DB_TYPE_TIMESTAMP,
-    DB_TYPE_TIMESTAMP_TZ, DB_TYPE_VARCHAR,
-    NUMBER, STRING, BinaryDouble, BinaryFloat, IntervalYM, JSON, Var,
-)
 from oracle.exceptions import (
-    DataError, DatabaseError, Error, IntegrityError, InterfaceError,
-    InternalError, NotSupportedError, OperationalError, ProgrammingError,
+    DatabaseError,
+    DataError,
+    Error,
+    IntegrityError,
+    InterfaceError,
+    InternalError,
+    NotSupportedError,
+    OperationalError,
+    ProgrammingError,
     Warning,
 )
-from oracle.pool import Pool
-from oracle.vector import SparseVector
 from oracle.pipeline import (
-    Pipeline, PipelineOp, PipelineOpResult, PipelineOpType, create_pipeline,
+    Pipeline,
+    PipelineOp,
+    PipelineOpResult,
+    PipelineOpType,
+    create_pipeline,
 )
+from oracle.pool import Pool
+from oracle.tns_consts import (
+    PURITY_DEFAULT,
+    PURITY_NEW,
+    PURITY_SELF,
+    TPC_BEGIN_JOIN,
+    TPC_BEGIN_NEW,
+    TPC_BEGIN_PROMOTE,
+    TPC_BEGIN_RESUME,
+    TPC_END_NORMAL,
+    TPC_END_SUSPEND,
+)
+from oracle.vector import SparseVector
 
 
 def connect(*args, **kwargs) -> OracleConnect:
@@ -84,23 +117,69 @@ def create_pool(*args, **kwargs) -> Pool:
 
 
 __all__ = [
-    "apilevel", "threadsafety", "paramstyle",
-    "connect", "connect_async", "create_pool", "create_pool_async",
-    "OracleConnect", "AsyncOracleConnect", "Pool", "AsyncPool",
-    "BinaryFloat", "BinaryDouble", "IntervalYM", "JSON", "SparseVector", "Var",
-    "DbObject", "DbObjectType", "DbRef", "Xid",
-    "Queue", "MessageProperties", "EnqOptions", "DeqOptions",
-    "Pipeline", "PipelineOp", "PipelineOpResult", "PipelineOpType",
-    "create_pipeline",
-    "TPC_BEGIN_NEW", "TPC_BEGIN_JOIN", "TPC_BEGIN_RESUME", "TPC_BEGIN_PROMOTE",
-    "TPC_END_NORMAL", "TPC_END_SUSPEND",
-    "PURITY_DEFAULT", "PURITY_NEW", "PURITY_SELF",
-    "NUMBER", "STRING", "DB_TYPE_NUMBER", "DB_TYPE_VARCHAR",
-    "DB_TYPE_NVARCHAR", "DB_TYPE_NCHAR",
-    "DB_TYPE_RAW", "DB_TYPE_DATE", "CURSOR", "DB_TYPE_CURSOR",
-    "DB_TYPE_TIMESTAMP", "DB_TYPE_TIMESTAMP_TZ", "DB_TYPE_BINARY_FLOAT",
-    "DB_TYPE_BINARY_DOUBLE", "DB_TYPE_INTERVAL_DS", "DB_TYPE_INTERVAL_YM",
-    "Warning", "Error", "InterfaceError", "DatabaseError", "DataError",
-    "OperationalError", "IntegrityError", "InternalError",
-    "ProgrammingError", "NotSupportedError",
+    'apilevel',
+    'threadsafety',
+    'paramstyle',
+    'connect',
+    'connect_async',
+    'create_pool',
+    'create_pool_async',
+    'OracleConnect',
+    'AsyncOracleConnect',
+    'Pool',
+    'AsyncPool',
+    'BinaryFloat',
+    'BinaryDouble',
+    'IntervalYM',
+    'JSON',
+    'SparseVector',
+    'Var',
+    'DbObject',
+    'DbObjectType',
+    'DbRef',
+    'Xid',
+    'Queue',
+    'MessageProperties',
+    'EnqOptions',
+    'DeqOptions',
+    'Pipeline',
+    'PipelineOp',
+    'PipelineOpResult',
+    'PipelineOpType',
+    'create_pipeline',
+    'TPC_BEGIN_NEW',
+    'TPC_BEGIN_JOIN',
+    'TPC_BEGIN_RESUME',
+    'TPC_BEGIN_PROMOTE',
+    'TPC_END_NORMAL',
+    'TPC_END_SUSPEND',
+    'PURITY_DEFAULT',
+    'PURITY_NEW',
+    'PURITY_SELF',
+    'NUMBER',
+    'STRING',
+    'DB_TYPE_NUMBER',
+    'DB_TYPE_VARCHAR',
+    'DB_TYPE_NVARCHAR',
+    'DB_TYPE_NCHAR',
+    'DB_TYPE_RAW',
+    'DB_TYPE_DATE',
+    'CURSOR',
+    'DB_TYPE_CURSOR',
+    'DB_TYPE_TIMESTAMP',
+    'DB_TYPE_TIMESTAMP_TZ',
+    'DB_TYPE_BINARY_FLOAT',
+    'DB_TYPE_BINARY_DOUBLE',
+    'DB_TYPE_INTERVAL_DS',
+    'DB_TYPE_INTERVAL_YM',
+    'Warning',
+    'Error',
+    'InterfaceError',
+    'DatabaseError',
+    'DataError',
+    'OperationalError',
+    'IntegrityError',
+    'InternalError',
+    'ProgrammingError',
+    'NotSupportedError',
 ]

@@ -20,8 +20,9 @@ from oracle.tns_consts import TNS_REDIRECT
 class RedirectListener:
     """Sends a single TNS_REDIRECT to `backend_host:backend_port`."""
 
-    def __init__(self, backend_host: str, backend_port: int,
-                 listen_host: str = "127.0.0.1"):
+    def __init__(
+        self, backend_host: str, backend_port: int, listen_host: str = '127.0.0.1'
+    ):
         self.backend = (backend_host, backend_port)
         self.listen_host = listen_host
         self.listen_port: int | None = None
@@ -30,14 +31,14 @@ class RedirectListener:
 
     def _redirect_packet(self) -> bytes:
         descriptor = (
-            f"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST={self.backend[0]})"
-            f"(PORT={self.backend[1]})))"
-        ).encode("ascii")
+            f'(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST={self.backend[0]})'
+            f'(PORT={self.backend[1]})))'
+        ).encode('ascii')
         # Header (8 bytes) + ub2 data length + descriptor, matching the real
         # redirect packet layout.
-        body = struct.pack(">H", len(descriptor)) + descriptor
+        body = struct.pack('>H', len(descriptor)) + descriptor
         total = 8 + len(body)
-        header = struct.pack(">HhBBh", total, 0, TNS_REDIRECT, 0, 0)
+        header = struct.pack('>HhBBh', total, 0, TNS_REDIRECT, 0, 0)
         return header + body
 
     def start(self) -> None:
@@ -55,12 +56,12 @@ class RedirectListener:
         except OSError:
             return
         try:
-            conn.recv(8192)                       # read + discard the CONNECT
+            conn.recv(8192)  # read + discard the CONNECT
             conn.sendall(self._redirect_packet())
         except OSError as exc:
             # Test fixture: client disconnects/races during teardown are
             # expected sometimes; keep behavior best-effort but not silent.
-            print(f"RedirectListener socket error: {exc}")
+            print(f'RedirectListener socket error: {exc}')
         finally:
             conn.close()
 
@@ -77,7 +78,7 @@ class RedirectListener:
             self._thread.join(timeout=2)
             self._thread = None
 
-    def __enter__(self) -> "RedirectListener":
+    def __enter__(self) -> 'RedirectListener':
         self.start()
         return self
 

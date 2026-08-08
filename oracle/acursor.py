@@ -9,21 +9,23 @@ from typing import Any
 from oracle.cursor import (
     _assign_out_binds,
     _assign_return_binds,
-    _col_annotations,
-    _extract_implicit_results,
     _check_object_bind_support,
+    _col_annotations,
     _column_description,
+    _extract_implicit_results,
     _is_plsql,
     _resolve_parameters,
     _returning_bind_positions,
 )
 from oracle.datatypes import TempLob, Var
 from oracle.exceptions import (
-    DatabaseError, InterfaceError, NotSupportedError, ProgrammingError,
+    DatabaseError,
+    InterfaceError,
+    NotSupportedError,
+    ProgrammingError,
     from_ora_code,
 )
-from oracle.tns_consts import (AL32UTF8_CHARSET, FIELD_VERSION_10_2,
-                               FIELD_VERSION_12_1)
+from oracle.tns_consts import AL32UTF8_CHARSET, FIELD_VERSION_10_2, FIELD_VERSION_12_1
 
 
 class AsyncCursor:
@@ -36,7 +38,7 @@ class AsyncCursor:
     """
 
     arraysize: int = 1
-    prefetchrows: int = 2   # rows prefetched on a scrollable open (#181)
+    prefetchrows: int = 2  # rows prefetched on a scrollable open (#181)
 
     def __init__(self, connection, scrollable: bool = False):
         self._connection = connection
@@ -59,7 +61,7 @@ class AsyncCursor:
         self._scroll_buf_max: int = 0
         self._scroll_consumed: int = 0
         self._scroll_eof: bool = False
-        self._implicit_results: list = []     # #121, consumed via nextset()
+        self._implicit_results: list = []  # #121, consumed via nextset()
 
     @property
     def scrollable(self) -> bool:
@@ -74,9 +76,9 @@ class AsyncCursor:
 
     def _check_open(self) -> None:
         if self._closed:
-            raise InterfaceError("cursor is closed")
+            raise InterfaceError('cursor is closed')
         if self._connection is None or self._connection._writer is None:
-            raise InterfaceError("connection is closed")
+            raise InterfaceError('connection is closed')
 
     @property
     def description(self) -> list[tuple] | None:
@@ -140,19 +142,21 @@ class AsyncCursor:
 
     async def execute(self, operation: str, parameters=None) -> 'AsyncCursor':
         self._check_open()
-        self._release_scroll_cursor()    # free any prior scrollable cursor (#181)
+        self._release_scroll_cursor()  # free any prior scrollable cursor (#181)
         Bind = _resolve_parameters(operation, parameters)
         Bind = await self._promote_large_lob_binds(operation, Bind)
         return await self._run(operation, Bind)
 
-    async def _promote_large_lob_binds(self, operation: str,
-                                       Bind: list) -> list:
+    async def _promote_large_lob_binds(self, operation: str, Bind: list) -> list:
         """Async port of `Cursor._promote_large_lob_binds` (#91): stream a
         > 32767-byte CLOB / BLOB bind for a PL/SQL block into a server temp LOB
         and bind the locator, sidestepping ORA-01460. 12c+ / PL/SQL only."""
         Conn = self._connection
-        if (getattr(Conn, 'field_version', 0) < FIELD_VERSION_12_1
-                or not _is_plsql(operation) or not Bind):
+        if (
+            getattr(Conn, 'field_version', 0) < FIELD_VERSION_12_1
+            or not _is_plsql(operation)
+            or not Bind
+        ):
             return Bind
         Promoted = []
         for Value in Bind:
@@ -160,8 +164,7 @@ class AsyncCursor:
                 Locator = await Conn.create_temp_lob()
                 await Conn.write_temp_lob(Locator, Value)
                 Promoted.append(TempLob(Locator, False, len(Value) * 4))
-            elif (isinstance(Value, (bytes, bytearray))
-                    and len(Value) > 32767):
+            elif isinstance(Value, (bytes, bytearray)) and len(Value) > 32767:
                 Locator = await Conn.create_temp_lob(is_blob=True)
                 await Conn.write_temp_lob(Locator, bytes(Value), is_blob=True)
                 Promoted.append(TempLob(Locator, True, len(Value)))
@@ -169,27 +172,35 @@ class AsyncCursor:
                 Promoted.append(Value)
         return Promoted
 
-    async def _run(self, operation: str, Bind: list,
-                   Batch: list | None = None, BatchErrors: bool = False,
-                   ArrayDmlRowCounts: bool = False) -> 'AsyncCursor':
+    async def _run(
+        self,
+        operation: str,
+        Bind: list,
+        Batch: list | None = None,
+        BatchErrors: bool = False,
+        ArrayDmlRowCounts: bool = False,
+    ) -> 'AsyncCursor':
         _check_object_bind_support(self._connection, Bind, Batch)
-        Kw: dict[str, Any] = {'Bind': Bind, 'Batch': Batch,
-                              'BatchErrors': BatchErrors,
-                              'ArrayDmlRowCounts': ArrayDmlRowCounts}
+        Kw: dict[str, Any] = {
+            'Bind': Bind,
+            'Batch': Batch,
+            'BatchErrors': BatchErrors,
+            'ArrayDmlRowCounts': ArrayDmlRowCounts,
+        }
         ReturnBinds = _returning_bind_positions(operation, len(Bind or []))
-        if ReturnBinds:                       # DML RETURNING ... INTO (#120)
+        if ReturnBinds:  # DML RETURNING ... INTO (#120)
             Kw['ReturnBinds'] = ReturnBinds
         # Server-side scrollable open (#181), 10g+ only; 9i (fv2) falls back to
         # the buffered scroll (#161).
-        if (self._scrollable
-                and self._connection.field_version >= FIELD_VERSION_10_2):
+        if self._scrollable and self._connection.field_version >= FIELD_VERSION_10_2:
             Kw['scrollable'] = True
             Kw['Prefetch'] = max(int(self.prefetchrows), 1)
         Result = await self._connection.execute(operation, **Kw)
         return await self._apply_result(Bind, Result, BatchErrors=BatchErrors)
 
-    async def _apply_result(self, Bind: list, Result,
-                            BatchErrors: bool = False) -> 'AsyncCursor':
+    async def _apply_result(
+        self, Bind: list, Result, BatchErrors: bool = False
+    ) -> 'AsyncCursor':
         # Interpret a decoded execute Result into this cursor (rows / rowcount /
         # OUT binds). Split out of _run (#158) so the request-pipelining wire
         # path can reuse the post-processing on a response it read out-of-band.
@@ -200,27 +211,29 @@ class AsyncCursor:
             Message = Result[5] if len(Result) > 5 else None
             LastRowid = Result[6] if len(Result) > 6 else None
         except (TypeError, IndexError, ValueError) as exc:
-            raise DatabaseError(f"unexpected wire response: {Result!r}") from exc
+            raise DatabaseError(f'unexpected wire response: {Result!r}') from exc
 
         # Array-DML batch errors (#18): each entry is {offset, code, message}.
         self._batcherrors = list(Result[7]) if len(Result) > 7 else []
         # Array-DML per-iteration row counts (#18): list of ints, one per row.
         self._arraydmlrowcounts = (
-            list(Result[8]) if len(Result) > 8 and Result[8] else [])
+            list(Result[8]) if len(Result) > 8 and Result[8] else []
+        )
 
         # ORA-24381 ("error(s) in array DML") is the non-fatal summary the
         # server returns when batcherrors collected per-row failures — surface
         # them through getbatcherrors() instead of raising (mirrors sync _run).
         NonFatal = (0, 1403, 24381) if BatchErrors else (0, 1403)
         if OraCode not in NonFatal:
-            Detail = Message or f"ORA-{OraCode:05d}"
+            Detail = Message or f'ORA-{OraCode:05d}'
             raise from_ora_code(OraCode)(Detail, code=OraCode)
 
         # PL/SQL OUT / IN OUT binds: scalars are assigned here; REF CURSOR OUT
         # binds are fetched (async) and wrapped in a nested AsyncCursor.
         for Variable, Marker in _assign_out_binds(Bind, Result):
             Rows = await self._connection.fetch_all_rows(
-                Marker['cursor_id'], Marker['row_format'])
+                Marker['cursor_id'], Marker['row_format']
+            )
             Variable._value = await self._build_refcursor(Rows, Marker)
 
         # DML RETURNING ... INTO: write the returned value list onto each Var.
@@ -240,13 +253,17 @@ class AsyncCursor:
             self._annotations = [_col_annotations(C) for C in ColMeta]
             self._rows = await self._resolve_rows(Rows)
             self._rowcount = len(self._rows)
-            if (self._scrollable
-                    and self._connection.field_version >= FIELD_VERSION_10_2):
+            if (
+                self._scrollable
+                and self._connection.field_version >= FIELD_VERSION_10_2
+            ):
                 # Server-side scroll window (#181), 10g+; 9i stays buffered (#161).
-                CursorId = (Result[2] if len(Result) > 2
-                            and isinstance(Result[2], int) else 0)
-                self._init_scroll_window(CursorId, ColMeta, ServerRowCount,
-                                         len(self._rows), OraCode == 1403)
+                CursorId = (
+                    Result[2] if len(Result) > 2 and isinstance(Result[2], int) else 0
+                )
+                self._init_scroll_window(
+                    CursorId, ColMeta, ServerRowCount, len(self._rows), OraCode == 1403
+                )
         else:
             self._lastrowid = LastRowid
             self._description = None
@@ -264,13 +281,18 @@ class AsyncCursor:
         # Async row resolution shared by execute and nextset: LOB cells via
         # await aread(), object/collection cells via the awaited type describe
         # (mirrors the sync _resolve_lobs + _resolve_objects).
+        from oracle.dbobject import (
+            DbObject,
+            ObjectImage,
+            decode_collection_image,
+            decode_object_image,
+            decode_xmltype,
+        )
         from oracle.lob import LOB
-        from oracle.dbobject import (ObjectImage, DbObject,
-                                     decode_object_image,
-                                     decode_collection_image, decode_xmltype)
         from oracle.tns_consts import TNS_TYPE_CLOB
+
         ResolvedRows = []
-        for Row in (Rows or []):
+        for Row in Rows or []:
             NewRow = list(Row)
             for I, Val in enumerate(NewRow):
                 if isinstance(Val, LOB):
@@ -279,7 +301,8 @@ class AsyncCursor:
                 elif isinstance(Val, ObjectImage) and Val.type_name == 'XMLTYPE':
                     # XMLType (#124): decode to str, or read the CLOB locator.
                     (IsLob, XmlVal) = decode_xmltype(
-                        Val.image, Val.charset or AL32UTF8_CHARSET)
+                        Val.image, Val.charset or AL32UTF8_CHARSET
+                    )
                     if IsLob:
                         Lob = LOB(TNS_TYPE_CLOB, XmlVal)
                         Lob._connection = self._connection
@@ -288,13 +311,16 @@ class AsyncCursor:
                         NewRow[I] = XmlVal
                 elif isinstance(Val, ObjectImage):
                     Typ = await self._connection._describe_object_type(
-                        Val.type_schema, Val.type_name)
+                        Val.type_schema, Val.type_name
+                    )
                     Charset = Val.charset or AL32UTF8_CHARSET
                     if Typ is not None and Typ.is_collection:
                         Elements = decode_collection_image(
-                            Val.image, Typ.element or {}, Charset)
-                        NewRow[I] = DbObject(Val.type_name,
-                                             elements=Elements, dbtype=Typ)
+                            Val.image, Typ.element or {}, Charset
+                        )
+                        NewRow[I] = DbObject(
+                            Val.type_name, elements=Elements, dbtype=Typ
+                        )
                     else:
                         Layout = Typ.attrs if Typ is not None else []
                         Attrs = decode_object_image(Val.image, Layout, Charset)
@@ -321,11 +347,10 @@ class AsyncCursor:
         # Wrap an already-fetched REF CURSOR result set in a nested AsyncCursor,
         # resolving any LOB cells with await (mirrors AsyncCursor.execute).
         from oracle.lob import LOB
+
         Nested = AsyncCursor(self._connection)
-        Nested._description = [_column_description(C)
-                               for C in Marker['row_format']]
-        Nested._annotations = [_col_annotations(C)
-                               for C in Marker['row_format']]
+        Nested._description = [_column_description(C) for C in Marker['row_format']]
+        Nested._annotations = [_col_annotations(C) for C in Marker['row_format']]
         Resolved = []
         for Row in Rows:
             NewRow = list(Row)
@@ -364,7 +389,7 @@ class AsyncCursor:
         self._check_open()
         Params = list(parameters) if parameters else []
         Placeholders = ', '.join(f':{I + 1}' for I in range(len(Params)))
-        await self.execute(f"BEGIN {name}({Placeholders}); END;", Params)
+        await self.execute(f'BEGIN {name}({Placeholders}); END;', Params)
         return [P.getvalue() if isinstance(P, Var) else P for P in Params]
 
     async def callfunc(self, name: str, return_type, parameters=None):
@@ -374,21 +399,23 @@ class AsyncCursor:
         Ret = Var(return_type)
         Params = list(parameters) if parameters else []
         Args = ', '.join(f':{I + 2}' for I in range(len(Params)))
-        await self.execute(f"BEGIN :1 := {name}({Args}); END;", [Ret] + Params)
+        await self.execute(f'BEGIN :1 := {name}({Args}); END;', [Ret] + Params)
         return Ret.getvalue()
 
-    async def executemany(self, operation: str, seq_of_parameters,
-                          batcherrors: bool = False,
-                          arraydmlrowcounts: bool = False) -> 'AsyncCursor':
+    async def executemany(
+        self,
+        operation: str,
+        seq_of_parameters,
+        batcherrors: bool = False,
+        arraydmlrowcounts: bool = False,
+    ) -> 'AsyncCursor':
         # Array DML in a single round trip; see Cursor.executemany. The
         # batcherrors / arraydmlrowcounts refinements behave exactly as the sync
         # cursor's (#18): batch-error collection via getbatcherrors(), and
         # per-iteration row counts (12.1+ only) via getarraydmlrowcounts().
         self._check_open()
-        if arraydmlrowcounts \
-                and self._connection.field_version < FIELD_VERSION_12_1:
-            raise NotSupportedError(
-                "arraydmlrowcounts requires an Oracle 12.1+ server")
+        if arraydmlrowcounts and self._connection.field_version < FIELD_VERSION_12_1:
+            raise NotSupportedError('arraydmlrowcounts requires an Oracle 12.1+ server')
         self._batcherrors = []
         self._arraydmlrowcounts = []
         Rows = [_resolve_parameters(operation, P) for P in seq_of_parameters]
@@ -398,9 +425,13 @@ class AsyncCursor:
             self._rowcount = 0
             self._row_index = 0
             return self
-        return await self._run(operation, Rows[0], Batch=Rows[1:],
-                               BatchErrors=batcherrors,
-                               ArrayDmlRowCounts=arraydmlrowcounts)
+        return await self._run(
+            operation,
+            Rows[0],
+            Batch=Rows[1:],
+            BatchErrors=batcherrors,
+            ArrayDmlRowCounts=arraydmlrowcounts,
+        )
 
     def getbatcherrors(self) -> list:
         """Errors collected by the most recent
@@ -409,8 +440,7 @@ class AsyncCursor:
         Out = []
         for E in getattr(self, '_batcherrors', []):
             Code = E.get('code')
-            Exc = from_ora_code(Code)(E.get('message') or f"ORA-{Code:05d}",
-                                      code=Code)
+            Exc = from_ora_code(Code)(E.get('message') or f'ORA-{Code:05d}', code=Code)
             Exc.offset = E.get('offset')
             Out.append(Exc)
         return Out
@@ -423,9 +453,9 @@ class AsyncCursor:
 
     # --- Server-side scroll window helpers (#181), see oracle.cursor.Cursor ---
 
-    def _init_scroll_window(self, cursor_id: int, colmeta: list,
-                            server_rowcount, batch_len: int,
-                            eof: bool) -> None:
+    def _init_scroll_window(
+        self, cursor_id: int, colmeta: list, server_rowcount, batch_len: int, eof: bool
+    ) -> None:
         self._scroll_active = True
         self._scroll_cursor_id = cursor_id
         self._scroll_rowformat = colmeta
@@ -448,13 +478,18 @@ class AsyncCursor:
         # Continue with orient CURRENT at the next absolute row (oracledb fetches
         # every batch as a positioned scroll re-execute, not a TTI_FETCH — #181).
         from oracle.tns_consts import TNS_FETCH_ORIENTATION_CURRENT
+
         Conn = self._connection
         Size = max(int(self.arraysize), 1)
         Prev = self._rows[-1] if self._rows else None
         Rows, Eof, ServerRowCount = await Conn.scroll_fetch(
-            self._scroll_cursor_id, TNS_FETCH_ORIENTATION_CURRENT,
-            self._scroll_consumed + 1, self._scroll_rowformat, Fetch=Size,
-            PrevRow=Prev)
+            self._scroll_cursor_id,
+            TNS_FETCH_ORIENTATION_CURRENT,
+            self._scroll_consumed + 1,
+            self._scroll_rowformat,
+            Fetch=Size,
+            PrevRow=Prev,
+        )
         Batch = await self._resolve_rows(Rows)
         self._rows = Batch
         # _scroll_set_window resets to empty for an off-the-end batch so a later
@@ -465,7 +500,7 @@ class AsyncCursor:
     async def fetchone(self) -> tuple | None:
         self._check_open()
         if self._description is None:
-            raise InterfaceError("no result set; call execute() with a SELECT first")
+            raise InterfaceError('no result set; call execute() with a SELECT first')
         if self._row_index >= len(self._rows):
             if self._scroll_active and not self._scroll_eof:
                 await self._scroll_refill()
@@ -505,9 +540,10 @@ class AsyncCursor:
         awaits nothing on the wire but stays async for API symmetry."""
         self._check_open()
         if self._description is None:
-            raise InterfaceError("no result set; call execute() with a SELECT first")
+            raise InterfaceError('no result set; call execute() with a SELECT first')
         from oracle.dataframe import build_table
-        Rows = self._rows[self._row_index:]
+
+        Rows = self._rows[self._row_index :]
         self._row_index = len(self._rows)
         return build_table(Rows, self._description)
 
@@ -516,67 +552,70 @@ class AsyncCursor:
         (#162). Async generator mirror of `Cursor.fetch_df_batches`."""
         self._check_open()
         if self._description is None:
-            raise InterfaceError("no result set; call execute() with a SELECT first")
+            raise InterfaceError('no result set; call execute() with a SELECT first')
         from oracle.dataframe import build_table
+
         if size is None:
             size = self.arraysize
         size = max(int(size), 1)
         while self._row_index < len(self._rows):
-            Rows = self._rows[self._row_index:self._row_index + size]
+            Rows = self._rows[self._row_index : self._row_index + size]
             self._row_index += len(Rows)
             yield build_table(Rows, self._description)
 
-    async def scroll(self, value: int = 0, mode: str = "relative") -> None:
+    async def scroll(self, value: int = 0, mode: str = 'relative') -> None:
         """Scroll the result-set cursor to a new position. See
         `oracle.cursor.Cursor.scroll`. With scrollable=True the reposition is
         server-side and rows are fetched lazily (#181); otherwise it is a local
         move over the buffered result set (#161)."""
         self._check_open()
         if self._description is None:
-            raise InterfaceError("no result set; call execute() with a SELECT first")
+            raise InterfaceError('no result set; call execute() with a SELECT first')
         if self._scroll_active:
             return await self._scroll_server(value, mode)
         return self._scroll_buffered(value, mode)
 
     def _scroll_buffered(self, value: int, mode: str) -> None:
         Count = len(self._rows)
-        if mode == "relative":
+        if mode == 'relative':
             Target = self._row_index + value
-        elif mode == "absolute":
+        elif mode == 'absolute':
             Target = value
-        elif mode == "first":
+        elif mode == 'first':
             Target = 1
-        elif mode == "last":
+        elif mode == 'last':
             Target = Count
         else:
-            raise ProgrammingError(f"invalid scroll mode: {mode!r}")
+            raise ProgrammingError(f'invalid scroll mode: {mode!r}')
         if Target < 1 or Target > Count:
-            raise IndexError("scroll operation would leave the result set")
+            raise IndexError('scroll operation would leave the result set')
         self._row_index = Target - 1
 
     async def _scroll_server(self, value: int, mode: str) -> None:
         from oracle.tns_consts import (
-            TNS_FETCH_ORIENTATION_ABSOLUTE, TNS_FETCH_ORIENTATION_RELATIVE,
-            TNS_FETCH_ORIENTATION_FIRST, TNS_FETCH_ORIENTATION_LAST,
+            TNS_FETCH_ORIENTATION_ABSOLUTE,
+            TNS_FETCH_ORIENTATION_FIRST,
+            TNS_FETCH_ORIENTATION_LAST,
+            TNS_FETCH_ORIENTATION_RELATIVE,
         )
-        if mode == "relative":
+
+        if mode == 'relative':
             Orientation = TNS_FETCH_ORIENTATION_RELATIVE
             Desired = self._scroll_consumed + value
-        elif mode == "absolute":
+        elif mode == 'absolute':
             Orientation = TNS_FETCH_ORIENTATION_ABSOLUTE
             Desired = value
-        elif mode == "first":
+        elif mode == 'first':
             Orientation = TNS_FETCH_ORIENTATION_FIRST
             Desired = 1
-        elif mode == "last":
+        elif mode == 'last':
             Orientation = TNS_FETCH_ORIENTATION_LAST
             Desired = 0
         else:
-            raise ProgrammingError(f"invalid scroll mode: {mode!r}")
-        if mode in ("relative", "absolute") and Desired < 1:
-            raise IndexError("scroll operation would leave the result set")
-        if (mode != "last"
-                and self._scroll_buf_min <= Desired < self._scroll_buf_max):
+            raise ProgrammingError(f'invalid scroll mode: {mode!r}')
+        if mode in ('relative', 'absolute') and Desired < 1:
+            raise IndexError('scroll operation would leave the result set')
+        if mode != 'last' and self._scroll_buf_min <= Desired < self._scroll_buf_max:
             self._row_index = Desired - self._scroll_buf_min
             self._scroll_consumed = Desired - 1
             return
@@ -584,8 +623,13 @@ class AsyncCursor:
         Size = max(int(self.arraysize), 1)
         Prev = self._rows[-1] if self._rows else None
         Rows, Eof, ServerRowCount = await Conn.scroll_fetch(
-            self._scroll_cursor_id, Orientation, Desired,
-            self._scroll_rowformat, Fetch=Size, PrevRow=Prev)
+            self._scroll_cursor_id,
+            Orientation,
+            Desired,
+            self._scroll_rowformat,
+            Fetch=Size,
+            PrevRow=Prev,
+        )
         Batch = await self._resolve_rows(Rows)
         if not Batch:
             self._rows = []

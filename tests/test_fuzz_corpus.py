@@ -29,21 +29,31 @@ from oracle.exceptions import DatabaseError
 from oracle.oson import OsonError, decode_oson
 from oracle.tns import decode_dalc
 from oracle.types import (
-    decode_binary_double, decode_binary_float, decode_date, decode_interval_ds,
-    decode_interval_ym, decode_number,
+    decode_binary_double,
+    decode_binary_float,
+    decode_date,
+    decode_interval_ds,
+    decode_interval_ym,
+    decode_number,
 )
 from oracle.vector import VectorError, decode_vector
 
 _HERE = os.path.dirname(__file__)
-_DECODERS_CORPUS = os.path.join(_HERE, "fuzz_corpus_decoders.txt")
-_IMAGES_CORPUS = os.path.join(_HERE, "fuzz_corpus_images.txt")
+_DECODERS_CORPUS = os.path.join(_HERE, 'fuzz_corpus_decoders.txt')
+_IMAGES_CORPUS = os.path.join(_HERE, 'fuzz_corpus_images.txt')
 
 # Every decoder of server-controlled column/field bytes a response-corpus blob
 # could reach (SeerODBC feeds each blob to all of them; there is no selector
 # byte).
 _DECODER_BATTERY = (
-    decode_number, decode_date, decode_binary_float, decode_binary_double,
-    decode_interval_ym, decode_interval_ds, decode_oson, decode_dalc,
+    decode_number,
+    decode_date,
+    decode_binary_float,
+    decode_binary_double,
+    decode_interval_ym,
+    decode_interval_ds,
+    decode_oson,
+    decode_dalc,
 )
 # The image corpus targets the ADT/VECTOR image decoders; decode_vector is the
 # self-describing one pyoracle exposes (object/collection images need a type
@@ -57,7 +67,7 @@ _DOMAIN_ERRORS = (DatabaseError, OsonError, VectorError)
 # The count/cycle bounds make every corpus blob return/raise in well under a
 # millisecond; the cap only fires on a genuine regression to unbounded work.
 _CALL_CAP_SECONDS = 5.0
-_HAS_ALARM = hasattr(signal, "SIGALRM")
+_HAS_ALARM = hasattr(signal, 'SIGALRM')
 
 
 class _Timeout(Exception):
@@ -70,10 +80,10 @@ def _on_alarm(signum, frame):
 
 def _load_corpus(path):
     blobs = []
-    with open(path, encoding="utf-8") as handle:
+    with open(path, encoding='utf-8') as handle:
         for line in handle:
             line = line.strip()
-            if line and not line.startswith("#"):
+            if line and not line.startswith('#'):
                 blobs.append(bytes.fromhex(line))
     return blobs
 
@@ -89,14 +99,14 @@ def _assert_bounded_and_typed(test, blobs, battery):
                 try:
                     decode(blob)
                 except _Timeout:
-                    test.fail(
-                        f"{decode.__name__} hung on corpus blob: {blob.hex()}")
+                    test.fail(f'{decode.__name__} hung on corpus blob: {blob.hex()}')
                 except _DOMAIN_ERRORS:
-                    pass                       # a clean, catchable decode error
-                except Exception as exc:       # noqa: BLE001
+                    pass  # a clean, catchable decode error
+                except Exception as exc:  # noqa: BLE001
                     test.fail(
-                        f"{decode.__name__} raised non-domain "
-                        f"{type(exc).__name__} on corpus blob: {blob.hex()}")
+                        f'{decode.__name__} raised non-domain '
+                        f'{type(exc).__name__} on corpus blob: {blob.hex()}'
+                    )
                 finally:
                     if _HAS_ALARM:
                         signal.setitimer(signal.ITIMER_REAL, 0)
@@ -106,7 +116,6 @@ def _assert_bounded_and_typed(test, blobs, battery):
 
 
 class TestFuzzCorpusReplay(unittest.TestCase):
-
     def test_decoder_battery_bounded_and_typed(self):
         blobs = _load_corpus(_DECODERS_CORPUS)
         # Guard against a corpus file that failed to vendor / load.
@@ -119,5 +128,5 @@ class TestFuzzCorpusReplay(unittest.TestCase):
         _assert_bounded_and_typed(self, blobs, _IMAGE_BATTERY)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

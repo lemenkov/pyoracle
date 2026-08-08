@@ -29,15 +29,23 @@ import builtins
 from oracle.exceptions import NotSupportedError
 from oracle.tns_consts import (
     AL32UTF8_CHARSET,
-    TNS_TYPE_BDOUBLE, TNS_TYPE_BFLOAT, TNS_TYPE_CHAR, TNS_TYPE_DATE,
-    TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_NUMBER, TNS_TYPE_RAW,
-    TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPLTZ, TNS_TYPE_TIMESTAMPTZ,
+    TNS_TYPE_BDOUBLE,
+    TNS_TYPE_BFLOAT,
+    TNS_TYPE_CHAR,
+    TNS_TYPE_DATE,
+    TNS_TYPE_INTERVALDS,
+    TNS_TYPE_INTERVALYM,
+    TNS_TYPE_NUMBER,
+    TNS_TYPE_RAW,
+    TNS_TYPE_TIMESTAMP,
+    TNS_TYPE_TIMESTAMPLTZ,
+    TNS_TYPE_TIMESTAMPTZ,
     TNS_TYPE_VARCHAR,
 )
 
 # Object image header flags (python-oracledb constants.pxi "image flags").
-_OBJ_IS_DEGENERATE = 0x10       # object stored in a LOB -- not supported here
-_OBJ_NO_PREFIX_SEG = 0x04       # no prefix segment precedes the attributes
+_OBJ_IS_DEGENERATE = 0x10  # object stored in a LOB -- not supported here
+_OBJ_NO_PREFIX_SEG = 0x04  # no prefix segment precedes the attributes
 
 # Collection kinds (python-oracledb "database object collection types").
 COLLECTION_PLSQL_INDEX_TABLE = 1
@@ -45,12 +53,12 @@ COLLECTION_NESTED_TABLE = 2
 COLLECTION_VARRAY = 3
 
 # Length markers inside the image (python-oracledb base_impl.pxd).
-_LONG_LENGTH_INDICATOR = 254    # next 4 bytes are a big-endian length
-_NULL_LENGTH_INDICATOR = 255    # NULL attribute (no bytes follow)
+_LONG_LENGTH_INDICATOR = 254  # next 4 bytes are a big-endian length
+_NULL_LENGTH_INDICATOR = 255  # NULL attribute (no bytes follow)
 
 # XMLType image flags (#124, python-oracledb constants.pxi).
-_XML_TYPE_LOB = 0x0001          # content is a CLOB locator
-_XML_TYPE_STRING = 0x0004       # content is an inline string
+_XML_TYPE_LOB = 0x0001  # content is a CLOB locator
+_XML_TYPE_STRING = 0x0004  # content is an inline string
 _XML_TYPE_FLAG_SKIP_NEXT_4 = 0x100000
 # Observed only on Oracle 11g XMLType *columns* (CLOB storage): the image holds
 # a complex binary structure, not a plain CLOB locator, and the LOBOPS read of
@@ -128,9 +136,13 @@ class DbRef:
 
     __slots__ = ('_locator', '_type_name', '_type_schema', '_type_oid')
 
-    def __init__(self, locator: bytes, type_name: str | None = None,
-                 type_schema: str | None = None,
-                 type_oid: bytes | None = None):
+    def __init__(
+        self,
+        locator: bytes,
+        type_name: str | None = None,
+        type_schema: str | None = None,
+        type_oid: bytes | None = None,
+    ):
         self._locator = bytes(locator)
         self._type_name = type_name
         self._type_schema = type_schema
@@ -171,8 +183,8 @@ class DbRef:
         return hash(self._locator)
 
     def __repr__(self):
-        Label = f" {self._type_name}" if self._type_name else ""
-        return f"<oracle.DbRef{Label} {self._locator.hex()}>"
+        Label = f' {self._type_name}' if self._type_name else ''
+        return f'<oracle.DbRef{Label} {self._locator.hex()}>'
 
 
 class DbObjectType:
@@ -184,24 +196,33 @@ class DbObjectType:
     a fresh, settable DbObject of this type ready to bind (#116).
     """
 
-    def __init__(self, schema, name, oid, version, attrs,
-                 is_collection=False, collection_type=None, element=None,
-                 max_elements=0):
+    def __init__(
+        self,
+        schema,
+        name,
+        oid,
+        version,
+        attrs,
+        is_collection=False,
+        collection_type=None,
+        element=None,
+        max_elements=0,
+    ):
         self.schema = schema
         self.name = name
-        self.oid = oid                       # 16-byte type OID (bytes)
+        self.oid = oid  # 16-byte type OID (bytes)
         self.version = version
-        self.attrs = attrs                   # ordered layout (list of dict)
+        self.attrs = attrs  # ordered layout (list of dict)
         # Collection types (#117/#118): a single element type instead of named
         # attributes. collection_type is VARRAY (3) / NESTED_TABLE (2).
         self.is_collection = is_collection
         self.collection_type = collection_type
-        self.element = element               # one layout dict, or None
+        self.element = element  # one layout dict, or None
         self.max_elements = max_elements
 
     @property
     def full_name(self) -> str:
-        return f"{self.schema}.{self.name}" if self.schema else self.name
+        return f'{self.schema}.{self.name}' if self.schema else self.name
 
     @property
     def attr_names(self) -> list:
@@ -217,10 +238,10 @@ class DbObjectType:
         index / ``append`` before binding.
         """
         if self.is_collection:
-            return DbObject(self.full_name, elements=list(values or []),
-                            dbtype=self)
-        Obj = DbObject(self.full_name, [(A['name'], None) for A in self.attrs],
-                       dbtype=self)
+            return DbObject(self.full_name, elements=list(values or []), dbtype=self)
+        Obj = DbObject(
+            self.full_name, [(A['name'], None) for A in self.attrs], dbtype=self
+        )
         if isinstance(values, dict):
             # Oracle identifiers are upper-cased unless quoted, so accept seed
             # keys in any case (direct obj.ATTR access stays exact).
@@ -234,7 +255,7 @@ class DbObjectType:
 
     def __repr__(self):
         Kind = 'collection ' if self.is_collection else ''
-        return f"<oracle.DbObjectType {Kind}{self.full_name}>"
+        return f'<oracle.DbObjectType {Kind}{self.full_name}>'
 
 
 class DbObject:
@@ -247,23 +268,29 @@ class DbObject:
     common ``cursor.fetchone()`` / bind use.
     """
 
-    def __init__(self, type_name: str | None,
-                 attrs: list[tuple[str, object]] | None = None,
-                 elements: list | None = None,
-                 dbtype: 'DbObjectType | None' = None):
+    def __init__(
+        self,
+        type_name: str | None,
+        attrs: list[tuple[str, object]] | None = None,
+        elements: list | None = None,
+        dbtype: 'DbObjectType | None' = None,
+    ):
         # _ prefixes keep the namespace clear of attribute names; __setattr__
         # routes any non-underscore name into _attrs. A collection object holds
         # an ordered element list instead of named attributes (#117/#118).
         IsCollection = elements is not None or (
-            dbtype is not None and dbtype.is_collection)
+            dbtype is not None and dbtype.is_collection
+        )
         object.__setattr__(self, '_type_name', type_name)
         object.__setattr__(self, '_dbtype', dbtype)
         object.__setattr__(self, '_is_collection', IsCollection)
-        object.__setattr__(self, '_elements',
-                           list(elements or []) if IsCollection else None)
+        object.__setattr__(
+            self, '_elements', list(elements or []) if IsCollection else None
+        )
         object.__setattr__(self, '_attrs', {} if IsCollection else dict(attrs or []))
-        object.__setattr__(self, '_order',
-                           [] if IsCollection else [Name for Name, _ in (attrs or [])])
+        object.__setattr__(
+            self, '_order', [] if IsCollection else [Name for Name, _ in (attrs or [])]
+        )
 
     @property
     def type_name(self) -> str | None:
@@ -286,7 +313,8 @@ class DbObject:
         Attrs = object.__getattribute__(self, '_attrs')
         if name not in Attrs:
             raise AttributeError(
-                f"{self._type_name or 'object'} has no attribute {name!r}")
+                f'{self._type_name or "object"} has no attribute {name!r}'
+            )
         Attrs[name] = value
 
     def __getitem__(self, key):
@@ -311,13 +339,13 @@ class DbObject:
     def append(self, value) -> None:
         """Append an element (collection types only)."""
         if not self._is_collection:
-            raise TypeError("append is only valid on a collection object")
+            raise TypeError('append is only valid on a collection object')
         self._elements.append(value)
 
     def extend(self, values) -> None:
         """Append several elements (collection types only)."""
         if not self._is_collection:
-            raise TypeError("extend is only valid on a collection object")
+            raise TypeError('extend is only valid on a collection object')
         self._elements.extend(values)
 
     def aslist(self) -> list:
@@ -329,25 +357,26 @@ class DbObject:
     def asdict(self) -> dict:
         """A name -> value mapping of the attributes (object types only)."""
         if self._is_collection:
-            raise TypeError("asdict is not valid on a collection object")
+            raise TypeError('asdict is not valid on a collection object')
         return dict(self._attrs)
 
     def __eq__(self, other):
         if not isinstance(other, DbObject):
             return NotImplemented
         if self._is_collection or other._is_collection:
-            return (self._type_name == other._type_name
-                    and self._is_collection == other._is_collection
-                    and self._elements == other._elements)
-        return (self._type_name == other._type_name
-                and self._attrs == other._attrs)
+            return (
+                self._type_name == other._type_name
+                and self._is_collection == other._is_collection
+                and self._elements == other._elements
+            )
+        return self._type_name == other._type_name and self._attrs == other._attrs
 
     def __repr__(self):
         Name = self._type_name or 'OBJECT'
         if self._is_collection:
-            return f"<oracle.DbObject {Name}{self._elements!r}>"
-        Body = ', '.join(f"{N}={self._attrs[N]!r}" for N in self._order)
-        return f"<oracle.DbObject {Name}({Body})>"
+            return f'<oracle.DbObject {Name}{self._elements!r}>'
+        Body = ', '.join(f'{N}={self._attrs[N]!r}' for N in self._order)
+        return f'<oracle.DbObject {Name}({Body})>'
 
 
 def _read_length(Image: bytes, Pos: int) -> tuple[int | None, int]:
@@ -358,7 +387,7 @@ def _read_length(Image: bytes, Pos: int) -> tuple[int | None, int]:
     if Length == _NULL_LENGTH_INDICATOR:
         return (None, Pos)
     if Length == _LONG_LENGTH_INDICATOR:
-        Length = int.from_bytes(Image[Pos:Pos + 4], 'big')
+        Length = int.from_bytes(Image[Pos : Pos + 4], 'big')
         Pos += 4
     return (Length, Pos)
 
@@ -369,24 +398,26 @@ def _read_image_header(Image: bytes) -> int:
     # -- a prefix segment that is read and skipped. Returns the offset of the
     # first attribute.
     Flags = Image[0]
-    Pos = 2                                      # flags + version
-    (_, Pos) = _read_length(Image, Pos)          # image length (unused here)
+    Pos = 2  # flags + version
+    (_, Pos) = _read_length(Image, Pos)  # image length (unused here)
     if Flags & _OBJ_IS_DEGENERATE:
-        raise NotSupportedError("decoding an object stored in a LOB is not supported")
+        raise NotSupportedError('decoding an object stored in a LOB is not supported')
     if not (Flags & _OBJ_NO_PREFIX_SEG):
         (PrefixLen, Pos) = _read_length(Image, Pos)
         Pos += PrefixLen or 0
     return Pos
 
 
-def decode_object_image(Image: bytes, Layout: list[dict],
-                        Charset: int = AL32UTF8_CHARSET) -> list[tuple[str, object]]:
+def decode_object_image(
+    Image: bytes, Layout: list[dict], Charset: int = AL32UTF8_CHARSET
+) -> list[tuple[str, object]]:
     """Walk an object image into a list of (attr_name, value) pairs.
 
     ``Layout`` is the ordered attribute list from the data dictionary; each
     entry is ``{'name': str, 'data_type': int|None, 'charset': int|None}``.
     """
     from oracle.types import decode_value
+
     Pos = _read_image_header(Image)
     Attrs: list[tuple[str, object]] = []
     for Attr in Layout:
@@ -394,7 +425,7 @@ def decode_object_image(Image: bytes, Layout: list[dict],
         if Length is None or Length == 0:
             Attrs.append((Attr['name'], None))
             continue
-        Raw = bytes(Image[Pos:Pos + Length])
+        Raw = bytes(Image[Pos : Pos + Length])
         Pos += Length
         Col = {
             'data_type': Attr.get('data_type'),
@@ -415,8 +446,8 @@ def decode_xmltype(Image: bytes, Charset: int = AL32UTF8_CHARSET) -> tuple:
     reads it through the LOB path).
     """
     Pos = _read_image_header(Image)
-    Pos += 1                                     # XML version (skip)
-    Flag = int.from_bytes(Image[Pos:Pos + 4], 'big')
+    Pos += 1  # XML version (skip)
+    Flag = int.from_bytes(Image[Pos : Pos + 4], 'big')
     Pos += 4
     if Flag & _XML_TYPE_FLAG_SKIP_NEXT_4:
         Pos += 4
@@ -430,15 +461,17 @@ def decode_xmltype(Image: bytes, Charset: int = AL32UTF8_CHARSET) -> tuple:
     if Flag & _XML_TYPE_LOB:
         if Flag & _XML_TYPE_LEGACY_STORAGE:
             raise NotSupportedError(
-                "reading a CLOB-stored XMLType column (Oracle 11g) is not "
-                "supported; cast it in SQL, e.g. "
-                "SELECT XMLTYPE.getclobval(col) or XMLSERIALIZE(...)")
-        return (True, Content)                   # CLOB locator
-    raise NotSupportedError(f"unexpected XMLType flag 0x{Flag:x}")
+                'reading a CLOB-stored XMLType column (Oracle 11g) is not '
+                'supported; cast it in SQL, e.g. '
+                'SELECT XMLTYPE.getclobval(col) or XMLSERIALIZE(...)'
+            )
+        return (True, Content)  # CLOB locator
+    raise NotSupportedError(f'unexpected XMLType flag 0x{Flag:x}')
 
 
-def decode_collection_image(Image: bytes, Element: dict,
-                            Charset: int = AL32UTF8_CHARSET) -> list:
+def decode_collection_image(
+    Image: bytes, Element: dict, Charset: int = AL32UTF8_CHARSET
+) -> list:
     """Walk a collection (VARRAY / nested table) image into a list of elements.
 
     The header (incl. the prefix segment a collection carries) is consumed by
@@ -448,8 +481,9 @@ def decode_collection_image(Image: bytes, Element: dict,
     associative arrays prefix each element with an int32 key -- that is #122.)
     """
     from oracle.types import decode_value
+
     Pos = _read_image_header(Image)
-    Pos += 1                                     # collection flags (skip)
+    Pos += 1  # collection flags (skip)
     (Count, Pos) = _read_length(Image, Pos)
     Col = {
         'data_type': Element.get('data_type'),
@@ -461,7 +495,7 @@ def decode_collection_image(Image: bytes, Element: dict,
         if Length is None or Length == 0:
             Out.append(None)
             continue
-        Raw = bytes(Image[Pos:Pos + Length])
+        Raw = bytes(Image[Pos : Pos + Length])
         Pos += Length
         Out.append(decode_value(Col, Raw))
     return Out
