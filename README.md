@@ -153,6 +153,19 @@ What works:
   `createIndex` / `dropIndex` / `getDataGuide`. Built on `DBMS_SODA`.
   Sync and async
 
+## Design goals & non-goals
+
+pyoracle is **pure Python by design** — no C extensions, no build step, no
+compiler, and no Oracle Instant Client. It installs anywhere CPython runs
+(`pip install`, no per-platform wheels), the whole package is type-annotated and
+mypy-checked in CI, and the source stays easy to read, audit, and contribute to.
+
+Staying pure Python is a deliberate **non-goal to add Cython or native
+extensions**: they would trade that portability and readability for speed the
+project does not need today. If a hot path ever warrants it, the plan is to
+profile with the benchmark harness (#166) and optimize the Python — or ship an
+*optional* accelerator with a pure-Python fallback — never a hard C dependency.
+
 ## Compatibility
 
 The driver negotiates the TTC field version per connection, so a single build
