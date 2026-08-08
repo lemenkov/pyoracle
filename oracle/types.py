@@ -16,12 +16,25 @@ from oracle._tzregions import TZ_REGIONS
 from oracle.datatypes import IntervalYM
 from oracle.exceptions import DataError
 from oracle.tns_consts import (
-    AL16UTF16_CHARSET, AL32UTF8_CHARSET, ISO_LATIN_1_CHARSET, UTF8_CHARSET,
-    TNS_TYPE_BDOUBLE, TNS_TYPE_BFLOAT, TNS_TYPE_BOOLEAN, TNS_TYPE_CHAR,
+    AL16UTF16_CHARSET,
+    AL32UTF8_CHARSET,
+    ISO_LATIN_1_CHARSET,
+    TNS_TYPE_BDOUBLE,
+    TNS_TYPE_BFLOAT,
+    TNS_TYPE_BOOLEAN,
+    TNS_TYPE_CHAR,
     TNS_TYPE_DATE,
-    TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_LONG, TNS_TYPE_LONGRAW,
-    TNS_TYPE_NUMBER, TNS_TYPE_REF, TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPLTZ,
-    TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_VARCHAR,
+    TNS_TYPE_INTERVALDS,
+    TNS_TYPE_INTERVALYM,
+    TNS_TYPE_LONG,
+    TNS_TYPE_LONGRAW,
+    TNS_TYPE_NUMBER,
+    TNS_TYPE_REF,
+    TNS_TYPE_TIMESTAMP,
+    TNS_TYPE_TIMESTAMPLTZ,
+    TNS_TYPE_TIMESTAMPTZ,
+    TNS_TYPE_VARCHAR,
+    UTF8_CHARSET,
 )
 
 # Oracle stores a TZ offset as (hour + 20, minute + 60); a top bit set on the
@@ -49,6 +62,7 @@ def _region_tzinfo(RegionId: int) -> datetime.tzinfo | None:
         return zoneinfo.ZoneInfo(Name)
     except (zoneinfo.ZoneInfoNotFoundError, ValueError, OSError):
         return None
+
 
 _CHARSET_PYTHON_NAME = {
     ISO_LATIN_1_CHARSET: 'iso-8859-1',
@@ -91,9 +105,9 @@ def decode_number(Data: bytes) -> int | Decimal | None:
     ExpByte = Data[0]
     IsPositive = (ExpByte & 0x80) != 0
     if IsPositive:
-        Exponent = (ExpByte & 0x7f) - 65
+        Exponent = (ExpByte & 0x7F) - 65
     else:
-        Exponent = ((~ExpByte) & 0x7f) - 65
+        Exponent = ((~ExpByte) & 0x7F) - 65
 
     Mantissa = Data[1:]
     if not IsPositive and Mantissa and Mantissa[-1] == 0x66:
@@ -172,21 +186,30 @@ def decode_date(Data: bytes) -> datetime.datetime | None:
                 TzHours = Data[11] - _TZ_HOUR_OFFSET
                 TzMinutes = Data[12] - _TZ_MINUTE_OFFSET
                 Tz = datetime.timezone(
-                    datetime.timedelta(hours=TzHours, minutes=TzMinutes))
+                    datetime.timedelta(hours=TzHours, minutes=TzMinutes)
+                )
 
         if Tz is None:
-            return datetime.datetime(Year, Month, Day, Hour, Minute, Second,
-                                     Microsecond)
+            return datetime.datetime(
+                Year, Month, Day, Hour, Minute, Second, Microsecond
+            )
 
-        Utc = datetime.datetime(Year, Month, Day, Hour, Minute, Second,
-                                Microsecond, tzinfo=datetime.timezone.utc)
+        Utc = datetime.datetime(
+            Year,
+            Month,
+            Day,
+            Hour,
+            Minute,
+            Second,
+            Microsecond,
+            tzinfo=datetime.timezone.utc,
+        )
         return Utc.astimezone(Tz)
     except (ValueError, OverflowError) as Exc:
         # Out-of-range date/time or TZ-offset fields (bad month/day, an offset
         # beyond +/-24h) make datetime()/timezone() reject; surface as DataError
         # rather than leaking a raw ValueError (#230).
-        raise DataError(
-            f'malformed Oracle DATE/TIMESTAMP: {Data.hex()}') from Exc
+        raise DataError(f'malformed Oracle DATE/TIMESTAMP: {Data.hex()}') from Exc
 
 
 def decode_binary_float(Data: bytes) -> float | None:
@@ -198,7 +221,7 @@ def decode_binary_float(Data: bytes) -> float | None:
         Raw = bytes([Data[0] & 0x7F]) + Data[1:4]
     else:
         Raw = bytes(B ^ 0xFF for B in Data[:4])
-    return struct.unpack(">f", Raw)[0]
+    return struct.unpack('>f', Raw)[0]
 
 
 def decode_binary_double(Data: bytes) -> float | None:
@@ -208,7 +231,7 @@ def decode_binary_double(Data: bytes) -> float | None:
         Raw = bytes([Data[0] & 0x7F]) + Data[1:8]
     else:
         Raw = bytes(B ^ 0xFF for B in Data[:8])
-    return struct.unpack(">d", Raw)[0]
+    return struct.unpack('>d', Raw)[0]
 
 
 def decode_interval_ds(Data: bytes) -> datetime.timedelta | None:
@@ -222,8 +245,13 @@ def decode_interval_ds(Data: bytes) -> datetime.timedelta | None:
     Seconds = Data[6] - 60
     Nanos = int.from_bytes(Data[7:11], 'big') - 2**31
     try:
-        return datetime.timedelta(days=Days, hours=Hours, minutes=Minutes,
-                                  seconds=Seconds, microseconds=Nanos // 1000)
+        return datetime.timedelta(
+            days=Days,
+            hours=Hours,
+            minutes=Minutes,
+            seconds=Seconds,
+            microseconds=Nanos // 1000,
+        )
     except OverflowError as Exc:
         # A valid INTERVAL DAY TO SECOND always fits in timedelta -- Oracle's
         # DAY(9) maximum of +/-999_999_999 days coincides with timedelta's own
@@ -231,7 +259,8 @@ def decode_interval_ds(Data: bytes) -> datetime.timedelta | None:
         # corrupt or truncated frame, not a value any server can legally send.
         # Surface it as DataError rather than leaking the raw OverflowError.
         raise DataError(
-            f'INTERVAL DAY TO SECOND value out of range (days={Days})') from Exc
+            f'INTERVAL DAY TO SECOND value out of range (days={Days})'
+        ) from Exc
 
 
 def decode_interval_ym(Data: bytes) -> IntervalYM | None:
@@ -244,22 +273,26 @@ def decode_interval_ym(Data: bytes) -> IntervalYM | None:
 
 
 # Oracle's base64 alphabet for the printable extended ROWID (not RFC 4648).
-_ROWID_ALPHABET = (
-    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/')
+_ROWID_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 
 
 def _rowid_b64(Value: int, NumChars: int) -> str:
     # Big-endian, zero-padded base64 of Value across exactly NumChars digits.
     return ''.join(
         _ROWID_ALPHABET[(Value >> (6 * (NumChars - 1 - I))) & 0x3F]
-        for I in range(NumChars))
+        for I in range(NumChars)
+    )
 
 
 def rowid_to_string(Obj: int, File: int, Block: int, Slot: int) -> str:
     # Extended ROWID: OOOOOO (data object) FFF (rel file) BBBBBB (block)
     # RRR (slot), e.g. "AAAK6JAAEAAACGPAAA".
-    return (_rowid_b64(Obj, 6) + _rowid_b64(File, 3)
-            + _rowid_b64(Block, 6) + _rowid_b64(Slot, 3))
+    return (
+        _rowid_b64(Obj, 6)
+        + _rowid_b64(File, 3)
+        + _rowid_b64(Block, 6)
+        + _rowid_b64(Slot, 3)
+    )
 
 
 def urowid_to_string(Value: bytes) -> str:
@@ -269,6 +302,7 @@ def urowid_to_string(Value: bytes) -> str:
     # base64 uses the standard alphabet; Oracle's printable form carries no
     # padding.
     import base64
+
     return '*' + base64.b64encode(Value[1:]).decode('ascii').rstrip('=')
 
 
@@ -287,10 +321,11 @@ def decode_fv2_lob(data_type: int, content: bytes, charset: int) -> str | bytes:
     # Empty content yields "" / b"". (#102)
     if data_type == 112:
         if not content:
-            return ""
-        return content.decode(_CHARSET_PYTHON_NAME.get(charset, 'utf-8'),
-                              errors='replace')
-    return content or b""
+            return ''
+        return content.decode(
+            _CHARSET_PYTHON_NAME.get(charset, 'utf-8'), errors='replace'
+        )
+    return content or b''
 
 
 def decode_value(Column: dict, Data: bytes | list | None) -> object:
@@ -307,8 +342,12 @@ def decode_value(Column: dict, Data: bytes | list | None) -> object:
         return decode_string(Data, _string_charset(Column))
     if DataType == TNS_TYPE_LONGRAW:
         return bytes(Data)
-    if DataType in (TNS_TYPE_DATE, TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ,
-                    TNS_TYPE_TIMESTAMPLTZ):
+    if DataType in (
+        TNS_TYPE_DATE,
+        TNS_TYPE_TIMESTAMP,
+        TNS_TYPE_TIMESTAMPTZ,
+        TNS_TYPE_TIMESTAMPLTZ,
+    ):
         return decode_date(Data)
     if DataType == TNS_TYPE_BFLOAT:
         return decode_binary_float(Data)
@@ -324,8 +363,13 @@ def decode_value(Column: dict, Data: bytes | list | None) -> object:
         # rather than bare bytes; dereference in SQL with DEREF(...) to get the
         # object. NULL was already handled above.
         from oracle.dbobject import DbRef
-        return DbRef(bytes(Data), Column.get('type_name'),
-                     Column.get('type_schema'), Column.get('type_oid'))
+
+        return DbRef(
+            bytes(Data),
+            Column.get('type_name'),
+            Column.get('type_schema'),
+            Column.get('type_oid'),
+        )
     if DataType == TNS_TYPE_BOOLEAN:
         # Native SQL BOOLEAN (23ai, #54). NULL is already handled above; a
         # present value's last byte is the truth value: TRUE arrives as

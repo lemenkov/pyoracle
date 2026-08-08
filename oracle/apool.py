@@ -31,7 +31,8 @@ from oracle.exceptions import InterfaceError
 
 class _AsyncPoolEntry:
     """One pooled async connection plus its last-used timestamp."""
-    __slots__ = ("conn", "released_at")
+
+    __slots__ = ('conn', 'released_at')
 
     def __init__(self, conn: AsyncOracleConnect):
         self.conn = conn
@@ -41,9 +42,10 @@ class _AsyncPoolEntry:
 class _AsyncPooledConnectionGuard:
     """Async context manager returned by `AsyncPool.acquire()`.
     Releases on `__aexit__` even if the user's block raised."""
-    __slots__ = ("_pool", "_conn")
 
-    def __init__(self, pool: "AsyncPool", conn: AsyncOracleConnect):
+    __slots__ = ('_pool', '_conn')
+
+    def __init__(self, pool: 'AsyncPool', conn: AsyncOracleConnect):
         self._pool = pool
         self._conn = conn
 
@@ -67,18 +69,23 @@ class AsyncPool:
     explicitly in an async context.
     """
 
-    def __init__(self, min: int = 1, max: int = 4, increment: int = 1,
-                 timeout: float | None = 30.0,
-                 idle_timeout: float | None = 60.0,
-                 health_check: bool = True,
-                 **connect_kwargs):
+    def __init__(
+        self,
+        min: int = 1,
+        max: int = 4,
+        increment: int = 1,
+        timeout: float | None = 30.0,
+        idle_timeout: float | None = 60.0,
+        health_check: bool = True,
+        **connect_kwargs,
+    ):
         if min < 0 or max <= 0 or min > max:
             raise ValueError(
-                f"invalid pool sizes: min={min}, max={max} "
-                f"(need 0 <= min <= max and max > 0)"
+                f'invalid pool sizes: min={min}, max={max} '
+                f'(need 0 <= min <= max and max > 0)'
             )
         if increment <= 0:
-            raise ValueError(f"increment must be positive, got {increment}")
+            raise ValueError(f'increment must be positive, got {increment}')
         self._min = min
         self._max = max
         self._increment = increment
@@ -112,7 +119,7 @@ class AsyncPool:
                 Conn = await self._open_connection()
                 self._free.append(_AsyncPoolEntry(Conn))
 
-    def acquire(self) -> "_AcquireContext":
+    def acquire(self) -> '_AcquireContext':
         """Return an async context manager that yields a free
         connection (or opens a fresh one, up to `max`). Use as:
 
@@ -128,7 +135,7 @@ class AsyncPool:
         async with cond:
             CheckoutId = id(conn)
             if CheckoutId not in self._in_use:
-                raise InterfaceError("connection was not acquired from this pool")
+                raise InterfaceError('connection was not acquired from this pool')
             self._in_use.discard(CheckoutId)
             if self._closed:
                 try:
@@ -184,7 +191,7 @@ class AsyncPool:
         async with cond:
             while True:
                 if self._closed:
-                    raise InterfaceError("pool is closed")
+                    raise InterfaceError('pool is closed')
                 while self._free:
                     Entry = self._free.popleft()
                     if self._needs_health_check(Entry):
@@ -203,17 +210,18 @@ class AsyncPool:
                     Remaining = Deadline - time.monotonic()
                     if Remaining <= 0:
                         raise InterfaceError(
-                            f"pool acquire timed out after {self._timeout}s "
-                            f"(in_use={len(self._in_use)}, max={self._max})"
+                            f'pool acquire timed out after {self._timeout}s '
+                            f'(in_use={len(self._in_use)}, max={self._max})'
                         )
                     try:
                         await asyncio.wait_for(
-                            cond.wait(), timeout=Remaining,
+                            cond.wait(),
+                            timeout=Remaining,
                         )
                     except asyncio.TimeoutError:
                         raise InterfaceError(
-                            f"pool acquire timed out after {self._timeout}s "
-                            f"(in_use={len(self._in_use)}, max={self._max})"
+                            f'pool acquire timed out after {self._timeout}s '
+                            f'(in_use={len(self._in_use)}, max={self._max})'
                         )
 
     async def _open_connection(self) -> AsyncOracleConnect:
@@ -230,7 +238,7 @@ class AsyncPool:
         try:
             Cur = conn.cursor()
             try:
-                await Cur.execute("SELECT 1 FROM DUAL")
+                await Cur.execute('SELECT 1 FROM DUAL')
                 await Cur.fetchone()
             finally:
                 try:
@@ -261,7 +269,8 @@ class _AcquireContext:
     forces `async with await pool.acquire():` — the extra `await`
     is ugly and easy to forget.
     """
-    __slots__ = ("_pool", "_conn")
+
+    __slots__ = ('_pool', '_conn')
 
     def __init__(self, pool: AsyncPool):
         self._pool = pool

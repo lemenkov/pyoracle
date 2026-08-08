@@ -33,7 +33,7 @@ class _FakeSock:
 
 
 def _conn():
-    return OracleConnect(host="x", port=1, user="u", password="p")
+    return OracleConnect(host='x', port=1, user='u', password='p')
 
 
 class TestCallTimeout(unittest.TestCase):
@@ -59,9 +59,8 @@ class TestBreak(unittest.TestCase):
         self.assertEqual(c.sock.oob, [])
         self.assertEqual(len(c.sock.normal), 1)
         pkt = c.sock.normal[0]
-        self.assertEqual(pkt[4], TNS_MARKER)             # packet type byte
-        self.assertEqual(pkt[-3:],
-                         bytes([1, 0, TNS_MARKER_TYPE_INTERRUPT]))
+        self.assertEqual(pkt[4], TNS_MARKER)  # packet type byte
+        self.assertEqual(pkt[-3:], bytes([1, 0, TNS_MARKER_TYPE_INTERRUPT]))
 
     def test_cancel_sends_oob_when_supported(self):
         # server advertised CAN_RECV_ATTENTION -> the OOB urgent byte
@@ -69,7 +68,7 @@ class TestBreak(unittest.TestCase):
         c.sock = _FakeSock()
         c._supports_oob = True
         c.cancel()
-        self.assertEqual(c.sock.oob, [b"!"])
+        self.assertEqual(c.sock.oob, [b'!'])
         self.assertEqual(c.sock.normal, [])
 
     def test_break_is_idempotent(self):
@@ -77,12 +76,12 @@ class TestBreak(unittest.TestCase):
         c.sock = _FakeSock()
         c._break_in_progress = True
         c._send_break()
-        self.assertEqual(c.sock.normal, [])              # in progress -> no-op
+        self.assertEqual(c.sock.normal, [])  # in progress -> no-op
 
     def test_break_without_socket_is_noop(self):
         c = _conn()
         c.sock = None
-        c._send_break()                                  # must not raise
+        c._send_break()  # must not raise
         self.assertFalse(c._break_in_progress)
 
     def test_on_call_timeout_flags_and_breaks(self):
@@ -92,9 +91,10 @@ class TestBreak(unittest.TestCase):
         self.assertTrue(c._timed_out)
         self.assertTrue(c._break_in_progress)
         self.assertEqual(len(c.sock.normal), 1)
-        self.assertEqual(c.sock.normal[0][-3:],
-                         bytes([1, 0, TNS_MARKER_TYPE_INTERRUPT]))
+        self.assertEqual(
+            c.sock.normal[0][-3:], bytes([1, 0, TNS_MARKER_TYPE_INTERRUPT])
+        )
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

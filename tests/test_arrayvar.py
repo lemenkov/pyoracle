@@ -10,7 +10,10 @@ import unittest
 from oracle.cursor import Cursor, _assign_out_binds
 from oracle.datatypes import Var
 from oracle.tns import (
-    _ENCODE_FIELD_VERSION, decode_ub4, encode_sb4, encode_token_oac,
+    _ENCODE_FIELD_VERSION,
+    decode_ub4,
+    encode_sb4,
+    encode_token_oac,
     encode_token_rxd,
 )
 from oracle.tns_consts import TNS_TYPE_NUMBER
@@ -37,16 +40,16 @@ class TestArrayVar(unittest.TestCase):
 
 class TestArrayEncode(unittest.TestCase):
     def setUp(self):
-        _ENCODE_FIELD_VERSION.set(8)        # 12c+ OAC form
+        _ENCODE_FIELD_VERSION.set(8)  # 12c+ OAC form
 
     def tearDown(self):
-        _ENCODE_FIELD_VERSION.set(6)        # restore module default
+        _ENCODE_FIELD_VERSION.set(6)  # restore module default
 
     def test_oac_sets_array_flag_and_max(self):
         oac = encode_token_oac(_arrayvar(int, 7))
         # 12c+ OAC: [type, flag, 0, 0] + sb4(length) + sb4(max_elements) + ...
         self.assertEqual(oac[0], TNS_TYPE_NUMBER)
-        self.assertEqual(oac[1], 0x41)      # USE_INDICATORS | ARRAY
+        self.assertEqual(oac[1], 0x41)  # USE_INDICATORS | ARRAY
         (length, rest) = decode_ub4(oac[4:])
         (max_elems, _rest) = decode_ub4(rest)
         self.assertEqual(max_elems, 7)
@@ -56,7 +59,7 @@ class TestArrayEncode(unittest.TestCase):
 
     def test_value_is_count_then_elements(self):
         out = encode_token_rxd(_arrayvar(int, [11, 22, 33]))
-        self.assertEqual(out[:len(encode_sb4(3))], encode_sb4(3))   # count = 3
+        self.assertEqual(out[: len(encode_sb4(3))], encode_sb4(3))  # count = 3
         # empty array -> count 0, no elements
         self.assertEqual(encode_token_rxd(_arrayvar(int, 5)), encode_sb4(0))
 
@@ -65,12 +68,16 @@ class TestArrayAssign(unittest.TestCase):
     def test_out_array_decoded_to_list(self):
         v = _arrayvar(int, 10)
         # NUMBER images for 1, 2, 3 (Oracle base-100): c1 02 / c1 03 / c1 04.
-        record = {'out_positions': [0], 'out_values': [
-            {'_array': True, 'values': [b"\xc1\x02", b"\xc1\x03", b"\xc1\x04"]}]}
+        record = {
+            'out_positions': [0],
+            'out_values': [
+                {'_array': True, 'values': [b'\xc1\x02', b'\xc1\x03', b'\xc1\x04']}
+            ],
+        }
         result = (None, None, None, None, [record])
         _assign_out_binds([v], result)
         self.assertEqual(v.getvalue(), [1, 2, 3])
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

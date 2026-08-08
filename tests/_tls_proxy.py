@@ -14,18 +14,22 @@ import socket
 import ssl
 import threading
 
-
-FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
-CERT_PATH = os.path.join(FIXTURES_DIR, "proxy_cert.pem")
-KEY_PATH = os.path.join(FIXTURES_DIR, "proxy_key.pem")
+FIXTURES_DIR = os.path.join(os.path.dirname(__file__), 'fixtures')
+CERT_PATH = os.path.join(FIXTURES_DIR, 'proxy_cert.pem')
+KEY_PATH = os.path.join(FIXTURES_DIR, 'proxy_key.pem')
 
 
 class TLSProxy:
     """TLS terminator that forwards plaintext to a backend host:port."""
 
-    def __init__(self, backend_host: str, backend_port: int,
-                 cert_path: str = CERT_PATH, key_path: str = KEY_PATH,
-                 listen_host: str = "127.0.0.1"):
+    def __init__(
+        self,
+        backend_host: str,
+        backend_port: int,
+        cert_path: str = CERT_PATH,
+        key_path: str = KEY_PATH,
+        listen_host: str = '127.0.0.1',
+    ):
         self.backend = (backend_host, backend_port)
         self.cert_path = cert_path
         self.key_path = key_path
@@ -46,8 +50,9 @@ class TLSProxy:
         self._sock.listen(8)
         self._sock.settimeout(0.5)
         self.listen_port = self._sock.getsockname()[1]
-        self._thread = threading.Thread(target=self._serve, daemon=True,
-                                        name="TLSProxy-accept")
+        self._thread = threading.Thread(
+            target=self._serve, daemon=True, name='TLSProxy-accept'
+        )
         self._thread.start()
 
     def stop(self) -> None:
@@ -69,8 +74,9 @@ class TLSProxy:
                 client, _ = self._sock.accept()
             except (socket.timeout, OSError):
                 continue
-            t = threading.Thread(target=self._handle, args=(client,),
-                                 daemon=True, name="TLSProxy-conn")
+            t = threading.Thread(
+                target=self._handle, args=(client,), daemon=True, name='TLSProxy-conn'
+            )
             self._workers.append(t)
             t.start()
 
@@ -95,14 +101,22 @@ class TLSProxy:
                 pass
             return
         # Pump in both directions. Either side closing tears the pair down.
-        t1 = threading.Thread(target=self._pump,
-                              args=(tls_client, backend),
-                              daemon=True, name="TLSProxy-c2b")
-        t2 = threading.Thread(target=self._pump,
-                              args=(backend, tls_client),
-                              daemon=True, name="TLSProxy-b2c")
-        t1.start(); t2.start()
-        t1.join(); t2.join()
+        t1 = threading.Thread(
+            target=self._pump,
+            args=(tls_client, backend),
+            daemon=True,
+            name='TLSProxy-c2b',
+        )
+        t2 = threading.Thread(
+            target=self._pump,
+            args=(backend, tls_client),
+            daemon=True,
+            name='TLSProxy-b2c',
+        )
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
 
     @staticmethod
     def _pump(src: socket.socket, dst: socket.socket) -> None:
@@ -129,7 +143,7 @@ class TLSProxy:
                     # Best-effort: nothing to do if it is already closed.
                     pass
 
-    def __enter__(self) -> "TLSProxy":
+    def __enter__(self) -> 'TLSProxy':
         self.start()
         return self
 

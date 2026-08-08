@@ -3,6 +3,7 @@
 
 import datetime
 
+
 class date(datetime.datetime):
     has_timestamp: bool = False
     timestamptz: int | None = None

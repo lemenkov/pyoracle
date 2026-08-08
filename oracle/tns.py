@@ -8,15 +8,17 @@ from typing import TYPE_CHECKING, Any, cast
 if TYPE_CHECKING:
     from oracle.dbobject import DbObject, DbRef
 from functools import reduce
-from oracle.crypto import o5logon
-from oracle.crypto import encrypt_password
-from oracle.exceptions import DataError
+
+from oracle.crypto import encrypt_password, o5logon
 from oracle.cursor import cursor
-from oracle.datatypes import (
-    BinaryDouble, BinaryFloat, IntervalYM, JSON, TempLob, Var)
+from oracle.datatypes import JSON, BinaryDouble, BinaryFloat, IntervalYM, TempLob, Var
 from oracle.date import date
+from oracle.exceptions import DataError
 from oracle.vector import (
-    is_vector_bind, encode_vector, VECTOR_BIND_OAC, VECTOR_BIND_DESCRIPTOR,
+    VECTOR_BIND_DESCRIPTOR,
+    VECTOR_BIND_OAC,
+    encode_vector,
+    is_vector_bind,
 )
 
 
@@ -25,6 +27,7 @@ def _json_bind_text(Token: object) -> str:
     # (#50): serialise to JSON text and bind it as a string; the server casts
     # VARCHAR -> JSON. Lazy import keeps oson off the tns import chain.
     from oracle.oson import json_to_text
+
     return json_to_text(Token.value if isinstance(Token, JSON) else Token)
 
 
@@ -32,73 +35,27 @@ def _native_lob_bind_value(image: bytes) -> bytes:
     # Native inline bind value for a LOB-backed type (VECTOR #62, JSON #70): a
     # fixed descriptor, the image length (ub2), 22 zero bytes, then the image
     # framed like RAW (encode_chr).
-    return (VECTOR_BIND_DESCRIPTOR + len(image).to_bytes(2, "big")
-            + b"\x00" * 22 + encode_chr(image))
+    return (
+        VECTOR_BIND_DESCRIPTOR
+        + len(image).to_bytes(2, 'big')
+        + b'\x00' * 22
+        + encode_chr(image)
+    )
 
 
 def _json_oson_image(Token: object):
     # The OSON image for a dict / JSON() bind (#70), or None when the value is
     # too large/complex for the native encoder so the caller falls back to the
     # text cast (#50/#64) — which the server parses just as well.
-    from oracle.oson import encode_oson, OsonError
+    from oracle.oson import OsonError, encode_oson
+
     value = Token.value if isinstance(Token, JSON) else Token
     try:
         return encode_oson(value)
     except OsonError:
         return None
-from oracle.tns_consts import (
-    AL16UTF16_CHARSET, AL32UTF8_CHARSET, CharsetDict, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_SID,
-    FIELD_VERSION_9_2, FIELD_VERSION_10_2,
-    FIELD_VERSION_11_2, FIELD_VERSION_12_1, FIELD_VERSION_12_2,
-    FIELD_VERSION_12_2_EXT1, FIELD_VERSION_19_1, FIELD_VERSION_19_1_EXT1,
-    FIELD_VERSION_20_1, FIELD_VERSION_21_1, FIELD_VERSION_23_1,
-    TNS_FUNC_AQ_ENQ, TNS_FUNC_AQ_DEQ, TNS_FUNC_ARRAY_AQ,
-    TNS_AQ_ARRAY_ENQ, TNS_AQ_ARRAY_FLAGS_RETURN_MESSAGE_ID,
-    TNS_AQ_MESSAGE_VERSION,
-    TNS_AQ_MESSAGE_ID_LENGTH, TNS_AQ_EXT_KEYWORD_AGENT_NAME,
-    TNS_AQ_EXT_KEYWORD_AGENT_ADDRESS, TNS_AQ_EXT_KEYWORD_AGENT_PROTOCOL,
-    TNS_AQ_EXT_KEYWORD_ORIGINAL_MSGID, TNS_KPD_AQ_BUFMSG, TNS_KPD_AQ_EITHER,
-    TNS_AQ_MSG_BUFFERED, TNS_AQ_MSG_PERSISTENT_OR_BUFFERED,
-    TNS_MSG_TYPE_FAST_AUTH, TNS_SERVER_CONVERTS_CHARS,
-    DictionaryType, TNS_DATA, TNS_REDIRECT, TTI_ALL7, TTI_ALL8, TTI_AUTH, TTI_BVC,
-    TTI_DCB, TTI_DTY, TTI_FETCH, TTI_FOB, TTI_FUN, TTI_IOV, TTI_LOB,
-    TTI_LOGOFF, TTI_OAC, TTI_OER, TTI_PFN, TTI_PRO, TTI_RPA, TTI_RXD,
-    TTI_IRD,
-    TTI_RXH, TTI_SESS, TTI_SPFP, TTI_STA, TTI_STRT, TTI_STOP, TTI_UDS,
-    TTI_END_OF_RESPONSE, TNS_CCAP_END_OF_RESPONSE,
-    TTI_MSG_TYPE_PIGGYBACK, TTI_TOKEN,
-    TNS_FUNC_PIPELINE_BEGIN, TNS_FUNC_PIPELINE_END,
-    TTI_OCCA,
-    TNS_EXEC_FLAGS_SCROLLABLE, TNS_EXEC_FLAGS_NO_CANCEL_ON_EOF,
-    TNS_EXEC_OPTION_EXECUTE,
-    TNS_FUNC_SET_END_TO_END_ATTR, TNS_END_TO_END_CLIENT_IDENTIFIER,
-    TNS_END_TO_END_MODULE, TNS_END_TO_END_ACTION, TNS_END_TO_END_CLIENT_INFO,
-    TNS_END_TO_END_DBOP,
-    TTI_SVR_PIGGYBACK, TNS_SERVER_PIGGYBACK_OS_PID_MTS,
-    TNS_SERVER_PIGGYBACK_SESS_RET, TNS_SERVER_PIGGYBACK_LTXID,
-    TNS_SERVER_PIGGYBACK_SYNC,
-    TNS_SERVER_PIGGYBACK_QUERY_CACHE_INVALIDATION,
-    TNS_SERVER_PIGGYBACK_TRACE_EVENT,
-    TTI_3LOGON, TTI_3LOGA,
-    TTI_WRN, TNS_BIND_DIR_INPUT, TNS_AL8I4_ARRAY_DML_ROWCOUNTS,
-    TNS_FUNC_TPC_TXN_SWITCH, TNS_FUNC_TPC_TXN_CHANGE_STATE,
-    TNS_EXEC_OPTION_BATCH_ERRORS,
-    TNS_LOB_OP_READ, TNS_LOB_OP_WRITE,
-    TNS_LOB_OP_FILE_OPEN, TNS_LOB_OP_FILE_CLOSE,
-    TNS_TYPE_BDOUBLE, TNS_TYPE_BFILE,
-    TNS_TYPE_BFLOAT, TNS_TYPE_BLOB, TNS_TYPE_BOOLEAN, TNS_TYPE_CLOB,
-    TNS_TYPE_DATE,
-    TNS_TYPE_ADT,
-    TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, TNS_TYPE_JSON, TNS_TYPE_LONG,
-    TNS_TYPE_LONGRAW, TNS_TYPE_VECTOR,
-    TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_REF, TNS_TYPE_REFCURSOR,
-    TNS_TYPE_RID, TNS_TYPE_ROWID,
-    TNS_TYPE_CHAR,
-    TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPLTZ, TNS_TYPE_TIMESTAMPTZ,
-    TNS_TYPE_UROWID, TNS_TYPE_VARCHAR,
-    TTI_LOBOPS,
-    UTF8_CHARSET,
-)
+
+
 import contextvars
 import logging
 import math
@@ -106,6 +63,139 @@ import os
 import re
 import socket
 import struct
+
+from oracle.tns_consts import (
+    AL16UTF16_CHARSET,
+    AL32UTF8_CHARSET,
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    DEFAULT_SID,
+    FIELD_VERSION_10_2,
+    FIELD_VERSION_11_2,
+    FIELD_VERSION_12_1,
+    FIELD_VERSION_12_2,
+    FIELD_VERSION_12_2_EXT1,
+    FIELD_VERSION_19_1_EXT1,
+    FIELD_VERSION_20_1,
+    FIELD_VERSION_21_1,
+    FIELD_VERSION_23_1,
+    TNS_AL8I4_ARRAY_DML_ROWCOUNTS,
+    TNS_AQ_ARRAY_ENQ,
+    TNS_AQ_ARRAY_FLAGS_RETURN_MESSAGE_ID,
+    TNS_AQ_EXT_KEYWORD_AGENT_ADDRESS,
+    TNS_AQ_EXT_KEYWORD_AGENT_NAME,
+    TNS_AQ_EXT_KEYWORD_AGENT_PROTOCOL,
+    TNS_AQ_EXT_KEYWORD_ORIGINAL_MSGID,
+    TNS_AQ_MESSAGE_ID_LENGTH,
+    TNS_AQ_MESSAGE_VERSION,
+    TNS_AQ_MSG_BUFFERED,
+    TNS_AQ_MSG_PERSISTENT_OR_BUFFERED,
+    TNS_BIND_DIR_INPUT,
+    TNS_CCAP_END_OF_RESPONSE,
+    TNS_DATA,
+    TNS_END_TO_END_ACTION,
+    TNS_END_TO_END_CLIENT_IDENTIFIER,
+    TNS_END_TO_END_CLIENT_INFO,
+    TNS_END_TO_END_DBOP,
+    TNS_END_TO_END_MODULE,
+    TNS_EXEC_FLAGS_NO_CANCEL_ON_EOF,
+    TNS_EXEC_FLAGS_SCROLLABLE,
+    TNS_EXEC_OPTION_BATCH_ERRORS,
+    TNS_EXEC_OPTION_EXECUTE,
+    TNS_FUNC_AQ_DEQ,
+    TNS_FUNC_AQ_ENQ,
+    TNS_FUNC_ARRAY_AQ,
+    TNS_FUNC_PIPELINE_BEGIN,
+    TNS_FUNC_PIPELINE_END,
+    TNS_FUNC_SET_END_TO_END_ATTR,
+    TNS_FUNC_TPC_TXN_CHANGE_STATE,
+    TNS_FUNC_TPC_TXN_SWITCH,
+    TNS_KPD_AQ_BUFMSG,
+    TNS_KPD_AQ_EITHER,
+    TNS_LOB_OP_FILE_CLOSE,
+    TNS_LOB_OP_FILE_OPEN,
+    TNS_LOB_OP_READ,
+    TNS_LOB_OP_WRITE,
+    TNS_MSG_TYPE_FAST_AUTH,
+    TNS_REDIRECT,
+    TNS_SERVER_CONVERTS_CHARS,
+    TNS_SERVER_PIGGYBACK_LTXID,
+    TNS_SERVER_PIGGYBACK_OS_PID_MTS,
+    TNS_SERVER_PIGGYBACK_QUERY_CACHE_INVALIDATION,
+    TNS_SERVER_PIGGYBACK_SESS_RET,
+    TNS_SERVER_PIGGYBACK_SYNC,
+    TNS_SERVER_PIGGYBACK_TRACE_EVENT,
+    TNS_TYPE_ADT,
+    TNS_TYPE_BDOUBLE,
+    TNS_TYPE_BFILE,
+    TNS_TYPE_BFLOAT,
+    TNS_TYPE_BLOB,
+    TNS_TYPE_BOOLEAN,
+    TNS_TYPE_CHAR,
+    TNS_TYPE_CLOB,
+    TNS_TYPE_DATE,
+    TNS_TYPE_INTERVALDS,
+    TNS_TYPE_INTERVALYM,
+    TNS_TYPE_JSON,
+    TNS_TYPE_LONG,
+    TNS_TYPE_LONGRAW,
+    TNS_TYPE_NUMBER,
+    TNS_TYPE_RAW,
+    TNS_TYPE_REF,
+    TNS_TYPE_REFCURSOR,
+    TNS_TYPE_RID,
+    TNS_TYPE_ROWID,
+    TNS_TYPE_TIMESTAMP,
+    TNS_TYPE_TIMESTAMPLTZ,
+    TNS_TYPE_TIMESTAMPTZ,
+    TNS_TYPE_UROWID,
+    TNS_TYPE_VARCHAR,
+    TNS_TYPE_VECTOR,
+    TTI_3LOGA,
+    TTI_3LOGON,
+    TTI_ALL7,
+    TTI_ALL8,
+    TTI_AUTH,
+    TTI_BVC,
+    TTI_DCB,
+    TTI_DTY,
+    TTI_END_OF_RESPONSE,
+    TTI_FETCH,
+    TTI_FOB,
+    TTI_FUN,
+    TTI_IOV,
+    TTI_IRD,
+    TTI_LOB,
+    TTI_LOBOPS,
+    TTI_LOGOFF,
+    TTI_MSG_TYPE_PIGGYBACK,
+    TTI_OAC,
+    TTI_OCCA,
+    TTI_OER,
+    TTI_PFN,
+    TTI_PRO,
+    TTI_RPA,
+    TTI_RXD,
+    TTI_RXH,
+    TTI_SESS,
+    TTI_SPFP,
+    TTI_STA,
+    TTI_STOP,
+    TTI_STRT,
+    TTI_SVR_PIGGYBACK,
+    TTI_TOKEN,
+    TTI_UDS,
+    TTI_WRN,
+    UTF8_CHARSET,
+    CharsetDict,
+    DictionaryType,
+)
+from oracle.tns_consts import (
+    FIELD_VERSION_9_2 as FIELD_VERSION_9_2,
+)
+from oracle.tns_consts import (
+    FIELD_VERSION_19_1 as FIELD_VERSION_19_1,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -116,20 +206,21 @@ logger = logging.getLogger(__name__)
 # global) so concurrent async connections / sync threads each see their own
 # value. Default 6 == FIELD_VERSION_11_2 (defined later); decoders only diverge
 # from the 11g layout when this is >= a 12c+ field version.
-_DECODE_FIELD_VERSION = contextvars.ContextVar("decode_field_version", default=6)
+_DECODE_FIELD_VERSION = contextvars.ContextVar('decode_field_version', default=6)
 
 # Same idea for the *encode* side: the field version of the message currently
 # being built, set by encode_dictionary_exec and read by encode_token_raw to
 # pick the 11g vs 12c+ bind-OAC layout. Separate from the decode var so the two
 # phases never interfere. Default 6 == FIELD_VERSION_11_2.
-_ENCODE_FIELD_VERSION = contextvars.ContextVar("encode_field_version", default=6)
+_ENCODE_FIELD_VERSION = contextvars.ContextVar('encode_field_version', default=6)
 
 # Set True for the duration of an execute that requested array-DML row counts
 # (oracledb arraydmlrowcounts, #18). It tells decode_token_rpa_piggyback to
 # expect the `ub4 count | count×ub4` row-count block the server appends to the
 # RPA region ahead of the trailing OER — absent the flag the RPA is just walked
 # and discarded as before. The connection sets it per execute.
-_DECODE_DML_ROWCOUNTS = contextvars.ContextVar("decode_dml_rowcounts", default=False)
+_DECODE_DML_ROWCOUNTS = contextvars.ContextVar('decode_dml_rowcounts', default=False)
+
 
 def set_decode_dml_rowcounts(Flag: bool) -> None:
     """Arm/disarm row-count extraction for the next response decode (#18).
@@ -139,16 +230,19 @@ def set_decode_dml_rowcounts(Flag: bool) -> None:
     block. Reset every execute so a stale flag never leaks into another call."""
     _DECODE_DML_ROWCOUNTS.set(bool(Flag))
 
+
 # DML RETURNING ... INTO (#120): the sorted return-bind positions for the next
 # response, so the TTI_RXD decoder reads the out-bind return data (per bind:
 # ub4 num_rows + per row a value + sb4 truncation length) instead of treating
 # the RXD as query rows. Reset every execute.
-_DECODE_RETURN_BINDS = contextvars.ContextVar("decode_return_binds", default=())
+_DECODE_RETURN_BINDS = contextvars.ContextVar('decode_return_binds', default=())
+
 
 def set_decode_return_binds(Positions) -> None:
     """Arm return-bind decoding for the next response (#120). `Positions` is the
     set/list of 0-based OUT-bind positions, or empty/None to disarm."""
     _DECODE_RETURN_BINDS.set(tuple(sorted(Positions)) if Positions else ())
+
 
 # The last row of the previous fetch, seeded for a scroll re-execute (#181). When
 # a scroll repositions onto a row whose column values equal the last row already
@@ -157,24 +251,29 @@ def set_decode_return_binds(Positions) -> None:
 # (Rows starts empty each call), so the cursor seeds this with the prior batch's
 # last row; decode_token_rxd falls back to it for a reused column when no
 # in-response previous row exists. Empty/None disarms (the default).
-_DECODE_PREV_ROW: contextvars.ContextVar[list | None] = \
-    contextvars.ContextVar("decode_prev_row", default=None)
+_DECODE_PREV_ROW: contextvars.ContextVar[list | None] = contextvars.ContextVar(
+    'decode_prev_row', default=None
+)
+
 
 def set_decode_prev_row(Row) -> None:
     """Seed the previous-fetch row for the next scroll re-execute decode (#181),
     or pass None to disarm."""
     _DECODE_PREV_ROW.set(list(Row) if Row else None)
 
-def assemble_packet(Data: bytes, Length: int, Large: bool = False) -> tuple[bool, int | None, bytes | None, bytes | None]:
+
+def assemble_packet(
+    Data: bytes, Length: int, Large: bool = False
+) -> tuple[bool, int | None, bytes | None, bytes | None]:
     # Two on-wire packet-header layouts share an 8-byte size and put the type at
     # byte 4. Legacy: len(ub2) + checksum(ub2) + type + flags + hdr-cksum(ub2).
     # Large-SDU (#155, negotiated at protocol version >= 315): len(ub4) + type +
     # flags + hdr-cksum(ub2) — the 4-byte length replaces the legacy len+cksum.
     # `Zero` (the hdr-cksum at bytes 6-7) is read the same way in both.
     if Large:
-        (PacketSize, Type, Flags, Zero) = struct.unpack(">IBBh", Data[:8])
+        (PacketSize, Type, Flags, Zero) = struct.unpack('>IBBh', Data[:8])
     else:
-        (PacketSize, _, Type, Flags, Zero) = struct.unpack(">HhBBh", Data[:8])
+        (PacketSize, _, Type, Flags, Zero) = struct.unpack('>HhBBh', Data[:8])
     if Type == TNS_DATA and Zero == 0:
         BodySize = PacketSize - 10
         Rest = Data[10:]
@@ -203,10 +302,11 @@ def assemble_packet(Data: bytes, Length: int, Large: bool = False) -> tuple[bool
         else:
             return (False, None, None, None)
     else:
-        raise Exception("Cannot decode packet", Data, Length)
+        raise Exception('Cannot decode packet', Data, Length)
 
-_REDIRECT_HOST_RE = re.compile(rb"\(HOST\s*=\s*([^)\s]+)\s*\)", re.IGNORECASE)
-_REDIRECT_PORT_RE = re.compile(rb"\(PORT\s*=\s*(\d+)\s*\)", re.IGNORECASE)
+
+_REDIRECT_HOST_RE = re.compile(rb'\(HOST\s*=\s*([^)\s]+)\s*\)', re.IGNORECASE)
+_REDIRECT_PORT_RE = re.compile(rb'\(PORT\s*=\s*(\d+)\s*\)', re.IGNORECASE)
 
 
 def parse_redirect_address(Body: bytes) -> tuple[str | None, int | None]:
@@ -217,14 +317,15 @@ def parse_redirect_address(Body: bytes) -> tuple[str | None, int | None]:
     # real target lives, and only fall back to a bare first match if there is
     # no ADDRESS keyword.
     Region = Body
-    Marker = re.search(rb"\(ADDRESS\b", Body, re.IGNORECASE)
+    Marker = re.search(rb'\(ADDRESS\b', Body, re.IGNORECASE)
     if Marker:
-        Region = Body[Marker.start():]
+        Region = Body[Marker.start() :]
     Host = _REDIRECT_HOST_RE.search(Region)
     Port = _REDIRECT_PORT_RE.search(Region)
     if Host and Port:
-        return (Host.group(1).decode("ascii", "replace"), int(Port.group(1)))
+        return (Host.group(1).decode('ascii', 'replace'), int(Port.group(1)))
     return (None, None)
+
 
 def decode_packet(Data: bytes, Acc: tuple, FieldVersion: int | None = None) -> tuple:
     # FieldVersion is passed only by the top-level caller (the connection's
@@ -233,7 +334,7 @@ def decode_packet(Data: bytes, Acc: tuple, FieldVersion: int | None = None) -> t
     if FieldVersion is not None:
         _DECODE_FIELD_VERSION.set(FieldVersion)
     Token = Data[0]
-    logger.debug("Token %s", Token)
+    logger.debug('Token %s', Token)
     match Token:
         case t if t == TTI_BVC:
             return decode_token_bvc(Data, Acc)
@@ -288,6 +389,7 @@ def decode_packet(Data: bytes, Acc: tuple, FieldVersion: int | None = None) -> t
     # analysis happy (the `case _` wildcard reads as an implicit fall-through).
     raise Exception("Can't decode unknown type", Token, Data, Acc)
 
+
 def decode_token_bvc(Data: bytes, Acc: tuple) -> tuple:
     # Bit vector identifying columns whose value is REPEATED from the previous
     # row (so the following RXD only carries the columns whose bits are set).
@@ -302,6 +404,7 @@ def decode_token_bvc(Data: bytes, Acc: tuple) -> tuple:
     BitVec = bytes(Rest[:VecLen])
     Rest = Rest[VecLen:]
     return decode_packet(Rest, (Cursor, RowFormat, Rows, BitVec))
+
 
 def _skip_chunked_bytes(Data: bytes) -> bytes:
     # Mirrors oracledb's skip_bytes: 1-byte length, then either that many raw
@@ -319,7 +422,8 @@ def _skip_chunked_bytes(Data: bytes) -> bytes:
     elif Length == 255:
         return Data[1:]
     else:
-        return Data[1 + Length:]
+        return Data[1 + Length :]
+
 
 def _read_chunked_bytes(Data: bytes) -> tuple[bytes, bytes]:
     # The value form _skip_chunked_bytes skips, but returning the bytes: a
@@ -328,7 +432,7 @@ def _read_chunked_bytes(Data: bytes) -> tuple[bytes, bytes]:
     Length = Data[0]
     if Length == 254:
         Rest = Data[1:]
-        Out = b""
+        Out = b''
         while True:
             (ChunkLen, Rest) = decode_ub4(Rest)
             if ChunkLen == 0:
@@ -336,15 +440,17 @@ def _read_chunked_bytes(Data: bytes) -> tuple[bytes, bytes]:
             Out += bytes(Rest[:ChunkLen])
             Rest = Rest[ChunkLen:]
     elif Length == 255:
-        return (b"", Data[1:])
+        return (b'', Data[1:])
     else:
-        return (bytes(Data[1:1 + Length]), Data[1 + Length:])
+        return (bytes(Data[1 : 1 + Length]), Data[1 + Length :])
+
 
 def _skip_bytes_with_length(Data: bytes) -> bytes:
     (NumBytes, Rest) = decode_ub4(Data)
     if NumBytes > 0:
         Rest = _skip_chunked_bytes(Rest)
     return Rest
+
 
 def _bytes_with_length(Data: bytes) -> bytes:
     # Inverse of `_skip_chunked_bytes` (oracledb write_bytes_with_length): a
@@ -354,18 +460,20 @@ def _bytes_with_length(Data: bytes) -> bytes:
         return bytes([len(Data)]) + Data
     Out = bytearray([254])
     for I in range(0, len(Data), 0x40):
-        Chunk = Data[I:I + 0x40]
+        Chunk = Data[I : I + 0x40]
         Out += encode_sb4(len(Chunk)) + Chunk
     Out += encode_sb4(0)
     return bytes(Out)
+
 
 def _read_str_with_length(Data: bytes) -> tuple[bytes, bytes]:
     (NumBytes, Rest) = decode_ub4(Data)
     if NumBytes > 0:
         # A length-prefixed string is never chunked, so the DALC value is bytes
         # (never the list form).
-        return cast("tuple[bytes, bytes]", decode_dalc(Rest))
-    return (b"", Rest)
+        return cast('tuple[bytes, bytes]', decode_dalc(Rest))
+    return (b'', Rest)
+
 
 def decode_token_dcb(Data: bytes, Acc: tuple) -> tuple:
     # Describe Information block. Layout reverse-engineered against Oracle 11g
@@ -389,6 +497,7 @@ def decode_token_dcb(Data: bytes, Acc: tuple) -> tuple:
     (Columns, Rest) = _decode_describe_body(Rest)
     return decode_packet(Rest, (Cursor, Columns, Rows))
 
+
 def decode_token_implicit(Data: bytes, Acc: tuple) -> tuple:
     # Implicit result sets (#121, DBMS_SQL.RETURN_RESULT). Layout (oracledb
     # base.pyx _process_implicit_result):
@@ -405,12 +514,13 @@ def decode_token_implicit(Data: bytes, Acc: tuple) -> tuple:
     Results = []
     for _ in range(NumResults):
         PreLen = Rest[0]
-        Rest = Rest[1 + PreLen:]
+        Rest = Rest[1 + PreLen :]
         (Columns, Rest) = _decode_describe_body(Rest)
-        (CursorId, Rest) = decode_ub4(Rest)       # ub2 cursor id
+        (CursorId, Rest) = decode_ub4(Rest)  # ub2 cursor id
         Results.append({'cursor_id': CursorId, 'row_format': Columns})
     Record = {'implicit_results': Results}
     return decode_packet(Rest, (Cursor, RowFormat, Rows + [Record]))
+
 
 def _decode_describe_body(Rest: bytes) -> tuple[list, bytes]:
     # The describe-info body shared by the TTI_DCB token and the implicit-result
@@ -418,17 +528,17 @@ def _decode_describe_body(Rest: bytes) -> tuple[list, bytes]:
     # per-column metadata, then the describe trailer. The token-specific
     # preamble (DCB's chunked uuid/timestamp, or the implicit-result ub1 block)
     # is consumed by the caller before this point.
-    (_, Rest) = decode_ub4(Rest)              # max row size
+    (_, Rest) = decode_ub4(Rest)  # max row size
     (NumCols, Rest) = decode_ub4(Rest)
     if NumCols > 0:
-        Rest = Rest[1:]                       # reserved
+        Rest = Rest[1:]  # reserved
     Columns = []
     for _ in range(NumCols):
         (Col, Rest) = _decode_dcb_column(Rest)
         Columns.append(Col)
-    Rest = _skip_bytes_with_length(Rest)      # current date
+    Rest = _skip_bytes_with_length(Rest)  # current date
     for _ in range(4):
-        (_, Rest) = decode_ub4(Rest)          # dcbflag/dcbmdbz/dcbmnpr/dcbmxpr
+        (_, Rest) = decode_ub4(Rest)  # dcbflag/dcbmdbz/dcbmnpr/dcbmxpr
     if _DECODE_FIELD_VERSION.get() >= FIELD_VERSION_11_2:
         # dcbqcky (query-cache key) is an 11g addition (the result cache landed
         # in 11g); 10g's describe ends after the four ub4 flags, so skipping a
@@ -436,53 +546,54 @@ def _decode_describe_body(Rest: bytes) -> tuple[list, bytes]:
         Rest = _skip_bytes_with_length(Rest)
     return (Columns, Rest)
 
+
 def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
     # Per-column metadata. 12c+ (field version >= 12.2) differs from 11g in two
     # ways (oracledb base.pyx _process_metadata): scale is a raw signed byte
     # (sb1), and an extra ub4 `oaccolid` follows max_size. 11g keeps an
     # sb4-style variable scale (so NUMBER's -127 default arrives as 0x81 0x7f)
     # and has no oaccolid. precision is sb1 in both.
-    Is12c = _DECODE_FIELD_VERSION.get() >= 8     # FIELD_VERSION_12_2
+    Is12c = _DECODE_FIELD_VERSION.get() >= 8  # FIELD_VERSION_12_2
     DataType = Rest[0]
-    Precision = Rest[2]   # sb1
+    Precision = Rest[2]  # sb1
     Rest = Rest[3:]
     if Is12c:
-        DataScale = Rest[0] - 256 if Rest[0] > 127 else Rest[0]   # sb1
+        DataScale = Rest[0] - 256 if Rest[0] > 127 else Rest[0]  # sb1
         Rest = Rest[1:]
     else:
         (DataScale, Rest) = decode_ub4(Rest)
     (BufferSize, Rest) = decode_ub4(Rest)
-    (_, Rest) = decode_ub4(Rest)              # max_array_elems
-    (_, Rest) = decode_ub4(Rest)              # cont_flags (ub8 on 12c; small)
+    (_, Rest) = decode_ub4(Rest)  # max_array_elems
+    (_, Rest) = decode_ub4(Rest)  # cont_flags (ub8 on 12c; small)
     (OidLen, Rest) = decode_ub4(Rest)
-    TypeOid = b""
+    TypeOid = b''
     if OidLen > 0:
         # For an object (ADT, type 109) / collection column this is the type's
         # 16-byte OID; capturing it (rather than skipping) lets the row decoder
         # tie the value back to its type for the attribute-layout lookup (#115).
         (TypeOid, Rest) = _read_chunked_bytes(Rest)
-    (_, Rest) = decode_ub4(Rest)              # version
-    (Charset, Rest) = decode_ub4(Rest)        # charset id
-    Csfrm = Rest[0]                           # charset form (1 DB / 2 national)
+    (_, Rest) = decode_ub4(Rest)  # version
+    (Charset, Rest) = decode_ub4(Rest)  # charset id
+    Csfrm = Rest[0]  # charset form (1 DB / 2 national)
     Rest = Rest[1:]
     (MaxSize, Rest) = decode_ub4(Rest)
     if Is12c:
-        (_, Rest) = decode_ub4(Rest)          # oaccolid (12.2+)
+        (_, Rest) = decode_ub4(Rest)  # oaccolid (12.2+)
     NullOk = Rest[0]
-    Rest = Rest[2:]                           # skip nulls_allowed-byte AND v7 name length
+    Rest = Rest[2:]  # skip nulls_allowed-byte AND v7 name length
     (ColName, Rest) = _read_str_with_length(Rest)
-    (TypeSchema, Rest) = _read_str_with_length(Rest)   # owner of the type (ADT)
-    (TypeName, Rest) = _read_str_with_length(Rest)     # the type's name (ADT)
-    (_, Rest) = decode_ub4(Rest)              # column position
+    (TypeSchema, Rest) = _read_str_with_length(Rest)  # owner of the type (ADT)
+    (TypeName, Rest) = _read_str_with_length(Rest)  # the type's name (ADT)
+    (_, Rest) = decode_ub4(Rest)  # column position
     if _DECODE_FIELD_VERSION.get() >= FIELD_VERSION_11_2:
         # `uds flags` is an 11g addition; a 10g (field version 4) describe ends
         # the per-column metadata at column position. Reading a phantom ub4 here
         # eats the next column's first bytes (or the DCB trailer's date length),
         # desyncing the whole row decode (#84). Verified against a live 10.2.0.5
         # server across 1/2/6-column, mixed-type and 0-row describes.
-        (_, Rest) = decode_ub4(Rest)          # uds flags
-    DomainSchema = DomainName = b""
-    if _DECODE_FIELD_VERSION.get() >= 17:     # FIELD_VERSION_23_1
+        (_, Rest) = decode_ub4(Rest)  # uds flags
+    DomainSchema = DomainName = b''
+    if _DECODE_FIELD_VERSION.get() >= 17:  # FIELD_VERSION_23_1
         # 23c (field version 17) appends the column's SQL-domain schema and
         # name, each a ub4-counted DALC string (the same codec as the column
         # name above) — empty (a single 0x00) for a column with no domain.
@@ -496,7 +607,7 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
         (DomainSchema, Rest) = _read_str_with_length(Rest)
         (DomainName, Rest) = _read_str_with_length(Rest)
     Annotations = {}
-    if _DECODE_FIELD_VERSION.get() > FIELD_VERSION_23_1:     # 23ai fv >= 18 (#89)
+    if _DECODE_FIELD_VERSION.get() > FIELD_VERSION_23_1:  # 23ai fv >= 18 (#89)
         # Each column carries its annotation map and the vector descriptor after
         # the domain fields (oracledb base.pyx _process_metadata). Both must be
         # consumed or the row stream desyncs; the annotations are the #89 payload.
@@ -504,15 +615,15 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
         # is followed by a ub4 flags word, with a trailing ub4 flags after the loop.
         (NumAnno, Rest) = decode_ub4(Rest)
         if NumAnno > 0:
-            Rest = Rest[1:]                       # pointer
-            (NumAnno, Rest) = decode_ub4(Rest)    # count, repeated
-            Rest = Rest[1:]                       # pointer
+            Rest = Rest[1:]  # pointer
+            (NumAnno, Rest) = decode_ub4(Rest)  # count, repeated
+            Rest = Rest[1:]  # pointer
             for _ in range(NumAnno):
                 (Key, Rest) = _read_str_with_length(Rest)
                 (Val, Rest) = _read_str_with_length(Rest)
-                Annotations[Key] = Val or b""
-                (_, Rest) = decode_ub4(Rest)      # per-pair flags
-            (_, Rest) = decode_ub4(Rest)          # trailing flags
+                Annotations[Key] = Val or b''
+                (_, Rest) = decode_ub4(Rest)  # per-pair flags
+            (_, Rest) = decode_ub4(Rest)  # trailing flags
         # Vector descriptor (23.4+): dimensions (ub4) + format + flags (ub1 each).
         (_, Rest) = decode_ub4(Rest)
         Rest = Rest[2:]
@@ -535,11 +646,14 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
         # identity here; keep it so the row decoder can look up the attribute
         # layout / label the REF. Names are plain ASCII identifiers.
         Col['type_oid'] = TypeOid
-        Col['type_schema'] = TypeSchema.decode('ascii', 'replace') or None \
-            if TypeSchema else None
-        Col['type_name'] = TypeName.decode('ascii', 'replace') or None \
-            if TypeName else None
+        Col['type_schema'] = (
+            TypeSchema.decode('ascii', 'replace') or None if TypeSchema else None
+        )
+        Col['type_name'] = (
+            TypeName.decode('ascii', 'replace') or None if TypeName else None
+        )
     return (Col, Rest)
+
 
 def decode_token_iov(Data: bytes, Acc: tuple) -> tuple:
     # I/O vector for an anonymous PL/SQL block's binds (section 6.5). Layout
@@ -565,21 +679,27 @@ def decode_token_iov(Data: bytes, Acc: tuple) -> tuple:
     (Cursor, RowFormat, Rows) = Acc[:3]
     Binds = Acc[3] if len(Acc) > 3 else None
     (Directions, OutValues, Rest) = _read_iov(Data, Binds)
-    OutPositions = [I for I, D in enumerate(Directions)
-                    if D != TNS_BIND_DIR_INPUT]
+    OutPositions = [I for I, D in enumerate(Directions) if D != TNS_BIND_DIR_INPUT]
     if OutPositions:
-        Rows = Rows + [{'out_positions': OutPositions,
-                        'out_values': OutValues,
-                        'directions': Directions}]
+        Rows = Rows + [
+            {
+                'out_positions': OutPositions,
+                'out_values': OutValues,
+                'directions': Directions,
+            }
+        ]
     return decode_packet(Rest, (Cursor, RowFormat, Rows))
+
 
 def _is_refcursor_bind(Bind: object) -> bool:
     if isinstance(Bind, Var):
         return Bind.dbtype.tns_type == TNS_TYPE_REFCURSOR
     return isinstance(Bind, cursor)
 
-def _read_iov(Data: bytes, Binds: list | None = None
-              ) -> tuple[list[int], list[object], bytes]:
+
+def _read_iov(
+    Data: bytes, Binds: list | None = None
+) -> tuple[list[int], list[object], bytes]:
     # Parse a TTI_IOV body starting at the token byte. Returns the per-bind
     # direction codes, the OUT/IN-OUT values (in OUT-bind order), and the
     # unconsumed tail (the RPA / OER that follow). See decode_token_iov.
@@ -589,17 +709,17 @@ def _read_iov(Data: bytes, Binds: list | None = None
     # it is returned as a {'_refcursor': True, 'cursor_id', 'row_format'} record
     # the cursor turns into a nested Cursor. Detecting which is which needs the
     # bind list, threaded in via the decode Acc.
-    Rest = Data[1:]                              # consume IOV token
-    Rest = Rest[1:]                              # skip flag (ub1)
+    Rest = Data[1:]  # consume IOV token
+    Rest = Rest[1:]  # skip flag (ub1)
     (NumRequests, Rest) = decode_ub4(Rest)
     (NumIters, Rest) = decode_ub4(Rest)
     NumBinds = NumIters * 256 + NumRequests
-    (_, Rest) = decode_ub4(Rest)                 # num iters this time
-    (_, Rest) = decode_ub4(Rest)                 # uac buffer length
-    (BvLen, Rest) = decode_ub4(Rest)             # fast-fetch bit vector
+    (_, Rest) = decode_ub4(Rest)  # num iters this time
+    (_, Rest) = decode_ub4(Rest)  # uac buffer length
+    (BvLen, Rest) = decode_ub4(Rest)  # fast-fetch bit vector
     if BvLen > 0:
         Rest = Rest[BvLen:]
-    (RidLen, Rest) = decode_ub4(Rest)            # rowid
+    (RidLen, Rest) = decode_ub4(Rest)  # rowid
     if RidLen > 0:
         Rest = Rest[RidLen:]
     Directions = [Rest[I] for I in range(NumBinds)]
@@ -607,7 +727,7 @@ def _read_iov(Data: bytes, Binds: list | None = None
     HasOut = any(D != TNS_BIND_DIR_INPUT for D in Directions)
     OutValues: list = []
     if HasOut and Rest and Rest[0] == TTI_RXD:
-        Rest = Rest[1:]                          # consume RXD token
+        Rest = Rest[1:]  # consume RXD token
         for Idx, D in enumerate(Directions):
             if D == TNS_BIND_DIR_INPUT:
                 continue
@@ -624,7 +744,7 @@ def _read_iov(Data: bytes, Binds: list | None = None
                 for _ in range(Count):
                     (Val, Rest) = decode_dalc(Rest)
                     (_, Rest) = decode_ub4(Rest)  # per-element return code
-                    Elements.append(b"" if Val == [] else bytes(Val))
+                    Elements.append(b'' if Val == [] else bytes(Val))
                 OutValues.append({'_array': True, 'values': Elements})
             else:
                 (Val, Rest) = decode_dalc(Rest)
@@ -633,47 +753,51 @@ def _read_iov(Data: bytes, Binds: list | None = None
                 # but a NULL value's is ub4(-1) = 0x81 0x01 (two bytes). Skipping
                 # a fixed byte desynced the decoder on a NULL OUT bind.
                 (_, Rest) = decode_ub4(Rest)
-                OutValues.append(b"" if Val == [] else bytes(Val))
+                OutValues.append(b'' if Val == [] else bytes(Val))
     return (Directions, OutValues, Rest)
+
 
 def _read_refcursor_out(Rest: bytes) -> tuple[dict, bytes]:
     # A REF CURSOR OUT value: a 1-byte length, then an inline describe (max row
     # size, num columns, the same per-column metadata as a DCB), then the
     # nested cursor id (ub2) and a 1-byte indicator. Mirrors oracledb's
     # _create_cursor_from_describe; byte layout verified against XE 11g.
-    Rest = Rest[1:]                              # skip_ub1 (length)
-    (_, Rest) = decode_ub4(Rest)                 # max row size
+    Rest = Rest[1:]  # skip_ub1 (length)
+    (_, Rest) = decode_ub4(Rest)  # max row size
     (NumCols, Rest) = decode_ub4(Rest)
     if NumCols > 0:
-        Rest = Rest[1:]                          # reserved byte
+        Rest = Rest[1:]  # reserved byte
     Columns = []
     for _ in range(NumCols):
         (Col, Rest) = _decode_dcb_column(Rest)
         Columns.append(Col)
-    Rest = _skip_bytes_with_length(Rest)         # current date
-    for _ in range(4):                           # dcbflag / mdbz / mnpr / mxpr
+    Rest = _skip_bytes_with_length(Rest)  # current date
+    for _ in range(4):  # dcbflag / mdbz / mnpr / mxpr
         (_, Rest) = decode_ub4(Rest)
     if _DECODE_FIELD_VERSION.get() >= FIELD_VERSION_11_2:
         # dcbqcky (query-cache key) is an 11g addition; a 10g (field version 4)
         # nested-cursor describe ends after the four ub4 flags. Skipping a
         # phantom one here consumes the cursor id and desyncs the IOV decode of
         # a REF CURSOR OUT bind (#84) — same pre-11g gap as decode_token_dcb.
-        Rest = _skip_bytes_with_length(Rest)     # dcbqcky
+        Rest = _skip_bytes_with_length(Rest)  # dcbqcky
     (CursorId, Rest) = decode_ub4(Rest)
-    Rest = Rest[1:]                              # per-value indicator byte
-    return ({'_refcursor': True, 'cursor_id': CursorId,
-             'row_format': Columns}, Rest)
+    Rest = Rest[1:]  # per-value indicator byte
+    return ({'_refcursor': True, 'cursor_id': CursorId, 'row_format': Columns}, Rest)
+
 
 def decode_token_lob(Data: bytes, Acc: tuple) -> tuple:
     # Defensive no-op for a TTI_LOB token seen in the general decode path. Real
     # LOB content is read by the dedicated _read_lob_response loop (see
     # lob_read), which walks TTI_LOB / RPA / OER itself — it doesn't route
     # through here.
-    logger.debug("decode_token_lob: ignored (handled in _read_lob_response)")
+    logger.debug('decode_token_lob: ignored (handled in _read_lob_response)')
     return (True, Acc)
+
 
 def decode_token_net(Data: bytes, Acc: tuple) -> None:
     pass
+
+
 def _read_batch_ub4_array(Rest: bytes) -> tuple[list, bytes]:
     # An array-DML batch field (#18): a ub4 count, then a DALC blob packing
     # that many ub4 values back-to-back. Returns the values and the remaining
@@ -682,12 +806,13 @@ def _read_batch_ub4_array(Rest: bytes) -> tuple[list, bytes]:
     if Count <= 0:
         return ([], Rest)
     (Blob, Rest) = decode_dalc(Rest)
-    Buf = bytes(Blob) if not isinstance(Blob, list) else b""
+    Buf = bytes(Blob) if not isinstance(Blob, list) else b''
     Values = []
     for _ in range(Count):
         (Value, Buf) = decode_ub4(Buf)
         Values.append(Value)
     return (Values, Rest)
+
 
 def decode_token_oer(Data: bytes, Acc: tuple) -> tuple:
     # OER ("Oracle Error" return-status TTC token; emitted at the end of every
@@ -705,42 +830,42 @@ def decode_token_oer(Data: bytes, Acc: tuple) -> tuple:
     # Array-DML row counts threaded in by decode_token_rpa_piggyback (the RPA
     # carrying them precedes this OER); None for a normal execute (#18).
     RowCounts = Acc[4] if len(Acc) > 4 else None
-    Rest = Data[1:]                                  # consume the OER token
+    Rest = Data[1:]  # consume the OER token
     (CallStatus, Rest) = decode_ub4(Rest)
-    (_, Rest) = decode_ub4(Rest)                     # end-to-end seq#
+    (_, Rest) = decode_ub4(Rest)  # end-to-end seq#
     # In 11g the "current row number" field doubles as the DML affected-row
     # count: UPDATE/DELETE/INSERT set it to the number of rows touched by
     # the call. 12c+ moved the rowcount to a separate ub8 at the end of the
     # OER, but we don't have that here.
     (RowCount, Rest) = decode_ub4(Rest)
-    (ErrCode, Rest) = decode_ub4(Rest)               # ORA-NNNN error number
-    (_, Rest) = decode_ub4(Rest)                     # array elem error #1
-    (_, Rest) = decode_ub4(Rest)                     # array elem error #2
-    (CursorId, Rest) = decode_ub4(Rest)              # current cursor id
-    (_, Rest) = decode_ub4(Rest)                     # error position
-    Rest = Rest[6:]                                  # 6 single-byte fields:
-                                                     #   sql_type, fatal,
-                                                     #   flags, user_cursor_opts,
-                                                     #   upi_param, warn_flags
+    (ErrCode, Rest) = decode_ub4(Rest)  # ORA-NNNN error number
+    (_, Rest) = decode_ub4(Rest)  # array elem error #1
+    (_, Rest) = decode_ub4(Rest)  # array elem error #2
+    (CursorId, Rest) = decode_ub4(Rest)  # current cursor id
+    (_, Rest) = decode_ub4(Rest)  # error position
+    Rest = Rest[6:]  # 6 single-byte fields:
+    #   sql_type, fatal,
+    #   flags, user_cursor_opts,
+    #   upi_param, warn_flags
     # rowid of the (last) row the statement touched — same physical-rowid
     # layout as a ROWID column (see _read_rowid_column): data object number,
     # relative file number, an unused byte, block number, slot number.
-    (RowidObj, Rest) = decode_ub4(Rest)              # data object number
-    (RowidFile, Rest) = decode_ub4(Rest)             # relative file number
-    Rest = Rest[1:]                                  # rowid reserved byte
-    (RowidBlock, Rest) = decode_ub4(Rest)            # block number
-    (RowidSlot, Rest) = decode_ub4(Rest)             # slot number
-    (_, Rest) = decode_ub4(Rest)                     # os error
-    Rest = Rest[2:]                                  # statement #, call #
-    (_, Rest) = decode_ub4(Rest)                     # padding (ub2)
-    (_, Rest) = decode_ub4(Rest)                     # successful iterations
-                                                     #   (always 1 for a
-                                                     #   single non-array
-                                                     #   execute on 11g — the
-                                                     #   real DML rowcount is
-                                                     #   the "current row
-                                                     #   number" field above)
-    Rest = _skip_bytes_with_length(Rest)             # oerrdd (logical rowid)
+    (RowidObj, Rest) = decode_ub4(Rest)  # data object number
+    (RowidFile, Rest) = decode_ub4(Rest)  # relative file number
+    Rest = Rest[1:]  # rowid reserved byte
+    (RowidBlock, Rest) = decode_ub4(Rest)  # block number
+    (RowidSlot, Rest) = decode_ub4(Rest)  # slot number
+    (_, Rest) = decode_ub4(Rest)  # os error
+    Rest = Rest[2:]  # statement #, call #
+    (_, Rest) = decode_ub4(Rest)  # padding (ub2)
+    (_, Rest) = decode_ub4(Rest)  # successful iterations
+    #   (always 1 for a
+    #   single non-array
+    #   execute on 11g — the
+    #   real DML rowcount is
+    #   the "current row
+    #   number" field above)
+    Rest = _skip_bytes_with_length(Rest)  # oerrdd (logical rowid)
     # Batch error code / offset / message arrays (array-DML `batcherrors`
     # mode, #18). For plain statements all three counts are zero and the loops
     # never run. When set, the three arrays line up by position: error i hit
@@ -758,30 +883,32 @@ def decode_token_oer(Data: bytes, Acc: tuple) -> tuple:
     BatchMessages: list = []
     (NumBatchMessages, Rest) = decode_ub4(Rest)
     if NumBatchMessages > 0:
-        Rest = Rest[1:]                              # indicator byte
+        Rest = Rest[1:]  # indicator byte
         for _ in range(NumBatchMessages):
             (MsgBytes, Rest) = _read_str_with_length(Rest)
-            Rest = Rest[2:]                          # 2-byte trailer
+            Rest = Rest[2:]  # 2-byte trailer
             BatchMessages.append(
-                bytes(MsgBytes).decode('utf-8', errors='replace').rstrip())
+                bytes(MsgBytes).decode('utf-8', errors='replace').rstrip()
+            )
     BatchErrors = [
-        {'offset': BatchOffsets[I] if I < len(BatchOffsets) else None,
-         'code': BatchCodes[I] if I < len(BatchCodes) else None,
-         'message': BatchMessages[I] if I < len(BatchMessages) else None}
-        for I in range(max(len(BatchOffsets), len(BatchCodes),
-                           len(BatchMessages)))
+        {
+            'offset': BatchOffsets[I] if I < len(BatchOffsets) else None,
+            'code': BatchCodes[I] if I < len(BatchCodes) else None,
+            'message': BatchMessages[I] if I < len(BatchMessages) else None,
+        }
+        for I in range(max(len(BatchOffsets), len(BatchCodes), len(BatchMessages)))
     ]
     # On 11g the trailing message DALC comes right here. 12c+ inserts the
     # extended-precision error number (ub4) and rowcount (ub8) ahead of it, and
     # 20.1+ adds a ub4 sql type + ub4 server checksum (oracledb
     # _process_error_info). Skip them so the message DALC stays aligned.
     FieldVersion = _DECODE_FIELD_VERSION.get()
-    if FieldVersion >= 7:                             # FIELD_VERSION_12_1
-        (_, Rest) = decode_ub4(Rest)                  # extended error number
-        (_, Rest) = decode_ub4(Rest)                  # extended rowcount (ub8)
-        if FieldVersion >= 14:                        # FIELD_VERSION_20_1
-            (_, Rest) = decode_ub4(Rest)              # sql type
-            (_, Rest) = decode_ub4(Rest)              # server checksum
+    if FieldVersion >= 7:  # FIELD_VERSION_12_1
+        (_, Rest) = decode_ub4(Rest)  # extended error number
+        (_, Rest) = decode_ub4(Rest)  # extended rowcount (ub8)
+        if FieldVersion >= 14:  # FIELD_VERSION_20_1
+            (_, Rest) = decode_ub4(Rest)  # sql type
+            (_, Rest) = decode_ub4(Rest)  # server checksum
     Message = None
     if ErrCode != 0 and Rest:
         try:
@@ -798,10 +925,21 @@ def decode_token_oer(Data: bytes, Acc: tuple) -> tuple:
     Rowid = None
     if RowidBlock:
         from oracle.types import rowid_to_string
+
         Rowid = rowid_to_string(RowidObj, RowidFile, RowidBlock, RowidSlot)
     RetFormat = (RowCount, RowFormat)
-    return (CallStatus, ErrCode, CursorId, RetFormat, Rows, Message, Rowid,
-            BatchErrors, RowCounts)
+    return (
+        CallStatus,
+        ErrCode,
+        CursorId,
+        RetFormat,
+        Rows,
+        Message,
+        Rowid,
+        BatchErrors,
+        RowCounts,
+    )
+
 
 def decode_lobops_oer(Packet: bytes, FieldVersion: int) -> tuple[int, str | None]:
     # Pull the (error code, message) out of a content-free TTI_LOBOPS response
@@ -815,7 +953,7 @@ def decode_lobops_oer(Packet: bytes, FieldVersion: int) -> tuple[int, str | None
     _DECODE_FIELD_VERSION.set(FieldVersion)
     Pos = 0
     if Packet and Packet[0] == TTI_RPA and len(Packet) >= 3:
-        Pos = 3 + ((Packet[1] << 8) | Packet[2])     # skip ub2-prefixed locator
+        Pos = 3 + ((Packet[1] << 8) | Packet[2])  # skip ub2-prefixed locator
     while Pos < len(Packet) - 1:
         if Packet[Pos] == TTI_OER and 1 <= Packet[Pos + 1] <= 4:
             Result = decode_token_oer(Packet[Pos:], (None, None, []))
@@ -823,8 +961,9 @@ def decode_lobops_oer(Packet: bytes, FieldVersion: int) -> tuple[int, str | None
         Pos += 1
     return (0, None)
 
+
 def decode_token_oac(Data: bytes, Acc: tuple) -> tuple[int, int, int, int, bytes]:
-    (DataType, Flg, Pre) = struct.unpack(">BBB", Data[:3])
+    (DataType, Flg, Pre) = struct.unpack('>BBB', Data[:3])
     (DataScale, R0) = decode_ub4(Data[3:])
     (MaxDataLength, R1) = decode_ub4(R0)
     (Mal, R2) = decode_ub4(R1)
@@ -832,8 +971,9 @@ def decode_token_oac(Data: bytes, Acc: tuple) -> tuple[int, int, int, int, bytes
     (ToId, R4) = decode_dalc(R3)
     (VSN, R5) = decode_ub4(R4)
     (Charset, R6) = decode_ub4(R5)
-    (Mxlc, R7) = decode_ub4(R6[1:])        # R6[0] is the csfrm byte — skipped
+    (Mxlc, R7) = decode_ub4(R6[1:])  # R6[0] is the csfrm byte — skipped
     return (DataType, MaxDataLength, DataScale, Charset, R7)
+
 
 def decode_token_rpa(Data: bytes, Acc: tuple) -> tuple:
     (Num, Rest0) = decode_ub4(Data)
@@ -853,6 +993,7 @@ def decode_token_rpa(Data: bytes, Acc: tuple) -> tuple:
     else:
         return (TTI_SESS, SessKey, Salt, DerivedSalt)
 
+
 def decode_token_pro(Data: bytes) -> dict:
     """Decode a TTI_PRO (protocol negotiation) server response.
 
@@ -862,22 +1003,25 @@ def decode_token_pro(Data: bytes) -> dict:
     field version the server advertises is `compile_caps[CCAP_FIELD_VERSION]`;
     the connection negotiates the effective version as min(client, server).
     Layout mirrors python-oracledb's protocol.pyx (docs/PROTOCOL.md §4.1)."""
-    Off = 1                                    # skip the message-type byte
+    Off = 1  # skip the message-type byte
     ServerVersion = Data[Off]
-    Off += 2                                   # version byte + a trailing zero
-    End = Data.index(0, Off)                   # NUL-terminated banner
+    Off += 2  # version byte + a trailing zero
+    End = Data.index(0, Off)  # NUL-terminated banner
     Banner = Data[Off:End]
     Off = End + 1
-    Off += 2                                   # charset_id (ub2 LE)
-    Off += 1                                   # server flags
-    NumElem = int.from_bytes(Data[Off:Off + 2], "little")
-    Off += 2 + NumElem * 5                     # skip the charset-element array
-    FdoLen = int.from_bytes(Data[Off:Off + 2], "big")
-    Off += 2 + FdoLen                          # skip the FDO blob
-    CcLen = Data[Off]; Off += 1
-    CompileCaps = Data[Off:Off + CcLen]; Off += CcLen
-    RcLen = Data[Off]; Off += 1
-    RuntimeCaps = Data[Off:Off + RcLen]
+    Off += 2  # charset_id (ub2 LE)
+    Off += 1  # server flags
+    NumElem = int.from_bytes(Data[Off : Off + 2], 'little')
+    Off += 2 + NumElem * 5  # skip the charset-element array
+    FdoLen = int.from_bytes(Data[Off : Off + 2], 'big')
+    Off += 2 + FdoLen  # skip the FDO blob
+    CcLen = Data[Off]
+    Off += 1
+    CompileCaps = Data[Off : Off + CcLen]
+    Off += CcLen
+    RcLen = Data[Off]
+    Off += 1
+    RuntimeCaps = Data[Off : Off + RcLen]
     return {
         'server_version': ServerVersion,
         'banner': Banner,
@@ -886,9 +1030,24 @@ def decode_token_pro(Data: bytes) -> dict:
     }
 
 
-_KNOWN_TTI_TOKENS = frozenset((TTI_OER, TTI_RXH, TTI_RXD, TTI_RPA, TTI_STA,
-                               TTI_IOV, TTI_UDS, TTI_OAC, TTI_LOB, TTI_WRN,
-                               TTI_DCB, TTI_FOB, TTI_BVC))
+_KNOWN_TTI_TOKENS = frozenset(
+    (
+        TTI_OER,
+        TTI_RXH,
+        TTI_RXD,
+        TTI_RPA,
+        TTI_STA,
+        TTI_IOV,
+        TTI_UDS,
+        TTI_OAC,
+        TTI_LOB,
+        TTI_WRN,
+        TTI_DCB,
+        TTI_FOB,
+        TTI_BVC,
+    )
+)
+
 
 def decode_token_server_piggyback(Data: bytes, Acc: tuple) -> tuple:
     # Server-side piggyback (#130): a session-state block the server prepends to
@@ -902,11 +1061,11 @@ def decode_token_server_piggyback(Data: bytes, Acc: tuple) -> tuple:
     Opcode = Rest[0]
     Rest = Rest[1:]
     if Opcode == TNS_SERVER_PIGGYBACK_SESS_RET:
-        (_, Rest) = decode_ub4(Rest)                 # number of DTYs (ub2)
-        Rest = Rest[1:]                              # length of DTYs (ub1)
-        (NumElements, Rest) = decode_ub4(Rest)       # number of pairs (ub2)
+        (_, Rest) = decode_ub4(Rest)  # number of DTYs (ub2)
+        Rest = Rest[1:]  # length of DTYs (ub1)
+        (NumElements, Rest) = decode_ub4(Rest)  # number of pairs (ub2)
         if NumElements > 0:
-            Rest = Rest[1:]                          # skip_ub1
+            Rest = Rest[1:]  # skip_ub1
             for _ in range(NumElements):
                 (KeyLen, Rest) = decode_ub4(Rest)
                 if KeyLen > 0:
@@ -914,13 +1073,13 @@ def decode_token_server_piggyback(Data: bytes, Acc: tuple) -> tuple:
                 (ValLen, Rest) = decode_ub4(Rest)
                 if ValLen > 0:
                     (_, Rest) = decode_dalc(Rest)
-                (_, Rest) = decode_ub4(Rest)         # pair flags (ub2)
-        (_, Rest) = decode_ub4(Rest)                 # session flags (ub4)
-        (_, Rest) = decode_ub4(Rest)                 # session id (ub4)
-        (_, Rest) = decode_ub4(Rest)                 # serial number (ub2)
+                (_, Rest) = decode_ub4(Rest)  # pair flags (ub2)
+        (_, Rest) = decode_ub4(Rest)  # session flags (ub4)
+        (_, Rest) = decode_ub4(Rest)  # session id (ub4)
+        (_, Rest) = decode_ub4(Rest)  # serial number (ub2)
     elif Opcode == TNS_SERVER_PIGGYBACK_OS_PID_MTS:
-        (_, Rest) = decode_ub4(Rest)                 # ub2
-        (_, Rest) = decode_dalc(Rest)                # pid bytes
+        (_, Rest) = decode_ub4(Rest)  # ub2
+        (_, Rest) = decode_dalc(Rest)  # pid bytes
     elif Opcode == TNS_SERVER_PIGGYBACK_SYNC:
         # Sessionless transactions (#133): the server reports txn-id sync state
         # as keyword-value pairs (keyword 201 = transaction id) piggybacked on
@@ -928,27 +1087,30 @@ def decode_token_server_piggyback(Data: bytes, Acc: tuple) -> tuple:
         # tracks the active flag client-side, so the pairs are only consumed
         # byte-for-byte here. Each pair = ub2 text-len + dalc / ub2 binary-len +
         # dalc / ub2 keyword-num, framed like the SESS_RET pair loop.
-        (_, Rest) = decode_ub4(Rest)                 # number of DTYs (ub2)
-        Rest = Rest[1:]                              # length of DTYs (ub1)
-        (NumElements, Rest) = decode_ub4(Rest)       # number of pairs (ub2)
-        Rest = Rest[1:]                              # length (ub1)
+        (_, Rest) = decode_ub4(Rest)  # number of DTYs (ub2)
+        Rest = Rest[1:]  # length of DTYs (ub1)
+        (NumElements, Rest) = decode_ub4(Rest)  # number of pairs (ub2)
+        Rest = Rest[1:]  # length (ub1)
         for _ in range(NumElements):
-            (TextLen, Rest) = decode_ub4(Rest)       # text value len (ub2)
+            (TextLen, Rest) = decode_ub4(Rest)  # text value len (ub2)
             if TextLen > 0:
                 (_, Rest) = decode_dalc(Rest)
-            (BinLen, Rest) = decode_ub4(Rest)        # binary value len (ub2)
+            (BinLen, Rest) = decode_ub4(Rest)  # binary value len (ub2)
             if BinLen > 0:
                 (_, Rest) = decode_dalc(Rest)
-            (_, Rest) = decode_ub4(Rest)             # keyword num (ub2)
-        (_, Rest) = decode_ub4(Rest)                 # overall flags (ub4)
+            (_, Rest) = decode_ub4(Rest)  # keyword num (ub2)
+        (_, Rest) = decode_ub4(Rest)  # overall flags (ub4)
     elif Opcode == TNS_SERVER_PIGGYBACK_LTXID:
-        (_, Rest) = decode_dalc(Rest)                # logical transaction id
-    elif Opcode in (TNS_SERVER_PIGGYBACK_QUERY_CACHE_INVALIDATION,
-                    TNS_SERVER_PIGGYBACK_TRACE_EVENT):
-        pass                                         # no body
+        (_, Rest) = decode_dalc(Rest)  # logical transaction id
+    elif Opcode in (
+        TNS_SERVER_PIGGYBACK_QUERY_CACHE_INVALIDATION,
+        TNS_SERVER_PIGGYBACK_TRACE_EVENT,
+    ):
+        pass  # no body
     else:
-        raise Exception("Unhandled server-side piggyback opcode", Opcode, Data)
+        raise Exception('Unhandled server-side piggyback opcode', Opcode, Data)
     return decode_packet(Rest, Acc)
+
 
 def decode_token_rpa_piggyback(Data: bytes, Acc: tuple) -> tuple:
     # Walks past a server-side session-state piggyback so the next decode_packet
@@ -982,8 +1144,7 @@ def decode_token_rpa_piggyback(Data: bytes, Acc: tuple) -> tuple:
     # at this point is the row-count block. Pull it out and stash it on Acc so
     # decode_token_oer can fold it into the result; the surrounding RPA fields
     # stay opaque as before.
-    if (_DECODE_DML_ROWCOUNTS.get() and Rest
-            and Rest[0] not in _KNOWN_TTI_TOKENS):
+    if _DECODE_DML_ROWCOUNTS.get() and Rest and Rest[0] not in _KNOWN_TTI_TOKENS:
         try:
             (Count, R2) = decode_ub4(Rest)
             Counts = []
@@ -1001,6 +1162,7 @@ def decode_token_rpa_piggyback(Data: bytes, Acc: tuple) -> tuple:
     if Rest:
         return decode_packet(Rest, Acc)
     return (True, Acc)
+
 
 def decode_token_uds(Data: bytes, Acc: tuple) -> tuple:
     # User describe information
@@ -1025,18 +1187,21 @@ def decode_token_uds(Data: bytes, Acc: tuple) -> tuple:
     NewFormat = RowFormat + [Col] if isinstance(RowFormat, list) else [Col]
     return decode_packet(Rest, (Cursor, NewFormat, Rows))
 
+
 # A native JSON column (21c+, #30) is delivered exactly like a BLOB: the RXD
 # carries a LOB locator and the OSON image comes back over TTI_LOBOPS. We read
 # it through the same locator path and decode the OSON in `LOB.read()`. A native
 # VECTOR column (23ai+, #55) works the same way — locator + binary image.
-_LOB_DATA_TYPES = frozenset((TNS_TYPE_CLOB, TNS_TYPE_BLOB, TNS_TYPE_BFILE,
-                             TNS_TYPE_JSON, TNS_TYPE_VECTOR))
+_LOB_DATA_TYPES = frozenset(
+    (TNS_TYPE_CLOB, TNS_TYPE_BLOB, TNS_TYPE_BFILE, TNS_TYPE_JSON, TNS_TYPE_VECTOR)
+)
 _ROWID_DATA_TYPES = frozenset((TNS_TYPE_RID,))
 _UROWID_DATA_TYPES = frozenset((TNS_TYPE_UROWID,))
 _LONG_DATA_TYPES = frozenset((TNS_TYPE_LONG, TNS_TYPE_LONGRAW))
 
+
 def decode_token_rxd(Data: bytes, Acc: tuple) -> tuple:
-    Val: Any                                    # reused per column, heterogeneous
+    Val: Any  # reused per column, heterogeneous
     # Row data (section 6.2). Each column value is normally a DALC blob whose
     # raw bytes we hand to oracle.types.decode_value, which dispatches on the
     # column's TNS data type from the describe-info block.
@@ -1050,8 +1215,9 @@ def decode_token_rxd(Data: bytes, Acc: tuple) -> tuple:
     # means "this column is in the RXD"; an unset bit means "reuse the
     # previous row's value". The bit vector applies to a single RXD and is
     # cleared from Acc on the way out.
-    from oracle.types import decode_value
     from oracle.lob import LOB
+    from oracle.types import decode_value
+
     (Cursor, RowFormat, Rows, *Extra) = Acc
     BitVec = Extra[0] if Extra else None
     Rest = Data[1:]
@@ -1068,11 +1234,13 @@ def decode_token_rxd(Data: bytes, Acc: tuple) -> tuple:
             Vals = []
             for _Row in range(NumRows):
                 (Val, Rest) = decode_dalc(Rest)
-                (_, Rest) = decode_ub4(Rest)         # sb4 actual length (trunc)
+                (_, Rest) = decode_ub4(Rest)  # sb4 actual length (trunc)
                 Vals.append(Val)
             ReturnValues.append(Vals)
-        Record = {'return_positions': list(ReturnPositions),
-                  'return_values': ReturnValues}
+        Record = {
+            'return_positions': list(ReturnPositions),
+            'return_values': ReturnValues,
+        }
         return decode_packet(Rest, (Cursor, RowFormat, Rows + [Record]))
     Row = []
     if RowFormat:
@@ -1110,6 +1278,7 @@ def decode_token_rxd(Data: bytes, Acc: tuple) -> tuple:
             Row.append(decode_value(Col, Val))
     return decode_packet(Rest, (Cursor, RowFormat, Rows + [Row]))
 
+
 def _read_lob_column(Rest: bytes) -> tuple[bytes | None, bytes]:
     # LOB column layout in RXD (Oracle 11g):
     #
@@ -1137,11 +1306,12 @@ def _read_lob_column(Rest: bytes) -> tuple[bytes | None, bytes]:
     if NumBytes <= 0 or not Body:
         # Defensive: malformed or unexpected layout. Surface what we have
         # rather than overrunning the buffer.
-        return (bytes(Body), b"")
+        return (bytes(Body), b'')
     (Locator, Tail) = decode_dalc(Body)
-    if isinstance(Locator, list):       # 0x00 / 0xFF DALC → empty / null
+    if isinstance(Locator, list):  # 0x00 / 0xFF DALC → empty / null
         return (None, Tail)
     return (bytes(Locator), Tail)
+
 
 def _read_rowid_column(Rest: bytes) -> tuple[str | None, bytes]:
     # ROWID (TNS type 11) in RXD: a 1-byte present indicator (the size the
@@ -1150,6 +1320,7 @@ def _read_rowid_column(Rest: bytes) -> tuple[str | None, bytes]:
     # (ub4) and slot (ub2). Mirrors oracledb's read_rowid; the byte counts and
     # the base64 rendering were verified against ROWIDTOCHAR on a live XE row.
     from oracle.types import rowid_to_string
+
     if not Rest:
         return (None, Rest)
     Indicator = Rest[0]
@@ -1158,10 +1329,11 @@ def _read_rowid_column(Rest: bytes) -> tuple[str | None, bytes]:
         return (None, Rest)
     (Obj, Rest) = decode_ub4(Rest)
     (File, Rest) = decode_ub4(Rest)
-    (_, Rest) = decode_ub4(Rest)             # unused ub1
+    (_, Rest) = decode_ub4(Rest)  # unused ub1
     (Block, Rest) = decode_ub4(Rest)
     (Slot, Rest) = decode_ub4(Rest)
     return (rowid_to_string(Obj, File, Block, Slot), Rest)
+
 
 def _read_urowid_column(Rest: bytes) -> tuple[str | None, bytes]:
     # UROWID (universal/logical rowid, TNS type 208 -- e.g. an index-organized
@@ -1170,15 +1342,17 @@ def _read_urowid_column(Rest: bytes) -> tuple[str | None, bytes]:
     # rowid body). Rendered as the "*"-prefixed base64 form. Verified against a
     # live XE IOT row vs the SELECT ROWID text.
     from oracle.types import urowid_to_string
+
     if not Rest:
         return (None, Rest)
     (NumBytes, Rest) = decode_ub4(Rest)
     if NumBytes <= 0:
         return (None, Rest)
-    Rest = Rest[1:]                              # 1-byte length echo
+    Rest = Rest[1:]  # 1-byte length echo
     Value = bytes(Rest[:NumBytes])
     Rest = Rest[NumBytes:]
     return (urowid_to_string(Value), Rest)
+
 
 def _read_long_column(Rest: bytes) -> tuple[bytes | None, bytes]:
     # LONG / LONG RAW in RXD: a value followed by two trailing ub4 indicators
@@ -1198,8 +1372,8 @@ def _read_long_column(Rest: bytes) -> tuple[bytes | None, bytes]:
         Rest = Rest[1:]
     elif Marker == 0xFE:
         Rest = Rest[1:]
-        Chunks = b""
-        if _DECODE_FIELD_VERSION.get() >= 8:        # FIELD_VERSION_12_2
+        Chunks = b''
+        if _DECODE_FIELD_VERSION.get() >= 8:  # FIELD_VERSION_12_2
             # 12c+ prefixes each chunk with a ub4 length (zero-length terminator)
             # rather than 11g's single length byte.
             while Rest:
@@ -1218,11 +1392,12 @@ def _read_long_column(Rest: bytes) -> tuple[bytes | None, bytes]:
                 Rest = Rest[ChunkLen:]
         Val = Chunks
     else:
-        Val = bytes(Rest[1:1 + Marker])
-        Rest = Rest[1 + Marker:]
+        Val = bytes(Rest[1 : 1 + Marker])
+        Rest = Rest[1 + Marker :]
     (_, Rest) = decode_ub4(Rest)
     (_, Rest) = decode_ub4(Rest)
     return (Val, Rest)
+
 
 def _read_object_column(Rest: bytes, Col: dict) -> tuple[object, bytes]:
     # SQL OBJECT (ADT, TNS type 109) value in RXD. The wire framing mirrors
@@ -1245,20 +1420,26 @@ def _read_object_column(Rest: bytes, Col: dict) -> tuple[object, bytes]:
     # once it has fetched the layout (#115). XMLType (type 109 with no object
     # type) is a separate path (#124).
     from oracle.dbobject import ObjectImage
-    (TypeOid, Rest) = _read_str_with_length(Rest)        # type OID
-    (_, Rest) = _read_str_with_length(Rest)              # object OID
-    Rest = _skip_bytes_with_length(Rest)                 # snapshot
-    (_, Rest) = decode_ub4(Rest)                         # version (ub2)
-    (NumBytes, Rest) = decode_ub4(Rest)                  # image-present gate
-    (_, Rest) = decode_ub4(Rest)                         # flags (ub2)
+
+    (TypeOid, Rest) = _read_str_with_length(Rest)  # type OID
+    (_, Rest) = _read_str_with_length(Rest)  # object OID
+    Rest = _skip_bytes_with_length(Rest)  # snapshot
+    (_, Rest) = decode_ub4(Rest)  # version (ub2)
+    (NumBytes, Rest) = decode_ub4(Rest)  # image-present gate
+    (_, Rest) = decode_ub4(Rest)  # flags (ub2)
     if NumBytes == 0:
         return (None, Rest)
     (Image, Rest) = _read_chunked_bytes(Rest)
-    Oid = bytes(TypeOid) if not isinstance(TypeOid, list) else b""
-    Placeholder = ObjectImage(Oid or Col.get('type_oid', b""),
-                              Col.get('type_schema'), Col.get('type_name'),
-                              Col.get('charset'), Image)
+    Oid = bytes(TypeOid) if not isinstance(TypeOid, list) else b''
+    Placeholder = ObjectImage(
+        Oid or Col.get('type_oid', b''),
+        Col.get('type_schema'),
+        Col.get('type_name'),
+        Col.get('charset'),
+        Image,
+    )
     return (Placeholder, Rest)
+
 
 def _bvc_bit_set(BitVec: bytes, Idx: int) -> bool:
     Byte = Idx // 8
@@ -1267,18 +1448,19 @@ def _bvc_bit_set(BitVec: bytes, Idx: int) -> bool:
         return False
     return bool(BitVec[Byte] & (1 << Bit))
 
+
 def decode_token_rxh(Data: bytes, Acc: tuple) -> tuple:
     # Row Transfer Header. Fields use Oracle's variable ub1/ub2/ub4 encoding
     # (1-byte length prefix + value bytes), not the fixed 2-byte big-endian
     # layout the older version of this decoder assumed. See python-oracledb's
     # _process_row_header.
     (Cursor, RowFormat, Rows) = Acc[:3]
-    Rest = Data[2:]                          # skip token + 1B flags
-    (_, Rest) = decode_ub4(Rest)             # num requests
-    (_, Rest) = decode_ub4(Rest)             # iteration number
-    (_, Rest) = decode_ub4(Rest)             # num iters
-    (_, Rest) = decode_ub4(Rest)             # buffer length
-    (NumBytes, Rest) = decode_ub4(Rest)      # bit vector length
+    Rest = Data[2:]  # skip token + 1B flags
+    (_, Rest) = decode_ub4(Rest)  # num requests
+    (_, Rest) = decode_ub4(Rest)  # iteration number
+    (_, Rest) = decode_ub4(Rest)  # num iters
+    (_, Rest) = decode_ub4(Rest)  # buffer length
+    (NumBytes, Rest) = decode_ub4(Rest)  # bit vector length
     BitVec = None
     if NumBytes > 0:
         # The row header can carry a column bit vector (oracledb's
@@ -1288,32 +1470,44 @@ def decode_token_rxh(Data: bytes, Acc: tuple) -> tuple:
         # the next token as a column value and desync (a scroll re-execute that
         # repositions onto a row whose value equals the last one returned uses
         # this compression, e.g. LAST after fetching to EOF). #181.
-        Rest = Rest[1:]                      # skip repeated length
+        Rest = Rest[1:]  # skip repeated length
         BitVec = bytes(Rest[:NumBytes])
         Rest = Rest[NumBytes:]
-    Rest = _skip_bytes_with_length(Rest)     # rxhrid
-    Acc = ((Cursor, RowFormat, Rows) if BitVec is None
-           else (Cursor, RowFormat, Rows, BitVec))
+    Rest = _skip_bytes_with_length(Rest)  # rxhrid
+    Acc = (
+        (Cursor, RowFormat, Rows)
+        if BitVec is None
+        else (Cursor, RowFormat, Rows, BitVec)
+    )
     return decode_packet(Rest, Acc)
+
 
 def decode_token_wrn(Data: bytes, Acc: tuple) -> tuple:
     # Warning message (section 3.1)
     # Skip the warning and continue processing
-    logger.debug("decode_token_wrn: warning received")
+    logger.debug('decode_token_wrn: warning received')
     Rest = Data[1:]  # skip token byte
     (ErrNum, Rest) = decode_ub4(Rest)
     (RowCount, Rest) = decode_ub4(Rest)
     (RetCode, Rest) = decode_ub4(Rest)
     (WarnFlag, Rest) = decode_ub4(Rest)
-    logger.debug("decode_token_wrn: err=%s rows=%s ret=%s warn=%s", ErrNum, RowCount, RetCode, WarnFlag)
+    logger.debug(
+        'decode_token_wrn: err=%s rows=%s ret=%s warn=%s',
+        ErrNum,
+        RowCount,
+        RetCode,
+        WarnFlag,
+    )
     return decode_packet(Rest, Acc)
+
 
 def _packet_header(Size: int, Type: int, Large: bool) -> bytes:
     # The 8-byte TNS packet header in the legacy (ub2 length + ub2 checksum) or
     # large-SDU (ub4 length, #155) layout. Type sits at byte 4 in both.
     if Large:
-        return struct.pack(">IBBh", Size, Type, 0, 0)
-    return struct.pack(">HhBBh", Size, 0, Type, 0, 0)
+        return struct.pack('>IBBh', Size, Type, 0, 0)
+    return struct.pack('>HhBBh', Size, 0, Type, 0, 0)
+
 
 def encode_data_packet(Body: bytes, DataFlags: int, Large: bool = False) -> bytes:
     # A single TNS_DATA packet carrying explicit data flags. Request pipelining
@@ -1321,10 +1515,16 @@ def encode_data_packet(Body: bytes, DataFlags: int, Large: bool = False) -> byte
     # END_OF_REQUEST (0x0800) on each op packet — the ordinary encode_packet
     # path always writes 0 (or 0x0020 on an oversized fragment), so the
     # pipelined sender builds its packets here instead.
-    return (_packet_header(len(Body) + 10, TNS_DATA, Large)
-            + struct.pack(">H", DataFlags) + Body)
+    return (
+        _packet_header(len(Body) + 10, TNS_DATA, Large)
+        + struct.pack('>H', DataFlags)
+        + Body
+    )
 
-def encode_packet(Type: int, Data: bytes, Length: int, Large: bool = False) -> tuple[bytes, bytes | None]:
+
+def encode_packet(
+    Type: int, Data: bytes, Length: int, Large: bool = False
+) -> tuple[bytes, bytes | None]:
     if Type == TNS_DATA:
         PacketSize = len(Data) + 10
         if PacketSize > Length:
@@ -1338,16 +1538,23 @@ def encode_packet(Type: int, Data: bytes, Length: int, Large: bool = False) -> t
             # mis-encoded that 0x20 flag as a 5-byte tail and drew ORA-12592 /
             # ORA-01013 from the server — issue #8.)
             BodySize = Length - 10
-            return (_packet_header(BodySize + 10, Type, Large)
-                    + struct.pack(">h", 0x0020) + Data[:BodySize], Data[BodySize:])
+            return (
+                _packet_header(BodySize + 10, Type, Large)
+                + struct.pack('>h', 0x0020)
+                + Data[:BodySize],
+                Data[BodySize:],
+            )
         # The non-final fragment branch above carries data-flags 0x0020; the
         # final/whole packet uses 0x0000. The 2-byte data flags follow the
         # 8-byte header in both framing layouts.
-        return (_packet_header(PacketSize, Type, Large)
-                + struct.pack(">h", 0) + Data, None)
+        return (
+            _packet_header(PacketSize, Type, Large) + struct.pack('>h', 0) + Data,
+            None,
+        )
     else:
         PacketSize = len(Data) + 8
         return (_packet_header(PacketSize, Type, Large) + Data, None)
+
 
 def encode_dictionary(Dictionary: dict) -> bytes:
     # Auth dictionaries yield two values (data, conn_key); callers use
@@ -1385,11 +1592,13 @@ def encode_dictionary(Dictionary: dict) -> bytes:
             return encode_dictionary_tran(Dictionary)
     # No case matched (the match has no value-less path); raising here rather
     # than via `case _` keeps every branch a value-return for flow analysis.
-    raise Exception("unsupported dict type", Dictionary['type'])
+    raise Exception('unsupported dict type', Dictionary['type'])
+
 
 ##
 ## Supplementary functions
 ##
+
 
 def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
     Tseq = Dictionary['seq']
@@ -1401,24 +1610,31 @@ def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
     Role = Dictionary['env'].get('role', 0)
     Prelim = Dictionary['env'].get('prelim', 0)
 
-    LogonMode = encode_sb4( (Role * 32) | (Prelim * 128) | 1 | 256 )
-    (AuthPass, AuthSess, SpeedyKey, SpeedyKeyInd, ConnKey) = o5logon(Sess, Salt, DerivedSalt, User, Pass)
+    LogonMode = encode_sb4((Role * 32) | (Prelim * 128) | 1 | 256)
+    (AuthPass, AuthSess, SpeedyKey, SpeedyKeyInd, ConnKey) = o5logon(
+        Sess, Salt, DerivedSalt, User, Pass
+    )
 
-    AuthPass = encode_kv(b"AUTH_PASSWORD", AuthPass.hex().upper().encode('utf-8'))
+    AuthPass = encode_kv(b'AUTH_PASSWORD', AuthPass.hex().upper().encode('utf-8'))
 
     # AUTH_PBKDF2_SPEEDY_KEY is hex-encoded like AUTH_PASSWORD / AUTH_SESSKEY
     # (the server expects the hex string, not the raw bytes — sending raw gives
     # ORA-03146 "invalid buffer length for TTC field"). 256-bit scheme only.
-    PBKDF2 = encode_kv(b"AUTH_PBKDF2_SPEEDY_KEY", SpeedyKey.hex().upper().encode('utf-8')) if SpeedyKeyInd != 0 else b""
+    PBKDF2 = (
+        encode_kv(b'AUTH_PBKDF2_SPEEDY_KEY', SpeedyKey.hex().upper().encode('utf-8'))
+        if SpeedyKeyInd != 0
+        else b''
+    )
 
-    AuthSess = encode_kv(b"AUTH_SESSKEY", AuthSess.hex().upper().encode('utf-8'), 1)
+    AuthSess = encode_kv(b'AUTH_SESSKEY', AuthSess.hex().upper().encode('utf-8'), 1)
 
     # Proxy authentication (#126): a `proxy_user[schema]` connect adds one auth
     # pair naming the target schema; the proxy user authenticates normally and
     # the server switches the session into the schema's context.
     ProxyUser = Dictionary['env'].get('proxy_user')
-    ProxyKv = (encode_kv(b"PROXY_CLIENT_NAME", ProxyUser.encode('utf-8'))
-               if ProxyUser else b"")
+    ProxyKv = (
+        encode_kv(b'PROXY_CLIENT_NAME', ProxyUser.encode('utf-8')) if ProxyUser else b''
+    )
     ProxyInd = 1 if ProxyUser else 0
 
     # DRCP (#130): a connection class and/or session purity. When DRCP is used
@@ -1427,11 +1643,15 @@ def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
     CClass = Dictionary['env'].get('cclass')
     Purity = Dictionary['env'].get('purity', 0) or 0
     if (CClass or Purity) and Purity == 0:
-        Purity = 1                                  # PURITY_NEW
-    CClassKv = (encode_kv(b"AUTH_KPPL_CONN_CLASS",
-                          CClass.encode('utf-8')) if CClass else b"")
-    PurityKv = (encode_kv(b"AUTH_KPPL_PURITY",
-                          str(Purity).encode('utf-8'), 1) if Purity else b"")
+        Purity = 1  # PURITY_NEW
+    CClassKv = (
+        encode_kv(b'AUTH_KPPL_CONN_CLASS', CClass.encode('utf-8')) if CClass else b''
+    )
+    PurityKv = (
+        encode_kv(b'AUTH_KPPL_PURITY', str(Purity).encode('utf-8'), 1)
+        if Purity
+        else b''
+    )
     DrcpInd = (1 if CClass else 0) + (1 if Purity else 0)
     DrcpKv = CClassKv + PurityKv
 
@@ -1465,11 +1685,27 @@ def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
         # it read the first username byte as a length and desync (ORA-03120).
         Header = bytes([TTI_FUN, TTI_AUTH, Tseq, 1])
         Mode = LogonMode
-        UserField = bytes([len(User)]) + User if FieldVersion >= FIELD_VERSION_12_1 else User
-        SessionKvs = b""
+        UserField = (
+            bytes([len(User)]) + User if FieldVersion >= FIELD_VERSION_12_1 else User
+        )
+        SessionKvs = b''
         NumPairs = 2 + SpeedyKeyInd + ProxyInd + DrcpInd
 
-    Data = Header + encode_sb4(len(User)) + Mode + bytes([1]) + encode_sb4(NumPairs) + bytes([1, 1]) + UserField + AuthPass + PBKDF2 + AuthSess + SessionKvs + ProxyKv + DrcpKv
+    Data = (
+        Header
+        + encode_sb4(len(User))
+        + Mode
+        + bytes([1])
+        + encode_sb4(NumPairs)
+        + bytes([1, 1])
+        + UserField
+        + AuthPass
+        + PBKDF2
+        + AuthSess
+        + SessionKvs
+        + ProxyKv
+        + DrcpKv
+    )
 
     return (Data, ConnKey)
 
@@ -1477,11 +1713,11 @@ def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
 # pyoracle's advertised client version, packed the way python-oracledb encodes
 # SESSION_CLIENT_VERSION: (major << 24) | (minor << 20) | (patch << 12). Keep the
 # string in sync with pyproject.toml. (4.0.1 -> 67112960 in the reference capture.)
-_CLIENT_VERSION = "1.10.1"
+_CLIENT_VERSION = '1.10.1'
 
 
 def _packed_client_version(Version: str) -> int:
-    Parts = [int(p) for p in Version.split(".")[:3]] + [0, 0, 0]
+    Parts = [int(p) for p in Version.split('.')[:3]] + [0, 0, 0]
     return (Parts[0] << 24) | (Parts[1] << 20) | (Parts[2] << 12)
 
 
@@ -1490,27 +1726,33 @@ def _local_tz_clause() -> bytes:
     # the client pins the session time zone to its own UTC offset.
     Offset = datetime.datetime.now().astimezone().utcoffset() or datetime.timedelta(0)
     Total = int(Offset.total_seconds())
-    Sign = "+" if Total >= 0 else "-"
+    Sign = '+' if Total >= 0 else '-'
     Hh, Mm = divmod(abs(Total) // 60, 60)
-    return (f"ALTER SESSION SET TIME_ZONE='{Sign}{Hh:02d}:{Mm:02d}'\x00"
-            .encode("utf-8"))
+    return f"ALTER SESSION SET TIME_ZONE='{Sign}{Hh:02d}:{Mm:02d}'\x00".encode('utf-8')
 
 
 def _auth_session_kvs(Dictionary: dict) -> bytes:
     """The session-context key/value pairs the OAUTH phase two must carry at
     fv >= 18 (#89): client charset, driver banner, packed version, the time-zone
     ALTER SESSION, and the connect descriptor."""
-    Charset = struct.pack("<H", CharsetDict.get(Dictionary['req'], AL32UTF8_CHARSET))
+    Charset = struct.pack('<H', CharsetDict.get(Dictionary['req'], AL32UTF8_CHARSET))
     return (
-        encode_kv(b"SESSION_CLIENT_CHARSET",
-                  str(int.from_bytes(Charset, "little")).encode("utf-8"))
-        + encode_kv(b"SESSION_CLIENT_DRIVER_NAME",
-                    f"pyoracle thn : {_CLIENT_VERSION}".encode("utf-8"))
-        + encode_kv(b"SESSION_CLIENT_VERSION",
-                    str(_packed_client_version(_CLIENT_VERSION)).encode("utf-8"))
-        + encode_kv(b"AUTH_ALTER_SESSION", _local_tz_clause(), 1)
-        + encode_kv(b"AUTH_CONNECT_STRING",
-                    encode_dictionary_description(Dictionary)))
+        encode_kv(
+            b'SESSION_CLIENT_CHARSET',
+            str(int.from_bytes(Charset, 'little')).encode('utf-8'),
+        )
+        + encode_kv(
+            b'SESSION_CLIENT_DRIVER_NAME',
+            f'pyoracle thn : {_CLIENT_VERSION}'.encode('utf-8'),
+        )
+        + encode_kv(
+            b'SESSION_CLIENT_VERSION',
+            str(_packed_client_version(_CLIENT_VERSION)).encode('utf-8'),
+        )
+        + encode_kv(b'AUTH_ALTER_SESSION', _local_tz_clause(), 1)
+        + encode_kv(b'AUTH_CONNECT_STRING', encode_dictionary_description(Dictionary))
+    )
+
 
 def encode_dictionary_chgpwd(Dictionary: dict) -> bytes:
     # Password change (#21). Sent on an already-authenticated session: a single
@@ -1530,11 +1772,13 @@ def encode_dictionary_chgpwd(Dictionary: dict) -> bytes:
     NewPass = Dictionary['auth']['new_password'].encode('utf-8')
 
     AuthPass = encode_kv(
-        b"AUTH_PASSWORD",
-        encrypt_password(ConnKey, CurPass).hex().upper().encode('utf-8'))
+        b'AUTH_PASSWORD',
+        encrypt_password(ConnKey, CurPass).hex().upper().encode('utf-8'),
+    )
     AuthNewPass = encode_kv(
-        b"AUTH_NEWPASSWORD",
-        encrypt_password(ConnKey, NewPass).hex().upper().encode('utf-8'))
+        b'AUTH_NEWPASSWORD',
+        encrypt_password(ConnKey, NewPass).hex().upper().encode('utf-8'),
+    )
 
     FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
     # fv >= 18 (23ai, #89) needs the same header shape as the login phase two:
@@ -1546,14 +1790,24 @@ def encode_dictionary_chgpwd(Dictionary: dict) -> bytes:
     else:
         Header = bytes([TTI_FUN, TTI_AUTH, Tseq, 1])
         LogonMode = encode_sb4(0x102)
-    UserField = bytes([len(User)]) + User if FieldVersion >= FIELD_VERSION_12_1 else User
+    UserField = (
+        bytes([len(User)]) + User if FieldVersion >= FIELD_VERSION_12_1 else User
+    )
 
-    return Header + encode_sb4(len(User)) + \
-        LogonMode + bytes([1]) + encode_sb4(2) + bytes([1, 1]) + UserField + \
-        AuthPass + AuthNewPass
+    return (
+        Header
+        + encode_sb4(len(User))
+        + LogonMode
+        + bytes([1])
+        + encode_sb4(2)
+        + bytes([1, 1])
+        + UserField
+        + AuthPass
+        + AuthNewPass
+    )
 
-def _fun_header(Token: int, Seq: int, FieldVersion: int,
-                TokenNum: int = 0) -> bytes:
+
+def _fun_header(Token: int, Seq: int, FieldVersion: int, TokenNum: int = 0) -> bytes:
     # Header for a TTI function-call message. 23ai (fv > 17, #89) appends a
     # ub8 "token number" after the sequence number (oracledb's
     # _write_function_code at fv24) — present on every function message
@@ -1567,8 +1821,10 @@ def _fun_header(Token: int, Seq: int, FieldVersion: int,
         return bytes([TTI_FUN, Token, Seq]) + encode_sb4(TokenNum)
     return bytes([TTI_FUN, Token, Seq])
 
-def encode_pipeline_begin(Seq: int, FieldVersion: int, TokenNum: int,
-                          Mode: int) -> bytes:
+
+def encode_pipeline_begin(
+    Seq: int, FieldVersion: int, TokenNum: int, Mode: int
+) -> bytes:
     # The begin-pipeline piggyback (#132): tells the server a pipelined burst is
     # starting and which error mode applies. It rides on the first pipelined
     # message (the caller sets the BEGIN_PIPELINE data flag on that packet) and
@@ -1578,6 +1834,7 @@ def encode_pipeline_begin(Seq: int, FieldVersion: int, TokenNum: int,
     if FieldVersion > FIELD_VERSION_23_1:
         Out += encode_sb4(TokenNum)
     return Out + encode_sb4(0) + bytes([0]) + bytes([Mode])
+
 
 def encode_pipeline_end(Seq: int, FieldVersion: int) -> bytes:
     # The PIPELINE_END (func 200) message closing a pipelined burst (#132).
@@ -1593,8 +1850,7 @@ def _e2e_header(Modified: bool, Value: bytes | None) -> bytes:
     return bytes([0]) + encode_sb4(0)
 
 
-def encode_close_cursors_piggyback(Seq: int, FieldVersion: int,
-                                   Cursors: list) -> bytes:
+def encode_close_cursors_piggyback(Seq: int, FieldVersion: int, Cursors: list) -> bytes:
     """Build the CLOSE_CURSORS (OCCA, func 105) piggyback that frees a batch of
     server cursors (#191). Rides in front of the next call's message; the server
     closes the listed cursors before processing that call. Mirrors oracledb's
@@ -1602,25 +1858,28 @@ def encode_close_cursors_piggyback(Seq: int, FieldVersion: int,
     encode_dictionary_pig path omitted (it was never exercised on 12c+)."""
     Out = bytes([TTI_MSG_TYPE_PIGGYBACK, TTI_OCCA, Seq])
     if FieldVersion > FIELD_VERSION_23_1:
-        Out += encode_sb4(0)                       # ub8 token (0)
-    Out += bytes([1]) + encode_sb4(len(Cursors))   # pointer + count
+        Out += encode_sb4(0)  # ub8 token (0)
+    Out += bytes([1]) + encode_sb4(len(Cursors))  # pointer + count
     for C in Cursors:
         Out += encode_sb4(C)
     return Out
 
 
-def encode_end_to_end_piggyback(Seq: int, FieldVersion: int,
-                                Attrs: dict) -> bytes:
+def encode_end_to_end_piggyback(Seq: int, FieldVersion: int, Attrs: dict) -> bytes:
     """Build the SET_END_TO_END_ATTR piggyback (#183, func 135) that updates the
     session's end-to-end application-tracing attributes. `Attrs` maps each name
     (client_identifier / module / action / client_info / dbop) to either its new
     str value or None (clear); only the keys present are flushed. The piggyback
     rides in front of the next call's message. Byte layout + field order mirror
     oracledb's _write_end_to_end_piggyback (validated against a 23ai capture)."""
+
     def enc(Name):
         return Attrs[Name].encode('utf-8') if Attrs.get(Name) is not None else None
-    Mod = {Name: Name in Attrs for Name in
-           ('client_identifier', 'module', 'action', 'client_info', 'dbop')}
+
+    Mod = {
+        Name: Name in Attrs
+        for Name in ('client_identifier', 'module', 'action', 'client_info', 'dbop')
+    }
     Val = {Name: enc(Name) for Name in Mod}
     Flags = 0
     if Mod['action']:
@@ -1636,16 +1895,16 @@ def encode_end_to_end_piggyback(Seq: int, FieldVersion: int,
 
     Out = bytes([TTI_MSG_TYPE_PIGGYBACK, TNS_FUNC_SET_END_TO_END_ATTR, Seq])
     if FieldVersion > FIELD_VERSION_23_1:
-        Out += encode_sb4(0)                      # ub8 token (0)
-    Out += bytes([0, 0]) + encode_sb4(Flags)      # cidnam, cidser pointers; flags
+        Out += encode_sb4(0)  # ub8 token (0)
+    Out += bytes([0, 0]) + encode_sb4(Flags)  # cidnam, cidser pointers; flags
     Out += _e2e_header(Mod['client_identifier'], Val['client_identifier'])
     Out += _e2e_header(Mod['module'], Val['module'])
     Out += _e2e_header(Mod['action'], Val['action'])
-    Out += bytes([0]) + encode_sb4(0)             # cideci (unsupported)
-    Out += bytes([0]) + encode_sb4(0)             # cidcct / cidecs (unsupported)
+    Out += bytes([0]) + encode_sb4(0)  # cideci (unsupported)
+    Out += bytes([0]) + encode_sb4(0)  # cidcct / cidecs (unsupported)
     Out += _e2e_header(Mod['client_info'], Val['client_info'])
-    Out += bytes([0]) + encode_sb4(0)             # cidkstk (unsupported)
-    Out += bytes([0]) + encode_sb4(0)             # cidktgt (unsupported)
+    Out += bytes([0]) + encode_sb4(0)  # cidkstk (unsupported)
+    Out += bytes([0]) + encode_sb4(0)  # cidktgt (unsupported)
     Out += _e2e_header(Mod['dbop'], Val['dbop'])
     # values, in field order, only those set to a non-None value
     for Name in ('client_identifier', 'module', 'action', 'client_info', 'dbop'):
@@ -1659,15 +1918,28 @@ def encode_dictionary_close(Dictionary: dict) -> bytes:
     FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
     return _fun_header(TTI_LOGOFF, Tseq, FieldVersion)
 
+
 # Env keys safe to include in a debug log. Deliberately an allow-list, NOT a
 # deny-list: the connection `password` (and the changepassword `new_password`)
 # is simply never read, so no secret value can flow into the logged copy. The
 # whole `auth` sub-dict is dropped wholesale — it only ever holds secrets (the
 # session key, salts, and the changepassword old/new passwords, #21).
 _REDACT_ENV_SAFE = (
-    'host', 'port', 'user', 'sid', 'service_name', 'conn_state', 'timeout',
-    'autocommit', 'fetch', 'role', 'charset', 'prelim', 'app_name',
+    'host',
+    'port',
+    'user',
+    'sid',
+    'service_name',
+    'conn_state',
+    'timeout',
+    'autocommit',
+    'fetch',
+    'role',
+    'charset',
+    'prelim',
+    'app_name',
 )
+
 
 def _redacted(Dictionary: dict) -> dict:
     # Return a copy safe to log. Secrets live in the env dict (connection
@@ -1681,6 +1953,7 @@ def _redacted(Dictionary: dict) -> dict:
         Safe['auth'] = '<redacted>'
     return Safe
 
+
 def _tpc_xid_bytes(Xid) -> tuple | None:
     # (format_id, gtrid, bqual, xid_bytes) for a TPC Xid, or None. The wire xid
     # is gtrid + bqual zero-padded to a fixed 128 bytes (oracledb _write_message).
@@ -1692,19 +1965,34 @@ def _tpc_xid_bytes(Xid) -> tuple | None:
     XidBytes = bytes(Gtrid) + bytes(Bqual) + bytes(128 - len(Gtrid) - len(Bqual))
     return (FormatId, bytes(Gtrid), bytes(Bqual), XidBytes)
 
+
 def _tpc_xid_descriptor(Parts) -> bytes:
     # The format-id / gtrid-len / bqual-len / xid-pointer block shared by both
     # TPC messages (after the operation + context-pointer block).
     if Parts is not None:
         (FormatId, Gtrid, Bqual, XidBytes) = Parts
-        return (encode_sb4(FormatId) + encode_sb4(len(Gtrid))
-                + encode_sb4(len(Bqual)) + bytes([1]) + encode_sb4(len(XidBytes)))
+        return (
+            encode_sb4(FormatId)
+            + encode_sb4(len(Gtrid))
+            + encode_sb4(len(Bqual))
+            + bytes([1])
+            + encode_sb4(len(XidBytes))
+        )
     return encode_sb4(0) + encode_sb4(0) + encode_sb4(0) + bytes([0]) + encode_sb4(0)
 
-def encode_tpc_switch(Seq: int, FieldVersion: int, Operation: int, Xid,
-                      Flags: int, Timeout: int, Context: bytes | None,
-                      AppValue: int = 0, InternalName: bytes | None = None,
-                      ExternalName: bytes | None = None) -> bytes:
+
+def encode_tpc_switch(
+    Seq: int,
+    FieldVersion: int,
+    Operation: int,
+    Xid,
+    Flags: int,
+    Timeout: int,
+    Context: bytes | None,
+    AppValue: int = 0,
+    InternalName: bytes | None = None,
+    ExternalName: bytes | None = None,
+) -> bytes:
     # TPC start (tpc_begin) / detach (tpc_end). Mirrors oracledb
     # TransactionSwitchMessage._write_message (#131).
     Parts = _tpc_xid_bytes(Xid)
@@ -1716,11 +2004,17 @@ def encode_tpc_switch(Seq: int, FieldVersion: int, Operation: int, Xid,
         Out += bytes([0]) + encode_sb4(0)
     Out += _tpc_xid_descriptor(Parts)
     Out += encode_sb4(Flags) + encode_sb4(Timeout)
-    Out += bytes([1, 1, 1])             # ptrs: app value, return context, len
-    Out += (bytes([1]) + encode_sb4(len(InternalName)) if InternalName
-            else bytes([0]) + encode_sb4(0))
-    Out += (bytes([1]) + encode_sb4(len(ExternalName)) if ExternalName
-            else bytes([0]) + encode_sb4(0))
+    Out += bytes([1, 1, 1])  # ptrs: app value, return context, len
+    Out += (
+        bytes([1]) + encode_sb4(len(InternalName))
+        if InternalName
+        else bytes([0]) + encode_sb4(0)
+    )
+    Out += (
+        bytes([1]) + encode_sb4(len(ExternalName))
+        if ExternalName
+        else bytes([0]) + encode_sb4(0)
+    )
     if Context is not None:
         Out += Context
     if Parts is not None:
@@ -1732,9 +2026,16 @@ def encode_tpc_switch(Seq: int, FieldVersion: int, Operation: int, Xid,
         Out += ExternalName
     return Out
 
-def encode_tpc_change_state(Seq: int, FieldVersion: int, Operation: int,
-                            State: int, Xid, Flags: int,
-                            Context: bytes | None) -> bytes:
+
+def encode_tpc_change_state(
+    Seq: int,
+    FieldVersion: int,
+    Operation: int,
+    State: int,
+    Xid,
+    Flags: int,
+    Context: bytes | None,
+) -> bytes:
     # TPC prepare / commit / rollback / forget. Mirrors oracledb
     # TransactionChangeStateMessage._write_message (#131).
     Parts = _tpc_xid_bytes(Xid)
@@ -1745,9 +2046,9 @@ def encode_tpc_change_state(Seq: int, FieldVersion: int, Operation: int,
     else:
         Out += bytes([0]) + encode_sb4(0)
     Out += _tpc_xid_descriptor(Parts)
-    Out += encode_sb4(0)               # timeout
+    Out += encode_sb4(0)  # timeout
     Out += encode_sb4(State)
-    Out += bytes([1])                  # ptr (out state)
+    Out += bytes([1])  # ptr (out state)
     Out += encode_sb4(Flags)
     if Context is not None:
         Out += Context
@@ -1755,24 +2056,50 @@ def encode_tpc_change_state(Seq: int, FieldVersion: int, Operation: int,
         Out += Parts[3]
     return Out
 
+
 def encode_dictionary_description(Dictionary: dict) -> bytes:
-    logger.debug("encode_dictionary_description: %s", _redacted(Dictionary))
+    logger.debug('encode_dictionary_description: %s', _redacted(Dictionary))
     Hostname = socket.gethostname().encode('utf-8')
     User = Dictionary['env']['user'].encode('utf-8')
     Host = Dictionary['env'].get('host', DEFAULT_HOST).encode('utf-8')
     Port = str(Dictionary['env'].get('port', DEFAULT_PORT)).encode('utf-8')
     SID = Dictionary['env'].get('sid', DEFAULT_SID).encode('utf-8')
     ServiceName = Dictionary['env'].get('service_name', None)
-    AppName = Dictionary['env'].get('app_name', "pyoracle").encode('utf-8')
+    AppName = Dictionary['env'].get('app_name', 'pyoracle').encode('utf-8')
     SslOpts = Dictionary['env'].get('ssl', None)
-    Sn = b"SID=" + SID if ServiceName is None else b"SERVICE_NAME=" + ServiceName.encode('utf-8')
-    Proto = b"TCP" if SslOpts is None else b"TCPS"
+    Sn = (
+        b'SID=' + SID
+        if ServiceName is None
+        else b'SERVICE_NAME=' + ServiceName.encode('utf-8')
+    )
+    Proto = b'TCP' if SslOpts is None else b'TCPS'
     # DRCP (#130): a connection class or non-default purity requests a pooled
     # server from the connection broker via (SERVER=POOLED) in the CONNECT_DATA.
-    Drcp = (b"(SERVER=POOLED)"
-            if (Dictionary['env'].get('cclass') or Dictionary['env'].get('purity'))
-            else b"")
-    return b"(DESCRIPTION=(CONNECT_DATA=(" + Sn + b")" + Drcp + b"(CID=(PROGRAM=" + AppName + b")(HOST=" + Hostname + b")(USER=" + User + b")))(ADDRESS=(PROTOCOL=" + Proto + b")(HOST=" + Host + b")(PORT=" + Port + b")))"
+    Drcp = (
+        b'(SERVER=POOLED)'
+        if (Dictionary['env'].get('cclass') or Dictionary['env'].get('purity'))
+        else b''
+    )
+    return (
+        b'(DESCRIPTION=(CONNECT_DATA=('
+        + Sn
+        + b')'
+        + Drcp
+        + b'(CID=(PROGRAM='
+        + AppName
+        + b')(HOST='
+        + Hostname
+        + b')(USER='
+        + User
+        + b')))(ADDRESS=(PROTOCOL='
+        + Proto
+        + b')(HOST='
+        + Host
+        + b')(PORT='
+        + Port
+        + b')))'
+    )
+
 
 # ---------------------------------------------------------------------------
 # TTC capability vectors (carried in the TTI_DTY / DATA_TYPES message)
@@ -1790,7 +2117,7 @@ def encode_dictionary_description(Dictionary: dict) -> bytes:
 CCAP_SQL_VERSION = 0
 CCAP_LOGON_TYPES = 4
 CCAP_FEATURE_BACKPORT = 5
-CCAP_FIELD_VERSION = 7          # gates the auth verifier + version-gated formats
+CCAP_FIELD_VERSION = 7  # gates the auth verifier + version-gated formats
 CCAP_SERVER_DEFINE_CONV = 8
 CCAP_DEQUEUE_WITH_SELECTOR = 9
 CCAP_TTC1 = 15
@@ -1801,7 +2128,7 @@ CCAP_RPC_SIG = 19
 CCAP_DBF_VERSION = 21
 CCAP_LOB = 23
 CCAP_TTC2 = 26
-CCAP_UB2_DTY = 27              # 2-byte data-type ids (12c+)
+CCAP_UB2_DTY = 27  # 2-byte data-type ids (12c+)
 CCAP_OCI2 = 31
 CCAP_CLIENT_FN = 34
 CCAP_OCI3 = 35
@@ -1830,64 +2157,84 @@ RCAP_TTC_32K = 0x04
 # 11.2 reproduces pyoracle's historical 11g vector byte-for-byte (asserted by
 # tests/test_tns_encode.py); 21.1 matches python-oracledb 4.0.1 against 21c.
 _COMPILE_CAPS = {
-    FIELD_VERSION_11_2: (38, {
-        CCAP_SQL_VERSION: 6,            # TNS_CCAP_SQL_VERSION_MAX
-        CCAP_LOGON_TYPES: 0x6a,         # O7LOGON | O5LOGON | O5LOGON_NP | 0x40
-        CCAP_FEATURE_BACKPORT: 1,
-        CCAP_FIELD_VERSION: FIELD_VERSION_11_2,
-        CCAP_SERVER_DEFINE_CONV: 1,
-        CCAP_DEQUEUE_WITH_SELECTOR: 1,
-        CCAP_TTC1: 0x29,
-        CCAP_OCI1: 0x90,
-        CCAP_TDS_VERSION: 3,            # TNS_CCAP_TDS_VERSION_MAX
-        CCAP_RPC_VERSION: 7,            # TNS_CCAP_RPC_VERSION_MAX
-        CCAP_RPC_SIG: 3,               # TNS_CCAP_RPC_SIG_VALUE
-        CCAP_DBF_VERSION: 1,           # TNS_CCAP_DBF_VERSION_MAX
-        CCAP_LOB: 0x4f,
-        CCAP_TTC2: 4,
-        CCAP_OCI2: 12,
-        CCAP_CLIENT_FN: 6,
-        CCAP_TTC3: 1,
-        # Slots oracledb leaves 0 but pyoracle's original 11g reference client
-        # set; not in oracledb's named map. Kept verbatim for byte-parity.
-        1: 1, 6: 1, 10: 1, 11: 1, 12: 1, 13: 1, 24: 1, 25: 0x37, 36: 1,
-    }),
-    FIELD_VERSION_21_1: (53, {
-        CCAP_SQL_VERSION: 6,
-        CCAP_LOGON_TYPES: 0xea,         # adds O8LOGON_LONG_IDENTIFIER (0x80)
-        CCAP_FEATURE_BACKPORT: 0x18,
-        CCAP_FIELD_VERSION: FIELD_VERSION_21_1,
-        CCAP_SERVER_DEFINE_CONV: 1,
-        CCAP_DEQUEUE_WITH_SELECTOR: 1,
-        CCAP_TTC1: 0x29,
-        CCAP_OCI1: 0x90,
-        CCAP_TDS_VERSION: 3,
-        CCAP_RPC_VERSION: 7,
-        CCAP_RPC_SIG: 3,
-        CCAP_DBF_VERSION: 1,
-        CCAP_LOB: 0xcf,                 # adds LOB_12C (0x80)
-        CCAP_TTC2: 4,
-        CCAP_UB2_DTY: 1,
-        CCAP_OCI2: 0x10,
-        CCAP_CLIENT_FN: 12,             # TNS_CCAP_CLIENT_FN_MAX
-        CCAP_OCI3: 0x20,               # OCI3_OCSSYNC
-        CCAP_TTC3: 0xb8,
-        CCAP_SESS_SIGNATURE_VERSION: 8,
-        CCAP_TTC4: 0x44,
-        CCAP_LOB2: 5,
-        CCAP_TTC5: 0x3e,
-        CCAP_FEATURE_BACKPORT2: 2,
-        CCAP_VECTOR_FEATURES: 3,
-    }),
+    FIELD_VERSION_11_2: (
+        38,
+        {
+            CCAP_SQL_VERSION: 6,  # TNS_CCAP_SQL_VERSION_MAX
+            CCAP_LOGON_TYPES: 0x6A,  # O7LOGON | O5LOGON | O5LOGON_NP | 0x40
+            CCAP_FEATURE_BACKPORT: 1,
+            CCAP_FIELD_VERSION: FIELD_VERSION_11_2,
+            CCAP_SERVER_DEFINE_CONV: 1,
+            CCAP_DEQUEUE_WITH_SELECTOR: 1,
+            CCAP_TTC1: 0x29,
+            CCAP_OCI1: 0x90,
+            CCAP_TDS_VERSION: 3,  # TNS_CCAP_TDS_VERSION_MAX
+            CCAP_RPC_VERSION: 7,  # TNS_CCAP_RPC_VERSION_MAX
+            CCAP_RPC_SIG: 3,  # TNS_CCAP_RPC_SIG_VALUE
+            CCAP_DBF_VERSION: 1,  # TNS_CCAP_DBF_VERSION_MAX
+            CCAP_LOB: 0x4F,
+            CCAP_TTC2: 4,
+            CCAP_OCI2: 12,
+            CCAP_CLIENT_FN: 6,
+            CCAP_TTC3: 1,
+            # Slots oracledb leaves 0 but pyoracle's original 11g reference client
+            # set; not in oracledb's named map. Kept verbatim for byte-parity.
+            1: 1,
+            6: 1,
+            10: 1,
+            11: 1,
+            12: 1,
+            13: 1,
+            24: 1,
+            25: 0x37,
+            36: 1,
+        },
+    ),
+    FIELD_VERSION_21_1: (
+        53,
+        {
+            CCAP_SQL_VERSION: 6,
+            CCAP_LOGON_TYPES: 0xEA,  # adds O8LOGON_LONG_IDENTIFIER (0x80)
+            CCAP_FEATURE_BACKPORT: 0x18,
+            CCAP_FIELD_VERSION: FIELD_VERSION_21_1,
+            CCAP_SERVER_DEFINE_CONV: 1,
+            CCAP_DEQUEUE_WITH_SELECTOR: 1,
+            CCAP_TTC1: 0x29,
+            CCAP_OCI1: 0x90,
+            CCAP_TDS_VERSION: 3,
+            CCAP_RPC_VERSION: 7,
+            CCAP_RPC_SIG: 3,
+            CCAP_DBF_VERSION: 1,
+            CCAP_LOB: 0xCF,  # adds LOB_12C (0x80)
+            CCAP_TTC2: 4,
+            CCAP_UB2_DTY: 1,
+            CCAP_OCI2: 0x10,
+            CCAP_CLIENT_FN: 12,  # TNS_CCAP_CLIENT_FN_MAX
+            CCAP_OCI3: 0x20,  # OCI3_OCSSYNC
+            CCAP_TTC3: 0xB8,
+            CCAP_SESS_SIGNATURE_VERSION: 8,
+            CCAP_TTC4: 0x44,
+            CCAP_LOB2: 5,
+            CCAP_TTC5: 0x3E,
+            CCAP_FEATURE_BACKPORT2: 2,
+            CCAP_VECTOR_FEATURES: 3,
+        },
+    ),
 }
 _RUNTIME_CAPS = {
-    FIELD_VERSION_11_2: (7, {
-        RCAP_COMPAT: RCAP_COMPAT_81,
-    }),
-    FIELD_VERSION_21_1: (11, {
-        RCAP_COMPAT: RCAP_COMPAT_81,
-        RCAP_TTC: RCAP_TTC_ZERO_COPY | RCAP_TTC_32K,
-    }),
+    FIELD_VERSION_11_2: (
+        7,
+        {
+            RCAP_COMPAT: RCAP_COMPAT_81,
+        },
+    ),
+    FIELD_VERSION_21_1: (
+        11,
+        {
+            RCAP_COMPAT: RCAP_COMPAT_81,
+            RCAP_TTC: RCAP_TTC_ZERO_COPY | RCAP_TTC_32K,
+        },
+    ),
 }
 
 
@@ -1911,7 +2258,7 @@ def capability_arrays(field_version: int = FIELD_VERSION_11_2) -> tuple[bytes, b
     highest version and operate against any server it negotiates down to
     (12.1 / 12.2 / 18c / 19c / 21c …)."""
     if not 0 <= field_version <= 0xFF:
-        raise ValueError(f"field version out of range: {field_version}")
+        raise ValueError(f'field version out of range: {field_version}')
     if field_version < FIELD_VERSION_10_2:
         # Pre-10g (9i, #90): the minimal capability vector the Oracle JDBC thin
         # driver sends — crucially LOGON_TYPES = 0 (does NOT advertise O5LOGON).
@@ -1920,7 +2267,11 @@ def capability_arrays(field_version: int = FIELD_VERSION_11_2) -> tuple[bytes, b
         # minimal caps 9i falls back to the O3LOGON path. CCAP_FIELD_VERSION
         # stays 0 (9i negotiates the field version via TTI_PRO, not the caps).
         return _O3_COMPILE_CAPS, _O3_RUNTIME_CAPS
-    Base = FIELD_VERSION_21_1 if field_version >= FIELD_VERSION_12_1 else FIELD_VERSION_11_2
+    Base = (
+        FIELD_VERSION_21_1
+        if field_version >= FIELD_VERSION_12_1
+        else FIELD_VERSION_11_2
+    )
     Compile = bytearray(_render_caps(_COMPILE_CAPS[Base]))
     Compile[CCAP_FIELD_VERSION] = field_version
     return bytes(Compile), _render_caps(_RUNTIME_CAPS[Base])
@@ -1942,39 +2293,360 @@ _O3_RUNTIME_CAPS = bytes([2])
 # python-oracledb 4.0.1's DATA_TYPES table byte-for-byte (verified against a 21c
 # capture); the gate is the UB2_DTY capability, i.e. field version >= 12.1.
 _DTY_12C_TYPES = [
-    1, 2, 8, 12, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 10, 11, 40,
-    41, 117, 120, 290, 291, 292, 293, 294, 298, 299, 300, 301, 302, 303,
-    304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 315, 316, 317,
-    318, 319, 320, 321, 322, 323, 327, 328, 329, 331, 333, 334, 335,
-    336, 337, 338, 339, 340, 341, 342, 343, 344, 345, 346, 348, 349,
-    354, 355, 359, 363, 380, 381, 382, 383, 384, 385, 386, 387, 388,
-    389, 390, 391, 393, 394, 395, 396, 397, 398, 399, 400, 401, 404,
-    405, 406, 407, 413, 414, 415, 416, 417, 418, 419, 420, 421, 422,
-    423, 424, 425, 426, 427, 429, 430, 431, 432, 433, 449, 450, 454,
-    455, 456, 457, 458, 459, 460, 461, 462, 463, 466, 467, 468, 469,
-    470, 471, 472, 473, 474, 475, 476, 477, 478, 479, 480, 481, 482,
-    483, 484, 485, 486, 490, 491, 492, 493, 494, 495, 496, 498, 499,
-    500, 501, 502, 509, 510, 513, 514, 516, 517, 518, 519, 520, 521,
-    522, 523, 524, 525, 526, 527, 528, 529, 530, 531, 532, 533, 534,
-    535, 536, 537, 538, 539, 540, 541, 542, 543, 560, 565, 572, 573,
-    574, 575, 576, 578, 563, 564, 579, 580, 581, 582, 583, 584, 585, 3,
-    4, 5, 6, 7, 9, 15, 39, 68, 91, 94, 95, 96, 97, 100, 101, 102, 104,
-    106, 108, 109, 110, 111, 112, 113, 114, 115, 116, 119, 198, 146,
-    152, 153, 154, 155, 156, 172, 178, 179, 180, 181, 182, 183, 184,
-    185, 186, 187, 188, 189, 190, 195, 196, 197, 208, 231, 232, 233,
-    241, 252, 590, 591, 592, 613, 614, 615, 616, 611, 612, 593, 594,
-    595, 596, 597, 598, 599, 600, 601, 602, 603, 604, 605, 622, 623,
-    624, 625, 626, 627, 628, 629, 630, 631, 632, 637, 638, 636, 639,
-    663, 640, 652, 646, 647, 127, 660, 661, 665, 669, 670,
+    1,
+    2,
+    8,
+    12,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    10,
+    11,
+    40,
+    41,
+    117,
+    120,
+    290,
+    291,
+    292,
+    293,
+    294,
+    298,
+    299,
+    300,
+    301,
+    302,
+    303,
+    304,
+    305,
+    306,
+    307,
+    308,
+    309,
+    310,
+    311,
+    312,
+    313,
+    315,
+    316,
+    317,
+    318,
+    319,
+    320,
+    321,
+    322,
+    323,
+    327,
+    328,
+    329,
+    331,
+    333,
+    334,
+    335,
+    336,
+    337,
+    338,
+    339,
+    340,
+    341,
+    342,
+    343,
+    344,
+    345,
+    346,
+    348,
+    349,
+    354,
+    355,
+    359,
+    363,
+    380,
+    381,
+    382,
+    383,
+    384,
+    385,
+    386,
+    387,
+    388,
+    389,
+    390,
+    391,
+    393,
+    394,
+    395,
+    396,
+    397,
+    398,
+    399,
+    400,
+    401,
+    404,
+    405,
+    406,
+    407,
+    413,
+    414,
+    415,
+    416,
+    417,
+    418,
+    419,
+    420,
+    421,
+    422,
+    423,
+    424,
+    425,
+    426,
+    427,
+    429,
+    430,
+    431,
+    432,
+    433,
+    449,
+    450,
+    454,
+    455,
+    456,
+    457,
+    458,
+    459,
+    460,
+    461,
+    462,
+    463,
+    466,
+    467,
+    468,
+    469,
+    470,
+    471,
+    472,
+    473,
+    474,
+    475,
+    476,
+    477,
+    478,
+    479,
+    480,
+    481,
+    482,
+    483,
+    484,
+    485,
+    486,
+    490,
+    491,
+    492,
+    493,
+    494,
+    495,
+    496,
+    498,
+    499,
+    500,
+    501,
+    502,
+    509,
+    510,
+    513,
+    514,
+    516,
+    517,
+    518,
+    519,
+    520,
+    521,
+    522,
+    523,
+    524,
+    525,
+    526,
+    527,
+    528,
+    529,
+    530,
+    531,
+    532,
+    533,
+    534,
+    535,
+    536,
+    537,
+    538,
+    539,
+    540,
+    541,
+    542,
+    543,
+    560,
+    565,
+    572,
+    573,
+    574,
+    575,
+    576,
+    578,
+    563,
+    564,
+    579,
+    580,
+    581,
+    582,
+    583,
+    584,
+    585,
+    3,
+    4,
+    5,
+    6,
+    7,
+    9,
+    15,
+    39,
+    68,
+    91,
+    94,
+    95,
+    96,
+    97,
+    100,
+    101,
+    102,
+    104,
+    106,
+    108,
+    109,
+    110,
+    111,
+    112,
+    113,
+    114,
+    115,
+    116,
+    119,
+    198,
+    146,
+    152,
+    153,
+    154,
+    155,
+    156,
+    172,
+    178,
+    179,
+    180,
+    181,
+    182,
+    183,
+    184,
+    185,
+    186,
+    187,
+    188,
+    189,
+    190,
+    195,
+    196,
+    197,
+    208,
+    231,
+    232,
+    233,
+    241,
+    252,
+    590,
+    591,
+    592,
+    613,
+    614,
+    615,
+    616,
+    611,
+    612,
+    593,
+    594,
+    595,
+    596,
+    597,
+    598,
+    599,
+    600,
+    601,
+    602,
+    603,
+    604,
+    605,
+    622,
+    623,
+    624,
+    625,
+    626,
+    627,
+    628,
+    629,
+    630,
+    631,
+    632,
+    637,
+    638,
+    636,
+    639,
+    663,
+    640,
+    652,
+    646,
+    647,
+    127,
+    660,
+    661,
+    665,
+    669,
+    670,
 ]
 _DTY_12C_OVERRIDES = {
-    2: (2, 10), 12: (12, 10), 27: (27, 10), 3: (2, 10), 4: (2, 10),
-    5: (1, 1), 6: (2, 10), 7: (2, 10), 9: (1, 1), 15: (1, 1), 68: (2, 10),
-    91: (2, 10), 94: (1, 1), 95: (23, 1), 97: (96, 1), 104: (11, 1),
-    108: (109, 1), 110: (111, 1), 116: (102, 1), 152: (2, 10),
-    153: (2, 10), 154: (2, 10), 155: (1, 1), 156: (12, 10), 172: (2, 10),
-    184: (12, 10), 195: (112, 1), 196: (113, 1), 197: (114, 1),
-    232: (231, 1), 241: (109, 1),
+    2: (2, 10),
+    12: (12, 10),
+    27: (27, 10),
+    3: (2, 10),
+    4: (2, 10),
+    5: (1, 1),
+    6: (2, 10),
+    7: (2, 10),
+    9: (1, 1),
+    15: (1, 1),
+    68: (2, 10),
+    91: (2, 10),
+    94: (1, 1),
+    95: (23, 1),
+    97: (96, 1),
+    104: (11, 1),
+    108: (109, 1),
+    110: (111, 1),
+    116: (102, 1),
+    152: (2, 10),
+    153: (2, 10),
+    154: (2, 10),
+    155: (1, 1),
+    156: (12, 10),
+    172: (2, 10),
+    184: (12, 10),
+    195: (112, 1),
+    196: (113, 1),
+    197: (114, 1),
+    232: (231, 1),
+    241: (109, 1),
 }
 
 
@@ -1984,8 +2656,8 @@ def _datatype_table_12c() -> bytes:
     Out = bytearray()
     for Type in _DTY_12C_TYPES:
         Conv, Rep = _DTY_12C_OVERRIDES.get(Type, (Type, 1))
-        Out += struct.pack(">HHHH", Type, Conv, Rep, 0)
-    Out += struct.pack(">H", 0)
+        Out += struct.pack('>HHHH', Type, Conv, Rep, 0)
+    Out += struct.pack('>H', 0)
     return bytes(Out)
 
 
@@ -2014,8 +2686,8 @@ def encode_dictionary_dty(Dictionary: dict) -> bytes:
     # hard-codes the equivalent, and the OCI thick client builds it from a
     # static C table at link time; we emit it as a constant for the same reason.
     # The table form is version-gated below: 11g 1-byte vs 12c+ 2-byte.
-    logger.debug("encode_dictionary_dty: %s", _redacted(Dictionary))
-    Charset = struct.pack("<H", CharsetDict.get(Dictionary['req'], AL32UTF8_CHARSET))
+    logger.debug('encode_dictionary_dty: %s', _redacted(Dictionary))
+    Charset = struct.pack('<H', CharsetDict.get(Dictionary['req'], AL32UTF8_CHARSET))
 
     # Compile-time + runtime capability arrays, each emitted as a length byte
     # followed by the array (write_bytes_with_length in oracledb terms).
@@ -2037,8 +2709,9 @@ def encode_dictionary_dty(Dictionary: dict) -> bytes:
     # type N and want it on the wire as type N with format flag 1". This
     # is the default assertion; `TypeOverrides` (below) overrides
     # specific entries.
-    IdentityMap = bytes(reduce(lambda y, z: y + z,
-                               [[]] + [[x, x, 1, 0] for x in range(1, 246)]))
+    IdentityMap = bytes(
+        reduce(lambda y, z: y + z, [[]] + [[x, x, 1, 0] for x in range(1, 246)])
+    )
 
     # Override table. Each entry is `(client_type, server_repr, format,
     # flags)` — when this client encounters data of type `client_type`,
@@ -2074,28 +2747,167 @@ def encode_dictionary_dty(Dictionary: dict) -> bytes:
     # Single-pair entries like `(13, 0)` are unknown types we don't have
     # a name for in tns_consts; they're left in for byte-level parity
     # with what every other Oracle client sends.
-    TypeOverrides = bytes([
-        2, 2, 10, 0, 3, 2, 10, 0, 4, 2, 10, 0, 5, 1, 1, 0,
-        6, 2, 10, 0, 7, 2, 10, 0, 9, 1, 1, 0, 12, 12, 10, 0,
-        13, 0, 14, 0,
-        15, 23, 1, 0, 16, 0, 17, 0, 18, 0, 19, 0, 20, 0, 21, 0, 22, 0,
-        39, 120, 1, 0,
-        58, 0,
-        68, 2, 10, 0, 69, 0, 70, 0, 74, 0,
-        6, 0,
-        91, 2, 10, 0, 94, 1, 1, 0, 95, 23, 1, 0,
-        96, 96, 1, 0, 97, 96, 1, 0,
-        104, 11, 1, 0, 105, 0,
-        108, 109, 1, 0, 110, 111, 1, 0,
-        116, 102, 1, 0,
-        118, 0, 119, 0, 121, 0, 122, 0, 123, 0, 136, 0,
-        146, 146, 1, 0, 147, 0,
-        152, 2, 10, 0, 153, 2, 10, 0, 154, 2, 10, 0,
-        155, 1, 1, 0, 156, 12, 10, 0,
-        172, 2, 10, 0,
-        209, 0, 3, 0,
-        0,  # terminator
-    ])
+    TypeOverrides = bytes(
+        [
+            2,
+            2,
+            10,
+            0,
+            3,
+            2,
+            10,
+            0,
+            4,
+            2,
+            10,
+            0,
+            5,
+            1,
+            1,
+            0,
+            6,
+            2,
+            10,
+            0,
+            7,
+            2,
+            10,
+            0,
+            9,
+            1,
+            1,
+            0,
+            12,
+            12,
+            10,
+            0,
+            13,
+            0,
+            14,
+            0,
+            15,
+            23,
+            1,
+            0,
+            16,
+            0,
+            17,
+            0,
+            18,
+            0,
+            19,
+            0,
+            20,
+            0,
+            21,
+            0,
+            22,
+            0,
+            39,
+            120,
+            1,
+            0,
+            58,
+            0,
+            68,
+            2,
+            10,
+            0,
+            69,
+            0,
+            70,
+            0,
+            74,
+            0,
+            6,
+            0,
+            91,
+            2,
+            10,
+            0,
+            94,
+            1,
+            1,
+            0,
+            95,
+            23,
+            1,
+            0,
+            96,
+            96,
+            1,
+            0,
+            97,
+            96,
+            1,
+            0,
+            104,
+            11,
+            1,
+            0,
+            105,
+            0,
+            108,
+            109,
+            1,
+            0,
+            110,
+            111,
+            1,
+            0,
+            116,
+            102,
+            1,
+            0,
+            118,
+            0,
+            119,
+            0,
+            121,
+            0,
+            122,
+            0,
+            123,
+            0,
+            136,
+            0,
+            146,
+            146,
+            1,
+            0,
+            147,
+            0,
+            152,
+            2,
+            10,
+            0,
+            153,
+            2,
+            10,
+            0,
+            154,
+            2,
+            10,
+            0,
+            155,
+            1,
+            1,
+            0,
+            156,
+            12,
+            10,
+            0,
+            172,
+            2,
+            10,
+            0,
+            209,
+            0,
+            3,
+            0,
+            0,  # terminator
+        ]
+    )
     # Datatype table: 12c+ (UB2_DTY) uses the uniform 2-byte-per-field table;
     # 11g uses the 1-byte form built above. The encoding flag follows suit
     # (oracledb sends 3 = MULTI_BYTE|CONV_LENGTH for 12c+, pyoracle 1 for 11g).
@@ -2106,8 +2918,16 @@ def encode_dictionary_dty(Dictionary: dict) -> bytes:
         DataTypeTable = IdentityMap + TypeOverrides
         Flag = 1
     # Same charset for IN (server-side) and OUT (client-side) negotiation.
-    return (bytes([TTI_DTY]) + Charset + Charset + bytes([Flag])
-            + CapabilityHeader + TableHeader + DataTypeTable)
+    return (
+        bytes([TTI_DTY])
+        + Charset
+        + Charset
+        + bytes([Flag])
+        + CapabilityHeader
+        + TableHeader
+        + DataTypeTable
+    )
+
 
 def _oac_rep_row(Rows: list) -> list:
     # For array DML, pick a representative value per column for the single OAC:
@@ -2120,6 +2940,7 @@ def _oac_rep_row(Rows: list) -> list:
         if isinstance(Value, (bytes, bytearray)):
             return len(Value)
         return 0
+
     NumCols = len(Rows[0])
     Rep = []
     for J in range(NumCols):
@@ -2132,6 +2953,7 @@ def _oac_rep_row(Rows: list) -> list:
         Rep.append(Best)
     return Rep
 
+
 def encode_dictionary_exec(Dictionary: dict) -> bytes:
     # Publish the field version for the bind-OAC encoder (encode_token_raw).
     FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
@@ -2139,7 +2961,11 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
     Type = Dictionary['query']['type']
     Auto = Dictionary['query']['auto']
     Fetch = Dictionary['query']['fetch']
-    ServerVersion = b"" if (Dictionary['query']['server_version'] >> 24) == 10 else bytes([0,0,0,0,0])
+    ServerVersion = (
+        b''
+        if (Dictionary['query']['server_version'] >> 24) == 10
+        else bytes([0, 0, 0, 0, 0])
+    )
     Cursor = Dictionary['query']['cursor']
     Query = Dictionary['query']['query'].encode('utf-8')
     QueryLen = len(Query)
@@ -2194,7 +3020,9 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
     # makes the server reject the execute as malformed (ORA-03137 kpoal8Check).
     ArrayDmlRowCounts = bool(
         Dictionary['query'].get('arraydmlrowcounts')
-        and FieldVersion >= FIELD_VERSION_12_2 and BatchLen > 0)
+        and FieldVersion >= FIELD_VERSION_12_2
+        and BatchLen > 0
+    )
     if ArrayDmlRowCounts and len(All8) > 9:
         All8 = list(All8)
         All8[9] = TNS_AL8I4_ARRAY_DML_ROWCOUNTS
@@ -2235,7 +3063,7 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
     # exec flags, al8i4[10] the orientation, al8i4[11] the position — validated
     # against a 23ai oracledb-thin capture (al8i4[9] reads 0x8082 = the 23ai
     # query flag | NO_CANCEL_ON_EOF | SCROLLABLE).
-    Scroll = Dictionary['query'].get('scroll')          # (orient, pos) or None
+    Scroll = Dictionary['query'].get('scroll')  # (orient, pos) or None
     if (Dictionary['query'].get('scrollable') or Scroll) and len(All8) > 11:
         All8 = list(All8)
         All8[9] |= TNS_EXEC_FLAGS_SCROLLABLE | TNS_EXEC_FLAGS_NO_CANCEL_ON_EOF
@@ -2253,43 +3081,57 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
 
     All8Len = len(All8)
     All8Flag = 1 if All8Len > 0 else 0
-    All8s = reduce( lambda x,y: x+y, [ encode_sb4(A) for A in All8])
+    All8s = reduce(lambda x, y: x + y, [encode_sb4(A) for A in All8])
 
     if BindLen == DefLen == 0:
-        Tokens = b""
+        Tokens = b''
     elif DefLen == QueryLen == 0:
         if BatchLen > 0:
-            Tokens = b"".join(encode_tokens_rxd(R, b"") for R in [Bind] + Batch)
+            Tokens = b''.join(encode_tokens_rxd(R, b'') for R in [Bind] + Batch)
         elif ReturnBinds:
             # Cached-cursor RETURNING: values for the input binds only.
-            Tokens = encode_tokens_rxd(InBind, b"") if InBind else b""
+            Tokens = encode_tokens_rxd(InBind, b'') if InBind else b''
         else:
-            Tokens = encode_tokens_rxd(Bind, b"")
+            Tokens = encode_tokens_rxd(Bind, b'')
     elif DefLen == 0:
         if BatchLen > 0:
             # Array DML: OAC describes the columns once (sized to the widest
             # value in each column across all rows so a later row can't exceed
             # the declared buffer), then one RXD row per iteration.
             AllRows = [Bind] + Batch
-            Oac = encode_tokens_oac(_oac_rep_row(AllRows), b"")
-            Tokens = Oac + b"".join(
-                encode_tokens_rxd(R, b"") for R in AllRows)
+            Oac = encode_tokens_oac(_oac_rep_row(AllRows), b'')
+            Tokens = Oac + b''.join(encode_tokens_rxd(R, b'') for R in AllRows)
         elif ReturnBinds:
             # DML RETURNING ... INTO: OAC for every bind, then an RXD carrying
             # only the input binds' values (the return binds are server-filled).
-            Oac = encode_tokens_oac(Bind, b"")
-            Tokens = (encode_tokens_rxd(InBind, Oac) if InBind else Oac)
+            Oac = encode_tokens_oac(Bind, b'')
+            Tokens = encode_tokens_rxd(InBind, Oac) if InBind else Oac
         else:
-            Oac = encode_tokens_oac(Bind, b"")
+            Oac = encode_tokens_oac(Bind, b'')
             Tokens = encode_tokens_rxd(Bind, Oac)
     elif BindLen == QueryLen == 0:
-        Tokens = encode_tokens_oac(Def, b"")
+        Tokens = encode_tokens_oac(Def, b'')
     else:
-        raise Exception("Unhandled tokens combination", Bind, Batch, Def, Query)
+        raise Exception('Unhandled tokens combination', Bind, Batch, Def, Query)
 
-    Head = _fun_header(TTI_ALL8, Tseq, FieldVersion, TokenNum) + encode_sb4(Opt) + encode_sb4(Cursor) + bytes([QueryFlag]) + encode_sb4(QueryLen) + bytes([All8Flag]) + \
-            encode_sb4(All8Len) + bytes([0,0]) + encode_sb4(LMax) + encode_sb4(Fetch) + encode_sb4(Max) + bytes([BindFlag]) + encode_sb4(BindLen) + \
-            bytes([0,0,0,0,0]) + bytes([DefFlag]) + encode_sb4(DefLen)
+    Head = (
+        _fun_header(TTI_ALL8, Tseq, FieldVersion, TokenNum)
+        + encode_sb4(Opt)
+        + encode_sb4(Cursor)
+        + bytes([QueryFlag])
+        + encode_sb4(QueryLen)
+        + bytes([All8Flag])
+        + encode_sb4(All8Len)
+        + bytes([0, 0])
+        + encode_sb4(LMax)
+        + encode_sb4(Fetch)
+        + encode_sb4(Max)
+        + bytes([BindFlag])
+        + encode_sb4(BindLen)
+        + bytes([0, 0, 0, 0, 0])
+        + bytes([DefFlag])
+        + encode_sb4(DefLen)
+    )
 
     if FieldVersion >= FIELD_VERSION_12_2:
         # 12c+ OALL8 carries extra al8 fields after the 11g header: the DML
@@ -2299,7 +3141,7 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
         # reads the SQL/al8i4 array from the wrong offset and returns ORA-03120
         # (two-task conversion routine: integer overflow). See oracledb
         # execute.pyx _write_execute_message.
-        Middle = bytes([0, 0, 1]) + bytes([0, 0, 0, 0, 0])   # reg_lsb .. reg_msb
+        Middle = bytes([0, 0, 1]) + bytes([0, 0, 0, 0, 0])  # reg_lsb .. reg_msb
         if ArrayDmlRowCounts:
             # al8pidmlrc = pointer(1) + ub4 iteration count + 1. The server
             # returns that many per-iteration row counts in the response RPA
@@ -2307,20 +3149,21 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
             # 01 01 04 01).
             Middle += bytes([1]) + encode_sb4(1 + BatchLen) + bytes([1])
         else:
-            Middle += bytes([0, 0, 0])                        # al8pidmlrc block
-        Middle += bytes([0, 0, 0, 0, 0])                      # 12.2 al8sqlsig / SQL id
+            Middle += bytes([0, 0, 0])  # al8pidmlrc block
+        Middle += bytes([0, 0, 0, 0, 0])  # 12.2 al8sqlsig / SQL id
         if FieldVersion >= FIELD_VERSION_12_2_EXT1:
-            Middle += bytes([0, 0])                           # 12.2_EXT1 chunk ids
+            Middle += bytes([0, 0])  # 12.2_EXT1 chunk ids
         # The length-prefixed SQL is written only when there is SQL to parse. On
         # a no-parse re-execute (Cursor != 0, empty query — e.g. a #181 scroll
         # re-execute) oracledb omits the SQL bytes entirely; emitting the
         # zero-length prefix (a stray 0x00) shifts the server's read of the
         # al8i4 array by one byte and it rejects the call as malformed
         # (ORA-03137 [12316]).
-        Sql = _bytes_with_length(Query) if QueryLen else b""
+        Sql = _bytes_with_length(Query) if QueryLen else b''
         return Head + Middle + Sql + All8s + Tokens
 
     return Head + bytes([0, 0, 1]) + ServerVersion + Query + All8s + Tokens
+
 
 def encode_dictionary_fetch(Dictionary: dict) -> bytes:
     Tseq = Dictionary['seq']
@@ -2329,20 +3172,23 @@ def encode_dictionary_fetch(Dictionary: dict) -> bytes:
     FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
     return _fun_header(TTI_FETCH, Tseq, FieldVersion) + Cursor + Fetch
 
+
 # ---------------------------------------------------------------------------
 # Oracle 9i (pre-10g, field version 2) query/fetch — the TTI_ALL7 dialect.
 # A SELECT is a four-call sequence (docs/PROTOCOL.md §19), reverse-engineered
 # from the Oracle JDBC thin driver against a live 9.2.0.4 server (#97). Gate
 # every fv2 path on `field_version < FIELD_VERSION_10_2`.
 # ---------------------------------------------------------------------------
-_O7_DESCRIBE_FUNC = 0x62          # describe columns (RPA carries the metadata)
-_O7_CLOSE_FUNC = 0x14             # close cursor
+_O7_DESCRIBE_FUNC = 0x62  # describe columns (RPA carries the metadata)
+_O7_CLOSE_FUNC = 0x14  # close cursor
+
 
 def encode_o7_open(Seq: int) -> bytes:
     # Call 0: OOPEN — allocate a server cursor. The server tracks it as the
     # "current" cursor for the subsequent parse/describe/execute/close (which
     # all carry cursor field 0). Without it the parse fails ORA-01001.
     return bytes([TTI_FUN, 0x02, Seq, 0x01, 0x00])
+
 
 def _o7_bind_oac(Value: object) -> bytes:
     # fv2 bind descriptor (same 13/14-byte shape as a define entry): the
@@ -2357,6 +3203,7 @@ def _o7_bind_oac(Value: object) -> bytes:
     # OAC — the server infers it from the block and signals it in the bind
     # prompt; see decode_fv2_block_out.
     from oracle.datatypes import Var
+
     # Char binds declare AL32UTF8 (csfrm 1) — the driver negotiates an AL32UTF8
     # session and sends UTF-8, which the 9i server converts to its DB charset —
     # or AL16UTF16 for national (csfrm 2) binds, which ride as UTF-16BE (see
@@ -2365,10 +3212,16 @@ def _o7_bind_oac(Value: object) -> bytes:
         if Type in (TNS_TYPE_VARCHAR, TNS_TYPE_CHAR):
             Charset = AL16UTF16_CHARSET if Csfrm == 2 else AL32UTF8_CHARSET
         else:
-            Charset = 31     # ignored by the server for non-char types (NUMBER /
-                             # DATE / RAW / INTERVAL); keep the historical value
-        return (bytes([Type, 0x01, 0, 0]) + encode_sb4(MaxSize)
-                + bytes([0, 0, 0, 0]) + encode_sb4(Charset) + bytes([Csfrm]))
+            Charset = 31  # ignored by the server for non-char types (NUMBER /
+            # DATE / RAW / INTERVAL); keep the historical value
+        return (
+            bytes([Type, 0x01, 0, 0])
+            + encode_sb4(MaxSize)
+            + bytes([0, 0, 0, 0])
+            + encode_sb4(Charset)
+            + bytes([Csfrm])
+        )
+
     if isinstance(Value, Var):
         VType = Value.dbtype.tns_type
         Vcsfrm = getattr(Value.dbtype, 'csfrm', 1)
@@ -2384,7 +3237,7 @@ def _o7_bind_oac(Value: object) -> bytes:
     elif isinstance(Value, (bytes, bytearray)):
         Type, MaxSize, Csfrm = TNS_TYPE_RAW, 2000, 0
     elif isinstance(Value, bool) or isinstance(Value, (int, float, Decimal)):
-        Type, MaxSize, Csfrm = 0x06, 22, 1          # VARNUM
+        Type, MaxSize, Csfrm = 0x06, 22, 1  # VARNUM
     elif isinstance(Value, datetime.datetime):
         # A datetime/date bind must declare the same Oracle temporal type the
         # value carries on the wire (encode_token_datetime emits 7/11/13 bytes),
@@ -2405,12 +3258,13 @@ def _o7_bind_oac(Value: object) -> bytes:
         # a VARCHAR and fail with ORA-01867.
         Type, MaxSize, Csfrm = TNS_TYPE_INTERVALDS, 11, 0
     elif isinstance(Value, IntervalYM):
-        Type, MaxSize, Csfrm = TNS_TYPE_INTERVALYM, 5, 0   # 5-byte YM interval
+        Type, MaxSize, Csfrm = TNS_TYPE_INTERVALYM, 5, 0  # 5-byte YM interval
     elif Value is None:
         Type, MaxSize, Csfrm = TNS_TYPE_VARCHAR, 1, 1
     else:
         Type, MaxSize, Csfrm = TNS_TYPE_VARCHAR, 4000, 1
     return _oac(Type, MaxSize, Csfrm)
+
 
 def encode_o7_parse(Seq: int, Sql: str, Binds: list | None = None) -> bytes:
     # Call 1: TTI_ALL7 parse. The SQL is carried inline, sb4-length-prefixed,
@@ -2421,16 +3275,19 @@ def encode_o7_parse(Seq: int, Sql: str, Binds: list | None = None) -> bytes:
     SqlBytes = Sql.encode('utf-8')
     Opt = 0x29 if Binds else 0x21
     BindCount = bytes([0x01, 0x01, len(Binds)]) if Binds else bytes([0, 0])
-    Out = (bytes([TTI_FUN, TTI_ALL7, Seq, 0x02, 0x80, Opt, 0x01, 0x01, 0x01])
-           + encode_sb4(len(SqlBytes))
-           + bytes([0, 0, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0, 0, 0])
-           + BindCount
-           + SqlBytes
-           + bytes([0x01, 0x01, 0x01, 0x01, 0, 0, 0, 0, 0]))
+    Out = (
+        bytes([TTI_FUN, TTI_ALL7, Seq, 0x02, 0x80, Opt, 0x01, 0x01, 0x01])
+        + encode_sb4(len(SqlBytes))
+        + bytes([0, 0, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0, 0, 0])
+        + BindCount
+        + SqlBytes
+        + bytes([0x01, 0x01, 0x01, 0x01, 0, 0, 0, 0, 0])
+    )
     if Binds:
-        Out += b"".join(_o7_bind_oac(V) for V in Binds)
-        Out += encode_tokens_rxd(Binds, b"")
+        Out += b''.join(_o7_bind_oac(V) for V in Binds)
+        Out += encode_tokens_rxd(Binds, b'')
     return Out
+
 
 def encode_o7_block(Seq: int, Sql: str, Binds: list | None = None) -> bytes:
     # Anonymous PL/SQL block parse-execute over TTI_ALL7 (#102, PROTOCOL §19.6).
@@ -2446,23 +3303,42 @@ def encode_o7_block(Seq: int, Sql: str, Binds: list | None = None) -> bytes:
     SqlBytes = Sql.encode('utf-8')
     OptBytes = bytes([0x02, 0x04, 0x29]) if Binds else bytes([0x01, 0x21])
     BindCount = bytes([0x01, 0x01, len(Binds)]) if Binds else bytes([0, 0])
-    Out = (bytes([TTI_FUN, TTI_ALL7, Seq]) + OptBytes
-           + bytes([0x01, 0x01, 0x01])
-           + encode_sb4(len(SqlBytes))
-           + bytes([0, 0, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0, 0, 0])
-           + BindCount
-           + SqlBytes
-           + bytes([0x01, 0x01, 0x01, 0x01, 0, 0, 0, 0, 0]))
+    Out = (
+        bytes([TTI_FUN, TTI_ALL7, Seq])
+        + OptBytes
+        + bytes([0x01, 0x01, 0x01])
+        + encode_sb4(len(SqlBytes))
+        + bytes([0, 0, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0, 0, 0])
+        + BindCount
+        + SqlBytes
+        + bytes([0x01, 0x01, 0x01, 0x01, 0, 0, 0, 0, 0])
+    )
     if Binds:
         # Bind OACs only — the values follow in a separate RXD frame after the
         # server's bind prompt (the 0x8000-inline path is not used for blocks).
-        Out += b"".join(_o7_bind_oac(V) for V in Binds)
+        Out += b''.join(_o7_bind_oac(V) for V in Binds)
     return Out
+
 
 def encode_o7_describe(Seq: int) -> bytes:
     # Call 2: fixed describe-columns request; response is the metadata RPA.
-    return bytes([TTI_FUN, _O7_DESCRIBE_FUNC, Seq,
-                  0x07, 0x01, 0x01, 0, 0, 0x01, 0x02, 0x01, 0x01])
+    return bytes(
+        [
+            TTI_FUN,
+            _O7_DESCRIBE_FUNC,
+            Seq,
+            0x07,
+            0x01,
+            0x01,
+            0,
+            0,
+            0x01,
+            0x02,
+            0x01,
+            0x01,
+        ]
+    )
+
 
 def _o7_define_entry(Col: dict) -> bytes:
     # One 13/14-byte define entry: the client's requested return type for a
@@ -2491,22 +3367,51 @@ def _o7_define_entry(Col: dict) -> bytes:
         DefType, MaxSize = Type, Col.get('max_size') or 0
     Flag = 0x21 if Type == TNS_TYPE_CHAR else 0x01
     Charset = Col.get('charset') or 31
-    return (bytes([DefType, Flag, 0, 0]) + encode_sb4(MaxSize)
-            + bytes([0, 0, 0, 0]) + encode_sb4(Charset) + bytes([Csfrm]))
+    return (
+        bytes([DefType, Flag, 0, 0])
+        + encode_sb4(MaxSize)
+        + bytes([0, 0, 0, 0])
+        + encode_sb4(Charset)
+        + bytes([Csfrm])
+    )
+
 
 def encode_o7_exec(Seq: int, Columns: list) -> bytes:
     # Call 3: TTI_ALL7 execute + fetch (option word 02 80 50), carrying a define
     # block (one entry per column) so the server returns the requested types.
-    Head = bytes([TTI_FUN, TTI_ALL7, Seq, 0x02, 0x80, 0x50,
-                  0x01, 0x01, 0, 0, 0, 0, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0])
-    Defines = (bytes([0x01, 0x01, len(Columns), 0, 0,
-                      0x01, 0x01, 0x01, 0x0a, 0, 0, 0, 0, 0])
-               + b"".join(_o7_define_entry(C) for C in Columns))
+    Head = bytes(
+        [
+            TTI_FUN,
+            TTI_ALL7,
+            Seq,
+            0x02,
+            0x80,
+            0x50,
+            0x01,
+            0x01,
+            0,
+            0,
+            0,
+            0,
+            0x01,
+            0x01,
+            0x07,
+            0x01,
+            0x01,
+            0x02,
+            0,
+        ]
+    )
+    Defines = bytes(
+        [0x01, 0x01, len(Columns), 0, 0, 0x01, 0x01, 0x01, 0x0A, 0, 0, 0, 0, 0]
+    ) + b''.join(_o7_define_entry(C) for C in Columns)
     return Head + Defines
+
 
 def encode_o7_close(Seq: int) -> bytes:
     # Call 4: close the cursor.
     return bytes([TTI_FUN, _O7_CLOSE_FUNC, Seq, 0x01, 0x01])
+
 
 # ---------------------------------------------------------------------------
 # fv2 (9i) LOB read — TTI_LOBOPS GETLEN + READ (PROTOCOL.md §19.5)
@@ -2521,40 +3426,50 @@ def encode_o7_close(Seq: int) -> bytes:
 # — only the op-specific middle and trailer differ. Validated byte-for-byte
 # against cap_9i_lobread.log (CLOB + BLOB GETLEN/READ) and cap_9i_bfile.log
 # (BFILE FILE_OPEN/READ/CLOSE). (#102, PROTOCOL §19.5 / §19.8)
-_LOBOP_GETLEN_MID = bytes.fromhex("000000000001000101000000")    # GETLEN
-_LOBOP_READ_MID = bytes.fromhex("00000101000001000102000000")    # READ
-_LOBOP_FOPEN_MID = bytes.fromhex("00000000000100020100000000")   # BFILE FILE_OPEN
-_LOBOP_FCLOSE_MID = bytes.fromhex("00000000000000020200000000")  # BFILE FILE_CLOSE
+_LOBOP_GETLEN_MID = bytes.fromhex('000000000001000101000000')  # GETLEN
+_LOBOP_READ_MID = bytes.fromhex('00000101000001000102000000')  # READ
+_LOBOP_FOPEN_MID = bytes.fromhex('00000000000100020100000000')  # BFILE FILE_OPEN
+_LOBOP_FCLOSE_MID = bytes.fromhex('00000000000000020200000000')  # BFILE FILE_CLOSE
 
-def _encode_o7_lobop(Seq: int, Locator: bytes, Middle: bytes,
-                     Trailer: bytes) -> bytes:
+
+def _encode_o7_lobop(Seq: int, Locator: bytes, Middle: bytes, Trailer: bytes) -> bytes:
     # Build a fv2 TTI_LOBOPS request. The source-locator length counts the full
     # `_read_lob_column` block (its leading byte plus the `<ub1 len><body>` that
     # goes on the wire); CLOB/BLOB locators are a fixed 86 bytes, BFILE locators
     # vary with the directory + file name, so it is computed rather than fixed.
-    return (bytes([TTI_FUN, TTI_LOBOPS, Seq, 0x01]) + encode_sb4(len(Locator))
-            + Middle + Locator[1:] + Trailer)
+    return (
+        bytes([TTI_FUN, TTI_LOBOPS, Seq, 0x01])
+        + encode_sb4(len(Locator))
+        + Middle
+        + Locator[1:]
+        + Trailer
+    )
+
 
 def encode_o7_lob_getlen(Seq: int, Locator: bytes) -> bytes:
     # GETLEN: ask the server for the LOB's length. Trailer is a single 0x00
     # (no read amount). Response carries the amount — see decode_fv2_lob_getlen.
     return _encode_o7_lobop(Seq, Locator, _LOBOP_GETLEN_MID, bytes([0]))
 
+
 def encode_o7_lob_read(Seq: int, Locator: bytes, Amount: int) -> bytes:
     # READ: pull `Amount` chars/bytes (the value GETLEN returned) starting at
     # offset 1. Response is `0e fe <chunks>` then an RPA + OER.
     return _encode_o7_lobop(Seq, Locator, _LOBOP_READ_MID, encode_sb4(Amount))
+
 
 def encode_o7_bfile_open(Seq: int, Locator: bytes) -> bytes:
     # BFILE FILE_OPEN: open the external file read-only (trailer 01 0b = amount
     # pointer present + open mode 0x0b). The reply's RPA carries an *updated*
     # locator with the open flag set — GETLEN/READ/CLOSE must use that one
     # (decode_fv2_opened_locator). (#102, PROTOCOL §19.8)
-    return _encode_o7_lobop(Seq, Locator, _LOBOP_FOPEN_MID, bytes.fromhex("010b"))
+    return _encode_o7_lobop(Seq, Locator, _LOBOP_FOPEN_MID, bytes.fromhex('010b'))
+
 
 def encode_o7_bfile_close(Seq: int, Locator: bytes) -> bytes:
     # BFILE FILE_CLOSE: close the opened file (no trailer).
-    return _encode_o7_lobop(Seq, Locator, _LOBOP_FCLOSE_MID, b"")
+    return _encode_o7_lobop(Seq, Locator, _LOBOP_FCLOSE_MID, b'')
+
 
 def decode_fv2_opened_locator(Packet: bytes) -> bytes | None:
     # Pull the opened BFILE locator out of a FILE_OPEN reply: TTI_RPA (08) 00
@@ -2564,7 +3479,8 @@ def decode_fv2_opened_locator(Packet: bytes) -> bytes | None:
     if not Packet or Packet[0] != TTI_RPA or len(Packet) < 3:
         return None
     Olen = Packet[2]
-    return bytes([0]) + bytes(Packet[2:3 + Olen])
+    return bytes([0]) + bytes(Packet[2 : 3 + Olen])
+
 
 def decode_fv2_lob_chunks(Data: bytes) -> tuple[bytes, bool]:
     # Parse the content of a 9i (fv2) TTI_LOBOPS READ reply: TTI_LOB (0e) then
@@ -2577,20 +3493,21 @@ def decode_fv2_lob_chunks(Data: bytes) -> tuple[bytes, bool]:
     # include one; a multi-row fetch does not), so the zero-length chunk is the
     # only reliable terminator. (#102, PROTOCOL.md §19.5)
     if len(Data) < 2 or Data[0] != TTI_LOB:
-        return (b"", False)
+        return (b'', False)
     # Data[1] is the 0xfe chunked marker; a non-chunked single value would be
     # `0e <len> <bytes>`, handled by treating Data[1] as the first chunk length.
     Pos = 2 if Data[1] == 0xFE else 1
-    Content = b""
+    Content = b''
     while Pos < len(Data):
         ChunkLen = Data[Pos]
         if ChunkLen == 0:
-            return (Content, True)              # zero-length chunk = end
+            return (Content, True)  # zero-length chunk = end
         if Pos + 1 + ChunkLen > len(Data):
-            break                               # chunk split across packets
-        Content += Data[Pos + 1:Pos + 1 + ChunkLen]
+            break  # chunk split across packets
+        Content += Data[Pos + 1 : Pos + 1 + ChunkLen]
         Pos += 1 + ChunkLen
     return (Content, False)
+
 
 def decode_fv2_lob_getlen(Packet: bytes) -> int:
     # GETLEN response layout: TTI_RPA (08) 00 <ub1 loclen><locator echo>
@@ -2599,22 +3516,23 @@ def decode_fv2_lob_getlen(Packet: bytes) -> int:
     # reads nothing rather than desyncing.
     if not Packet or Packet[0] != TTI_RPA:
         return 0
-    Pos = 2                                   # skip RPA token + its 0x00
+    Pos = 2  # skip RPA token + its 0x00
     if Pos >= len(Packet):
         return 0
     LocLen = Packet[Pos]
-    Pos += 1 + LocLen                         # skip the echoed locator
+    Pos += 1 + LocLen  # skip the echoed locator
     if Pos >= len(Packet):
         return 0
     (Amount, _) = decode_ub4(Packet[Pos:])
     return Amount
+
 
 def _decode_oac_fv2(Rest: bytes) -> tuple[dict, bytes]:
     # fv2 column descriptor = the modern decode_token_oac field order MINUS the
     # trailing Mxlc ub4 (a later addition). The leading DataType byte is the
     # standard Oracle type code (== TNS_TYPE_*), so existing value decoders are
     # reused. Returns a column dict shaped like decode_token_dcb's output.
-    (DataType, Flag, Precision) = struct.unpack(">BBB", Rest[:3])
+    (DataType, Flag, Precision) = struct.unpack('>BBB', Rest[:3])
     Rest = Rest[3:]
     (DataScale, Rest) = decode_ub4(Rest)
     (MaxLen, Rest) = decode_ub4(Rest)
@@ -2639,6 +3557,7 @@ def _decode_oac_fv2(Rest: bytes) -> tuple[dict, bytes]:
     }
     return (Col, Rest)
 
+
 def decode_fv2_describe(Data: bytes) -> list[dict]:
     # Parse the TTI_RPA (0x08) answering the 0x62 describe-columns call into a
     # list of column dicts (docs/PROTOCOL.md §19.1). Layout:
@@ -2659,16 +3578,17 @@ def decode_fv2_describe(Data: bytes) -> list[dict]:
     Columns = []
     for _ in range(NumCols):
         (Col, Rest) = _decode_oac_fv2(Rest)
-        Col['null_ok'] = 0 if Rest[0] == 0 else 1   # 0x00 NOT NULL, 0x01 nullable
-        Rest = Rest[2:]                              # null_ok(1B) + namelen_bytes(1B)
-        (_NlChars, Rest) = decode_ub4(Rest)          # name length in chars (ub4)
+        Col['null_ok'] = 0 if Rest[0] == 0 else 1  # 0x00 NOT NULL, 0x01 nullable
+        Rest = Rest[2:]  # null_ok(1B) + namelen_bytes(1B)
+        (_NlChars, Rest) = decode_ub4(Rest)  # name length in chars (ub4)
         (Name, Rest) = decode_dalc(Rest)
-        Col['column_name'] = Name if isinstance(Name, bytes) else b""
+        Col['column_name'] = Name if isinstance(Name, bytes) else b''
         Columns.append(Col)
         # two-byte inter-column separator
         if len(Rest) >= 2 and Rest[0] == 0 and Rest[1] == 0:
             Rest = Rest[2:]
     return Columns
+
 
 def _decode_fv2_oer(Rest: bytes) -> tuple[int, int, bytes]:
     # Minimal fv2 (9i) OER: the short pre-10g form. The exec+fetch terminates
@@ -2676,10 +3596,11 @@ def _decode_fv2_oer(Rest: bytes) -> tuple[int, int, bytes]:
     # found") is the end-of-fetch marker, 0 is success (PROTOCOL.md §19.2). We
     # only need the status + error code; the message DALC trailing the fixed
     # middle is left to from_ora_code() in the caller.
-    Rest = Rest[1:]                                  # OER token
+    Rest = Rest[1:]  # OER token
     (RowsThisFetch, Rest) = decode_ub4(Rest)
     (ErrCode, Rest) = decode_ub4(Rest)
     return (RowsThisFetch, ErrCode, Rest)
+
 
 def decode_fv2_oer_error(Packet: bytes) -> tuple[int, str | None]:
     # If `Packet` is a 9i OER token, return its (ora_code, message); otherwise
@@ -2696,9 +3617,10 @@ def decode_fv2_oer_error(Packet: bytes) -> tuple[int, str | None]:
     for I in range(len(Rest)):
         Length = Rest[I]
         if Length and I + 1 + Length == len(Rest):
-            Message = bytes(Rest[I + 1:]).decode('utf-8', errors='replace').rstrip()
+            Message = bytes(Rest[I + 1 :]).decode('utf-8', errors='replace').rstrip()
             break
     return (ErrCode, Message)
+
 
 def decode_fv2_exec_response(Data: bytes, Columns: list) -> tuple[list, int]:
     # Walk the fv2 (9i) execute+fetch response stream: TTI_RXH (06) then one
@@ -2707,8 +3629,9 @@ def decode_fv2_exec_response(Data: bytes, Columns: list) -> tuple[list, int]:
     # each column value is a DALC blob followed by a 1-byte indicator. Row
     # values themselves use the version-independent §11 decoders. Returns
     # (rows, ora_code) where ora_code 1403 == end-of-fetch (PROTOCOL.md §19.2).
-    from oracle.types import decode_value
     from oracle.lob import LOB
+    from oracle.types import decode_value
+
     Rows: list = []
     ErrCode = 0
     Rest = Data
@@ -2738,16 +3661,17 @@ def decode_fv2_exec_response(Data: bytes, Columns: list) -> tuple[list, int]:
                     # — `00 81 01` (an empty DALC then the `81 01` null
                     # indicator). A present locator's num_bytes is always >= its
                     # minimum (first byte 0x01), so a leading 0x00 means NULL.
-                    if Rest[:1] == b"\x00":
-                        Rest = Rest[1:]                  # empty DALC
-                        if Rest[:1] == b"\x81":
-                            Rest = Rest[2:]              # 81 01 null indicator
+                    if Rest[:1] == b'\x00':
+                        Rest = Rest[1:]  # empty DALC
+                        if Rest[:1] == b'\x81':
+                            Rest = Rest[2:]  # 81 01 null indicator
                         Row.append(None)
                     else:
                         (Locator, Rest) = _read_lob_column(Rest)
-                        Rest = Rest[1:]                  # present indicator (0x00)
-                        Row.append(LOB(DataType, Locator)
-                                   if Locator is not None else None)
+                        Rest = Rest[1:]  # present indicator (0x00)
+                        Row.append(
+                            LOB(DataType, Locator) if Locator is not None else None
+                        )
                     continue
                 # The value is a DALC; decode_dalc handles the 0xfe chunked form
                 # that LONG / LONG RAW stream in (in batch fetch they arrive
@@ -2763,8 +3687,7 @@ def decode_fv2_exec_response(Data: bytes, Columns: list) -> tuple[list, int]:
                     # already the rowid text — decode it directly, not via the
                     # native ROWID decoder.
                     Rest = Rest[1:]
-                    Row.append(bytes(Val).decode('ascii', 'replace')
-                               if Val else None)
+                    Row.append(bytes(Val).decode('ascii', 'replace') if Val else None)
                 else:
                     Rest = Rest[1:]
                     Row.append(decode_value(Col, Val))
@@ -2775,6 +3698,7 @@ def decode_fv2_exec_response(Data: bytes, Columns: list) -> tuple[list, int]:
         else:
             break
     return (Rows, ErrCode)
+
 
 def decode_fv2_dml_response(Data: bytes) -> tuple[int, int]:
     # 9i DML (INSERT/UPDATE/DELETE) over TTI_ALL7: a single parse-executes the
@@ -2801,10 +3725,12 @@ def decode_fv2_dml_response(Data: bytes) -> tuple[int, int]:
         return (RowCount, ErrCode)
     return (0, 0)
 
+
 # Token that opens the 9i bind-values prompt the server sends after a PL/SQL
 # block parse-execute carrying binds: `0b 05 01 <numbinds> 00 01 01 00` then one
 # direction byte per bind (0x20 = IN, 0x10 = OUT, 0x30 = IN OUT). #102.
 _FV2_BIND_PROMPT = 0x0B
+
 
 def strip_fv2_bind_prompt(Data: bytes) -> bytes:
     # Drop a leading bind prompt, if present, returning the bytes that follow
@@ -2823,8 +3749,8 @@ def strip_fv2_bind_prompt(Data: bytes) -> bytes:
         return Data[Pos:]
     return Data
 
-def decode_fv2_block_out(Data: bytes,
-                         NumOut: int) -> tuple[list, int, int]:
+
+def decode_fv2_block_out(Data: bytes, NumOut: int) -> tuple[list, int, int]:
     # Parse a 9i PL/SQL block reply that returns OUT / IN OUT values (#102,
     # PROTOCOL §19.7). After any bind prompt is stripped, the reply is an
     # optional TTI_RXD (07) carrying `NumOut` × (DALC value + 1-byte indicator)
@@ -2838,17 +3764,18 @@ def decode_fv2_block_out(Data: bytes,
         Rest = Rest[1:]
         for _ in range(NumOut):
             (Val, Rest) = decode_dalc(Rest)
-            if Rest and Rest[0] == 0x81:        # 81 01 NULL indicator
+            if Rest and Rest[0] == 0x81:  # 81 01 NULL indicator
                 Rest = Rest[2:]
                 OutValues.append(None)
             else:
                 if Rest:
-                    Rest = Rest[1:]             # present indicator (00)
-                OutValues.append(bytes(Val)
-                                 if isinstance(Val, (bytes, bytearray)) and Val
-                                 else None)
+                    Rest = Rest[1:]  # present indicator (00)
+                OutValues.append(
+                    bytes(Val) if isinstance(Val, (bytes, bytearray)) and Val else None
+                )
     (RowCount, ErrCode) = decode_fv2_dml_response(Rest)
     return (OutValues, RowCount, ErrCode)
+
 
 def encode_dictionary_lobops(Dictionary: dict) -> bytes:
     # TTI_LOBOPS request. See docs/PROTOCOL.md §14 for the field layout.
@@ -2866,11 +3793,17 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
         # the type-spec bytes, and both forms still end with the trailing sb4
         # 0x0369. 12c+ only; 11g rejects CREATE_TEMP.
         if Dictionary.get('is_blob'):
-            Body = (bytes.fromhex("01012800010a00000100010201100000000171")
-                    + bytes(47) + bytes.fromhex("020369"))
+            Body = (
+                bytes.fromhex('01012800010a00000100010201100000000171')
+                + bytes(47)
+                + bytes.fromhex('020369')
+            )
         else:
-            Body = (bytes.fromhex("01012800010a0000010001020110000001010170")
-                    + bytes(47) + bytes.fromhex("020369"))
+            Body = (
+                bytes.fromhex('01012800010a0000010001020110000001010170')
+                + bytes(47)
+                + bytes.fromhex('020369')
+            )
         return LobHead + Body
     if Dictionary.get('operation') == TNS_LOB_OP_WRITE:
         # WRITE (op 0x0040, #91): push `data` into the LOB at `source_offset`.
@@ -2889,36 +3822,35 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
         Data = Dictionary['data']
         SourceOffset = Dictionary.get('source_offset', 1)
         Out = LobHead
-        Out += bytes([1])                       # source pointer present
-        Out += encode_sb4(len(Locator) + 2)     # source locator length (+ub2)
-        Out += bytes([0])                       # dest pointer absent
-        Out += encode_sb4(0)                    # dest_length
-        Out += encode_sb4(0)                    # short source offset
-        Out += encode_sb4(0)                    # short dest offset
-        Out += bytes([0])                       # charset pointer absent
-        Out += bytes([0])                       # short amount absent
-        Out += bytes([0])                       # null lob pointer absent
-        Out += encode_sb4(TNS_LOB_OP_WRITE)     # operation code
-        Out += bytes([0])                       # scn array pointer absent
-        Out += bytes([0])                       # scn array length
-        Out += encode_sb4(SourceOffset)         # source offset (ub8)
-        Out += encode_sb4(0)                    # dest offset (ub8)
-        Out += bytes([0])                       # amount pointer absent
-        Out += struct.pack(">HHH", 0, 0, 0)     # three reserved ub16be slots
-        Out += struct.pack(">H", len(Locator))  # ub2 locator length prefix
+        Out += bytes([1])  # source pointer present
+        Out += encode_sb4(len(Locator) + 2)  # source locator length (+ub2)
+        Out += bytes([0])  # dest pointer absent
+        Out += encode_sb4(0)  # dest_length
+        Out += encode_sb4(0)  # short source offset
+        Out += encode_sb4(0)  # short dest offset
+        Out += bytes([0])  # charset pointer absent
+        Out += bytes([0])  # short amount absent
+        Out += bytes([0])  # null lob pointer absent
+        Out += encode_sb4(TNS_LOB_OP_WRITE)  # operation code
+        Out += bytes([0])  # scn array pointer absent
+        Out += bytes([0])  # scn array length
+        Out += encode_sb4(SourceOffset)  # source offset (ub8)
+        Out += encode_sb4(0)  # dest offset (ub8)
+        Out += bytes([0])  # amount pointer absent
+        Out += struct.pack('>HHH', 0, 0, 0)  # three reserved ub16be slots
+        Out += struct.pack('>H', len(Locator))  # ub2 locator length prefix
         Out += Locator
-        Out += bytes([0x0E])                    # WRITE-data marker
+        Out += bytes([0x0E])  # WRITE-data marker
         if len(Data) <= 0xFC:
             Out += bytes([len(Data)]) + Data
         else:
             Out += bytes([0xFE])
             for K in range(0, len(Data), 0x7FFF):
-                Chunk = Data[K:K + 0x7FFF]
+                Chunk = Data[K : K + 0x7FFF]
                 Out += encode_sb4(len(Chunk)) + Chunk
-            Out += encode_sb4(0)                # zero-length terminator
+            Out += encode_sb4(0)  # zero-length terminator
         return Out
-    if Dictionary.get('operation') in (TNS_LOB_OP_FILE_OPEN,
-                                        TNS_LOB_OP_FILE_CLOSE):
+    if Dictionary.get('operation') in (TNS_LOB_OP_FILE_OPEN, TNS_LOB_OP_FILE_CLOSE):
         # BFILE open / close (#46). Same field block as READ but with source
         # offset 0 and no read amount. FILE_OPEN sets the amount pointer and
         # sends the open mode (sb4 0x0B = read-only) where READ sends the read
@@ -2929,25 +3861,25 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
         Operation = Dictionary['operation']
         IsOpen = Operation == TNS_LOB_OP_FILE_OPEN
         Out = LobHead
-        Out += bytes([1])                       # source pointer present
-        Out += encode_sb4(len(Locator) + 2)     # source locator length (+ub2)
-        Out += bytes([0])                       # dest pointer absent
-        Out += encode_sb4(0)                    # dest_length
-        Out += encode_sb4(0)                    # short source offset
-        Out += encode_sb4(0)                    # short dest offset
-        Out += bytes([0])                       # charset pointer absent
-        Out += bytes([0])                       # short amount absent
-        Out += bytes([0])                       # null lob pointer absent
-        Out += encode_sb4(Operation)            # operation code
-        Out += bytes([0])                       # scn array pointer absent
-        Out += bytes([0])                       # scn array length
-        Out += encode_sb4(0)                    # source offset (ub8)
-        Out += encode_sb4(0)                    # dest offset (ub8)
-        Out += bytes([1 if IsOpen else 0])      # amount pointer (open mode)
-        Out += struct.pack(">HHH", 0, 0, 0)     # three reserved ub16be slots
-        Out += struct.pack(">H", len(Locator)) + Locator   # ub2-prefixed
+        Out += bytes([1])  # source pointer present
+        Out += encode_sb4(len(Locator) + 2)  # source locator length (+ub2)
+        Out += bytes([0])  # dest pointer absent
+        Out += encode_sb4(0)  # dest_length
+        Out += encode_sb4(0)  # short source offset
+        Out += encode_sb4(0)  # short dest offset
+        Out += bytes([0])  # charset pointer absent
+        Out += bytes([0])  # short amount absent
+        Out += bytes([0])  # null lob pointer absent
+        Out += encode_sb4(Operation)  # operation code
+        Out += bytes([0])  # scn array pointer absent
+        Out += bytes([0])  # scn array length
+        Out += encode_sb4(0)  # source offset (ub8)
+        Out += encode_sb4(0)  # dest offset (ub8)
+        Out += bytes([1 if IsOpen else 0])  # amount pointer (open mode)
+        Out += struct.pack('>HHH', 0, 0, 0)  # three reserved ub16be slots
+        Out += struct.pack('>H', len(Locator)) + Locator  # ub2-prefixed
         if IsOpen:
-            Out += encode_sb4(0x0B)             # open mode: read-only
+            Out += encode_sb4(0x0B)  # open mode: read-only
         return Out
     Locator = Dictionary['locator']
     # `amount` is in chars for CLOB / NCLOB and in bytes for BLOB / BFILE.
@@ -2960,11 +3892,11 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
     # ceiling.
     Amount = Dictionary.get('amount', 0x40000000)
     Operation = Dictionary.get('operation', TNS_LOB_OP_READ)
-    SourceOffset = Dictionary.get('source_offset', 1)    # 1-based: start
+    SourceOffset = Dictionary.get('source_offset', 1)  # 1-based: start
     LocatorLen = len(Locator)
 
     Out = LobHead
-    Out += bytes([1])                       # source pointer present
+    Out += bytes([1])  # source pointer present
     # Persistent-LOB locators read back correctly with the bare length + raw
     # locator. Temporary LOBs (#91) instead need the locator sent as a
     # ub2-length-prefixed field with the declared length counting that prefix
@@ -2973,26 +3905,27 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
     # form regresses them on 11g + 21c, so the prefix is opt-in per call.
     Prefixed = Dictionary.get('locator_prefixed', False)
     Out += encode_sb4(LocatorLen + 2 if Prefixed else LocatorLen)  # src loc len
-    Out += bytes([0])                       # dest pointer absent
-    Out += encode_sb4(0)                    # dest_length
-    Out += encode_sb4(0)                    # short source offset
-    Out += encode_sb4(0)                    # short dest offset
-    Out += bytes([0])                       # charset pointer absent
-    Out += bytes([0])                       # short amount absent
-    Out += bytes([0])                       # null lob pointer absent
-    Out += encode_sb4(Operation)            # operation code
-    Out += bytes([0])                       # scn array pointer absent
-    Out += bytes([0])                       # scn array length
-    Out += encode_sb4(SourceOffset)         # source offset (ub8; small fits sb4)
-    Out += encode_sb4(0)                    # dest offset (ub8)
-    Out += bytes([1])                       # amount pointer present
-    Out += struct.pack(">HHH", 0, 0, 0)     # three reserved ub16be slots
+    Out += bytes([0])  # dest pointer absent
+    Out += encode_sb4(0)  # dest_length
+    Out += encode_sb4(0)  # short source offset
+    Out += encode_sb4(0)  # short dest offset
+    Out += bytes([0])  # charset pointer absent
+    Out += bytes([0])  # short amount absent
+    Out += bytes([0])  # null lob pointer absent
+    Out += encode_sb4(Operation)  # operation code
+    Out += bytes([0])  # scn array pointer absent
+    Out += bytes([0])  # scn array length
+    Out += encode_sb4(SourceOffset)  # source offset (ub8; small fits sb4)
+    Out += encode_sb4(0)  # dest offset (ub8)
+    Out += bytes([1])  # amount pointer present
+    Out += struct.pack('>HHH', 0, 0, 0)  # three reserved ub16be slots
     if Prefixed:
-        Out += struct.pack(">H", LocatorLen) + Locator   # ub2-prefixed locator
+        Out += struct.pack('>H', LocatorLen) + Locator  # ub2-prefixed locator
     else:
-        Out += Locator                      # raw locator bytes (no DALC)
-    Out += encode_sb4(Amount)               # amount to read
+        Out += Locator  # raw locator bytes (no DALC)
+    Out += encode_sb4(Amount)  # amount to read
     return Out
+
 
 def encode_dictionary_login(Dictionary: dict) -> bytes:
     # The CONNECT packet, in the protocol-version-319 ("large SDU" / end-of-
@@ -3005,42 +3938,61 @@ def encode_dictionary_login(Dictionary: dict) -> bytes:
     # handler that flips self._large_packets. The connect-data offset is 74 (the
     # legacy 58 plus the 16 trailing bytes: large SDU/TDU + connect flags).
     Sdu = Dictionary['sdu']
-    PacketVersion = struct.pack(">H", 319)
+    PacketVersion = struct.pack('>H', 319)
     # Lowest compatible version we accept. The server negotiates
     # min(its_max, our PacketVersion); it REFUSES the connect if that is below
     # our floor. Oracle 9i's max protocol version is 312, so the 300 floor lets
     # 9i settle on 312 while newer servers negotiate up to 319 (#90).
-    LowestCompatVersion = struct.pack(">H", 300)
-    GSO = struct.pack(">H", 0x0401)            # global/service options
-    SDU = struct.pack(">H", Sdu)
-    TDU = struct.pack(">H", Sdu)
-    ProtocolCharacteristics = struct.pack(">H", 0x4f98)
-    MaxUnackPackets = bytes([0,0]) # Max packets before ACK
-    Endiannes = struct.pack(">h", 1) # 1 in hardware byte order
+    LowestCompatVersion = struct.pack('>H', 300)
+    GSO = struct.pack('>H', 0x0401)  # global/service options
+    SDU = struct.pack('>H', Sdu)
+    TDU = struct.pack('>H', Sdu)
+    ProtocolCharacteristics = struct.pack('>H', 0x4F98)
+    MaxUnackPackets = bytes([0, 0])  # Max packets before ACK
+    Endiannes = struct.pack('>h', 1)  # 1 in hardware byte order
     Data = encode_dictionary_description(Dictionary)
-    DataLength = struct.pack(">H", len(Data)) # Connect Data length
-    CDO = struct.pack(">H", 74) # Connect Data offset (legacy 58 + 16 trailing)
-    MaxConnDataRecv = bytes(4) # Max connect data that can be received
-    ANO = bytes([132,132]) # ANO disabled
+    DataLength = struct.pack('>H', len(Data))  # Connect Data length
+    CDO = struct.pack('>H', 74)  # Connect Data offset (legacy 58 + 16 trailing)
+    MaxConnDataRecv = bytes(4)  # Max connect data that can be received
+    ANO = bytes([132, 132])  # ANO disabled
     Padding = bytes(24)
     # The 319-era trailing block before the connect data: 32-bit SDU and TDU,
     # then connect_flags_1 (0) and connect_flags_2 (1 = OOB check), per capture.
-    Trailer = (struct.pack(">I", Sdu) + struct.pack(">I", Sdu)
-               + struct.pack(">I", 0) + struct.pack(">I", 1))
-    return (PacketVersion + LowestCompatVersion + GSO + SDU + TDU
-            + ProtocolCharacteristics + MaxUnackPackets + Endiannes
-            + DataLength + CDO + MaxConnDataRecv + ANO + Padding + Trailer
-            + Data)
+    Trailer = (
+        struct.pack('>I', Sdu)
+        + struct.pack('>I', Sdu)
+        + struct.pack('>I', 0)
+        + struct.pack('>I', 1)
+    )
+    return (
+        PacketVersion
+        + LowestCompatVersion
+        + GSO
+        + SDU
+        + TDU
+        + ProtocolCharacteristics
+        + MaxUnackPackets
+        + Endiannes
+        + DataLength
+        + CDO
+        + MaxConnDataRecv
+        + ANO
+        + Padding
+        + Trailer
+        + Data
+    )
+
 
 def encode_dictionary_pig(Dictionary: dict) -> bytes:
-    Request = Dictionary['req']        # single function-code byte (ping works)
+    Request = Dictionary['req']  # single function-code byte (ping works)
     Tseq = Dictionary['seq']
     CursorsLen = encode_sb4(len(Dictionary['cursor']))
-    Cursors = reduce( lambda x,y: x+y, [ encode_sb4(C) for C in Dictionary['cursor']])
+    Cursors = reduce(lambda x, y: x + y, [encode_sb4(C) for C in Dictionary['cursor']])
     return bytes([TTI_PFN, Request, Tseq, 1]) + CursorsLen + Cursors
 
+
 def encode_dictionary_pro(Dictionary: dict) -> bytes:
-    return bytes([TTI_PRO, 6, 5, 4, 3, 2, 1, 0]) + b"python" + bytes([0])
+    return bytes([TTI_PRO, 6, 5, 4, 3, 2, 1, 0]) + b'python' + bytes([0])
 
 
 def encode_fast_auth(Pro: bytes, Dty: bytes, Sess: bytes) -> bytes:
@@ -3058,11 +4010,14 @@ def encode_fast_auth(Pro: bytes, Dty: bytes, Sess: bytes) -> bytes:
         <DTY message>            (its caps array still advertises the real fv)
         <OSESSKEY message>
     """
-    return (bytes([TNS_MSG_TYPE_FAST_AUTH, 1, TNS_SERVER_CONVERTS_CHARS, 0])
-            + Pro
-            + b"\x00\x00\x00\x00\x00"
-            + bytes([FIELD_VERSION_19_1_EXT1])
-            + Dty + Sess)
+    return (
+        bytes([TNS_MSG_TYPE_FAST_AUTH, 1, TNS_SERVER_CONVERTS_CHARS, 0])
+        + Pro
+        + b'\x00\x00\x00\x00\x00'
+        + bytes([FIELD_VERSION_19_1_EXT1])
+        + Dty
+        + Sess
+    )
 
 
 def find_fast_auth_rpa(Body: bytes) -> int:
@@ -3074,24 +4029,28 @@ def find_fast_auth_rpa(Body: bytes) -> int:
         if Body[Off] != TTI_RPA:
             continue
         try:
-            Result = decode_token_rpa(Body[Off + 1:], ())
+            Result = decode_token_rpa(Body[Off + 1 :], ())
         except Exception:
             continue
         if Result[0] == TTI_SESS and Result[1]:
             return Off
     return -1
 
+
 def encode_dictionary_sess(Dictionary: dict) -> bytes:
     Tseq = Dictionary['seq']
-    Hostname = encode_kv(b"AUTH_MACHINE", socket.gethostname().encode('utf-8'))
-    Pid = encode_kv(b"AUTH_PID", str(os.getpid()).encode('utf-8'))
+    Hostname = encode_kv(b'AUTH_MACHINE', socket.gethostname().encode('utf-8'))
+    Pid = encode_kv(b'AUTH_PID', str(os.getpid()).encode('utf-8'))
     User = Dictionary['env']['user'].encode('utf-8')
-    SID = encode_kv(b"AUTH_SID", Dictionary['env']['user'].encode('utf-8'))
+    SID = encode_kv(b'AUTH_SID', Dictionary['env']['user'].encode('utf-8'))
     UserLen = encode_sb4(len(Dictionary['env']['user']))
     Role = Dictionary['env'].get('role', 0)
     Prelim = Dictionary['env'].get('prelim', 0)
-    LogonMode = encode_sb4( (Role * 32) | (Prelim * 128) | 1 )
-    AppName = encode_kv(b"AUTH_PROGRAM_NM", Dictionary['env'].get('app_name', "pyoracle").encode('utf-8'))
+    LogonMode = encode_sb4((Role * 32) | (Prelim * 128) | 1)
+    AppName = encode_kv(
+        b'AUTH_PROGRAM_NM',
+        Dictionary['env'].get('app_name', 'pyoracle').encode('utf-8'),
+    )
 
     FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
     if FieldVersion >= FIELD_VERSION_12_1:
@@ -3100,13 +4059,37 @@ def encode_dictionary_sess(Dictionary: dict) -> bytes:
         # pair count is 5, leading with AUTH_TERMINAL. 11g instead reads the
         # username by the earlier UserLen field and sends 4 pairs; sending the
         # 12c shape to 11g (or vice-versa) desyncs the server's parse.
-        Terminal = encode_kv(b"AUTH_TERMINAL", b"unknown")
+        Terminal = encode_kv(b'AUTH_TERMINAL', b'unknown')
         UserField = bytes([len(User)]) + User
-        return (bytes([TTI_FUN, TTI_SESS, Tseq, 1]) + UserLen + LogonMode
-                + bytes([1]) + encode_sb4(5) + bytes([1, 1]) + UserField
-                + Terminal + AppName + Hostname + Pid + SID)
+        return (
+            bytes([TTI_FUN, TTI_SESS, Tseq, 1])
+            + UserLen
+            + LogonMode
+            + bytes([1])
+            + encode_sb4(5)
+            + bytes([1, 1])
+            + UserField
+            + Terminal
+            + AppName
+            + Hostname
+            + Pid
+            + SID
+        )
 
-    return bytes([TTI_FUN, TTI_SESS, Tseq, 1]) + UserLen + LogonMode + bytes([1]) + encode_sb4(4) + bytes([1, 1]) + User + AppName + Hostname + Pid + SID
+    return (
+        bytes([TTI_FUN, TTI_SESS, Tseq, 1])
+        + UserLen
+        + LogonMode
+        + bytes([1])
+        + encode_sb4(4)
+        + bytes([1, 1])
+        + User
+        + AppName
+        + Hostname
+        + Pid
+        + SID
+    )
+
 
 # Pre-10g (9i) thin authentication uses O3LOGON: TTI_3LOGA (0x52) to fetch the
 # session key, then TTI_3LOGON (0x51) to send the password (#90). The OSESSKEY
@@ -3116,36 +4099,56 @@ def encode_dictionary_sess(Dictionary: dict) -> bytes:
 # (verified — see tests/test_tns_encode.py). The terminal/machine/osuser/program
 # strings are session metadata the server does not authenticate on, so we send
 # the same values JDBC does; only the username and (phase two) the password vary.
-_O3_ENV = b"unknown" + b"o9i" + b"root" + b"JDBC Thin Client"
+_O3_ENV = b'unknown' + b'o9i' + b'root' + b'JDBC Thin Client'
 # Fixed header skeleton between the length fields and the string blob, captured
 # from JDBC (it bakes in the env-string lengths above).
-_O3_MID1 = bytes.fromhex("00000000000001010701010301010402100000000101100000000001011001")
-_O3_MID2 = bytes.fromhex("0000000001010701010301010402100000000101100000000000011000")
+_O3_MID1 = bytes.fromhex(
+    '00000000000001010701010301010402100000000101100000000001011001'
+)
+_O3_MID2 = bytes.fromhex('0000000001010701010301010402100000000101100000000000011000')
+
 
 def encode_o3logon_phase1(Seq: int, User: bytes) -> bytes:
     # TTI_3LOGA: request the session key. No password field.
-    return (bytes([TTI_FUN, TTI_3LOGA, Seq, 1]) + encode_sb4(len(User))
-            + _O3_MID1 + User + _O3_ENV)
+    return (
+        bytes([TTI_FUN, TTI_3LOGA, Seq, 1])
+        + encode_sb4(len(User))
+        + _O3_MID1
+        + User
+        + _O3_ENV
+    )
+
 
 def encode_o3logon_phase2(Seq: int, User: bytes, PwdField: bytes) -> bytes:
     # TTI_3LOGON: send the AUTH_PASSWORD (hex(DES blocks) + decimal pad count).
-    return (bytes([TTI_FUN, TTI_3LOGON, Seq, 1]) + encode_sb4(len(User))
-            + bytes([1]) + encode_sb4(len(PwdField)) + _O3_MID2
-            + User + PwdField + _O3_ENV)
+    return (
+        bytes([TTI_FUN, TTI_3LOGON, Seq, 1])
+        + encode_sb4(len(User))
+        + bytes([1])
+        + encode_sb4(len(PwdField))
+        + _O3_MID2
+        + User
+        + PwdField
+        + _O3_ENV
+    )
+
 
 def encode_dictionary_spfp(Dictionary: dict) -> bytes:
     Tseq = Dictionary['seq']
     return bytes([TTI_FUN, TTI_SPFP, Tseq, 1, 1, 100, 1, 1, 0, 0, 0, 0, 0])
+
 
 def encode_dictionary_start(Dictionary: dict) -> bytes:
     Tseq = Dictionary['seq']
     Request = encode_sb4(Dictionary['req'])
     return bytes([TTI_FUN, TTI_STRT, Tseq]) + Request + bytes([1])
 
+
 def encode_dictionary_stop(Dictionary: dict) -> bytes:
     Tseq = Dictionary['seq']
     Request = encode_sb4(Dictionary['req'])
     return bytes([TTI_FUN, TTI_STOP, Tseq]) + Request + bytes([1])
+
 
 def encode_dictionary_tran(Dictionary: dict) -> bytes:
     Request = Dictionary['req']
@@ -3153,15 +4156,19 @@ def encode_dictionary_tran(Dictionary: dict) -> bytes:
     FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
     return _fun_header(Request, Tseq, FieldVersion)
 
+
 ##
 ## Decoders/Encoders for base types
 ##
 
-def set_opts(Type: str, Flag: int, Id: int, Len: int, Param: int) -> tuple[int, int, int, list[int]]:
+
+def set_opts(
+    Type: str, Flag: int, Id: int, Len: int, Param: int
+) -> tuple[int, int, int, list[int]]:
     P0 = 32768
     P1 = (Id * 8) | (Param * 256)
     P2 = 0
-    P3 = 2147483647 # 2^^31-1
+    P3 = 2147483647  # 2^^31-1
 
     if Type == 'fetch':
         P1 = (Id * 16) | 64
@@ -3170,8 +4177,8 @@ def set_opts(Type: str, Flag: int, Id: int, Len: int, Param: int) -> tuple[int, 
         P1 = (Id * 8) | 64
         All8 = set_opts_all8(Flag, Param, 1)
     elif (Type == 'select') and (Flag == 1):
-        P1 = (Id * 8)
-        P2 = 4294967295 # 2**32-1
+        P1 = Id * 8
+        P2 = 4294967295  # 2**32-1
         All8 = set_opts_all8(Flag, 0, 1)
     elif Type == 'change':
         All8 = set_opts_all8(Flag, 1 + Len, 0)
@@ -3180,7 +4187,7 @@ def set_opts(Type: str, Flag: int, Id: int, Len: int, Param: int) -> tuple[int, 
         All8 = set_opts_all8(Flag, 1, 0)
     elif Type == 'block':
         P0 = 1024
-        P3 = 32760 # (2**15-1)^(2**3-1)
+        P3 = 32760  # (2**15-1)^(2**3-1)
         All8 = set_opts_all8(Flag, 1, 0)
     else:
         raise Exception("Can't set opts", (Type, Flag, Id, Len, Param))
@@ -3189,8 +4196,10 @@ def set_opts(Type: str, Flag: int, Id: int, Len: int, Param: int) -> tuple[int, 
     # SELECT / DML / PL/SQL-block / array-DML execs.
     return (Flag ^ 32 ^ P0 | P1, P2, P3, All8)
 
+
 def set_opts_all8(Opts: int, Fetch: int, Type: int) -> list[int]:
-    return [Opts,Fetch,0,0,0,0,0,Type,0,0,0,0,0]
+    return [Opts, Fetch, 0, 0, 0, 0, 0, Type, 0, 0, 0, 0, 0]
+
 
 def decode_ub4(Bytes: bytes) -> tuple[int, bytes]:
     # Variable-length integer (PROTOCOL.md §12.1): a length byte, then that many
@@ -3200,11 +4209,11 @@ def decode_ub4(Bytes: bytes) -> tuple[int, bytes]:
     # NUMBER scale -127 as 0x81 0x7f, and -256 as 0x82 0x01 0x00.
     Length = Bytes[0]
     Negative = bool(Length & 0x80)
-    Width = Length & 0x7f
+    Width = Length & 0x7F
     if Width <= 4:
-        Magnitude = int.from_bytes(Bytes[1:Width + 1], 'big')
+        Magnitude = int.from_bytes(Bytes[1 : Width + 1], 'big')
         Value = -Magnitude if Negative else Magnitude
-        return (Value, Bytes[Width + 1:])
+        return (Value, Bytes[Width + 1 :])
     # Width 5..0x7f is not a valid 1..4-byte integer. In practice the only field
     # that reaches here is a raw ub2 / counter that decode_token_oer reads through
     # this function (its leading byte is frequently 5..255); the historic
@@ -3214,6 +4223,7 @@ def decode_ub4(Bytes: bytes) -> tuple[int, bytes]:
     # version that raised here crashed plain
     # "SELECT level FROM dual CONNECT BY level <= 50" (#24).
     return (-Bytes[1], Bytes[2:])
+
 
 def encode_sb4(Val: int) -> bytes:
     Bytes = struct.Struct('>I').pack(Val)
@@ -3232,6 +4242,7 @@ def encode_sb4(Val: int) -> bytes:
     # every branch is a value-return for flow analysis.
     raise Exception("Can't encode value", Val)
 
+
 def decode_dalc(Bytes: bytes) -> tuple[bytes | list, bytes]:
     # Data with Attached Length Code (PROTOCOL.md §12.2). 0x00 = empty,
     # 0xFF = null marker (no data follows), 0xFE = chunked, otherwise the
@@ -3244,12 +4255,13 @@ def decode_dalc(Bytes: bytes) -> tuple[bytes | list, bytes]:
         if Bytes[0] == 254:
             return decode_chr(Bytes)
         Length = Bytes[0]
-        return (Bytes[1:Length+1], Bytes[Length+1:])
+        return (Bytes[1 : Length + 1], Bytes[Length + 1 :])
     except IndexError as Exc:
         # A truncated field (empty Bytes, or a chunk length in decode_chr that
         # runs past the buffer) indexes out of range; surface as DataError
         # rather than leaking a raw IndexError (#230).
         raise DataError('truncated DALC field') from Exc
+
 
 def decode_chr(Bytes: bytes) -> tuple[bytes, bytes]:
     if Bytes[0] == 254:
@@ -3257,9 +4269,9 @@ def decode_chr(Bytes: bytes) -> tuple[bytes, bytes]:
         # ends with a zero-length chunk (same framing as _skip_chunked_bytes);
         # 11g uses a single length byte per chunk. The decode field version is
         # set by decode_packet for the current response.
-        if _DECODE_FIELD_VERSION.get() >= 8:        # FIELD_VERSION_12_2
+        if _DECODE_FIELD_VERSION.get() >= 8:  # FIELD_VERSION_12_2
             Rest = Bytes[1:]
-            Out = b""
+            Out = b''
             while True:
                 (ChunkLen, Rest) = decode_ub4(Rest)
                 if ChunkLen == 0:
@@ -3268,20 +4280,21 @@ def decode_chr(Bytes: bytes) -> tuple[bytes, bytes]:
                 Rest = Rest[ChunkLen:]
         j = 1
         i = Bytes[j]
-        Out = b""
+        Out = b''
         while True:
-            Out += Bytes[j+1:i+j+1]
-            if Bytes[i+j+1] == 0:
+            Out += Bytes[j + 1 : i + j + 1]
+            if Bytes[i + j + 1] == 0:
                 break
-            j = i+j+1
+            j = i + j + 1
             i = Bytes[j]
-        return (Out, Bytes[i+j+1+1:])
+        return (Out, Bytes[i + j + 1 + 1 :])
     else:
-        return (Bytes[1:Bytes[0]+1], Bytes[Bytes[0]+1:])
+        return (Bytes[1 : Bytes[0] + 1], Bytes[Bytes[0] + 1 :])
+
 
 def encode_chr(String: str | bytes) -> bytes:
     Bytes = String.encode('utf-8') if isinstance(String, str) else String
-    if _ENCODE_FIELD_VERSION.get() >= 8:        # FIELD_VERSION_12_2
+    if _ENCODE_FIELD_VERSION.get() >= 8:  # FIELD_VERSION_12_2
         # 12c+ bind data follows write_bytes_with_length: a single length byte
         # for values < 254, otherwise the 254 marker + ub4-prefixed chunks.
         # 11g instead chunks anything over 64 bytes with single-byte lengths;
@@ -3289,29 +4302,32 @@ def encode_chr(String: str | bytes) -> bytes:
         return _bytes_with_length(Bytes)
     Length = len(Bytes)
     if Length > 64:
-        Out = b""
+        Out = b''
         i = 0
         while i < Length - 64:
-            Out += bytes([64]) + Bytes[i:i+64]
+            Out += bytes([64]) + Bytes[i : i + 64]
             i += 64
         return bytes([254]) + Out + bytes([Length - i]) + Bytes[i:] + bytes([0])
 
     return bytes([Length]) + Bytes
 
+
 def decode_kv(Data: bytes, Num: int, Acc: list) -> tuple[list, bytes]:
     if Num <= 0 or not Data:
         return (sorted(Acc), Data)
+
     def decode_to_bin(D):
         if D[0] == 0:
             return (bytes([0]), D[1:])
         else:
             (Size, R) = decode_ub4(D)
             if R[0] == Size:
-                return (R[1:1+Size], R[1+Size:])
+                return (R[1 : 1 + Size], R[1 + Size :])
             elif R[0] == 254:
                 return decode_chr(R)
             else:
                 return decode_chr(R)
+
     (Key, R0) = decode_to_bin(Data)
     (Val, R1) = decode_to_bin(R0)
     if Val == bytes([0]):
@@ -3322,14 +4338,17 @@ def decode_kv(Data: bytes, Num: int, Acc: list) -> tuple[list, bytes]:
     Skip = R1[0] + 1
     return decode_kv(R1[Skip:], Num - 1, NewAcc)
 
+
 def encode_kv(Key: bytes, Val: bytes, Padding: int = 0) -> bytes:
     def encode_to_bin(Data):
         Size = len(Data)
         if Size == 0:
             return bytes([0])
         else:
-            return encode_sb4(Size) +  bytes([Size]) + Data
+            return encode_sb4(Size) + bytes([Size]) + Data
+
     return encode_to_bin(Key) + encode_to_bin(Val) + encode_sb4(Padding)
+
 
 def encode_tokens_rxd(Tokens: list, Binary: bytes) -> bytes:
     Out = bytes([TTI_RXD])
@@ -3337,13 +4356,15 @@ def encode_tokens_rxd(Tokens: list, Binary: bytes) -> bytes:
         Out += encode_token_rxd(Token)
     return Binary + Out
 
+
 def encode_tokens_oac(Tokens: list, Binary: bytes) -> bytes:
     # OAC descriptors are emitted bare here (no leading TTI_OAC token byte) —
     # that's what the server expects inside the ALL8 bind section.
-    Out = b""
+    Out = b''
     for Token in Tokens:
         Out += encode_token_oac(Token)
     return Binary + Out
+
 
 def exec_oac_signature(Bind: list, Batch: list) -> bytes:
     # The exact OAC bytes a fresh parse would send for these binds. Used as
@@ -3355,10 +4376,11 @@ def exec_oac_signature(Bind: list, Batch: list) -> bytes:
     # (ORA-01461). Keying the cache on this signature turns such a call into a
     # cache miss, forcing a re-parse with a correctly-sized OAC.
     if not Bind:
-        return b""
+        return b''
     if Batch:
-        return encode_tokens_oac(_oac_rep_row([Bind] + Batch), b"")
-    return encode_tokens_oac(Bind, b"")
+        return encode_tokens_oac(_oac_rep_row([Bind] + Batch), b'')
+    return encode_tokens_oac(Bind, b'')
+
 
 def encode_token_rxd(Token: object) -> bytes:
     if isinstance(Token, Var):
@@ -3373,11 +4395,10 @@ def encode_token_rxd(Token: object) -> bytes:
                 Out += encode_token_rxd(Element)
             return Out
         if Token.dbtype.tns_type == TNS_TYPE_REFCURSOR:
-            return bytes([1, 0])            # REF CURSOR slot placeholder
+            return bytes([1, 0])  # REF CURSOR slot placeholder
         if Token._value is None:
             return bytes([0])
-        if (getattr(Token.dbtype, 'csfrm', 1) == 2
-                and isinstance(Token._value, str)):
+        if getattr(Token.dbtype, 'csfrm', 1) == 2 and isinstance(Token._value, str):
             # National-charset bind (NVARCHAR2 / NCHAR, #174): the value rides as
             # AL16UTF16 (UTF-16 big-endian), independent of the DB charset.
             # encode_chr length-frames the raw bytes (it only re-encodes str).
@@ -3387,11 +4408,15 @@ def encode_token_rxd(Token: object) -> bytes:
         # Temp-LOB locator bind (#91): the LOB-descriptor prefix `01 28 28`
         # (shared with the native VECTOR / JSON binds), a ub2 locator length,
         # then the locator bytes. Verified against python-oracledb on 21c.
-        return (bytes.fromhex("012828") + struct.pack(">H", len(Token.locator))
-                + Token.locator)
+        return (
+            bytes.fromhex('012828')
+            + struct.pack('>H', len(Token.locator))
+            + Token.locator
+        )
     if Token is None:
         return bytes([0])
     from oracle.dbobject import DbObject, DbRef
+
     if isinstance(Token, DbObject):
         # SQL OBJECT (ADT) bind (#116): the write_dbobject framing + image.
         return _encode_object_bind_value(Token)
@@ -3414,7 +4439,7 @@ def encode_token_rxd(Token: object) -> bytes:
         # `02 01 <0/1>` (TRUE = 01 01, FALSE = 01 00; captured from
         # python-oracledb). Pre-23ai servers have no BOOLEAN type, so fall back
         # to the historical NUMBER 0/1 binding there (bool is an int subclass).
-        if _ENCODE_FIELD_VERSION.get() >= 17:    # FIELD_VERSION_23_1
+        if _ENCODE_FIELD_VERSION.get() >= 17:  # FIELD_VERSION_23_1
             return bytes([2, 1, 1 if Token else 0])
         Bytes = encode_token_num(int(Token))
         return bytes([len(Bytes)]) + Bytes
@@ -3471,7 +4496,8 @@ def encode_token_rxd(Token: object) -> bytes:
             datetime.datetime(Token.year, Token.month, Token.day)
         )
         return bytes([len(Bytes)]) + Bytes
-    raise Exception("Unknown RXD token", Token)
+    raise Exception('Unknown RXD token', Token)
+
 
 def encode_token_oac(Token: object) -> bytes:
     # The OAC field tells the server the maximum size we *might* send for
@@ -3491,13 +4517,15 @@ def encode_token_oac(Token: object) -> bytes:
         # National (csfrm 2) char Vars declare AL16UTF16 so encode_token_raw
         # sets csfrm 2 and the value rides as UTF-16BE (#174); ordinary char
         # Vars keep AL32UTF8.
-        CharCs = (AL16UTF16_CHARSET if getattr(Token.dbtype, 'csfrm', 1) == 2
-                  else AL32UTF8_CHARSET)
+        CharCs = (
+            AL16UTF16_CHARSET
+            if getattr(Token.dbtype, 'csfrm', 1) == 2
+            else AL32UTF8_CHARSET
+        )
         if DT == TNS_TYPE_NUMBER:
             return encode_token_raw(TNS_TYPE_NUMBER, 22, 0, 0, 0, A)
         if DT == TNS_TYPE_VARCHAR:
-            return encode_token_raw(TNS_TYPE_VARCHAR, Token.size, 16,
-                                    CharCs, 0, A)
+            return encode_token_raw(TNS_TYPE_VARCHAR, Token.size, 16, CharCs, 0, A)
         if DT == TNS_TYPE_CHAR:
             return encode_token_raw(TNS_TYPE_CHAR, Token.size, 16, CharCs, 0, A)
         if DT == TNS_TYPE_RAW:
@@ -3518,7 +4546,7 @@ def encode_token_oac(Token: object) -> bytes:
             return encode_token_raw(TNS_TYPE_INTERVALYM, 5, 0, 0, 0, A)
         if DT == TNS_TYPE_REFCURSOR:
             return encode_token_raw(TNS_TYPE_REFCURSOR, 1, 0, UTF8_CHARSET, 0)
-        raise Exception("Unsupported Var OAC type", DT)
+        raise Exception('Unsupported Var OAC type', DT)
     if isinstance(Token, TempLob):
         # Temp-LOB locator bind (#91): a CLOB / BLOB OAC carrying the LOB
         # cont-flag 0x02000000 (the same flag the native VECTOR / JSON OACs
@@ -3527,20 +4555,24 @@ def encode_token_oac(Token: object) -> bytes:
         DT = TNS_TYPE_BLOB if Token.is_blob else TNS_TYPE_CLOB
         Charset = 0 if Token.is_blob else AL32UTF8_CHARSET
         Csfrm = 0 if Token.is_blob else 1
-        return (bytes([DT, 1, 0, 0]) + encode_sb4(Token.oac_size)
-                + encode_sb4(0)                # max number of array elements
-                + encode_sb4(0x02000000)       # cont flag (ub8) — LOB
-                + encode_sb4(0)                # OID
-                + encode_sb4(0)                # version
-                + encode_sb4(Charset)          # charset id (ub2)
-                + bytes([Csfrm])               # character set form
-                + encode_sb4(0)                # LOB prefetch length
-                + encode_sb4(0))               # oaccolid (12.2+)
+        return (
+            bytes([DT, 1, 0, 0])
+            + encode_sb4(Token.oac_size)
+            + encode_sb4(0)  # max number of array elements
+            + encode_sb4(0x02000000)  # cont flag (ub8) — LOB
+            + encode_sb4(0)  # OID
+            + encode_sb4(0)  # version
+            + encode_sb4(Charset)  # charset id (ub2)
+            + bytes([Csfrm])  # character set form
+            + encode_sb4(0)  # LOB prefetch length
+            + encode_sb4(0)
+        )  # oaccolid (12.2+)
     if Token is None:
         # NULL value (0 bytes): a minimal VARCHAR OAC, again avoiding the
         # 32767 LONG-reorder swap when a NULL bind precedes another bind.
         return encode_token_raw(TNS_TYPE_VARCHAR, 1, 16, AL32UTF8_CHARSET, 0)
     from oracle.dbobject import DbObject, DbRef
+
     if isinstance(Token, DbObject):
         # SQL OBJECT (ADT) bind OAC (#116): type 109 + the type's OID + version.
         return _encode_object_oac(Token)
@@ -3553,6 +4585,7 @@ def encode_token_oac(Token: object) -> bytes:
         # encode_token_rxd.
         if _json_oson_image(Token) is not None:
             from oracle.oson import JSON_BIND_OAC
+
             return JSON_BIND_OAC
         Token = _json_bind_text(Token)
     elif is_vector_bind(Token):
@@ -3572,7 +4605,7 @@ def encode_token_oac(Token: object) -> bytes:
         # Native BOOLEAN OAC on 23ai (#54): type 252, fixed size 4 (matches
         # python-oracledb's `fc 01 00 00 01 04 …`). Pre-23ai falls back to the
         # NUMBER OAC, pairing with the NUMBER value in encode_token_rxd.
-        if _ENCODE_FIELD_VERSION.get() >= 17:    # FIELD_VERSION_23_1
+        if _ENCODE_FIELD_VERSION.get() >= 17:  # FIELD_VERSION_23_1
             return encode_token_raw(TNS_TYPE_BOOLEAN, 4, 0, 0, 0)
         return encode_token_raw(TNS_TYPE_NUMBER, 22, 0, 0, 0)
     if isinstance(Token, (int, float, complex, Decimal)):
@@ -3589,8 +4622,12 @@ def encode_token_oac(Token: object) -> bytes:
         # 4000 bytes still gets the larger size (and the LONG handling) it
         # needs for the ~7 KiB regular-path CLOB case.
         return encode_token_raw(
-            TNS_TYPE_VARCHAR, max(len(Token.encode('utf-8')), 1), 16,
-            AL32UTF8_CHARSET, 0)
+            TNS_TYPE_VARCHAR,
+            max(len(Token.encode('utf-8')), 1),
+            16,
+            AL32UTF8_CHARSET,
+            0,
+        )
     if isinstance(Token, (bytes, bytearray)):
         # Bind as RAW so arbitrary byte sequences (non-UTF8, control bytes,
         # 0x80+) round-trip verbatim into RAW / BLOB columns. Size to the
@@ -3612,7 +4649,8 @@ def encode_token_oac(Token: object) -> bytes:
         return encode_token_raw(TNS_TYPE_DATE, 7, 0, 0, 0)
     if isinstance(Token, datetime.date):
         return encode_token_raw(TNS_TYPE_DATE, 7, 0, 0, 0)
-    raise Exception("Unknown OAC token", Token)
+    raise Exception('Unknown OAC token', Token)
+
 
 def encode_token_decimal(Value: Decimal) -> bytes:
     # The base-100 NUMBER encoder works on int and float; route Decimal through
@@ -3623,21 +4661,23 @@ def encode_token_decimal(Value: Decimal) -> bytes:
         return encode_token_num(int(Value))
     return encode_token_num(float(Value))
 
+
 # --- SQL OBJECT (ADT) bind encode (#116) — the inverse of _read_object_column
 # and the #115 image walk. Mirrors python-oracledb's write_dbobject /
 # _get_packed_data / _pack_value / create_new_object.
 
-_OBJ_IMAGE_FLAGS = 0x84             # IS_VERSION_81 (0x80) | NO_PREFIX_SEG (0x04)
+_OBJ_IMAGE_FLAGS = 0x84  # IS_VERSION_81 (0x80) | NO_PREFIX_SEG (0x04)
 _OBJ_IMAGE_FLAGS_COLLECTION = 0x88  # IS_VERSION_81 (0x80) | IS_COLLECTION (0x08)
 _OBJ_IMAGE_VERSION = 1
 _OBJ_TOP_LEVEL = 0x01
-_OBJ_NULL_ATTR = 255               # TNS_NULL_LENGTH_INDICATOR
-_OBJ_LONG_LEN = 254                # TNS_LONG_LENGTH_INDICATOR
-_OBJ_MAX_SHORT_LEN = 245           # TNS_OBJ_MAX_SHORT_LENGTH
+_OBJ_NULL_ATTR = 255  # TNS_NULL_LENGTH_INDICATOR
+_OBJ_LONG_LEN = 254  # TNS_LONG_LENGTH_INDICATOR
+_OBJ_MAX_SHORT_LEN = 245  # TNS_OBJ_MAX_SHORT_LENGTH
 # toid wrapper for a new object: 00 22 (NON_NULL_OID | HAS_EXTENT_OID) + oid +
 # the fixed extent OID (python-oracledb create_new_object).
 _OBJ_TOID_PREFIX = bytes([0x00, 0x22, 0x02, 0x08])
 _OBJ_EXTENT_OID = bytes.fromhex('00000000000000000000000000010001')
+
 
 def _obj_write_length(Length: int) -> bytes:
     # python-oracledb DbObjectPickleBuffer.write_length.
@@ -3645,12 +4685,14 @@ def _obj_write_length(Length: int) -> bytes:
         return bytes([Length])
     return bytes([_OBJ_LONG_LEN]) + struct.pack('>I', Length)
 
+
 def _obj_two_lengths(Value: bytes) -> bytes:
     # write_bytes_with_two_lengths: a ub4 count, then (for a non-empty value)
     # the length-prefixed bytes. An empty value is just the zero count.
     if not Value:
         return encode_sb4(0)
     return encode_sb4(len(Value)) + _bytes_with_length(Value)
+
 
 def _encode_object_attr(DataType: int, Charset: int, Value: Any) -> bytes:
     # The raw scalar bytes for one attribute — the same on-wire encoding the
@@ -3668,8 +4710,12 @@ def _encode_object_attr(DataType: int, Charset: int, Value: Any) -> bytes:
         return encode_token_num(Value)
     if DataType in (TNS_TYPE_RAW, TNS_TYPE_LONGRAW):
         return bytes(Value)
-    if DataType in (TNS_TYPE_DATE, TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ,
-                    TNS_TYPE_TIMESTAMPLTZ):
+    if DataType in (
+        TNS_TYPE_DATE,
+        TNS_TYPE_TIMESTAMP,
+        TNS_TYPE_TIMESTAMPTZ,
+        TNS_TYPE_TIMESTAMPLTZ,
+    ):
         if isinstance(Value, date):
             return encode_token_date(Value)
         return encode_token_datetime(Value)
@@ -3685,6 +4731,7 @@ def _encode_object_attr(DataType: int, Charset: int, Value: Any) -> bytes:
         return bytes(Value)
     return str(Value).encode('utf-8')
 
+
 def _encode_object_attr_field(DataType: int, Charset: int, Value: Any) -> bytes:
     # One image field: a single 0xFF for NULL, else the write_length-prefixed
     # raw scalar bytes.
@@ -3693,7 +4740,8 @@ def _encode_object_attr_field(DataType: int, Charset: int, Value: Any) -> bytes:
     Raw = _encode_object_attr(DataType, Charset or AL32UTF8_CHARSET, Value)
     return _obj_write_length(len(Raw)) + Raw
 
-def encode_object_image(Obj: "DbObject") -> bytes:
+
+def encode_object_image(Obj: 'DbObject') -> bytes:
     # Pack a DbObject into its image. For an object: header (flags, version,
     # long-form length backpatched) then each attribute length-prefixed in
     # declaration order. For a collection (#117/#118): the header also carries a
@@ -3705,65 +4753,81 @@ def encode_object_image(Obj: "DbObject") -> bytes:
         Element = Typ.element or {}
         Charset = Element.get('charset') or AL32UTF8_CHARSET
         DataType = Element.get('data_type')
-        Body = bytes([0])                         # collection flags
+        Body = bytes([0])  # collection flags
         Body += _obj_write_length(len(Obj._elements))
         for Value in Obj._elements:
             Body += _encode_object_attr_field(cast(int, DataType), Charset, Value)
         # Collection header = flags, version, long-form length, prefix seg (01 01).
         Total = 9 + len(Body)
-        return (bytes([_OBJ_IMAGE_FLAGS_COLLECTION, _OBJ_IMAGE_VERSION,
-                       _OBJ_LONG_LEN]) + struct.pack('>I', Total)
-                + bytes([1, 1]) + Body)
-    Body = b""
+        return (
+            bytes([_OBJ_IMAGE_FLAGS_COLLECTION, _OBJ_IMAGE_VERSION, _OBJ_LONG_LEN])
+            + struct.pack('>I', Total)
+            + bytes([1, 1])
+            + Body
+        )
+    Body = b''
     for Attr in Typ.attrs:
         Body += _encode_object_attr_field(
-            Attr.get('data_type'), Attr.get('charset') or AL32UTF8_CHARSET,
-            Obj._attrs.get(Attr['name']))
+            Attr.get('data_type'),
+            Attr.get('charset') or AL32UTF8_CHARSET,
+            Obj._attrs.get(Attr['name']),
+        )
     # Header length is written long-form (0xFE + ub4) and covers the whole image
     # (the 7-byte header included), matching python-oracledb write_header.
     Total = 7 + len(Body)
-    return (bytes([_OBJ_IMAGE_FLAGS, _OBJ_IMAGE_VERSION, _OBJ_LONG_LEN])
-            + struct.pack('>I', Total) + Body)
+    return (
+        bytes([_OBJ_IMAGE_FLAGS, _OBJ_IMAGE_VERSION, _OBJ_LONG_LEN])
+        + struct.pack('>I', Total)
+        + Body
+    )
 
-def _encode_object_bind_value(Obj: "DbObject") -> bytes:
+
+def _encode_object_bind_value(Obj: 'DbObject') -> bytes:
     # The bind value framing (python-oracledb write_dbobject): the constructed
     # toid, an empty object OID, zero snapshot/version, the image length, the
     # TOP_LEVEL flags, then the image.
     Typ = Obj._dbtype
     Toid = _OBJ_TOID_PREFIX + Typ.oid + _OBJ_EXTENT_OID
     Image = encode_object_image(Obj)
-    return (_obj_two_lengths(Toid)
-            + _obj_two_lengths(b"")              # object OID (empty for new)
-            + encode_sb4(0)                       # snapshot
-            + encode_sb4(0)                       # version
-            + encode_sb4(len(Image))              # image length
-            + encode_sb4(_OBJ_TOP_LEVEL)          # flags
-            + _bytes_with_length(Image))          # the image
+    return (
+        _obj_two_lengths(Toid)
+        + _obj_two_lengths(b'')  # object OID (empty for new)
+        + encode_sb4(0)  # snapshot
+        + encode_sb4(0)  # version
+        + encode_sb4(len(Image))  # image length
+        + encode_sb4(_OBJ_TOP_LEVEL)  # flags
+        + _bytes_with_length(Image)
+    )  # the image
 
-def _encode_object_oac(Obj: "DbObject") -> bytes:
+
+def _encode_object_oac(Obj: 'DbObject') -> bytes:
     # The bind OAC for an object (type 109): the 12c+ metadata layout injecting
     # the type's 16-byte OID + version (precision/scale 0, no charset). Mirrors
     # python-oracledb _write_column_metadata's object branch. 12c+ only — pre-12c
     # object binds are gated in the cursor (no thin reference for that OAC).
     Typ = Obj._dbtype
     Image = encode_object_image(Obj)
-    return (bytes([TNS_TYPE_ADT, 1, 0, 0])        # type, flag (USE_INDICATORS), p, s
-            + encode_sb4(len(Image))              # buffer size
-            + encode_sb4(0)                       # max number of array elements
-            + encode_sb4(0)                       # cont flag (ub8)
-            + _obj_two_lengths(Typ.oid)           # type OID (16 bytes)
-            + encode_sb4(Typ.version)             # type version
-            + encode_sb4(0)                       # charset id (ub2)
-            + bytes([0])                          # character set form
-            + encode_sb4(0)                       # LOB prefetch length
-            + encode_sb4(0))                      # oaccolid (12.2+)
+    return (
+        bytes([TNS_TYPE_ADT, 1, 0, 0])  # type, flag (USE_INDICATORS), p, s
+        + encode_sb4(len(Image))  # buffer size
+        + encode_sb4(0)  # max number of array elements
+        + encode_sb4(0)  # cont flag (ub8)
+        + _obj_two_lengths(Typ.oid)  # type OID (16 bytes)
+        + encode_sb4(Typ.version)  # type version
+        + encode_sb4(0)  # charset id (ub2)
+        + bytes([0])  # character set form
+        + encode_sb4(0)  # LOB prefetch length
+        + encode_sb4(0)
+    )  # oaccolid (12.2+)
+
 
 # Fixed buffer size the REF bind OAC advertises (matches the Oracle JDBC thin
 # reference capture; the locator is self-describing so the exact value is not
 # load-bearing).
 _REF_OAC_BUFFER_SIZE = 4000
 
-def _encode_ref_oac(Ref: "DbRef") -> bytes:
+
+def _encode_ref_oac(Ref: 'DbRef') -> bytes:
     # The bind OAC for a REF (type 111, #139). Same 12c+ ADT-style metadata as
     # _encode_object_oac but with the REF type code and the *referenced* type's
     # 16-byte OID. Byte-for-byte from the Oracle JDBC thin reference (oracledb
@@ -3771,31 +4835,38 @@ def _encode_ref_oac(Ref: "DbRef") -> bytes:
     # the DbRef from its describe (#119); without it we cannot build the OAC.
     if Ref.type_oid is None:
         from oracle.exceptions import NotSupportedError
-        raise NotSupportedError(
-            "cannot bind a REF without its referenced type OID; the value must "
-            "come from a fetched DbRef whose describe carried the type identity")
-    return (bytes([TNS_TYPE_REF, 3, 0, 0])        # type 111, flag, prec, scale
-            + encode_sb4(_REF_OAC_BUFFER_SIZE)    # buffer size
-            + encode_sb4(0)                       # max number of array elements
-            + encode_sb4(0)                       # cont flag (ub8)
-            + _obj_two_lengths(Ref.type_oid)      # referenced type OID (16 bytes)
-            + encode_sb4(1)                       # type version
-            + encode_sb4(2)                       # charset id (ub2) — per capture
-            + bytes([0])                          # character set form
-            + encode_sb4(0)                       # LOB prefetch length
-            + encode_sb4(0))                      # oaccolid (12.2+)
 
-def _encode_ref_bind_value(Ref: "DbRef") -> bytes:
+        raise NotSupportedError(
+            'cannot bind a REF without its referenced type OID; the value must '
+            'come from a fetched DbRef whose describe carried the type identity'
+        )
+    return (
+        bytes([TNS_TYPE_REF, 3, 0, 0])  # type 111, flag, prec, scale
+        + encode_sb4(_REF_OAC_BUFFER_SIZE)  # buffer size
+        + encode_sb4(0)  # max number of array elements
+        + encode_sb4(0)  # cont flag (ub8)
+        + _obj_two_lengths(Ref.type_oid)  # referenced type OID (16 bytes)
+        + encode_sb4(1)  # type version
+        + encode_sb4(2)  # charset id (ub2) — per capture
+        + bytes([0])  # character set form
+        + encode_sb4(0)  # LOB prefetch length
+        + encode_sb4(0)
+    )  # oaccolid (12.2+)
+
+
+def _encode_ref_bind_value(Ref: 'DbRef') -> bytes:
     # The bind value for a REF (#139): just the opaque locator, length-prefixed —
     # the exact inverse of the read path (decode_dalc). Confirmed against the
     # JDBC reference for both an INSERT and a DEREF bind.
     return _bytes_with_length(Ref.bytes)
 
+
 # --- Advanced Queuing (#128) ---
 
 # AQ JSON payload descriptor (#150): the fixed prefix before the ub2 image
 # length / 22 zero bytes / encode_chr(OSON). RE'd from an oracledb-thin capture.
-_AQ_JSON_DESCRIPTOR = bytes.fromhex("012800260004610800000001000000000000")
+_AQ_JSON_DESCRIPTOR = bytes.fromhex('012800260004610800000001000000000000')
+
 
 def _encode_sb4i(Val: int) -> bytes:
     # Signed ub4: non-negative via encode_sb4; negative as 0x80|width then the
@@ -3805,6 +4876,7 @@ def _encode_sb4i(Val: int) -> bytes:
     Mag = (-Val).to_bytes(4, 'big').lstrip(b'\x00') or b'\x00'
     return bytes([0x80 | len(Mag)]) + Mag
 
+
 def _aq_value_with_length(Value) -> bytes:
     # write_value_with_length: None -> ub4 0; else write_bytes_with_two_lengths.
     if Value is None:
@@ -3813,11 +4885,16 @@ def _aq_value_with_length(Value) -> bytes:
         Value = Value.encode('utf-8')
     return _obj_two_lengths(bytes(Value))
 
+
 def _aq_kv_pair(Text, Binary, Keyword: int) -> bytes:
     # write_keyword_value_pair: the text value, the binary value, then the ub2
     # keyword (each value length-prefixed; None -> ub4 0).
-    return (_aq_value_with_length(Text) + _aq_value_with_length(Binary)
-            + encode_sb4(Keyword))
+    return (
+        _aq_value_with_length(Text)
+        + _aq_value_with_length(Binary)
+        + encode_sb4(Keyword)
+    )
+
 
 def _aq_write_msg_props(Props, FieldVersion: int) -> bytes:
     # write_msg_props (aq_base): priority/delay/expiration, correlation,
@@ -3828,24 +4905,25 @@ def _aq_write_msg_props(Props, FieldVersion: int) -> bytes:
     Out += encode_sb4(Props.delay)
     Out += _encode_sb4i(Props.expiration)
     Out += _aq_value_with_length(Props.correlation)
-    Out += encode_sb4(0)                            # number of attempts
+    Out += encode_sb4(0)  # number of attempts
     Out += _aq_value_with_length(Props.exceptionq)
     Out += encode_sb4(Props.state)
-    Out += encode_sb4(0)                            # enqueue time length
+    Out += encode_sb4(0)  # enqueue time length
     Out += _aq_value_with_length(Props.enq_txn_id)
-    Out += encode_sb4(4)                            # number of extensions
-    Out += bytes([0x0e])                            # unknown extra byte
+    Out += encode_sb4(4)  # number of extensions
+    Out += bytes([0x0E])  # unknown extra byte
     Out += _aq_kv_pair(None, None, TNS_AQ_EXT_KEYWORD_AGENT_NAME)
     Out += _aq_kv_pair(None, None, TNS_AQ_EXT_KEYWORD_AGENT_ADDRESS)
     Out += _aq_kv_pair(None, b'\x00', TNS_AQ_EXT_KEYWORD_AGENT_PROTOCOL)
     Out += _aq_kv_pair(None, None, TNS_AQ_EXT_KEYWORD_ORIGINAL_MSGID)
-    Out += encode_sb4(0)                            # user property
-    Out += encode_sb4(0)                            # cscn
-    Out += encode_sb4(0)                            # dscn
-    Out += encode_sb4(0)                            # flags
+    Out += encode_sb4(0)  # user property
+    Out += encode_sb4(0)  # cscn
+    Out += encode_sb4(0)  # dscn
+    Out += encode_sb4(0)  # flags
     if FieldVersion >= FIELD_VERSION_21_1:
-        Out += encode_sb4(0xFFFFFFFF)               # shard id
+        Out += encode_sb4(0xFFFFFFFF)  # shard id
     return Out
+
 
 def _aq_write_payload(Queue, Props) -> bytes:
     # The payload bytes: JSON (OSON), a SQL object image, or RAW bytes.
@@ -3856,70 +4934,80 @@ def _aq_write_payload(Queue, Props) -> bytes:
         # it's the native-LOB value form (#70) but with a slightly different
         # descriptor than VECTOR_BIND_DESCRIPTOR (no second 0x28 byte).
         from oracle.oson import encode_oson
+
         Oson = encode_oson(Props.payload)
         # _bytes_with_length (the 12c+ single-byte/0xFE-chunked form) -- NOT
         # encode_chr, whose 11g branch chunks at 64 bytes when the encode field
         # version isn't set in this context and desyncs the server (ORA-03120).
-        return (_AQ_JSON_DESCRIPTOR + len(Oson).to_bytes(2, "big")
-                + b"\x00" * 22 + _bytes_with_length(Oson))
+        return (
+            _AQ_JSON_DESCRIPTOR
+            + len(Oson).to_bytes(2, 'big')
+            + b'\x00' * 22
+            + _bytes_with_length(Oson)
+        )
     if Queue.payload_type is not None:
         return _encode_object_bind_value(Props.payload)
-    Payload = Props.payload if Props.payload is not None else b""
+    Payload = Props.payload if Props.payload is not None else b''
     if isinstance(Payload, str):
         Payload = Payload.encode('utf-8')
     return bytes(Payload)
+
 
 def encode_aq_enq(Seq: int, FieldVersion: int, Queue, Props) -> bytes:
     # AQ enqueue (TNS_FUNC_AQ_ENQ). RE'd from python-oracledb AqEnqMessage.
     QName = Queue.name.encode('utf-8')
     Out = _fun_header(TNS_FUNC_AQ_ENQ, Seq, FieldVersion)
-    Out += bytes([1]) + encode_sb4(len(QName))      # queue name ptr + len
+    Out += bytes([1]) + encode_sb4(len(QName))  # queue name ptr + len
     Out += _aq_write_msg_props(Props, FieldVersion)
     if Props.recipients is None:
-        Out += bytes([0]) + encode_sb4(0)           # recipients ptr + count
+        Out += bytes([0]) + encode_sb4(0)  # recipients ptr + count
     else:
         Out += bytes([1]) + encode_sb4(3 * len(Props.recipients))
     Out += encode_sb4(Queue.enqoptions.visibility)
-    Out += bytes([0]) + encode_sb4(0)               # relative message id ptr+len
-    Out += encode_sb4(0)                            # sequence deviation
-    Out += bytes([1]) + encode_sb4(16)              # payload TOID ptr + len
-    Out += encode_sb4(TNS_AQ_MESSAGE_VERSION)       # message version (ub2)
+    Out += bytes([0]) + encode_sb4(0)  # relative message id ptr+len
+    Out += encode_sb4(0)  # sequence deviation
+    Out += bytes([1]) + encode_sb4(16)  # payload TOID ptr + len
+    Out += encode_sb4(TNS_AQ_MESSAGE_VERSION)  # message version (ub2)
     if Queue.is_json:
-        Out += bytes([0, 0]) + encode_sb4(0)        # payload 0, RAW 0, RAW len 0
+        Out += bytes([0, 0]) + encode_sb4(0)  # payload 0, RAW 0, RAW len 0
     elif Queue.payload_type is not None:
-        Out += bytes([1, 0]) + encode_sb4(0)        # payload 1, RAW 0, RAW len 0
+        Out += bytes([1, 0]) + encode_sb4(0)  # payload 1, RAW 0, RAW len 0
     else:
         RawLen = len(Props.payload) if Props.payload is not None else 0
-        Out += bytes([0, 1]) + encode_sb4(RawLen)   # payload 0, RAW 1, RAW len
+        Out += bytes([0, 1]) + encode_sb4(RawLen)  # payload 0, RAW 1, RAW len
     Out += bytes([1]) + encode_sb4(TNS_AQ_MESSAGE_ID_LENGTH)  # return msgid ptr+len
-    EnqFlags = (TNS_KPD_AQ_BUFMSG
-                if Queue.enqoptions.delivery_mode == TNS_AQ_MSG_BUFFERED else 0)
-    Out += encode_sb4(EnqFlags)                     # enqueue flags
-    Out += bytes([0]) + encode_sb4(0)               # extensions 1 ptr + count
-    Out += bytes([0]) + encode_sb4(0)               # extensions 2 ptr + count
-    Out += bytes([0]) + encode_sb4(0)               # source sequence num ptr+len
-    Out += bytes([0]) + encode_sb4(0)               # max sequence num ptr + len
-    Out += bytes([0])                               # output ack length
-    Out += bytes([0]) + encode_sb4(0)               # correlation ptr + len
-    Out += bytes([0]) + encode_sb4(0)               # sender name ptr + len
-    Out += bytes([0]) + encode_sb4(0)               # sender address ptr + len
-    Out += bytes([0])                               # sender charset id ptr
-    Out += bytes([0])                               # sender ncharset id ptr
+    EnqFlags = (
+        TNS_KPD_AQ_BUFMSG
+        if Queue.enqoptions.delivery_mode == TNS_AQ_MSG_BUFFERED
+        else 0
+    )
+    Out += encode_sb4(EnqFlags)  # enqueue flags
+    Out += bytes([0]) + encode_sb4(0)  # extensions 1 ptr + count
+    Out += bytes([0]) + encode_sb4(0)  # extensions 2 ptr + count
+    Out += bytes([0]) + encode_sb4(0)  # source sequence num ptr+len
+    Out += bytes([0]) + encode_sb4(0)  # max sequence num ptr + len
+    Out += bytes([0])  # output ack length
+    Out += bytes([0]) + encode_sb4(0)  # correlation ptr + len
+    Out += bytes([0]) + encode_sb4(0)  # sender name ptr + len
+    Out += bytes([0]) + encode_sb4(0)  # sender address ptr + len
+    Out += bytes([0])  # sender charset id ptr
+    Out += bytes([0])  # sender ncharset id ptr
     if FieldVersion >= FIELD_VERSION_20_1:
-        Out += bytes([1 if Queue.is_json else 0])   # JSON payload ptr
+        Out += bytes([1 if Queue.is_json else 0])  # JSON payload ptr
     # data section
     Out += _bytes_with_length(QName)
-    Out += Queue.payload_toid                       # 16-byte type OID (raw)
+    Out += Queue.payload_toid  # 16-byte type OID (raw)
     Out += _aq_write_payload(Queue, Props)
     return Out
+
 
 def encode_aq_deq(Seq: int, FieldVersion: int, Queue) -> bytes:
     # AQ dequeue (TNS_FUNC_AQ_DEQ). RE'd from python-oracledb AqDeqMessage.
     Opts = Queue.deqoptions
     QName = Queue.name.encode('utf-8')
     Out = _fun_header(TNS_FUNC_AQ_DEQ, Seq, FieldVersion)
-    Out += bytes([1]) + encode_sb4(len(QName))      # queue name ptr + len
-    Out += bytes([1, 1, 1, 1])                      # msg props + recipient list ptrs
+    Out += bytes([1]) + encode_sb4(len(QName))  # queue name ptr + len
+    Out += bytes([1, 1, 1, 1])  # msg props + recipient list ptrs
     Consumer = Opts.consumer_name.encode('utf-8') if Opts.consumer_name else None
     if Consumer is not None:
         Out += bytes([1]) + encode_sb4(len(Consumer))
@@ -3938,26 +5026,26 @@ def encode_aq_deq(Seq: int, FieldVersion: int, Queue) -> bytes:
         Out += bytes([1]) + encode_sb4(len(Correlation))
     else:
         Out += bytes([0]) + encode_sb4(0)
-    Out += bytes([1]) + encode_sb4(16)              # payload TOID ptr + len
-    Out += encode_sb4(TNS_AQ_MESSAGE_VERSION)       # message version (ub2)
-    Out += bytes([1])                               # payload ptr
+    Out += bytes([1]) + encode_sb4(16)  # payload TOID ptr + len
+    Out += encode_sb4(TNS_AQ_MESSAGE_VERSION)  # message version (ub2)
+    Out += bytes([1])  # payload ptr
     Out += bytes([1]) + encode_sb4(TNS_AQ_MESSAGE_ID_LENGTH)  # return msgid ptr+len
     DeqFlags = 0
     if Opts.delivery_mode == TNS_AQ_MSG_BUFFERED:
         DeqFlags |= TNS_KPD_AQ_BUFMSG
     elif Opts.delivery_mode == TNS_AQ_MSG_PERSISTENT_OR_BUFFERED:
         DeqFlags |= TNS_KPD_AQ_EITHER
-    Out += encode_sb4(DeqFlags)                     # dequeue flags
+    Out += encode_sb4(DeqFlags)  # dequeue flags
     Condition = Opts.condition.encode('utf-8') if Opts.condition else None
     if Condition is not None:
         Out += bytes([1]) + encode_sb4(len(Condition))
     else:
         Out += bytes([0]) + encode_sb4(0)
-    Out += bytes([0]) + encode_sb4(0)               # extensions ptr + count
+    Out += bytes([0]) + encode_sb4(0)  # extensions ptr + count
     if FieldVersion >= FIELD_VERSION_20_1:
-        Out += bytes([0])                           # JSON payload ptr
+        Out += bytes([0])  # JSON payload ptr
     if FieldVersion >= FIELD_VERSION_21_1:
-        Out += _encode_sb4i(-1)                     # shard id
+        Out += _encode_sb4i(-1)  # shard id
     # data section
     Out += _bytes_with_length(QName)
     if Consumer is not None:
@@ -3966,34 +5054,39 @@ def encode_aq_deq(Seq: int, FieldVersion: int, Queue) -> bytes:
         Out += bytes(Opts.msgid[:16]).ljust(16, b'\x00')
     if Correlation is not None:
         Out += _bytes_with_length(Correlation)
-    Out += Queue.payload_toid                       # 16-byte type OID (raw)
+    Out += Queue.payload_toid  # 16-byte type OID (raw)
     if Condition is not None:
         Out += _bytes_with_length(Condition)
     return Out
 
+
 def _aq_write_array_enq(Queue, PropsList, FieldVersion: int) -> bytes:
     QName = Queue.name.encode('utf-8')
-    Flags = (TNS_KPD_AQ_BUFMSG
-             if Queue.enqoptions.delivery_mode == TNS_AQ_MSG_BUFFERED else 0)
-    Out = encode_sb4(0)                              # relative msgid length
-    Out += bytes([TTI_RXH])                          # ROW_HEADER marker
+    Flags = (
+        TNS_KPD_AQ_BUFMSG
+        if Queue.enqoptions.delivery_mode == TNS_AQ_MSG_BUFFERED
+        else 0
+    )
+    Out = encode_sb4(0)  # relative msgid length
+    Out += bytes([TTI_RXH])  # ROW_HEADER marker
     Out += _obj_two_lengths(QName)
     Out += Queue.payload_toid
     Out += encode_sb4(TNS_AQ_MESSAGE_VERSION)
     Out += encode_sb4(Flags)
     for Props in PropsList:
-        Out += bytes([TTI_RXD])                      # ROW_DATA marker
-        Out += encode_sb4(Flags)                     # aqi flags
+        Out += bytes([TTI_RXD])  # ROW_DATA marker
+        Out += encode_sb4(Flags)  # aqi flags
         Out += _aq_write_msg_props(Props, FieldVersion)
-        Out += encode_sb4(0)                         # num recipients (None)
+        Out += encode_sb4(0)  # num recipients (None)
         Out += encode_sb4(Queue.enqoptions.visibility)
-        Out += encode_sb4(0)                         # relative message id
-        Out += encode_sb4(0)                         # sequence deviation
+        Out += encode_sb4(0)  # relative message id
+        Out += encode_sb4(0)  # sequence deviation
         if Queue.payload_type is None and not Queue.is_json:
             Out += encode_sb4(len(Props.payload))
         Out += _aq_write_payload(Queue, Props)
-    Out += bytes([TTI_STA])                          # STATUS marker
+    Out += bytes([TTI_STA])  # STATUS marker
     return Out
+
 
 def _aq_write_array_deq(Queue, PropsList, FieldVersion: int) -> bytes:
     Opts = Queue.deqoptions
@@ -4006,11 +5099,11 @@ def _aq_write_array_deq(Queue, PropsList, FieldVersion: int) -> bytes:
     Consumer = Opts.consumer_name.encode('utf-8') if Opts.consumer_name else None
     Correlation = Opts.correlation.encode('utf-8') if Opts.correlation else None
     Condition = Opts.condition.encode('utf-8') if Opts.condition else None
-    Out = b""
+    Out = b''
     for Props in PropsList:
         Out += _obj_two_lengths(QName)
         Out += _aq_write_msg_props(Props, FieldVersion)
-        Out += encode_sb4(0)                         # num recipients
+        Out += encode_sb4(0)  # num recipients
         Out += _aq_value_with_length(Consumer)
         Out += _encode_sb4i(Opts.mode)
         Out += _encode_sb4i(Opts.navigation)
@@ -4019,43 +5112,46 @@ def _aq_write_array_deq(Queue, PropsList, FieldVersion: int) -> bytes:
         Out += _aq_value_with_length(Opts.msgid)
         Out += _aq_value_with_length(Correlation)
         Out += _aq_value_with_length(Condition)
-        Out += encode_sb4(0)                         # extensions
-        Out += encode_sb4(0)                         # relative message id
-        Out += encode_sb4(0)                         # sequence deviation
+        Out += encode_sb4(0)  # extensions
+        Out += encode_sb4(0)  # relative message id
+        Out += encode_sb4(0)  # sequence deviation
         Out += _obj_two_lengths(Queue.payload_toid)
         Out += encode_sb4(TNS_AQ_MESSAGE_VERSION)
-        Out += encode_sb4(0)                         # payload length
-        Out += encode_sb4(0)                         # raw payload length
+        Out += encode_sb4(0)  # payload length
+        Out += encode_sb4(0)  # raw payload length
         Out += encode_sb4(0)
         Out += encode_sb4(Flags)
-        Out += encode_sb4(0)                         # extensions length
-        Out += encode_sb4(0)                         # source sequence length
+        Out += encode_sb4(0)  # extensions length
+        Out += encode_sb4(0)  # source sequence length
     return Out
 
-def encode_aq_array(Seq: int, FieldVersion: int, Queue, Operation: int,
-                    PropsList, NumIters: int) -> bytes:
+
+def encode_aq_array(
+    Seq: int, FieldVersion: int, Queue, Operation: int, PropsList, NumIters: int
+) -> bytes:
     # AQ array enqueue / dequeue (TNS_FUNC_ARRAY_AQ). RE'd from python-oracledb
     # AqArrayMessage. For dequeue PropsList is NumIters placeholder properties.
     Out = _fun_header(TNS_FUNC_ARRAY_AQ, Seq, FieldVersion)
     if Operation == TNS_AQ_ARRAY_ENQ:
-        Out += bytes([0]) + encode_sb4(0)            # input params ptr + len
+        Out += bytes([0]) + encode_sb4(0)  # input params ptr + len
     else:
         Out += bytes([1]) + encode_sb4(NumIters)
     Out += encode_sb4(TNS_AQ_ARRAY_FLAGS_RETURN_MESSAGE_ID)
     if Operation == TNS_AQ_ARRAY_ENQ:
-        Out += bytes([1, 0])                         # output params ptr + len
+        Out += bytes([1, 0])  # output params ptr + len
     else:
         Out += bytes([1, 1])
     Out += _encode_sb4i(Operation)
     Out += bytes([1 if Operation == TNS_AQ_ARRAY_ENQ else 0])  # num iters ptr
     if FieldVersion >= FIELD_VERSION_21_1:
-        Out += encode_sb4(0xFFFF)                    # shard id
+        Out += encode_sb4(0xFFFF)  # shard id
     if Operation == TNS_AQ_ARRAY_ENQ:
         Out += encode_sb4(NumIters)
         Out += _aq_write_array_enq(Queue, PropsList, FieldVersion)
     else:
         Out += _aq_write_array_deq(Queue, PropsList, FieldVersion)
     return Out
+
 
 def encode_token_datetime(DT: datetime.datetime) -> bytes:
     # 7-byte DATE prefix is shared by all three temporal formats. TIMESTAMP
@@ -4078,50 +5174,96 @@ def encode_token_datetime(DT: datetime.datetime) -> bytes:
         return _encode_date_prefix(DT) + (DT.microsecond * 1000).to_bytes(4, 'big')
     return _encode_date_prefix(DT)
 
+
 def _encode_date_prefix(DT: datetime.datetime) -> bytes:
-    return bytes([
-        DT.year // 100 + 100, DT.year % 100 + 100,
-        DT.month, DT.day,
-        DT.hour + 1, DT.minute + 1, DT.second + 1,
-    ])
+    return bytes(
+        [
+            DT.year // 100 + 100,
+            DT.year % 100 + 100,
+            DT.month,
+            DT.day,
+            DT.hour + 1,
+            DT.minute + 1,
+            DT.second + 1,
+        ]
+    )
+
 
 def encode_token_date(Token: date) -> bytes:
     # Retained for any caller that still constructs the legacy oracle.date.date
     # subclass. New code should pass a stdlib datetime.datetime instead.
     if Token.has_timestamp and Token.timestamptz:
         T = Token.set_timestamptz(Token.timestamptz)
-        return bytes([T.year // 100 + 100, T.year % 100 + 100, T.month, T.day, T.hour + 1, T.minute + 1, T.second + 1])+ (Token.microsecond * 1000).to_bytes(4, 'big') + bytes([Token.timestamptz // 3600 + 20, 60])
+        return (
+            bytes(
+                [
+                    T.year // 100 + 100,
+                    T.year % 100 + 100,
+                    T.month,
+                    T.day,
+                    T.hour + 1,
+                    T.minute + 1,
+                    T.second + 1,
+                ]
+            )
+            + (Token.microsecond * 1000).to_bytes(4, 'big')
+            + bytes([Token.timestamptz // 3600 + 20, 60])
+        )
     elif Token.has_timestamp:
-        return bytes([Token.year // 100 + 100, Token.year % 100 + 100, Token.month, Token.day, Token.hour + 1, Token.minute + 1, Token.second + 1]) + (Token.microsecond * 1000).to_bytes(4, 'big')
+        return bytes(
+            [
+                Token.year // 100 + 100,
+                Token.year % 100 + 100,
+                Token.month,
+                Token.day,
+                Token.hour + 1,
+                Token.minute + 1,
+                Token.second + 1,
+            ]
+        ) + (Token.microsecond * 1000).to_bytes(4, 'big')
     else:
-        return bytes([Token.year // 100 + 100, Token.year % 100 + 100, Token.month, Token.day, Token.hour + 1, Token.minute + 1, Token.second + 1])
+        return bytes(
+            [
+                Token.year // 100 + 100,
+                Token.year % 100 + 100,
+                Token.month,
+                Token.day,
+                Token.hour + 1,
+                Token.minute + 1,
+                Token.second + 1,
+            ]
+        )
+
 
 def encode_token_num(Token: int | float) -> bytes:
     if Token == 0:
         return bytes([128])
     elif isinstance(Token, int):
-        return bytes(lnxfmt(lnxmin(abs(Token),1,[]), Token))
+        return bytes(lnxfmt(lnxmin(abs(Token), 1, []), Token))
     elif isinstance(Token, float):
-        return bytes(lnxfmt(lnxren(abs(Token),0), Token))
+        return bytes(lnxfmt(lnxren(abs(Token), 0), Token))
     else:
-        raise Exception("Unhandled number token", Token)
+        raise Exception('Unhandled number token', Token)
+
 
 def encode_token_binary_float(Value: float) -> bytes:
     # BINARY_FLOAT is a 32-bit IEEE-754 value stored in Oracle's order-
     # preserving form: for a positive number the sign bit is set, for a
     # negative number every bit is flipped. Decoding reverses this.
-    Raw = struct.pack(">f", Value)
+    Raw = struct.pack('>f', Value)
     if Raw[0] & 0x80:
         return bytes(B ^ 0xFF for B in Raw)
     return bytes([Raw[0] ^ 0x80]) + Raw[1:]
 
+
 def encode_token_binary_double(Value: float) -> bytes:
     # BINARY_DOUBLE: same order-preserving transform as BINARY_FLOAT over the
     # 64-bit IEEE-754 representation.
-    Raw = struct.pack(">d", Value)
+    Raw = struct.pack('>d', Value)
     if Raw[0] & 0x80:
         return bytes(B ^ 0xFF for B in Raw)
     return bytes([Raw[0] ^ 0x80]) + Raw[1:]
+
 
 def encode_token_interval_ds(TD: datetime.timedelta) -> bytes:
     # INTERVAL DAY TO SECOND: 4-byte days biased by 2**31, then hours / minutes
@@ -4139,26 +5281,34 @@ def encode_token_interval_ds(TD: datetime.timedelta) -> bytes:
     Nanos = Micros * 1000
     if Negative:
         Days, Hours, Minutes, Seconds, Nanos = (
-            -Days, -Hours, -Minutes, -Seconds, -Nanos)
+            -Days,
+            -Hours,
+            -Minutes,
+            -Seconds,
+            -Nanos,
+        )
     return (
-        (Days + 2**31).to_bytes(4, "big")
+        (Days + 2**31).to_bytes(4, 'big')
         + bytes([Hours + 60, Minutes + 60, Seconds + 60])
-        + (Nanos + 2**31).to_bytes(4, "big")
+        + (Nanos + 2**31).to_bytes(4, 'big')
     )
+
 
 def encode_token_interval_ym(IV: IntervalYM) -> bytes:
     # INTERVAL YEAR TO MONTH: 4-byte years biased by 2**31, then 1-byte months
     # biased by 60. IntervalYM has already normalised the two fields to share a
     # sign with abs(months) < 12.
-    return (IV.years + 2**31).to_bytes(4, "big") + bytes([IV.months + 60])
+    return (IV.years + 2**31).to_bytes(4, 'big') + bytes([IV.months + 60])
 
-def encode_token_raw(DataType: int, Length: int, Flag: int, Charset: int,
-                     Max: int, Array: int = 0) -> bytes:
+
+def encode_token_raw(
+    DataType: int, Length: int, Flag: int, Charset: int, Max: int, Array: int = 0
+) -> bytes:
     # Array > 0 marks a PL/SQL associative-array bind (#122): the flag gains
     # TNS_BIND_ARRAY (0x40) and the max-number-of-array-elements field carries
     # the array's declared capacity (0 for a scalar bind).
     FormOfUse = 2 if Charset == AL16UTF16_CHARSET else 1
-    if _ENCODE_FIELD_VERSION.get() >= 8:        # FIELD_VERSION_12_2
+    if _ENCODE_FIELD_VERSION.get() >= 8:  # FIELD_VERSION_12_2
         # 12c+ bind OAC (oracledb _write_column_metadata): a fixed flag byte
         # (TNS_BIND_USE_INDICATORS = 1), a ub8 cont-flag, OID + version, the
         # bind charset as a ub2 (AL32UTF8 / AL16UTF16, 0 for non-char), the
@@ -4171,31 +5321,46 @@ def encode_token_raw(DataType: int, Length: int, Flag: int, Charset: int,
             BindCharset, Csfrm = AL16UTF16_CHARSET, 2
         else:
             BindCharset, Csfrm = AL32UTF8_CHARSET, 1
-        FlagByte = 0x41 if Array else 1        # USE_INDICATORS | ARRAY
-        return (bytes([DataType, FlagByte, 0, 0]) + encode_sb4(Length)
-                + encode_sb4(Array)            # max number of array elements
-                + encode_sb4(0)                # cont flag (ub8)
-                + encode_sb4(0)                # OID
-                + encode_sb4(0)                # version
-                + encode_sb4(BindCharset)      # charset id (ub2)
-                + bytes([Csfrm])               # character set form
-                + encode_sb4(0)                # LOB prefetch length
-                + encode_sb4(0))               # oaccolid (12.2+)
+        FlagByte = 0x41 if Array else 1  # USE_INDICATORS | ARRAY
+        return (
+            bytes([DataType, FlagByte, 0, 0])
+            + encode_sb4(Length)
+            + encode_sb4(Array)  # max number of array elements
+            + encode_sb4(0)  # cont flag (ub8)
+            + encode_sb4(0)  # OID
+            + encode_sb4(0)  # version
+            + encode_sb4(BindCharset)  # charset id (ub2)
+            + bytes([Csfrm])  # character set form
+            + encode_sb4(0)  # LOB prefetch length
+            + encode_sb4(0)
+        )  # oaccolid (12.2+)
     FlagOut = (Flag | 0x40) if Array else Flag
     MaxOut = Array if Array else Max
-    return bytes([DataType, 3, 0, 0]) + encode_sb4(Length) + bytes([0]) + encode_sb4(FlagOut) + bytes([0,0]) + encode_sb4(Charset) + bytes([FormOfUse]) + encode_sb4(MaxOut)
+    return (
+        bytes([DataType, 3, 0, 0])
+        + encode_sb4(Length)
+        + bytes([0])
+        + encode_sb4(FlagOut)
+        + bytes([0, 0])
+        + encode_sb4(Charset)
+        + bytes([FormOfUse])
+        + encode_sb4(MaxOut)
+    )
+
 
 ##
 ## Some other specific transformation functions
 ##
 
+
 def lnxmin(N: int, I: int, Acc: list[int]) -> list[int]:
     if N // 100 == 0:
-        return lnxpak(([I-1] + [N % 100] + Acc)[::-1])
+        return lnxpak(([I - 1] + [N % 100] + Acc)[::-1])
     elif I < 20:
-        return lnxmin(N // 100, I+1, [N % 100] + Acc)
+        return lnxmin(N // 100, I + 1, [N % 100] + Acc)
     else:
-        raise Exception("LnxMin cannot handle this", N, I, Acc)
+        raise Exception('LnxMin cannot handle this', N, I, Acc)
+
 
 def lnxpak(List: list[int]) -> list[int]:
     i = 0
@@ -4203,36 +5368,42 @@ def lnxpak(List: list[int]) -> list[int]:
         i += 1
     return List[: None if i == 0 else i - 1 : -1]
 
+
 def lnxpak2(List: list[int], I: int) -> list[int]:
     if List == [100] and I == 8:
-        return [100-1]
+        return [100 - 1]
     elif len(List) > 1 and List[0] == 100 and I < 8:
-        return lnxpak2([List[1] + 1] + List[2:], I+1)
+        return lnxpak2([List[1] + 1] + List[2:], I + 1)
     else:
         return List
 
+
 def lnxren(N: float, I: int) -> list[int]:
     if N < 1.0:
-        return lnxren(N * 100.0, I-1)
-    elif N < 10.0:                  # 1.0 <= N < 10.0 (the cascade guarantees ≥1.0)
-        return lnxpak(([I] + lnxren4(N,0,1,[]))[::-1])
-    elif N < 100.0:                 # 10.0 <= N < 100.0
-        return lnxpak(([I] + lnxren4(N,0,0,[]))[::-1])
-    else: # N >= 100.0
-        return lnxren(N * 0.01, I+1)
+        return lnxren(N * 100.0, I - 1)
+    elif N < 10.0:  # 1.0 <= N < 10.0 (the cascade guarantees ≥1.0)
+        return lnxpak(([I] + lnxren4(N, 0, 1, []))[::-1])
+    elif N < 100.0:  # 10.0 <= N < 100.0
+        return lnxpak(([I] + lnxren4(N, 0, 0, []))[::-1])
+    else:  # N >= 100.0
+        return lnxren(N * 0.01, I + 1)
+
 
 def lnxren4(N: float, I: int, J: int, Acc: list[int]) -> list[int]:
     if J == 0 and I == 8 and len(Acc) > 1:
-        return lnxpak2([(Acc[0]+5) // 10 * 10] + Acc[1:],1)[::-1]
+        return lnxpak2([(Acc[0] + 5) // 10 * 10] + Acc[1:], 1)[::-1]
     elif J == 1 and I == 8 and len(Acc) > 1:
-        return lnxpak2([Acc[0] + (Acc[0] // 50)] + Acc[1:],1)[::-1]
+        return lnxpak2([Acc[0] + (Acc[0] // 50)] + Acc[1:], 1)[::-1]
     else:
-        return lnxren4((N-int(N))*100.0, I+1, J, [int(N)] + Acc)
+        return lnxren4((N - int(N)) * 100.0, I + 1, J, [int(N)] + Acc)
+
 
 def lnxfmt(List: list[int], Data: int | float) -> list[int]:
     if Data > 0:
         return [List[0] + 192 + 1] + list(map(lambda x: x + 1, List[1:]))
     elif Data < 0:
-        return [(List[0] + 192 + 1) ^ 255] + list(map(lambda x: 101 - x, List[1:])) + [102]
+        return (
+            [(List[0] + 192 + 1) ^ 255] + list(map(lambda x: 101 - x, List[1:])) + [102]
+        )
     else:
-        raise Exception("LnxFmt cannot handle zeroes", List, Data)
+        raise Exception('LnxFmt cannot handle zeroes', List, Data)

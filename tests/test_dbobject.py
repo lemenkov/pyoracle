@@ -13,58 +13,73 @@
 import unittest
 
 from oracle.dbobject import (
-    COLLECTION_NESTED_TABLE, COLLECTION_VARRAY, DbObject, DbObjectType, DbRef,
-    ObjectImage, decode_collection_image, decode_object_image, decode_xmltype,
+    COLLECTION_NESTED_TABLE,
+    COLLECTION_VARRAY,
+    DbObject,
+    DbObjectType,
+    DbRef,
+    ObjectImage,
+    decode_collection_image,
+    decode_object_image,
+    decode_xmltype,
     type_name_to_tns,
 )
 from oracle.exceptions import NotSupportedError
-from oracle.types import decode_value
 from oracle.tns import (
-    _encode_object_bind_value, _encode_ref_oac, _encode_ref_bind_value,
-    _read_object_column, encode_object_image, _ENCODE_FIELD_VERSION,
+    _ENCODE_FIELD_VERSION,
+    _encode_object_bind_value,
+    _encode_ref_bind_value,
+    _encode_ref_oac,
+    _read_object_column,
+    encode_object_image,
 )
 from oracle.tns_consts import (
-    AL32UTF8_CHARSET, TNS_TYPE_CHAR, TNS_TYPE_NUMBER, TNS_TYPE_REF,
-    TNS_TYPE_TIMESTAMP, TNS_TYPE_VARCHAR,
+    AL32UTF8_CHARSET,
+    TNS_TYPE_CHAR,
+    TNS_TYPE_NUMBER,
+    TNS_TYPE_REF,
+    TNS_TYPE_TIMESTAMP,
+    TNS_TYPE_VARCHAR,
 )
+from oracle.types import decode_value
 
 # The full on-wire object column value for ('Main St', 12345, 'US') plus four
 # trailing bytes (the start of the next row) used as a desync sentinel.
 _OBJ_COLUMN = bytes.fromhex(
-    "01 24 24 00 22 02 08 54 88 dc 42 c0 05 09 31 e0 63 c0 00 a8 c0 9d 0b"
-    "00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 01 00 00 00 01 13"
-    "01 01 13"
-    "84 01 13 07 4d 61 69 6e 20 53 74 04 c3 02 18 2e 02 55 53"
-    "08 01 06 03".replace(" ", "")
+    '01 24 24 00 22 02 08 54 88 dc 42 c0 05 09 31 e0 63 c0 00 a8 c0 9d 0b'
+    '00 00 00 00 00 00 00 00 00 00 00 00 00 01 00 01 00 00 00 01 13'
+    '01 01 13'
+    '84 01 13 07 4d 61 69 6e 20 53 74 04 c3 02 18 2e 02 55 53'
+    '08 01 06 03'.replace(' ', '')
 )
-_SENTINEL = bytes.fromhex("08010603")
+_SENTINEL = bytes.fromhex('08010603')
 
 # Just the packed image (header + attributes), as read_dbobject would hand it
 # to the image walk.
-_IMAGE = bytes.fromhex("840113" "07" "4d61696e205374" "04" "c302182e" "02" "5553")
+_IMAGE = bytes.fromhex('840113074d61696e20537404c302182e025553')
 
 _ADDR_LAYOUT = [
-    {"name": "STREET", "data_type": TNS_TYPE_VARCHAR, "charset": None},
-    {"name": "ZIP", "data_type": TNS_TYPE_NUMBER, "charset": None},
-    {"name": "CODE", "data_type": TNS_TYPE_CHAR, "charset": None},
+    {'name': 'STREET', 'data_type': TNS_TYPE_VARCHAR, 'charset': None},
+    {'name': 'ZIP', 'data_type': TNS_TYPE_NUMBER, 'charset': None},
+    {'name': 'CODE', 'data_type': TNS_TYPE_CHAR, 'charset': None},
 ]
 
 
 class TestObjectColumnFraming(unittest.TestCase):
     def test_read_object_column_keeps_stream_in_sync(self):
-        Col = {"type_schema": "PYO", "type_name": "ADDR_T", "charset": 0}
+        Col = {'type_schema': 'PYO', 'type_name': 'ADDR_T', 'charset': 0}
         (Val, Rest) = _read_object_column(_OBJ_COLUMN, Col)
         self.assertIsInstance(Val, ObjectImage)
         self.assertEqual(Val.image, _IMAGE)
-        self.assertEqual(Val.type_schema, "PYO")
-        self.assertEqual(Val.type_name, "ADDR_T")
+        self.assertEqual(Val.type_schema, 'PYO')
+        self.assertEqual(Val.type_name, 'ADDR_T')
         # Exactly the object value is consumed; the next row's bytes remain.
         self.assertEqual(Rest, _SENTINEL)
 
     def test_null_object_consumes_no_image(self):
         # A NULL object: framing present but a zero image-gate, no image blob.
         # toid(empty) oid(empty) snapshot(empty) version(0) gate(0) flags(0).
-        Null = bytes.fromhex("00 00 00 00 00 00".replace(" ", "")) + _SENTINEL
+        Null = bytes.fromhex('00 00 00 00 00 00'.replace(' ', '')) + _SENTINEL
         (Val, Rest) = _read_object_column(Null, {})
         self.assertIsNone(Val)
         self.assertEqual(Rest, _SENTINEL)
@@ -73,47 +88,46 @@ class TestObjectColumnFraming(unittest.TestCase):
 class TestImageWalk(unittest.TestCase):
     def test_decode_addr_image(self):
         Attrs = decode_object_image(_IMAGE, _ADDR_LAYOUT)
-        self.assertEqual(Attrs,
-                         [("STREET", "Main St"), ("ZIP", 12345), ("CODE", "US")])
+        self.assertEqual(Attrs, [('STREET', 'Main St'), ('ZIP', 12345), ('CODE', 'US')])
 
     def test_null_attribute(self):
         # STREET NULL (length 0), ZIP 12345, CODE 'US'.
-        Image = bytes.fromhex("840113" "00" "04" "c302182e" "02" "5553")
+        Image = bytes.fromhex('8401130004c302182e025553')
         Attrs = decode_object_image(Image, _ADDR_LAYOUT)
-        self.assertEqual(Attrs,
-                         [("STREET", None), ("ZIP", 12345), ("CODE", "US")])
+        self.assertEqual(Attrs, [('STREET', None), ('ZIP', 12345), ('CODE', 'US')])
 
 
 class TestDbObjectApi(unittest.TestCase):
     def setUp(self):
         Attrs = decode_object_image(_IMAGE, _ADDR_LAYOUT, AL32UTF8_CHARSET)
-        self.obj = DbObject("PYO.ADDR_T", Attrs)
+        self.obj = DbObject('PYO.ADDR_T', Attrs)
 
     def test_attribute_access(self):
-        self.assertEqual(self.obj.STREET, "Main St")
+        self.assertEqual(self.obj.STREET, 'Main St')
         self.assertEqual(self.obj.ZIP, 12345)
-        self.assertEqual(self.obj.CODE, "US")
+        self.assertEqual(self.obj.CODE, 'US')
 
     def test_item_access_and_views(self):
-        self.assertEqual(self.obj["ZIP"], 12345)
-        self.assertEqual(self.obj.aslist(), ["Main St", 12345, "US"])
-        self.assertEqual(self.obj.asdict(),
-                         {"STREET": "Main St", "ZIP": 12345, "CODE": "US"})
-        self.assertEqual(self.obj.type_name, "PYO.ADDR_T")
+        self.assertEqual(self.obj['ZIP'], 12345)
+        self.assertEqual(self.obj.aslist(), ['Main St', 12345, 'US'])
+        self.assertEqual(
+            self.obj.asdict(), {'STREET': 'Main St', 'ZIP': 12345, 'CODE': 'US'}
+        )
+        self.assertEqual(self.obj.type_name, 'PYO.ADDR_T')
 
     def test_unknown_attribute_raises(self):
         with self.assertRaises(AttributeError):
             _ = self.obj.NOPE
 
     def test_equality_and_repr(self):
-        Twin = DbObject("PYO.ADDR_T", decode_object_image(_IMAGE, _ADDR_LAYOUT))
+        Twin = DbObject('PYO.ADDR_T', decode_object_image(_IMAGE, _ADDR_LAYOUT))
         self.assertEqual(self.obj, Twin)
         self.assertIn("STREET='Main St'", repr(self.obj))
 
 
 _ADDR_TYPE = DbObjectType(
-    "PYO", "ADDR_T", bytes.fromhex("00112233445566778899aabbccddeeff"), 1,
-    _ADDR_LAYOUT)
+    'PYO', 'ADDR_T', bytes.fromhex('00112233445566778899aabbccddeeff'), 1, _ADDR_LAYOUT
+)
 
 
 class TestObjectBindEncode(unittest.TestCase):
@@ -122,51 +136,56 @@ class TestObjectBindEncode(unittest.TestCase):
     # image; the contract is that it round-trips back through the #115 decoders.
 
     def test_image_encode_decode_roundtrip(self):
-        Obj = _ADDR_TYPE.newobject({"STREET": "Main St", "ZIP": 12345,
-                                    "CODE": "US"})
+        Obj = _ADDR_TYPE.newobject({'STREET': 'Main St', 'ZIP': 12345, 'CODE': 'US'})
         Image = encode_object_image(Obj)
-        self.assertEqual(decode_object_image(Image, _ADDR_LAYOUT),
-                         [("STREET", "Main St"), ("ZIP", 12345), ("CODE", "US")])
+        self.assertEqual(
+            decode_object_image(Image, _ADDR_LAYOUT),
+            [('STREET', 'Main St'), ('ZIP', 12345), ('CODE', 'US')],
+        )
 
     def test_image_encode_null_attribute(self):
-        Obj = _ADDR_TYPE.newobject({"STREET": None, "ZIP": 7, "CODE": None})
+        Obj = _ADDR_TYPE.newobject({'STREET': None, 'ZIP': 7, 'CODE': None})
         Attrs = decode_object_image(encode_object_image(Obj), _ADDR_LAYOUT)
-        self.assertEqual(Attrs, [("STREET", None), ("ZIP", 7), ("CODE", None)])
+        self.assertEqual(Attrs, [('STREET', None), ('ZIP', 7), ('CODE', None)])
 
     def test_bind_value_framing_roundtrips(self):
         # The full write_dbobject framing must parse back through the row
         # decoder (with the next-row sentinel preserved).
-        Obj = _ADDR_TYPE.newobject({"STREET": "Main St", "ZIP": 12345,
-                                    "CODE": "US"})
+        Obj = _ADDR_TYPE.newobject({'STREET': 'Main St', 'ZIP': 12345, 'CODE': 'US'})
         Wire = _encode_object_bind_value(Obj) + _SENTINEL
-        Col = {"type_schema": "PYO", "type_name": "ADDR_T", "charset": 0}
+        Col = {'type_schema': 'PYO', 'type_name': 'ADDR_T', 'charset': 0}
         (Val, Rest) = _read_object_column(Wire, Col)
         self.assertIsInstance(Val, ObjectImage)
         self.assertEqual(Rest, _SENTINEL)
-        self.assertEqual(decode_object_image(Val.image, _ADDR_LAYOUT),
-                         [("STREET", "Main St"), ("ZIP", 12345), ("CODE", "US")])
+        self.assertEqual(
+            decode_object_image(Val.image, _ADDR_LAYOUT),
+            [('STREET', 'Main St'), ('ZIP', 12345), ('CODE', 'US')],
+        )
 
     def test_bind_value_carries_type_oid(self):
         # The bind toid wraps the type's 16-byte OID (00 22 02 08 + oid + extent).
         Obj = _ADDR_TYPE.newobject()
         Wire = _encode_object_bind_value(Obj)
         # toid = 00 22 02 08 + the 16-byte type OID + the fixed extent OID.
-        self.assertIn(b"\x00\x22\x02\x08" + _ADDR_TYPE.oid, Wire)
+        self.assertIn(b'\x00\x22\x02\x08' + _ADDR_TYPE.oid, Wire)
 
 
 class TestRefBindEncode(unittest.TestCase):
     # REF bind (#139). Byte fixtures captured from the Oracle JDBC thin driver
     # binding a fetched REF back (oracledb has no REF type, so JDBC is the only
     # reference) on 23ai: person_t REF for ('Alice'), bound into DEREF(?).
-    _OID = bytes.fromhex("54b3dec71d796414e063c000a8c01de8")
+    _OID = bytes.fromhex('54b3dec71d796414e063c000a8c01de8')
     _LOCATOR = bytes.fromhex(
-        "0028020954b3dec71d7f6414e063c000a8c01de8"
-        "54b3dec71d7e6414e063c000a8c01de800017afb0000")
+        '0028020954b3dec71d7f6414e063c000a8c01de8'
+        '54b3dec71d7e6414e063c000a8c01de800017afb0000'
+    )
     _CAP_OAC = bytes.fromhex(
-        "6f030000020fa0000001101054b3dec71d796414e063c000a8c01de801010102000000")
+        '6f030000020fa0000001101054b3dec71d796414e063c000a8c01de801010102000000'
+    )
     _CAP_VAL = bytes.fromhex(
-        "2a0028020954b3dec71d7f6414e063c000a8c01de8"
-        "54b3dec71d7e6414e063c000a8c01de800017afb0000")
+        '2a0028020954b3dec71d7f6414e063c000a8c01de8'
+        '54b3dec71d7e6414e063c000a8c01de800017afb0000'
+    )
 
     def setUp(self):
         _ENCODE_FIELD_VERSION.set(24)
@@ -175,8 +194,9 @@ class TestRefBindEncode(unittest.TestCase):
         _ENCODE_FIELD_VERSION.set(6)
 
     def _ref(self, oid=None):
-        return DbRef(self._LOCATOR, "PERSON_T", "PYO",
-                     self._OID if oid is None else oid)
+        return DbRef(
+            self._LOCATOR, 'PERSON_T', 'PYO', self._OID if oid is None else oid
+        )
 
     def test_oac_matches_jdbc_capture(self):
         self.assertEqual(_encode_ref_oac(self._ref()), self._CAP_OAC)
@@ -192,7 +212,7 @@ class TestRefBindEncode(unittest.TestCase):
         # A DbRef lacking the type OID (e.g. a describe that didn't carry it)
         # cannot build the bind OAC.
         with self.assertRaises(NotSupportedError):
-            _encode_ref_oac(DbRef(self._LOCATOR, "PERSON_T"))
+            _encode_ref_oac(DbRef(self._LOCATOR, 'PERSON_T'))
 
 
 class TestDbObjectTypeApi(unittest.TestCase):
@@ -202,33 +222,39 @@ class TestDbObjectTypeApi(unittest.TestCase):
         self.assertIs(Obj._dbtype, _ADDR_TYPE)
 
     def test_newobject_seed_case_insensitive(self):
-        Obj = _ADDR_TYPE.newobject({"street": "X", "Zip": 1, "CODE": "US"})
-        self.assertEqual(Obj.STREET, "X")
+        Obj = _ADDR_TYPE.newobject({'street': 'X', 'Zip': 1, 'CODE': 'US'})
+        self.assertEqual(Obj.STREET, 'X')
         self.assertEqual(Obj.ZIP, 1)
 
     def test_set_and_reject_unknown(self):
         Obj = _ADDR_TYPE.newobject()
-        Obj.STREET = "Main"
-        self.assertEqual(Obj.STREET, "Main")
+        Obj.STREET = 'Main'
+        self.assertEqual(Obj.STREET, 'Main')
         with self.assertRaises(AttributeError):
             Obj.NOPE = 1
         with self.assertRaises(KeyError):
-            Obj["NOPE"] = 1
+            Obj['NOPE'] = 1
 
     def test_seed_from_sequence(self):
-        Obj = _ADDR_TYPE.newobject(["Main St", 12345, "US"])
-        self.assertEqual(Obj.aslist(), ["Main St", 12345, "US"])
+        Obj = _ADDR_TYPE.newobject(['Main St', 12345, 'US'])
+        self.assertEqual(Obj.aslist(), ['Main St', 12345, 'US'])
 
     def test_type_repr_and_names(self):
-        self.assertEqual(_ADDR_TYPE.full_name, "PYO.ADDR_T")
-        self.assertEqual(_ADDR_TYPE.attr_names, ["STREET", "ZIP", "CODE"])
+        self.assertEqual(_ADDR_TYPE.full_name, 'PYO.ADDR_T')
+        self.assertEqual(_ADDR_TYPE.attr_names, ['STREET', 'ZIP', 'CODE'])
 
 
 _NUM_VA = DbObjectType(
-    "PYO", "NUM_VA", bytes.fromhex("ffeeddccbbaa99887766554433221100"), 1, [],
-    is_collection=True, collection_type=COLLECTION_VARRAY,
-    element={"name": "element", "data_type": TNS_TYPE_NUMBER, "charset": None},
-    max_elements=5)
+    'PYO',
+    'NUM_VA',
+    bytes.fromhex('ffeeddccbbaa99887766554433221100'),
+    1,
+    [],
+    is_collection=True,
+    collection_type=COLLECTION_VARRAY,
+    element={'name': 'element', 'data_type': TNS_TYPE_NUMBER, 'charset': None},
+    max_elements=5,
+)
 
 
 class TestVarrayCollection(unittest.TestCase):
@@ -251,26 +277,28 @@ class TestVarrayCollection(unittest.TestCase):
     def test_image_encode_decode_roundtrip(self):
         v = _NUM_VA.newobject([10, 20, 30])
         Image = encode_object_image(v)
-        self.assertEqual(decode_collection_image(Image, _NUM_VA.element),
-                         [10, 20, 30])
+        self.assertEqual(decode_collection_image(Image, _NUM_VA.element), [10, 20, 30])
 
     def test_image_roundtrip_empty_and_null_element(self):
         self.assertEqual(
-            decode_collection_image(encode_object_image(_NUM_VA.newobject([])),
-                                    _NUM_VA.element), [])
+            decode_collection_image(
+                encode_object_image(_NUM_VA.newobject([])), _NUM_VA.element
+            ),
+            [],
+        )
         v = _NUM_VA.newobject([1, None, 3])
         self.assertEqual(
             decode_collection_image(encode_object_image(v), _NUM_VA.element),
-            [1, None, 3])
+            [1, None, 3],
+        )
 
     def test_bind_value_framing_roundtrips(self):
         v = _NUM_VA.newobject([7, 8, 9])
         Wire = _encode_object_bind_value(v) + _SENTINEL
-        (Val, Rest) = _read_object_column(Wire, {"charset": 0})
+        (Val, Rest) = _read_object_column(Wire, {'charset': 0})
         self.assertIsInstance(Val, ObjectImage)
         self.assertEqual(Rest, _SENTINEL)
-        self.assertEqual(decode_collection_image(Val.image, _NUM_VA.element),
-                         [7, 8, 9])
+        self.assertEqual(decode_collection_image(Val.image, _NUM_VA.element), [7, 8, 9])
 
     def test_asdict_rejected_on_collection(self):
         with self.assertRaises(TypeError):
@@ -281,10 +309,15 @@ class TestNestedTableCollection(unittest.TestCase):
     # A nested table (#118) shares the VARRAY image and bind framing exactly;
     # only collection_type differs (2 vs 3). These lock that in offline.
     _NT = DbObjectType(
-        "PYO", "NUM_NT", bytes.fromhex("0102030405060708090a0b0c0d0e0f10"), 1,
-        [], is_collection=True, collection_type=COLLECTION_NESTED_TABLE,
-        element={"name": "element", "data_type": TNS_TYPE_NUMBER,
-                 "charset": None})
+        'PYO',
+        'NUM_NT',
+        bytes.fromhex('0102030405060708090a0b0c0d0e0f10'),
+        1,
+        [],
+        is_collection=True,
+        collection_type=COLLECTION_NESTED_TABLE,
+        element={'name': 'element', 'data_type': TNS_TYPE_NUMBER, 'charset': None},
+    )
 
     def test_collection_type_is_nested_table(self):
         self.assertEqual(self._NT.collection_type, COLLECTION_NESTED_TABLE)
@@ -294,66 +327,67 @@ class TestNestedTableCollection(unittest.TestCase):
         v = self._NT.newobject([10, 20, 30])
         self.assertEqual(
             decode_collection_image(encode_object_image(v), self._NT.element),
-            [10, 20, 30])
+            [10, 20, 30],
+        )
 
     def test_bind_value_framing_roundtrips(self):
         v = self._NT.newobject([1, None, 3])
         Wire = _encode_object_bind_value(v) + _SENTINEL
-        (Val, Rest) = _read_object_column(Wire, {"charset": 0})
+        (Val, Rest) = _read_object_column(Wire, {'charset': 0})
         self.assertEqual(Rest, _SENTINEL)
-        self.assertEqual(decode_collection_image(Val.image, self._NT.element),
-                         [1, None, 3])
+        self.assertEqual(
+            decode_collection_image(Val.image, self._NT.element), [1, None, 3]
+        )
 
 
 class TestDbRef(unittest.TestCase):
     # A REF locator captured from a live 21c `SELECT REF(o)` (#119).
     _LOC = bytes.fromhex(
-        "00280209548b330e9c292c65e063c000a8c03c4e"
-        "548b330e9c282c65e063c000a8c03c4e0300223e0000")
+        '00280209548b330e9c292c65e063c000a8c03c4e'
+        '548b330e9c282c65e063c000a8c03c4e0300223e0000'
+    )
 
     def test_decode_value_wraps_ref(self):
-        v = decode_value({"data_type": TNS_TYPE_REF, "type_name": "REF_OBJ"},
-                         self._LOC)
+        v = decode_value({'data_type': TNS_TYPE_REF, 'type_name': 'REF_OBJ'}, self._LOC)
         self.assertIsInstance(v, DbRef)
         self.assertEqual(v.bytes, self._LOC)
         self.assertEqual(v.hex, self._LOC.hex())
-        self.assertEqual(v.type_name, "REF_OBJ")
+        self.assertEqual(v.type_name, 'REF_OBJ')
 
     def test_null_ref_is_none(self):
-        self.assertIsNone(
-            decode_value({"data_type": TNS_TYPE_REF}, b""))
+        self.assertIsNone(decode_value({'data_type': TNS_TYPE_REF}, b''))
 
     def test_equality_and_hash(self):
-        a = DbRef(self._LOC, "REF_OBJ")
-        b = DbRef(self._LOC, "OTHER")          # equality is by locator bytes
+        a = DbRef(self._LOC, 'REF_OBJ')
+        b = DbRef(self._LOC, 'OTHER')  # equality is by locator bytes
         self.assertEqual(a, b)
         self.assertEqual(hash(a), hash(b))
-        self.assertNotEqual(a, DbRef(self._LOC[:-1] + b"\x99"))
+        self.assertNotEqual(a, DbRef(self._LOC[:-1] + b'\x99'))
         self.assertEqual(len({a, b}), 1)
 
     def test_repr_includes_type(self):
-        self.assertIn("REF_OBJ", repr(DbRef(self._LOC, "REF_OBJ")))
+        self.assertIn('REF_OBJ', repr(DbRef(self._LOC, 'REF_OBJ')))
 
 
 class TestXmlType(unittest.TestCase):
     # XMLType images captured from live servers (#124).
     # 21c column '<a><b>hi</b></a>' (pretty-printed): header + STRING flag 0x14.
-    _INLINE = bytes.fromhex("85011d0100000014") + b"<a>\n  <b>hi</b>\n</a>\n"
+    _INLINE = bytes.fromhex('85011d0100000014') + b'<a>\n  <b>hi</b>\n</a>\n'
     # XMLELEMENT("r", 42): STRING + SKIP_NEXT_4 (flag 0x100414), then a 4-byte
     # skip, then the content.
-    _XMLELEMENT = bytes.fromhex("8501150100100414") + bytes(4) + b"<r>42</r>"
+    _XMLELEMENT = bytes.fromhex('8501150100100414') + bytes(4) + b'<r>42</r>'
     # 11g CLOB-stored column: LOB + legacy-storage bit (flag 0x1020011) -> error.
-    _LEGACY_11G = bytes.fromhex("8501080101020011")
+    _LEGACY_11G = bytes.fromhex('8501080101020011')
 
     def test_inline_string(self):
         (is_lob, value) = decode_xmltype(self._INLINE)
         self.assertFalse(is_lob)
-        self.assertEqual(value, "<a>\n  <b>hi</b>\n</a>\n")
+        self.assertEqual(value, '<a>\n  <b>hi</b>\n</a>\n')
 
     def test_xmlelement_skip_next_4(self):
         (is_lob, value) = decode_xmltype(self._XMLELEMENT)
         self.assertFalse(is_lob)
-        self.assertEqual(value, "<r>42</r>")
+        self.assertEqual(value, '<r>42</r>')
 
     def test_11g_legacy_storage_unsupported(self):
         with self.assertRaises(NotSupportedError):
@@ -362,19 +396,19 @@ class TestXmlType(unittest.TestCase):
 
 class TestTypeNameMap(unittest.TestCase):
     def test_known_names(self):
-        self.assertEqual(type_name_to_tns("VARCHAR2"), TNS_TYPE_VARCHAR)
-        self.assertEqual(type_name_to_tns("NUMBER"), TNS_TYPE_NUMBER)
-        self.assertEqual(type_name_to_tns("CHAR"), TNS_TYPE_CHAR)
+        self.assertEqual(type_name_to_tns('VARCHAR2'), TNS_TYPE_VARCHAR)
+        self.assertEqual(type_name_to_tns('NUMBER'), TNS_TYPE_NUMBER)
+        self.assertEqual(type_name_to_tns('CHAR'), TNS_TYPE_CHAR)
 
     def test_precision_suffix_stripped(self):
-        self.assertEqual(type_name_to_tns("TIMESTAMP(6)"), TNS_TYPE_TIMESTAMP)
+        self.assertEqual(type_name_to_tns('TIMESTAMP(6)'), TNS_TYPE_TIMESTAMP)
 
     def test_unknown_name_is_none(self):
         # A nested object type (out of scope for #115) yields None, so the
         # attribute decodes to its raw bytes rather than desyncing.
-        self.assertIsNone(type_name_to_tns("SOME_NESTED_TYPE"))
+        self.assertIsNone(type_name_to_tns('SOME_NESTED_TYPE'))
         self.assertIsNone(type_name_to_tns(None))
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

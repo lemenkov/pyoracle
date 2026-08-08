@@ -21,20 +21,20 @@ from oracle.tns import decode_packet
 # (14), markers, end-of-response (29). Mutating around these exercises the
 # length/offset/chunk handling that is most at risk of an unbounded loop.
 _SEEDS = [
-    "101735ebcd3cc510be7fdf53b18448bb2dda787e0608123633010201015c0200",
-    "101736595fbfc8d361f990557c35c1301c42787e061008050c016b01064d0200",
-    "0106007838365f36342f4c696e757820322e342e7878006903010a0066034003",
-    "00021fe80102010200062201010001020000000702c10208010603284b3a0001",
-    "02000000000000040101011b010102057b00000102010e030000000000000000",
-    "0000000030001010000000002057b0101010300194f52412d30313430333a2",
-    "08010602000000000000000001010101013100000000010707787e0608123633",
-    "0903010005024be91d",                       # STA + EOR
-    "040101022bcd010102057b000001",             # OER region
-    "0701c102",                                  # RXD + a number
-    "0e0100020000000000",                        # LOB op
-    "1d",                                        # end-of-response alone
-    "0c0100",                                    # short / marker-ish
-    "21010108",                                  # TOKEN(33) marker
+    '101735ebcd3cc510be7fdf53b18448bb2dda787e0608123633010201015c0200',
+    '101736595fbfc8d361f990557c35c1301c42787e061008050c016b01064d0200',
+    '0106007838365f36342f4c696e757820322e342e7878006903010a0066034003',
+    '00021fe80102010200062201010001020000000702c10208010603284b3a0001',
+    '02000000000000040101011b010102057b00000102010e030000000000000000',
+    '0000000030001010000000002057b0101010300194f52412d30313430333a2',
+    '08010602000000000000000001010101013100000000010707787e0608123633',
+    '0903010005024be91d',  # STA + EOR
+    '040101022bcd010102057b000001',  # OER region
+    '0701c102',  # RXD + a number
+    '0e0100020000000000',  # LOB op
+    '1d',  # end-of-response alone
+    '0c0100',  # short / marker-ish
+    '21010108',  # TOKEN(33) marker
 ]
 
 # decode_packet seeds the row decoder with (Cursor, RowFormat, Rows).
@@ -42,7 +42,7 @@ _ACC = (None, None, [])
 
 # Per-input hang guard (Unix). decode_packet must return or raise quickly; if it
 # spins, SIGALRM interrupts it and the input is reported as a hang to fix.
-_HAS_ALARM = hasattr(signal, "SIGALRM")
+_HAS_ALARM = hasattr(signal, 'SIGALRM')
 
 
 class _Timeout(Exception):
@@ -56,21 +56,20 @@ def _on_alarm(signum, frame):
 def _mutate(data: bytes, rng: random.Random) -> bytes:
     b = bytearray(data)
     op = rng.randrange(5)
-    if op == 0 and b:                       # flip a few bits
+    if op == 0 and b:  # flip a few bits
         for _ in range(rng.randint(1, 5)):
             i = rng.randrange(len(b))
             b[i] ^= 1 << rng.randrange(8)
-    elif op == 1:                           # truncate
-        b = b[:rng.randrange(len(b) + 1)]
-    elif op == 2:                           # append random bytes
+    elif op == 1:  # truncate
+        b = b[: rng.randrange(len(b) + 1)]
+    elif op == 2:  # append random bytes
         b += bytes(rng.randrange(256) for _ in range(rng.randint(1, 24)))
-    elif op == 3 and len(b) > 1:            # overwrite a run (often a length)
+    elif op == 3 and len(b) > 1:  # overwrite a run (often a length)
         i = rng.randrange(len(b))
         for j in range(i, min(i + rng.randint(1, 4), len(b))):
             b[j] = rng.randrange(256)
-    else:                                   # splice two seeds
-        b = bytearray(data) + bytearray(
-            bytes.fromhex(rng.choice(_SEEDS)))
+    else:  # splice two seeds
+        b = bytearray(data) + bytearray(bytes.fromhex(rng.choice(_SEEDS)))
     return bytes(b)
 
 
@@ -87,7 +86,7 @@ class TestDecoderFuzz(unittest.TestCase):
                 try:
                     decode_packet(data, _ACC)
                 except _Timeout:
-                    self.fail("decode_packet hung on input: " + data.hex())
+                    self.fail('decode_packet hung on input: ' + data.hex())
                 except Exception:
                     # Any clean exception is acceptable — the connection layer
                     # treats a decode failure as a protocol error. We only fail
@@ -111,5 +110,5 @@ class TestDecoderFuzz(unittest.TestCase):
                 pass
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

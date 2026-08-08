@@ -6,17 +6,24 @@ from typing import Any
 
 from oracle.datatypes import TempLob, Var
 from oracle.exceptions import (
-    DatabaseError, InterfaceError, NotSupportedError, ProgrammingError,
+    DatabaseError,
+    InterfaceError,
+    NotSupportedError,
+    ProgrammingError,
     from_ora_code,
 )
 from oracle.tns_consts import (
-    AL32UTF8_CHARSET, FIELD_VERSION_10_2, FIELD_VERSION_12_1,
-    TNS_TYPE_CLOB, UTF8_CHARSET,
-    TNS_FETCH_ORIENTATION_ABSOLUTE, TNS_FETCH_ORIENTATION_RELATIVE,
-    TNS_FETCH_ORIENTATION_FIRST, TNS_FETCH_ORIENTATION_LAST,
+    AL32UTF8_CHARSET,
+    FIELD_VERSION_10_2,
+    FIELD_VERSION_12_1,
+    TNS_FETCH_ORIENTATION_ABSOLUTE,
     TNS_FETCH_ORIENTATION_CURRENT,
+    TNS_FETCH_ORIENTATION_FIRST,
+    TNS_FETCH_ORIENTATION_LAST,
+    TNS_FETCH_ORIENTATION_RELATIVE,
+    TNS_TYPE_CLOB,
+    UTF8_CHARSET,
 )
-
 
 # `:name` placeholder. Names are case-insensitive and follow normal SQL
 # identifier rules; pure-digit forms (`:1`, `:2`) are handled separately as
@@ -88,9 +95,9 @@ class Cursor:
 
     def _check_open(self) -> None:
         if self._closed:
-            raise InterfaceError("cursor is closed")
+            raise InterfaceError('cursor is closed')
         if self._connection is None or self._connection.sock is None:
-            raise InterfaceError("connection is closed")
+            raise InterfaceError('connection is closed')
 
     @property
     def description(self) -> list[tuple] | None:
@@ -179,8 +186,11 @@ class Cursor:
         # bind the locator instead. Only for PL/SQL blocks (plain DML keeps the
         # streamed-LONG path) and only on 12c+ (11g rejects CREATE_TEMP).
         Conn = self._connection
-        if (getattr(Conn, 'field_version', 0) < FIELD_VERSION_12_1
-                or not _is_plsql(operation) or not Bind):
+        if (
+            getattr(Conn, 'field_version', 0) < FIELD_VERSION_12_1
+            or not _is_plsql(operation)
+            or not Bind
+        ):
             return Bind
         Promoted = []
         for Value in Bind:
@@ -188,8 +198,7 @@ class Cursor:
                 Locator = Conn.create_temp_lob()
                 Conn.write_temp_lob(Locator, Value)
                 Promoted.append(TempLob(Locator, False, len(Value) * 4))
-            elif (isinstance(Value, (bytes, bytearray))
-                    and len(Value) > 32767):
+            elif isinstance(Value, (bytes, bytearray)) and len(Value) > 32767:
                 Locator = Conn.create_temp_lob(is_blob=True)
                 Conn.write_temp_lob(Locator, bytes(Value), is_blob=True)
                 Promoted.append(TempLob(Locator, True, len(Value)))
@@ -197,22 +206,29 @@ class Cursor:
                 Promoted.append(Value)
         return Promoted
 
-    def _run(self, operation: str, Bind: list, Batch: list | None = None,
-             BatchErrors: bool = False,
-             ArrayDmlRowCounts: bool = False) -> 'Cursor':
+    def _run(
+        self,
+        operation: str,
+        Bind: list,
+        Batch: list | None = None,
+        BatchErrors: bool = False,
+        ArrayDmlRowCounts: bool = False,
+    ) -> 'Cursor':
         _check_object_bind_support(self._connection, Bind, Batch)
-        Kw: dict[str, Any] = {'Bind': Bind, 'Batch': Batch,
-                              'BatchErrors': BatchErrors,
-                              'ArrayDmlRowCounts': ArrayDmlRowCounts}
+        Kw: dict[str, Any] = {
+            'Bind': Bind,
+            'Batch': Batch,
+            'BatchErrors': BatchErrors,
+            'ArrayDmlRowCounts': ArrayDmlRowCounts,
+        }
         ReturnBinds = _returning_bind_positions(operation, len(Bind or []))
-        if ReturnBinds:                       # DML RETURNING ... INTO (#120)
+        if ReturnBinds:  # DML RETURNING ... INTO (#120)
             Kw['ReturnBinds'] = ReturnBinds
         # Server-side scrollable open (#181): mark the cursor scrollable and cap
         # the open's prefetch to prefetchrows so it stays mid-stream. Gated to
         # 10g+ (the OALL8 path); 9i (fv2) speaks the TTI_ALL7 dialect and falls
         # back to the buffered scroll (#161).
-        if (self._scrollable
-                and self._connection.field_version >= FIELD_VERSION_10_2):
+        if self._scrollable and self._connection.field_version >= FIELD_VERSION_10_2:
             Kw['scrollable'] = True
             Kw['Prefetch'] = max(int(self.prefetchrows), 1)
         Result = self._connection.execute(operation, **Kw)
@@ -235,29 +251,30 @@ class Cursor:
             Message = Result[5] if len(Result) > 5 else None
             LastRowid = Result[6] if len(Result) > 6 else None
         except (TypeError, IndexError, ValueError) as exc:
-            raise DatabaseError(f"unexpected wire response: {Result!r}") from exc
+            raise DatabaseError(f'unexpected wire response: {Result!r}') from exc
 
         # Array-DML batch errors (#18): each entry is {offset, code, message}.
         self._batcherrors = list(Result[7]) if len(Result) > 7 else []
         # Array-DML per-iteration row counts (#18): list of ints, one per row.
         self._arraydmlrowcounts = (
-            list(Result[8]) if len(Result) > 8 and Result[8] else [])
+            list(Result[8]) if len(Result) > 8 and Result[8] else []
+        )
 
         # ORA-24381 ("error(s) in array DML") is the summary code the server
         # returns when batcherrors collected per-row failures — not a fatal
         # error. Surface them through getbatcherrors() instead of raising.
         NonFatal = (0, 1403, 24381) if BatchErrors else (0, 1403)
         if OraCode not in NonFatal:
-            Detail = Message or f"ORA-{OraCode:05d}"
+            Detail = Message or f'ORA-{OraCode:05d}'
             raise from_ora_code(OraCode)(Detail, code=OraCode)
 
         # PL/SQL OUT / IN OUT binds: write returned values back into any Var
         # objects the caller passed. REF CURSOR OUT binds are fetched here.
         for Variable, Marker in _assign_out_binds(Bind, Result):
             Rows = self._connection.fetch_all_rows(
-                Marker['cursor_id'], Marker['row_format'])
-            Variable._value = _build_refcursor_cursor(
-                self._connection, Rows, Marker)
+                Marker['cursor_id'], Marker['row_format']
+            )
+            Variable._value = _build_refcursor_cursor(self._connection, Rows, Marker)
 
         # DML RETURNING ... INTO: write the returned value list onto each Var.
         _assign_return_binds(Bind, Result)
@@ -280,24 +297,29 @@ class Cursor:
             self._lastrowid = None
             self._description = [_column_description(C) for C in ColMeta]
             self._annotations = [_col_annotations(C) for C in ColMeta]
-            self._rows = [_resolve_objects(self._connection,
-                                           _resolve_lobs(self._connection, row))
-                          for row in (Rows or [])]
+            self._rows = [
+                _resolve_objects(self._connection, _resolve_lobs(self._connection, row))
+                for row in (Rows or [])
+            ]
             # For SELECT, the OER's success-iters value is the per-call fetch
             # count, not the total result set size; len(rows) is the answer
             # callers expect from cursor.rowcount.
             self._rowcount = len(self._rows)
-            if (self._scrollable
-                    and self._connection.field_version >= FIELD_VERSION_10_2):
+            if (
+                self._scrollable
+                and self._connection.field_version >= FIELD_VERSION_10_2
+            ):
                 # Server-side scrollable open (#181): the cursor stays open and
                 # this Result holds only the first prefetched batch. Record the
                 # window so scroll()/fetchone can reposition + pull more lazily.
                 # Gated to 10g+ to match _run; on 9i the open drained and scroll
                 # stays buffered (#161).
-                CursorId = (Result[2] if len(Result) > 2
-                            and isinstance(Result[2], int) else 0)
-                self._init_scroll_window(CursorId, ColMeta, ServerRowCount,
-                                         len(self._rows), OraCode == 1403)
+                CursorId = (
+                    Result[2] if len(Result) > 2 and isinstance(Result[2], int) else 0
+                )
+                self._init_scroll_window(
+                    CursorId, ColMeta, ServerRowCount, len(self._rows), OraCode == 1403
+                )
         else:
             # DDL / DML / non-result-set statement. OER carries the affected
             # row count in its success-iters field; surface it, along with the
@@ -350,7 +372,7 @@ class Cursor:
         self._check_open()
         Params = list(parameters) if parameters else []
         Placeholders = ', '.join(f':{I + 1}' for I in range(len(Params)))
-        self.execute(f"BEGIN {name}({Placeholders}); END;", Params)
+        self.execute(f'BEGIN {name}({Placeholders}); END;', Params)
         return [P.getvalue() if isinstance(P, Var) else P for P in Params]
 
     def callfunc(self, name: str, return_type, parameters=None):
@@ -364,12 +386,16 @@ class Cursor:
         Params = list(parameters) if parameters else []
         # :1 is the return value; arguments are :2, :3, ...
         Args = ', '.join(f':{I + 2}' for I in range(len(Params)))
-        self.execute(f"BEGIN :1 := {name}({Args}); END;", [Ret] + Params)
+        self.execute(f'BEGIN :1 := {name}({Args}); END;', [Ret] + Params)
         return Ret.getvalue()
 
-    def executemany(self, operation: str, seq_of_parameters,
-                    batcherrors: bool = False,
-                    arraydmlrowcounts: bool = False) -> 'Cursor':
+    def executemany(
+        self,
+        operation: str,
+        seq_of_parameters,
+        batcherrors: bool = False,
+        arraydmlrowcounts: bool = False,
+    ) -> 'Cursor':
         # Array DML: bind every row's values and execute them in a single
         # server round trip (one parse, `len(rows)` iterations) rather than
         # one execute() per row. Column types are taken from the first row.
@@ -383,10 +409,8 @@ class Cursor:
         # each iteration affected, retrievable via `getarraydmlrowcounts()`.
         # A 12c+ feature; raises on an 11g server (oracledb-compatible). #18.
         self._check_open()
-        if arraydmlrowcounts \
-                and self._connection.field_version < FIELD_VERSION_12_1:
-            raise NotSupportedError(
-                "arraydmlrowcounts requires an Oracle 12.1+ server")
+        if arraydmlrowcounts and self._connection.field_version < FIELD_VERSION_12_1:
+            raise NotSupportedError('arraydmlrowcounts requires an Oracle 12.1+ server')
         self._batcherrors = []
         self._arraydmlrowcounts = []
         Rows = [_resolve_parameters(operation, P) for P in seq_of_parameters]
@@ -396,9 +420,13 @@ class Cursor:
             self._rowcount = 0
             self._row_index = 0
             return self
-        return self._run(operation, Rows[0], Batch=Rows[1:],
-                         BatchErrors=batcherrors,
-                         ArrayDmlRowCounts=arraydmlrowcounts)
+        return self._run(
+            operation,
+            Rows[0],
+            Batch=Rows[1:],
+            BatchErrors=batcherrors,
+            ArrayDmlRowCounts=arraydmlrowcounts,
+        )
 
     def getbatcherrors(self) -> list:
         """Errors collected by the most recent ``executemany(batcherrors=True)``.
@@ -411,8 +439,7 @@ class Cursor:
         Out = []
         for E in getattr(self, '_batcherrors', []):
             Code = E.get('code')
-            Exc = from_ora_code(Code)(E.get('message') or f"ORA-{Code:05d}",
-                                      code=Code)
+            Exc = from_ora_code(Code)(E.get('message') or f'ORA-{Code:05d}', code=Code)
             Exc.offset = E.get('offset')
             Out.append(Exc)
         return Out
@@ -430,9 +457,9 @@ class Cursor:
 
     # --- Server-side scroll window helpers (#181) ---
 
-    def _init_scroll_window(self, cursor_id: int, colmeta: list,
-                            server_rowcount, batch_len: int,
-                            eof: bool) -> None:
+    def _init_scroll_window(
+        self, cursor_id: int, colmeta: list, server_rowcount, batch_len: int, eof: bool
+    ) -> None:
         # Arm the lazy server-side scroll path after a scrollable open.
         self._scroll_active = True
         self._scroll_cursor_id = cursor_id
@@ -466,9 +493,13 @@ class Cursor:
         Size = max(int(self.arraysize), 1)
         Prev = self._rows[-1] if self._rows else None
         Rows, Eof, ServerRowCount = Conn.scroll_fetch(
-            self._scroll_cursor_id, TNS_FETCH_ORIENTATION_CURRENT,
-            self._scroll_consumed + 1, self._scroll_rowformat, Fetch=Size,
-            PrevRow=Prev)
+            self._scroll_cursor_id,
+            TNS_FETCH_ORIENTATION_CURRENT,
+            self._scroll_consumed + 1,
+            self._scroll_rowformat,
+            Fetch=Size,
+            PrevRow=Prev,
+        )
         Batch = [_resolve_objects(Conn, _resolve_lobs(Conn, R)) for R in Rows]
         self._rows = Batch
         # _scroll_set_window resets the window to empty when Batch is empty
@@ -479,7 +510,7 @@ class Cursor:
     def fetchone(self) -> tuple | None:
         self._check_open()
         if self._description is None:
-            raise InterfaceError("no result set; call execute() with a SELECT first")
+            raise InterfaceError('no result set; call execute() with a SELECT first')
         if self._row_index >= len(self._rows):
             # Lazy server-side scrollable cursor: pull the next batch on demand.
             if self._scroll_active and not self._scroll_eof:
@@ -520,9 +551,10 @@ class Cursor:
         pyarrow (#162, oracledb-compatible). Consumes the rows like fetchall."""
         self._check_open()
         if self._description is None:
-            raise InterfaceError("no result set; call execute() with a SELECT first")
+            raise InterfaceError('no result set; call execute() with a SELECT first')
         from oracle.dataframe import build_table
-        Rows = self._rows[self._row_index:]
+
+        Rows = self._rows[self._row_index :]
         self._row_index = len(self._rows)
         return build_table(Rows, self._description)
 
@@ -532,13 +564,14 @@ class Cursor:
         without materialising every row at once (#162)."""
         self._check_open()
         if self._description is None:
-            raise InterfaceError("no result set; call execute() with a SELECT first")
+            raise InterfaceError('no result set; call execute() with a SELECT first')
         from oracle.dataframe import build_table
+
         if size is None:
             size = self.arraysize
         size = max(int(size), 1)
         while self._row_index < len(self._rows):
-            Rows = self._rows[self._row_index:self._row_index + size]
+            Rows = self._rows[self._row_index : self._row_index + size]
             self._row_index += len(Rows)
             yield build_table(Rows, self._description)
 
@@ -557,14 +590,15 @@ class Cursor:
         Rows = self._connection.fetch_all_rows(CursorId, RowFormat)
         self._description = [_column_description(C) for C in RowFormat]
         self._annotations = [_col_annotations(C) for C in RowFormat]
-        self._rows = [_resolve_objects(self._connection,
-                                       _resolve_lobs(self._connection, Row))
-                      for Row in (Rows or [])]
+        self._rows = [
+            _resolve_objects(self._connection, _resolve_lobs(self._connection, Row))
+            for Row in (Rows or [])
+        ]
         self._rowcount = len(self._rows)
         self._row_index = 0
         return True
 
-    def scroll(self, value: int = 0, mode: str = "relative") -> None:
+    def scroll(self, value: int = 0, mode: str = 'relative') -> None:
         """Scroll the result-set cursor to a new position (PEP 249 / oracledb
         semantics). `mode` is one of:
 
@@ -581,7 +615,7 @@ class Cursor:
         """
         self._check_open()
         if self._description is None:
-            raise InterfaceError("no result set; call execute() with a SELECT first")
+            raise InterfaceError('no result set; call execute() with a SELECT first')
         if self._scroll_active:
             return self._scroll_server(value, mode)
         return self._scroll_buffered(value, mode)
@@ -590,18 +624,18 @@ class Cursor:
         # #161 fallback: the whole result set is in self._rows, so scroll() is a
         # local index move. Used for non-scrollable cursors.
         Count = len(self._rows)
-        if mode == "relative":
+        if mode == 'relative':
             Target = self._row_index + value
-        elif mode == "absolute":
+        elif mode == 'absolute':
             Target = value
-        elif mode == "first":
+        elif mode == 'first':
             Target = 1
-        elif mode == "last":
+        elif mode == 'last':
             Target = Count
         else:
-            raise ProgrammingError(f"invalid scroll mode: {mode!r}")
+            raise ProgrammingError(f'invalid scroll mode: {mode!r}')
         if Target < 1 or Target > Count:
-            raise IndexError("scroll operation would leave the result set")
+            raise IndexError('scroll operation would leave the result set')
         self._row_index = Target - 1
 
     def _scroll_server(self, value: int, mode: str) -> None:
@@ -609,28 +643,27 @@ class Cursor:
         # 1-based row, satisfy it from the current buffer when possible, else
         # re-execute the open cursor at the new position (oracledb's
         # _create_scroll_message / _post_process_scroll).
-        if mode == "relative":
+        if mode == 'relative':
             Orientation = TNS_FETCH_ORIENTATION_RELATIVE
             Desired = self._scroll_consumed + value
-        elif mode == "absolute":
+        elif mode == 'absolute':
             Orientation = TNS_FETCH_ORIENTATION_ABSOLUTE
             Desired = value
-        elif mode == "first":
+        elif mode == 'first':
             Orientation = TNS_FETCH_ORIENTATION_FIRST
             Desired = 1
-        elif mode == "last":
+        elif mode == 'last':
             Orientation = TNS_FETCH_ORIENTATION_LAST
             Desired = 0
         else:
-            raise ProgrammingError(f"invalid scroll mode: {mode!r}")
+            raise ProgrammingError(f'invalid scroll mode: {mode!r}')
         # A target before the first row leaves the result set (PEP 249); raise
         # locally rather than sending an invalid position to the server.
-        if mode in ("relative", "absolute") and Desired < 1:
-            raise IndexError("scroll operation would leave the result set")
+        if mode in ('relative', 'absolute') and Desired < 1:
+            raise IndexError('scroll operation would leave the result set')
         # Buffer hit: the target row is already in the current window — just move
         # the index, no server round trip.
-        if (mode != "last"
-                and self._scroll_buf_min <= Desired < self._scroll_buf_max):
+        if mode != 'last' and self._scroll_buf_min <= Desired < self._scroll_buf_max:
             self._row_index = Desired - self._scroll_buf_min
             self._scroll_consumed = Desired - 1
             return
@@ -638,8 +671,13 @@ class Cursor:
         Size = max(int(self.arraysize), 1)
         Prev = self._rows[-1] if self._rows else None
         Rows, Eof, ServerRowCount = Conn.scroll_fetch(
-            self._scroll_cursor_id, Orientation, Desired,
-            self._scroll_rowformat, Fetch=Size, PrevRow=Prev)
+            self._scroll_cursor_id,
+            Orientation,
+            Desired,
+            self._scroll_rowformat,
+            Fetch=Size,
+            PrevRow=Prev,
+        )
         Batch = [_resolve_objects(Conn, _resolve_lobs(Conn, R)) for R in Rows]
         if not Batch:
             # Scrolled off the end (oracledb resets the window; the next
@@ -685,14 +723,13 @@ def _assign_out_binds(Bind, Result) -> list:
     # 'row_format'}); they need a server fetch to materialise, which differs
     # between the sync and async cursors, so collect and return them as
     # (Var, marker) pairs for the caller to finish.
-    if not isinstance(Bind, list) or not isinstance(Result, tuple) \
-            or len(Result) < 5:
+    if not isinstance(Bind, list) or not isinstance(Result, tuple) or len(Result) < 5:
         return []
     Rows = Result[4]
-    if not Rows or not isinstance(Rows[0], dict) \
-            or 'out_positions' not in Rows[0]:
+    if not Rows or not isinstance(Rows[0], dict) or 'out_positions' not in Rows[0]:
         return []
     from oracle.types import decode_value
+
     Record = Rows[0]
     RefCursors = []
     for Pos, Value in zip(Record['out_positions'], Record['out_values']):
@@ -705,8 +742,9 @@ def _assign_out_binds(Bind, Result) -> list:
         elif isinstance(Value, dict) and Value.get('_array'):
             # Associative-array OUT (#122): decode each element by the Var's
             # type into a Python list.
-            Variable._value = [decode_value(Column, V if V else None)
-                               for V in Value['values']]
+            Variable._value = [
+                decode_value(Column, V if V else None) for V in Value['values']
+            ]
         else:
             Variable._value = decode_value(Column, Value if Value else None)
     return RefCursors
@@ -718,22 +756,20 @@ def _assign_return_binds(Bind, Result) -> None:
     # return_values[i] is the list of raw values for that bind (one per affected
     # row). Decode each by its Var's declared type and store the list on the Var
     # (getvalue() returns the list, matching python-oracledb).
-    if not isinstance(Bind, list) or not isinstance(Result, tuple) \
-            or len(Result) < 5:
+    if not isinstance(Bind, list) or not isinstance(Result, tuple) or len(Result) < 5:
         return
     Rows = Result[4]
-    if not Rows or not isinstance(Rows[0], dict) \
-            or 'return_positions' not in Rows[0]:
+    if not Rows or not isinstance(Rows[0], dict) or 'return_positions' not in Rows[0]:
         return
     from oracle.types import decode_value
+
     Record = Rows[0]
     for Pos, Values in zip(Record['return_positions'], Record['return_values']):
         if Pos >= len(Bind) or not isinstance(Bind[Pos], Var):
             continue
         Variable = Bind[Pos]
         Column = {'data_type': Variable.dbtype.tns_type, 'charset': UTF8_CHARSET}
-        Variable._value = [decode_value(Column, V if V else None)
-                           for V in Values]
+        Variable._value = [decode_value(Column, V if V else None) for V in Values]
         Variable.has_value = True
 
 
@@ -748,8 +784,7 @@ def _extract_implicit_results(Result) -> list:
         return []
     for Row in Rows:
         if isinstance(Row, dict) and 'implicit_results' in Row:
-            return [(R['row_format'], R['cursor_id'])
-                    for R in Row['implicit_results']]
+            return [(R['row_format'], R['cursor_id']) for R in Row['implicit_results']]
     return []
 
 
@@ -758,8 +793,9 @@ def _build_refcursor_cursor(Connection, Rows, Marker) -> 'Cursor':
     Nested = Cursor(Connection)
     Nested._description = [_column_description(C) for C in Marker['row_format']]
     Nested._annotations = [_col_annotations(C) for C in Marker['row_format']]
-    Nested._rows = [_resolve_objects(Connection, _resolve_lobs(Connection, Row))
-                    for Row in Rows]
+    Nested._rows = [
+        _resolve_objects(Connection, _resolve_lobs(Connection, Row)) for Row in Rows
+    ]
     Nested._rowcount = len(Nested._rows)
     Nested._row_index = 0
     return Nested
@@ -771,6 +807,7 @@ def _resolve_lobs(Connection, Row: list) -> list:
     # row decoder already handed back None for NULL LOBs before they ever
     # became LOB objects).
     from oracle.lob import LOB
+
     Out = list(Row)
     for I, Val in enumerate(Out):
         if isinstance(Val, LOB):
@@ -787,6 +824,7 @@ def _check_object_bind_support(Connection, Bind, Batch=None) -> None:
     # Refuse both up front on pre-12c with a clear error. (Object/collection
     # *decode* works on all tiers — only these binds are 12c+.)
     from oracle.dbobject import DbObject, DbRef
+
     if getattr(Connection, 'field_version', 0) >= FIELD_VERSION_12_1:
         return
     Rows = [Bind] + (Batch or []) if Bind else (Batch or [])
@@ -795,14 +833,17 @@ def _check_object_bind_support(Connection, Bind, Batch=None) -> None:
         for V in Values:
             if isinstance(V, DbObject):
                 raise NotSupportedError(
-                    "binding a SQL OBJECT value requires an Oracle 12.1+ server")
+                    'binding a SQL OBJECT value requires an Oracle 12.1+ server'
+                )
             if isinstance(V, DbRef):
                 raise NotSupportedError(
-                    "binding a REF value requires an Oracle 12.1+ server")
+                    'binding a REF value requires an Oracle 12.1+ server'
+                )
             if isinstance(V, Var) and getattr(V, 'is_array', False):
                 raise NotSupportedError(
-                    "binding a PL/SQL associative array (arrayvar) requires an "
-                    "Oracle 12.1+ server")
+                    'binding a PL/SQL associative array (arrayvar) requires an '
+                    'Oracle 12.1+ server'
+                )
 
 
 def _resolve_objects(Connection, Row: list) -> list:
@@ -810,9 +851,15 @@ def _resolve_objects(Connection, Row: list) -> list:
     # kept the packed image without decoding it (the attribute layout isn't
     # known at decode time); fetch the layout for the type now (cached on the
     # connection) and walk the image. NULL objects already came back as None.
-    from oracle.dbobject import (ObjectImage, DbObject, decode_object_image,
-                                 decode_collection_image, decode_xmltype)
+    from oracle.dbobject import (
+        DbObject,
+        ObjectImage,
+        decode_collection_image,
+        decode_object_image,
+        decode_xmltype,
+    )
     from oracle.lob import LOB
+
     Out = list(Row)
     for I, Val in enumerate(Out):
         if isinstance(Val, ObjectImage):
@@ -821,7 +868,8 @@ def _resolve_objects(Connection, Row: list) -> list:
                 # image directly (no describe round trip) -> str, or read the
                 # CLOB locator for a large document.
                 (IsLob, XmlVal) = decode_xmltype(
-                    Val.image, Val.charset or AL32UTF8_CHARSET)
+                    Val.image, Val.charset or AL32UTF8_CHARSET
+                )
                 if IsLob:
                     Lob = LOB(TNS_TYPE_CLOB, XmlVal)
                     Lob._connection = Connection
@@ -832,8 +880,9 @@ def _resolve_objects(Connection, Row: list) -> list:
             Typ = Connection._describe_object_type(Val.type_schema, Val.type_name)
             Charset = Val.charset or AL32UTF8_CHARSET
             if Typ is not None and Typ.is_collection:
-                Elements = decode_collection_image(Val.image, Typ.element or {},
-                                                   Charset)
+                Elements = decode_collection_image(
+                    Val.image, Typ.element or {}, Charset
+                )
                 Out[I] = DbObject(Val.type_name, elements=Elements, dbtype=Typ)
             else:
                 Layout = Typ.attrs if Typ is not None else []
@@ -868,7 +917,7 @@ def _returning_bind_positions(SQL: str, num_binds: int) -> frozenset:
     Into = _INTO_RE.search(Cleaned, Ret.end())
     if Into is None:
         return frozenset()
-    K = len(_ANY_BIND_RE.findall(Cleaned[Into.end():]))
+    K = len(_ANY_BIND_RE.findall(Cleaned[Into.end() :]))
     if K <= 0 or K > num_binds:
         return frozenset()
     return frozenset(range(num_binds - K, num_binds))
@@ -894,13 +943,11 @@ def _resolve_parameters(SQL: str, Params) -> list:
         Out = []
         for N in Names:
             if N not in Lower:
-                raise ProgrammingError(
-                    f"missing bind value for :{N}"
-                )
+                raise ProgrammingError(f'missing bind value for :{N}')
             Out.append(Lower[N])
         return Out
     raise NotSupportedError(
-        f"parameters must be a list, tuple, or dict; got {type(Params).__name__}"
+        f'parameters must be a list, tuple, or dict; got {type(Params).__name__}'
     )
 
 
@@ -933,10 +980,9 @@ def _is_plsql(SQL: str) -> bool:
     # PL/SQL blocks start with BEGIN or DECLARE after stripping leading
     # whitespace and SQL comments. Anonymous blocks, packaged calls
     # wrapped in BEGIN...END;, and DECLARE...BEGIN forms all match.
-    Stripped = re.sub(r'^\s*(?:--[^\n]*\n|/\*.*?\*/|\s)+', '',
-                      SQL, flags=re.S)
+    Stripped = re.sub(r'^\s*(?:--[^\n]*\n|/\*.*?\*/|\s)+', '', SQL, flags=re.S)
     Head = Stripped[:8].upper()
-    return Head.startswith("BEGIN") or Head.startswith("DECLARE")
+    return Head.startswith('BEGIN') or Head.startswith('DECLARE')
 
 
 def _col_annotations(Col: dict) -> dict | None:
@@ -945,8 +991,10 @@ def _col_annotations(Col: dict) -> dict | None:
     Ann = Col.get('annotations')
     if not Ann:
         return None
+
     def _s(B):
         return B.decode('utf-8', errors='replace') if isinstance(B, bytes) else B
+
     return {_s(K): _s(V) for K, V in Ann.items()}
 
 

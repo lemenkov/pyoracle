@@ -12,15 +12,29 @@ from __future__ import annotations
 import pyarrow as pa
 
 from oracle.tns_consts import (
-    TNS_TYPE_BDOUBLE, TNS_TYPE_BFLOAT, TNS_TYPE_CHAR,
-    TNS_TYPE_DATE, TNS_TYPE_FLOAT, TNS_TYPE_LONG, TNS_TYPE_LONGRAW,
-    TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPLTZ,
-    TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_VARCHAR, TNS_TYPE_VARNUM,
+    TNS_TYPE_BDOUBLE,
+    TNS_TYPE_BFLOAT,
+    TNS_TYPE_CHAR,
+    TNS_TYPE_DATE,
+    TNS_TYPE_FLOAT,
+    TNS_TYPE_LONG,
+    TNS_TYPE_LONGRAW,
+    TNS_TYPE_NUMBER,
+    TNS_TYPE_RAW,
+    TNS_TYPE_TIMESTAMP,
+    TNS_TYPE_TIMESTAMPLTZ,
+    TNS_TYPE_TIMESTAMPTZ,
+    TNS_TYPE_VARCHAR,
+    TNS_TYPE_VARNUM,
 )
 
 _BINARY_TYPES = (TNS_TYPE_RAW, TNS_TYPE_LONGRAW)
-_TIMESTAMP_TYPES = (TNS_TYPE_DATE, TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ,
-                    TNS_TYPE_TIMESTAMPLTZ)
+_TIMESTAMP_TYPES = (
+    TNS_TYPE_DATE,
+    TNS_TYPE_TIMESTAMP,
+    TNS_TYPE_TIMESTAMPTZ,
+    TNS_TYPE_TIMESTAMPLTZ,
+)
 _STRING_TYPES = (TNS_TYPE_VARCHAR, TNS_TYPE_CHAR, TNS_TYPE_LONG)
 _NUMBER_TYPES = (TNS_TYPE_NUMBER, TNS_TYPE_VARNUM)
 
@@ -34,7 +48,7 @@ def _fallback_type(type_code, scale) -> pa.DataType:
     if type_code in (TNS_TYPE_BDOUBLE, TNS_TYPE_FLOAT):
         return pa.float64()
     if type_code in _TIMESTAMP_TYPES:
-        return pa.timestamp("us")
+        return pa.timestamp('us')
     if type_code in _BINARY_TYPES:
         return pa.binary()
     return pa.string()
@@ -59,7 +73,7 @@ def _explicit_type(type_code, precision, scale):
         if scale == 0:
             # Integer values; int64 holds up to 18 digits without overflow.
             return pa.int64() if precision <= 18 else None
-        return None                                   # negative scale -> infer
+        return None  # negative scale -> infer
     if type_code == TNS_TYPE_BFLOAT:
         return pa.float32()
     if type_code in (TNS_TYPE_BDOUBLE, TNS_TYPE_FLOAT):
@@ -71,7 +85,7 @@ def _explicit_type(type_code, precision, scale):
     # DATE / naive TIMESTAMP decode to naive datetimes; the TZ-aware variants
     # (TIMESTAMPTZ / LTZ) carry a tz, so leave those to inference.
     if type_code in (TNS_TYPE_DATE, TNS_TYPE_TIMESTAMP):
-        return pa.timestamp("us")
+        return pa.timestamp('us')
     return None
 
 
@@ -101,7 +115,10 @@ def build_table(rows: list, description: list) -> pa.Table:
     for Row in rows:
         for I in range(NumCols):
             Columns[I].append(Row[I] if I < len(Row) else None)
-    Arrays = [_column_array(Columns[I], description[I][1], description[I][5],
-                            description[I][4])
-              for I in range(NumCols)]
+    Arrays = [
+        _column_array(
+            Columns[I], description[I][1], description[I][5], description[I][4]
+        )
+        for I in range(NumCols)
+    ]
     return pa.table(dict(zip(Names, Arrays))) if Names else pa.table({})

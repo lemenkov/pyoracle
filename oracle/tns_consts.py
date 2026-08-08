@@ -29,20 +29,20 @@ TNS_GSO_CAN_RECV_ATTENTION = 0x0400
 # 4-byte ("large") packet length, and a >= 318 server's ACCEPT carries an
 # extended flags2 word whose HAS_END_OF_RESPONSE bit lets the client opt into the
 # end-of-response framing that pipelining (#132) needs.
-TNS_VERSION_MIN_LARGE_SDU = 315          # 4-byte packet length from here up
-TNS_VERSION_MIN_OOB_CHECK = 318          # accept carries the extended flags2
+TNS_VERSION_MIN_LARGE_SDU = 315  # 4-byte packet length from here up
+TNS_VERSION_MIN_OOB_CHECK = 318  # accept carries the extended flags2
 TNS_ACCEPT_FLAG_HAS_END_OF_RESPONSE = 0x02000000
-TNS_CCAP_END_OF_RESPONSE = 0x20          # CCAP_TTC4 opt-in bit (#155/#132)
-TTI_END_OF_RESPONSE = 29                 # per-response terminator marker
+TNS_CCAP_END_OF_RESPONSE = 0x20  # CCAP_TTC4 opt-in bit (#155/#132)
+TTI_END_OF_RESPONSE = 29  # per-response terminator marker
 # Request pipelining (#132). Several calls are sent back-to-back, each numbered
 # with a ub8 token, then a PIPELINE_END message; the server tags each response
 # with a matching TOKEN (33) marker and ends it with the EOR (29) marker.
-TTI_MSG_TYPE_PIGGYBACK = 0x11            # piggyback message type (17)
-TTI_TOKEN = 33                           # response correlation marker
-TNS_FUNC_PIPELINE_BEGIN = 199            # begin-pipeline piggyback
-TNS_FUNC_PIPELINE_END = 200              # end-of-pipeline message
-TNS_DATA_FLAGS_BEGIN_PIPELINE = 0x1000   # first pipelined packet
-TNS_DATA_FLAGS_END_OF_REQUEST = 0x0800   # a pipelined call expecting a result
+TTI_MSG_TYPE_PIGGYBACK = 0x11  # piggyback message type (17)
+TTI_TOKEN = 33  # response correlation marker
+TNS_FUNC_PIPELINE_BEGIN = 199  # begin-pipeline piggyback
+TNS_FUNC_PIPELINE_END = 200  # end-of-pipeline message
+TNS_DATA_FLAGS_BEGIN_PIPELINE = 0x1000  # first pipelined packet
+TNS_DATA_FLAGS_END_OF_REQUEST = 0x0800  # a pipelined call expecting a result
 TNS_PIPELINE_MODE_CONTINUE_ON_ERROR = 1
 TNS_PIPELINE_MODE_ABORT_ON_ERROR = 2
 
@@ -71,7 +71,7 @@ TNS_FETCH_ORIENTATION_RELATIVE = 0x40
 # piggyback (func TTI_SCID=135) tells the server which of module / action /
 # client_identifier / client_info / dbop changed and carries the new values.
 # Flag bits (which attributes the piggyback updates).
-TNS_FUNC_SET_END_TO_END_ATTR = 135        # == TTI_SCID, 0x87
+TNS_FUNC_SET_END_TO_END_ATTR = 135  # == TTI_SCID, 0x87
 TNS_END_TO_END_CLIENT_IDENTIFIER = 0x0001
 TNS_END_TO_END_MODULE = 0x0008
 TNS_END_TO_END_ACTION = 0x0010
@@ -109,9 +109,9 @@ TNS_TYPE_BFLOAT = 100
 TNS_TYPE_BDOUBLE = 101
 TNS_TYPE_ADT = 109
 TNS_TYPE_REF = 111
-TNS_TYPE_JSON = 119      # native JSON (OSON), 21c+ (#30)
-TNS_TYPE_BOOLEAN = 252   # native SQL BOOLEAN, 23ai+ (#54)
-TNS_TYPE_VECTOR = 127    # native VECTOR, 23ai+ (#55)
+TNS_TYPE_JSON = 119  # native JSON (OSON), 21c+ (#30)
+TNS_TYPE_BOOLEAN = 252  # native SQL BOOLEAN, 23ai+ (#54)
+TNS_TYPE_VECTOR = 127  # native VECTOR, 23ai+ (#55)
 
 TTI_PRO = 1
 TTI_DTY = 2
@@ -131,10 +131,10 @@ TTI_DCB = 16
 TTI_PFN = 17
 TTI_FOB = 19
 TTI_BVC = 21
-TTI_IRD = 27        # implicit result-set describe (DBMS_SQL.RETURN_RESULT, #121)
+TTI_IRD = 27  # implicit result-set describe (DBMS_SQL.RETURN_RESULT, #121)
 
 # Two-phase commit / XA (#131). Function codes + operations + states.
-TNS_FUNC_TPC_TXN_SWITCH = 103       # tpc_begin (start) / tpc_end (detach)
+TNS_FUNC_TPC_TXN_SWITCH = 103  # tpc_begin (start) / tpc_end (detach)
 TNS_FUNC_TPC_TXN_CHANGE_STATE = 104  # tpc_prepare / commit / rollback / forget
 TNS_TPC_TXN_START = 0x01
 TNS_TPC_TXN_DETACH = 0x02
@@ -161,7 +161,7 @@ TPC_END_SUSPEND = 0x00100000
 # magic format-id carried in the XID slot (the user txn id goes in the gtrid).
 # Confirmed on the wire (23ai 23.26) against the oracledb-thin reference.
 TPC_TXN_FLAGS_SESSIONLESS = 0x00000010
-TNS_TPC_SESSIONLESS_FORMAT_ID = 0x4e5c3e
+TNS_TPC_SESSIONLESS_FORMAT_ID = 0x4E5C3E
 TNS_SESSIONLESS_TXN_ID_MAX = 64
 
 # DRCP session purity (#130).
@@ -256,18 +256,18 @@ TTI_PING = 147
 # wire formats. Kept here in the leaf constants module (rather than oracle.tns)
 # so oracle.cursor can import the 12.1 threshold without forming an import cycle
 # — oracle.tns imports oracle.cursor.
-FIELD_VERSION_9_2 = 2          # Oracle 9i (pre-10g O3LOGON thin auth, #90)
-FIELD_VERSION_10_2 = 4         # Oracle 10g — oldest tier using the O5LOGON path
+FIELD_VERSION_9_2 = 2  # Oracle 9i (pre-10g O3LOGON thin auth, #90)
+FIELD_VERSION_10_2 = 4  # Oracle 10g — oldest tier using the O5LOGON path
 FIELD_VERSION_11_2 = 6
 FIELD_VERSION_12_1 = 7
 FIELD_VERSION_12_2 = 8
 FIELD_VERSION_12_2_EXT1 = 9
 FIELD_VERSION_19_1 = 12
-FIELD_VERSION_19_1_EXT1 = 13   # written inside the FAST_AUTH envelope (#89)
-FIELD_VERSION_20_1 = 14        # AQ JSON-payload pointer gate (#128)
+FIELD_VERSION_19_1_EXT1 = 13  # written inside the FAST_AUTH envelope (#89)
+FIELD_VERSION_20_1 = 14  # AQ JSON-payload pointer gate (#128)
 FIELD_VERSION_21_1 = 16
-FIELD_VERSION_23_1 = 17        # highest the LEGACY 3-message handshake reaches
-FIELD_VERSION_23_4 = 24        # 23ai max; reached only via FAST_AUTH (#89)
+FIELD_VERSION_23_1 = 17  # highest the LEGACY 3-message handshake reaches
+FIELD_VERSION_23_4 = 24  # 23ai max; reached only via FAST_AUTH (#89)
 
 # Oracle 23ai "fast auth" (#89): a single TNS DATA packet (message type 0x22)
 # bundling the protocol, datatypes, and OSESSKEY messages in one round trip. It is
@@ -276,9 +276,12 @@ FIELD_VERSION_23_4 = 24        # 23ai max; reached only via FAST_AUTH (#89)
 # own field version (learned from its PRO reply, 23ai advertises 27), not an ACCEPT
 # flag: at the protocol version pyoracle sends (313) the ACCEPT carries no flag.
 TNS_MSG_TYPE_FAST_AUTH = 0x22
-TNS_SERVER_CONVERTS_CHARS = 0x01      # fast-auth envelope flag byte
+TNS_SERVER_CONVERTS_CHARS = 0x01  # fast-auth envelope flag byte
 
-DictionaryType = Enum('DictionaryType', 'auth chgpwd close description dty exec fetch lobops login pig pro sess spfp start stop tran')
+DictionaryType = Enum(
+    'DictionaryType',
+    'auth chgpwd close description dty exec fetch lobops login pig pro sess spfp start stop tran',
+)
 
 # OALL8 execute-option bit that turns on array-DML batch-error mode: a per-row
 # error is collected (in the OER batch-error arrays) instead of aborting the
@@ -311,27 +314,27 @@ AL32UTF8_CHARSET = 873
 AL16UTF16_CHARSET = 2000
 
 CharsetDict = {
-    'we8iso8859p1' : 31,
-    'ee8iso8859p2' : 32,
-    'cl8iso8859p5' : 35,
-    'ee8mswin1250' : 170,
-    'cl8mswin1251' : 171,
-    'we8mswin1252' : 178,
-    'ja16euc' : 830,
-    'zhs16gbk' : 852,
-    'zht16big5' : 865,
-    'zht16mswin950' : 867,
-    'al32utf8' : 873,
-    'al16utf16' : 2000
+    'we8iso8859p1': 31,
+    'ee8iso8859p2': 32,
+    'cl8iso8859p5': 35,
+    'ee8mswin1250': 170,
+    'cl8mswin1251': 171,
+    'we8mswin1252': 178,
+    'ja16euc': 830,
+    'zhs16gbk': 852,
+    'zht16big5': 865,
+    'zht16mswin950': 867,
+    'al32utf8': 873,
+    'al16utf16': 2000,
 }
 
-DEFAULT_HOST = ""
+DEFAULT_HOST = ''
 DEFAULT_PORT = 1521
-DEFAULT_SID = ""
+DEFAULT_SID = ''
 
-CONN_STATE_DISCONNECTED   = 0
-CONN_STATE_CONNECTED      = 1
+CONN_STATE_DISCONNECTED = 0
+CONN_STATE_CONNECTED = 1
 CONN_STATE_AUTH_NEGOTIATE = 2
-CONN_STATE_AUTHENTICATED  = 3
+CONN_STATE_AUTHENTICATED = 3
 
 MAX_SEQ_NUM = 127

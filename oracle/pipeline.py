@@ -28,12 +28,30 @@ class PipelineOpType(Enum):
 class PipelineOp:
     """A single operation queued in a Pipeline (#132)."""
 
-    __slots__ = ("op_type", "statement", "parameters", "keyword_parameters",
-                 "name", "return_type", "num_rows", "arraysize", "rowfactory")
+    __slots__ = (
+        'op_type',
+        'statement',
+        'parameters',
+        'keyword_parameters',
+        'name',
+        'return_type',
+        'num_rows',
+        'arraysize',
+        'rowfactory',
+    )
 
-    def __init__(self, op_type, statement=None, parameters=None,
-                 keyword_parameters=None, name=None, return_type=None,
-                 num_rows=None, arraysize=None, rowfactory=None):
+    def __init__(
+        self,
+        op_type,
+        statement=None,
+        parameters=None,
+        keyword_parameters=None,
+        name=None,
+        return_type=None,
+        num_rows=None,
+        arraysize=None,
+        rowfactory=None,
+    ):
         self.op_type = op_type
         self.statement = statement
         self.parameters = parameters
@@ -45,15 +63,14 @@ class PipelineOp:
         self.rowfactory = rowfactory
 
     def __repr__(self):
-        what = self.statement or self.name or ""
-        return f"<oracle.PipelineOp {self.op_type.name} {what!r}>"
+        what = self.statement or self.name or ''
+        return f'<oracle.PipelineOp {self.op_type.name} {what!r}>'
 
 
 class PipelineOpResult:
     """The result of one PipelineOp after run_pipeline (#132)."""
 
-    __slots__ = ("operation", "rows", "return_value", "columns", "error",
-                 "warning")
+    __slots__ = ('operation', 'rows', 'return_value', 'columns', 'error', 'warning')
 
     def __init__(self, operation):
         self.operation = operation
@@ -64,8 +81,8 @@ class PipelineOpResult:
         self.warning = None
 
     def __repr__(self):
-        state = "error" if self.error else "ok"
-        return f"<oracle.PipelineOpResult {self.operation.op_type.name} {state}>"
+        state = 'error' if self.error else 'ok'
+        return f'<oracle.PipelineOpResult {self.operation.op_type.name} {state}>'
 
 
 class Pipeline:
@@ -82,52 +99,78 @@ class Pipeline:
 
     def add_execute(self, statement, parameters=None) -> PipelineOp:
         """Queue a statement execute (DML/DDL/PL-SQL); no rows are fetched."""
-        return self._add(PipelineOp(PipelineOpType.EXECUTE, statement,
-                                    parameters))
+        return self._add(PipelineOp(PipelineOpType.EXECUTE, statement, parameters))
 
     def add_executemany(self, statement, parameters) -> PipelineOp:
         """Queue an executemany over a sequence of parameter rows."""
-        return self._add(PipelineOp(PipelineOpType.EXECUTE_MANY, statement,
-                                    parameters))
+        return self._add(PipelineOp(PipelineOpType.EXECUTE_MANY, statement, parameters))
 
-    def add_fetchone(self, statement, parameters=None,
-                     rowfactory=None) -> PipelineOp:
+    def add_fetchone(self, statement, parameters=None, rowfactory=None) -> PipelineOp:
         """Queue a query and fetch its first row (result.rows[0] or None)."""
-        return self._add(PipelineOp(PipelineOpType.FETCH_ONE, statement,
-                                    parameters, rowfactory=rowfactory))
+        return self._add(
+            PipelineOp(
+                PipelineOpType.FETCH_ONE, statement, parameters, rowfactory=rowfactory
+            )
+        )
 
-    def add_fetchmany(self, statement, parameters=None, num_rows=None,
-                      rowfactory=None) -> PipelineOp:
+    def add_fetchmany(
+        self, statement, parameters=None, num_rows=None, rowfactory=None
+    ) -> PipelineOp:
         """Queue a query and fetch up to num_rows rows."""
-        return self._add(PipelineOp(PipelineOpType.FETCH_MANY, statement,
-                                    parameters, num_rows=num_rows,
-                                    rowfactory=rowfactory))
+        return self._add(
+            PipelineOp(
+                PipelineOpType.FETCH_MANY,
+                statement,
+                parameters,
+                num_rows=num_rows,
+                rowfactory=rowfactory,
+            )
+        )
 
-    def add_fetchall(self, statement, parameters=None, arraysize=None,
-                     rowfactory=None) -> PipelineOp:
+    def add_fetchall(
+        self, statement, parameters=None, arraysize=None, rowfactory=None
+    ) -> PipelineOp:
         """Queue a query and fetch all its rows."""
-        return self._add(PipelineOp(PipelineOpType.FETCH_ALL, statement,
-                                    parameters, arraysize=arraysize,
-                                    rowfactory=rowfactory))
+        return self._add(
+            PipelineOp(
+                PipelineOpType.FETCH_ALL,
+                statement,
+                parameters,
+                arraysize=arraysize,
+                rowfactory=rowfactory,
+            )
+        )
 
     def add_commit(self) -> PipelineOp:
         """Queue a commit."""
         return self._add(PipelineOp(PipelineOpType.COMMIT))
 
-    def add_callproc(self, name, parameters=None,
-                     keyword_parameters=None) -> PipelineOp:
+    def add_callproc(
+        self, name, parameters=None, keyword_parameters=None
+    ) -> PipelineOp:
         """Queue a stored-procedure call."""
-        return self._add(PipelineOp(PipelineOpType.CALL_PROC, name=name,
-                                    parameters=parameters,
-                                    keyword_parameters=keyword_parameters))
+        return self._add(
+            PipelineOp(
+                PipelineOpType.CALL_PROC,
+                name=name,
+                parameters=parameters,
+                keyword_parameters=keyword_parameters,
+            )
+        )
 
-    def add_callfunc(self, name, return_type, parameters=None,
-                     keyword_parameters=None) -> PipelineOp:
+    def add_callfunc(
+        self, name, return_type, parameters=None, keyword_parameters=None
+    ) -> PipelineOp:
         """Queue a stored-function call returning return_type."""
-        return self._add(PipelineOp(PipelineOpType.CALL_FUNC, name=name,
-                                    return_type=return_type,
-                                    parameters=parameters,
-                                    keyword_parameters=keyword_parameters))
+        return self._add(
+            PipelineOp(
+                PipelineOpType.CALL_FUNC,
+                name=name,
+                return_type=return_type,
+                parameters=parameters,
+                keyword_parameters=keyword_parameters,
+            )
+        )
 
 
 def create_pipeline() -> Pipeline:

@@ -6,62 +6,112 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 if TYPE_CHECKING:
     from oracle.dbobject import DbObjectType
 
-from oracle.crypto import validate
-from oracle.tns import assemble_packet
-from oracle.tns import decode_token_pro
-from oracle.tns import decode_token_rpa
-from oracle.tns import encode_dictionary, encode_dictionary_auth
-from oracle.tns import encode_packet
-from oracle.tns import exec_oac_signature
-from oracle.tns import (set_decode_dml_rowcounts, set_decode_return_binds,
-                        set_decode_prev_row)
-from oracle.tns import encode_tpc_switch, encode_tpc_change_state
-from oracle.tns import encode_aq_enq, encode_aq_deq, encode_aq_array
-from oracle.tns import (encode_o7_open, encode_o7_parse, encode_o7_describe, encode_o7_exec,
-                        encode_o7_close, encode_o7_block, encode_tokens_rxd,
-                        decode_fv2_describe,
-                        decode_fv2_exec_response, decode_fv2_dml_response,
-                        decode_fv2_oer_error, decode_fv2_block_out,
-                        encode_o7_lob_getlen,
-                        encode_o7_lob_read, decode_fv2_lob_getlen,
-                        decode_fv2_lob_chunks, encode_o7_bfile_open,
-                        encode_o7_bfile_close, decode_fv2_opened_locator)
-from oracle.exceptions import InterfaceError, OperationalError
-from oracle.tns import (CCAP_FIELD_VERSION, FIELD_VERSION_10_2,
-                        FIELD_VERSION_12_1, FIELD_VERSION_21_1,
-                        encode_fast_auth, find_fast_auth_rpa)
-from oracle.tns import (decode_packet, encode_data_packet,
-                        encode_pipeline_begin, encode_pipeline_end,
-                        encode_end_to_end_piggyback,
-                        encode_close_cursors_piggyback)
-from oracle.tns_consts import (
-    CONN_STATE_AUTH_NEGOTIATE, CONN_STATE_AUTHENTICATED,
-    CONN_STATE_CONNECTED, CONN_STATE_DISCONNECTED, DictionaryType,
-    FIELD_VERSION_23_1, FIELD_VERSION_23_4, MAX_SEQ_NUM,
-    TNS_ACCEPT, TNS_CONNECT, TNS_DATA, TNS_MARKER,
-    TNS_MARKER_TYPE_INTERRUPT, TNS_GSO_CAN_RECV_ATTENTION,
-    TNS_FETCH_ORIENTATION_CURRENT,
-    TNS_VERSION_MIN_LARGE_SDU, TNS_VERSION_MIN_OOB_CHECK,
-    TNS_ACCEPT_FLAG_HAS_END_OF_RESPONSE,
-    TNS_REDIRECT, TNS_REFUSE, TNS_RESEND, TTI_AUTH, TTI_DTY, TTI_PRO,
-    TTI_OER, TTI_RPA, TTI_SESS, TTI_WRN,
-    TNS_TPC_TXN_START, TNS_TPC_TXN_DETACH, TNS_TPC_TXN_COMMIT,
-    TNS_TPC_TXN_ABORT, TNS_TPC_TXN_PREPARE,
-    TNS_TPC_TXN_STATE_REQUIRES_COMMIT, TNS_TPC_TXN_STATE_COMMITTED,
-    TNS_TPC_TXN_STATE_ABORTED, TNS_TPC_TXN_STATE_READ_ONLY,
-    TNS_TPC_TXN_STATE_FORGOTTEN, TPC_BEGIN_NEW, TPC_END_NORMAL,
-    TPC_BEGIN_RESUME, TPC_TXN_FLAGS_SESSIONLESS,
-    TNS_TPC_SESSIONLESS_FORMAT_ID, TNS_SESSIONLESS_TXN_ID_MAX,
-    PURITY_DEFAULT,
-    TNS_DATA_FLAGS_BEGIN_PIPELINE, TNS_DATA_FLAGS_END_OF_REQUEST,
-    TNS_PIPELINE_MODE_CONTINUE_ON_ERROR,
-)
-from oracle.exceptions import DatabaseError
 import logging
 import socket
 import struct
 import threading
 import uuid
+
+from oracle.crypto import validate
+from oracle.exceptions import DatabaseError, InterfaceError, OperationalError
+from oracle.tns import (
+    CCAP_FIELD_VERSION,
+    FIELD_VERSION_10_2,
+    FIELD_VERSION_12_1,
+    FIELD_VERSION_21_1,
+    assemble_packet,
+    decode_fv2_block_out,
+    decode_fv2_describe,
+    decode_fv2_dml_response,
+    decode_fv2_exec_response,
+    decode_fv2_lob_chunks,
+    decode_fv2_lob_getlen,
+    decode_fv2_oer_error,
+    decode_fv2_opened_locator,
+    decode_packet,
+    decode_token_pro,
+    decode_token_rpa,
+    encode_aq_array,
+    encode_aq_deq,
+    encode_aq_enq,
+    encode_close_cursors_piggyback,
+    encode_data_packet,
+    encode_dictionary,
+    encode_dictionary_auth,
+    encode_end_to_end_piggyback,
+    encode_fast_auth,
+    encode_o7_bfile_close,
+    encode_o7_bfile_open,
+    encode_o7_block,
+    encode_o7_close,
+    encode_o7_describe,
+    encode_o7_exec,
+    encode_o7_lob_getlen,
+    encode_o7_lob_read,
+    encode_o7_open,
+    encode_o7_parse,
+    encode_packet,
+    encode_pipeline_begin,
+    encode_pipeline_end,
+    encode_tokens_rxd,
+    encode_tpc_change_state,
+    encode_tpc_switch,
+    exec_oac_signature,
+    find_fast_auth_rpa,
+    set_decode_dml_rowcounts,
+    set_decode_prev_row,
+    set_decode_return_binds,
+)
+from oracle.tns_consts import (
+    CONN_STATE_AUTH_NEGOTIATE,
+    CONN_STATE_AUTHENTICATED,
+    CONN_STATE_CONNECTED,
+    CONN_STATE_DISCONNECTED,
+    FIELD_VERSION_23_1,
+    FIELD_VERSION_23_4,
+    MAX_SEQ_NUM,
+    PURITY_DEFAULT,
+    TNS_ACCEPT,
+    TNS_ACCEPT_FLAG_HAS_END_OF_RESPONSE,
+    TNS_CONNECT,
+    TNS_DATA,
+    TNS_DATA_FLAGS_BEGIN_PIPELINE,
+    TNS_DATA_FLAGS_END_OF_REQUEST,
+    TNS_FETCH_ORIENTATION_CURRENT,
+    TNS_GSO_CAN_RECV_ATTENTION,
+    TNS_MARKER,
+    TNS_MARKER_TYPE_INTERRUPT,
+    TNS_PIPELINE_MODE_CONTINUE_ON_ERROR,
+    TNS_REDIRECT,
+    TNS_REFUSE,
+    TNS_RESEND,
+    TNS_SESSIONLESS_TXN_ID_MAX,
+    TNS_TPC_SESSIONLESS_FORMAT_ID,
+    TNS_TPC_TXN_ABORT,
+    TNS_TPC_TXN_COMMIT,
+    TNS_TPC_TXN_DETACH,
+    TNS_TPC_TXN_PREPARE,
+    TNS_TPC_TXN_START,
+    TNS_TPC_TXN_STATE_ABORTED,
+    TNS_TPC_TXN_STATE_COMMITTED,
+    TNS_TPC_TXN_STATE_FORGOTTEN,
+    TNS_TPC_TXN_STATE_READ_ONLY,
+    TNS_TPC_TXN_STATE_REQUIRES_COMMIT,
+    TNS_VERSION_MIN_LARGE_SDU,
+    TNS_VERSION_MIN_OOB_CHECK,
+    TPC_BEGIN_NEW,
+    TPC_BEGIN_RESUME,
+    TPC_END_NORMAL,
+    TPC_TXN_FLAGS_SESSIONLESS,
+    TTI_AUTH,
+    TTI_DTY,
+    TTI_OER,
+    TTI_PRO,
+    TTI_RPA,
+    TTI_SESS,
+    TTI_WRN,
+    DictionaryType,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,15 +131,20 @@ _MAX_REDIRECTS = 5
 # set inline; any overflow is drained serially once the burst is read.
 _PIPELINE_FETCH_ALL_PREFETCH = 32760
 
+
 def _format_version(Packed: int) -> str | None:
     # Oracle packs the release into a single integer: major (8 bits),
     # minor (4), update (8), patch (4), port-specific update (8). Verified
     # against product_component_version on XE 11.2.0.2.0 (0x0b200200).
     if not Packed:
         return None
-    return "%d.%d.%d.%d.%d" % (
-        (Packed >> 24) & 0xFF, (Packed >> 20) & 0x0F, (Packed >> 12) & 0xFF,
-        (Packed >> 8) & 0x0F, Packed & 0xFF)
+    return '%d.%d.%d.%d.%d' % (
+        (Packed >> 24) & 0xFF,
+        (Packed >> 20) & 0x0F,
+        (Packed >> 12) & 0xFF,
+        (Packed >> 8) & 0x0F,
+        Packed & 0xFF,
+    )
 
 
 import collections
@@ -97,14 +152,16 @@ import collections
 # Global transaction identifier for two-phase commit (#131): a (format_id,
 # global_transaction_id, branch_qualifier) triple, matching oracledb's Xid.
 Xid = collections.namedtuple(
-    "Xid", ["format_id", "global_transaction_id", "branch_qualifier"])
+    'Xid', ['format_id', 'global_transaction_id', 'branch_qualifier']
+)
 
 
 def _raise_tpc_error(Packet: bytes) -> None:
     # A TPC op that failed comes back as a TTI_OER (not the RPA return params).
     # Pull the ORA code + message out of it and raise the matching exception.
-    from oracle.tns import decode_packet
     from oracle.exceptions import from_ora_code
+    from oracle.tns import decode_packet
+
     try:
         Result = decode_packet(Packet, (None, None, []))
         Code = Result[1] if isinstance(Result, tuple) and len(Result) > 1 else 0
@@ -112,8 +169,8 @@ def _raise_tpc_error(Packet: bytes) -> None:
     except Exception:
         Code, Msg = 0, None
     if Code:
-        raise from_ora_code(Code)(Msg or f"ORA-{Code:05d}", code=Code)
-    raise DatabaseError(f"unexpected TPC response 0x{Packet[:1].hex()}")
+        raise from_ora_code(Code)(Msg or f'ORA-{Code:05d}', code=Code)
+    raise DatabaseError(f'unexpected TPC response 0x{Packet[:1].hex()}')
 
 
 def _decode_tpc_context(Packet: bytes) -> bytes:
@@ -122,13 +179,14 @@ def _decode_tpc_context(Packet: bytes) -> bytes:
     # context length (ub2), and the opaque transaction context bytes. RE'd from
     # a live 21c tpc_begin capture; the context is replayed on prepare/commit.
     from oracle.tns import decode_ub4
+
     if not Packet:
-        raise OperationalError("empty TPC response")
+        raise OperationalError('empty TPC response')
     if Packet[0] != TTI_RPA:
         _raise_tpc_error(Packet)
     Rest = Packet[1:]
     (_AppValue, Rest) = decode_ub4(Rest)
-    (CtxLen, Rest) = decode_ub4(Rest)              # context length (ub2)
+    (CtxLen, Rest) = decode_ub4(Rest)  # context length (ub2)
     return bytes(Rest[:CtxLen])
 
 
@@ -136,14 +194,16 @@ def _decode_aq_enq(Packet: bytes) -> bytes:
     # AQ enqueue return: the RPA token then the 16-byte message id (the trailing
     # ub2 extensions length is ignored). #128.
     from oracle.tns_consts import TNS_AQ_MESSAGE_ID_LENGTH
+
     if not Packet:
-        raise OperationalError("empty AQ enqueue response")
+        raise OperationalError('empty AQ enqueue response')
     if Packet[0] != TTI_RPA:
         _aq_raise(Packet)
-    return bytes(Packet[1:1 + TNS_AQ_MESSAGE_ID_LENGTH])
+    return bytes(Packet[1 : 1 + TNS_AQ_MESSAGE_ID_LENGTH])
 
 
 import re as _re
+
 _AQ_ORA_RE = _re.compile(rb'ORA-(\d{5}):\s*([^\x00\n]*)')
 
 
@@ -153,8 +213,7 @@ def _aq_error_info(Packet: bytes):
     # text is the reliable source.
     Match = _AQ_ORA_RE.search(bytes(Packet))
     if Match:
-        return (int(Match.group(1)),
-                Match.group(2).rstrip().decode('utf-8', 'replace'))
+        return (int(Match.group(1)), Match.group(2).rstrip().decode('utf-8', 'replace'))
     return (0, None)
 
 
@@ -164,26 +223,29 @@ def _aq_oer_code(Packet: bytes) -> int:
 
 def _aq_raise(Packet: bytes) -> None:
     from oracle.exceptions import from_ora_code
+
     (Code, Msg) = _aq_error_info(Packet)
     if Code:
-        raise from_ora_code(Code)(Msg or f"ORA-{Code:05d}", code=Code)
-    raise DatabaseError(f"unexpected AQ response 0x{Packet[:1].hex()}")
+        raise from_ora_code(Code)(Msg or f'ORA-{Code:05d}', code=Code)
+    raise DatabaseError(f'unexpected AQ response 0x{Packet[:1].hex()}')
 
 
 def _aq_str(Rest: bytes) -> tuple:
     # read_bytes_with_length / read_str_with_length: a ub4 count, then (if
     # non-zero) the chunked data. Empty/null normalised to b"".
     from oracle.tns import _read_str_with_length
+
     (Value, Rest) = _read_str_with_length(Rest)
-    return (b"" if isinstance(Value, list) else bytes(Value), Rest)
+    return (b'' if isinstance(Value, list) else bytes(Value), Rest)
 
 
 def _aq_raw(Rest: bytes) -> tuple:
     # read_raw_bytes_and_length / read_bytes(): a single length byte then the
     # data (0xFE = chunked). Used for the enqueue-time date and the payload image.
     from oracle.tns import decode_dalc
+
     (Value, Rest) = decode_dalc(Rest)
-    return (b"" if isinstance(Value, list) else bytes(Value), Rest)
+    return (b'' if isinstance(Value, list) else bytes(Value), Rest)
 
 
 def _decode_aq_payload(Rest: bytes, queue):
@@ -191,36 +253,43 @@ def _decode_aq_payload(Rest: bytes, queue):
     # blob whose first 4 bytes are a header; for an object queue it's a packed
     # DbObject; for JSON it's OSON. Returns (payload, remaining_bytes).
     from oracle.tns import decode_ub4
+
     if queue.payload_type is not None:
+        from oracle.dbobject import (
+            DbObject,
+            decode_collection_image,
+            decode_object_image,
+        )
         from oracle.tns import _read_object_column
-        from oracle.dbobject import (DbObject, decode_object_image,
-                                     decode_collection_image)
         from oracle.tns_consts import AL32UTF8_CHARSET
+
         (Img, Rest) = _read_object_column(Rest, {})
         if Img is None:
             return (None, Rest)
-        Img = cast(Any, Img)             # the decoded object image (has .image)
+        Img = cast(Any, Img)  # the decoded object image (has .image)
         Typ = queue.payload_type
         if Typ.is_collection:
-            Elements = decode_collection_image(Img.image, Typ.element or {},
-                                               AL32UTF8_CHARSET)
+            Elements = decode_collection_image(
+                Img.image, Typ.element or {}, AL32UTF8_CHARSET
+            )
             return (DbObject(Typ.name, elements=Elements, dbtype=Typ), Rest)
         Attrs = decode_object_image(Img.image, Typ.attrs, AL32UTF8_CHARSET)
         return (DbObject(Typ.name, Attrs, dbtype=Typ), Rest)
     (_toid, Rest) = _aq_str(Rest)
     (_oid, Rest) = _aq_str(Rest)
     (_snapshot, Rest) = _aq_str(Rest)
-    (_version, Rest) = decode_ub4(Rest)            # skip_ub2 version no
+    (_version, Rest) = decode_ub4(Rest)  # skip_ub2 version no
     (image_length, Rest) = decode_ub4(Rest)
-    (_flags, Rest) = decode_ub4(Rest)              # skip_ub2 flags
+    (_flags, Rest) = decode_ub4(Rest)  # skip_ub2 flags
     if image_length > 0:
         (Image, Rest) = _aq_raw(Rest)
         Payload = bytes(Image[4:image_length])
         if queue.is_json:
             from oracle.oson import decode_oson
+
             return (decode_oson(Payload), Rest)
         return (Payload, Rest)
-    return (None if queue.is_json else b"", Rest)
+    return (None if queue.is_json else b'', Rest)
 
 
 def _decode_aq_deq(Packet: bytes, queue):
@@ -228,12 +297,13 @@ def _decode_aq_deq(Packet: bytes, queue):
     # present, the message properties, recipients, payload, and 16-byte msgid.
     # An empty queue comes back as ORA-25228 (no messages) -> None. RE'd from a
     # live 21c capture; mirrors python-oracledb AqDeqMessage.
-    from oracle.tns import decode_ub4
     from oracle.aq import MessageProperties
+    from oracle.tns import decode_ub4
+
     if not Packet:
         return None
     if Packet[0] == TTI_OER:
-        if _aq_oer_code(Packet) in (25228, 25254):     # no message available
+        if _aq_oer_code(Packet) in (25228, 25254):  # no message available
             return None
         _aq_raise(Packet)
     Rest = Packet[1:]
@@ -254,6 +324,7 @@ def _parse_aq_msg_props(Rest: bytes, Props, field_version: int) -> bytes:
     # state, enqueue date, txn id, the keyword extensions, and the trailing
     # user-property/cscn/dscn/flags (+ shard at fv >= 21.1).
     from oracle.tns import decode_ub4
+
     (Props.priority, Rest) = decode_ub4(Rest)
     (Props.delay, Rest) = decode_ub4(Rest)
     (Props.expiration, Rest) = decode_ub4(Rest)
@@ -263,13 +334,13 @@ def _parse_aq_msg_props(Rest: bytes, Props, field_version: int) -> bytes:
     (ExQ, Rest) = _aq_str(Rest)
     Props.exceptionq = ExQ.decode('utf-8') if ExQ else None
     (Props.state, Rest) = decode_ub4(Rest)
-    (DateFlag, Rest) = decode_ub4(Rest)                 # enqueue time
+    (DateFlag, Rest) = decode_ub4(Rest)  # enqueue time
     if DateFlag > 0:
         (_DateBytes, Rest) = _aq_raw(Rest)
     (Props.enq_txn_id, Rest) = _aq_str(Rest)
-    (NumExt, Rest) = decode_ub4(Rest)                   # extensions
+    (NumExt, Rest) = decode_ub4(Rest)  # extensions
     if NumExt > 0:
-        Rest = Rest[1:]                                 # skip_ub1
+        Rest = Rest[1:]  # skip_ub1
         for _ in range(NumExt):
             (_Text, Rest) = _aq_str(Rest)
             (_Bin, Rest) = _aq_str(Rest)
@@ -288,9 +359,10 @@ def _decode_aq_array(Packet: bytes, queue, operation: int, props_list: list):
     # block of concatenated 16-byte message ids assigned back to props_list; for
     # dequeue it carries num_iters messages (properties + payload + msgid). An
     # empty queue comes back as ORA-25228 -> []. Mirrors AqArrayMessage.
+    from oracle.aq import MessageProperties
     from oracle.tns import decode_ub4
     from oracle.tns_consts import TNS_AQ_ARRAY_ENQ
-    from oracle.aq import MessageProperties
+
     if not Packet:
         return []
     if Packet[0] == TTI_OER:
@@ -303,22 +375,22 @@ def _decode_aq_array(Packet: bytes, queue, operation: int, props_list: list):
     Out = []
     for I in range(NumIters):
         Props = MessageProperties()
-        (Flag, Rest) = decode_ub4(Rest)                 # ub2 props-present
+        (Flag, Rest) = decode_ub4(Rest)  # ub2 props-present
         if Flag > 0:
-            Rest = Rest[1:]                             # skip_ub1
+            Rest = Rest[1:]  # skip_ub1
             Rest = _parse_aq_msg_props(Rest, Props, FV)
         (_NumRecipients, Rest) = decode_ub4(Rest)
-        (PayFlag, Rest) = decode_ub4(Rest)              # ub2 payload-present
+        (PayFlag, Rest) = decode_ub4(Rest)  # ub2 payload-present
         if PayFlag > 0:
             (Props.payload, Rest) = _decode_aq_payload(Rest, queue)
         (MsgId, Rest) = _aq_str(Rest)
         if operation == TNS_AQ_ARRAY_ENQ:
             for J, P in enumerate(props_list):
-                P.msgid = bytes(MsgId[J * 16:(J + 1) * 16])
+                P.msgid = bytes(MsgId[J * 16 : (J + 1) * 16])
         else:
             Props.msgid = bytes(MsgId)
-        (ExtLen, Rest) = decode_ub4(Rest)               # ub2 extensions length
-        (_Ack, Rest) = decode_ub4(Rest)                 # ub2 output ack
+        (ExtLen, Rest) = decode_ub4(Rest)  # ub2 extensions length
+        (_Ack, Rest) = decode_ub4(Rest)  # ub2 output ack
         Out.append(Props)
     return props_list if operation == TNS_AQ_ARRAY_ENQ else Out
 
@@ -326,8 +398,9 @@ def _decode_aq_array(Packet: bytes, queue, operation: int, props_list: list):
 def _decode_tpc_state(Packet: bytes) -> int:
     # TPC change-state return (#131): the RPA token then a ub4 transaction state.
     from oracle.tns import decode_ub4
+
     if not Packet:
-        raise OperationalError("empty TPC response")
+        raise OperationalError('empty TPC response')
     if Packet[0] != TTI_RPA:
         _raise_tpc_error(Packet)
     (State, _) = decode_ub4(Packet[1:])
@@ -343,7 +416,7 @@ def _parse_accept_eor(version: int, packet: bytes) -> bool:
     # EOR (the connection behaves exactly as it does without it).
     if version < TNS_VERSION_MIN_OOB_CHECK or len(packet) < 37:
         return False
-    (flags2,) = struct.unpack(">I", packet[33:37])
+    (flags2,) = struct.unpack('>I', packet[33:37])
     return bool(flags2 & TNS_ACCEPT_FLAG_HAS_END_OF_RESPONSE)
 
 
@@ -352,7 +425,7 @@ def _parse_accept_sdu(version: int, packet: bytes, legacy_sdu: int) -> int:
     # SDU as a uint32 at offset 24; below that it is the legacy 16-bit field the
     # caller already read from packet[4:6].
     if version >= TNS_VERSION_MIN_LARGE_SDU and len(packet) >= 28:
-        (sdu,) = struct.unpack(">I", packet[24:28])
+        (sdu,) = struct.unpack('>I', packet[24:28])
         if sdu > 0:
             return sdu
     return legacy_sdu
@@ -376,6 +449,7 @@ _FV2_MAX_VARCHAR_BIND = 4000
 
 def _check_fv2_bind_sizes(Bind, Batch=None) -> None:
     from oracle.exceptions import NotSupportedError
+
     Rows = [Bind] if Bind else []
     if Batch:
         Rows = Rows + list(Batch)
@@ -385,21 +459,24 @@ def _check_fv2_bind_sizes(Bind, Batch=None) -> None:
             if isinstance(Value, (bytes, bytearray)):
                 if len(Value) > _FV2_MAX_RAW_BIND:
                     raise NotSupportedError(
-                        f"Oracle 9i cannot bind a bytes value larger than "
-                        f"{_FV2_MAX_RAW_BIND} bytes (got {len(Value)}); 9i has "
-                        f"no streamed LOB/LONG bind path")
+                        f'Oracle 9i cannot bind a bytes value larger than '
+                        f'{_FV2_MAX_RAW_BIND} bytes (got {len(Value)}); 9i has '
+                        f'no streamed LOB/LONG bind path'
+                    )
             elif isinstance(Value, str):
                 if len(Value.encode('utf-8')) > _FV2_MAX_VARCHAR_BIND:
                     raise NotSupportedError(
-                        f"Oracle 9i cannot bind a str value larger than "
-                        f"{_FV2_MAX_VARCHAR_BIND} bytes (utf-8); 9i has no "
-                        f"streamed LOB/LONG bind path")
+                        f'Oracle 9i cannot bind a str value larger than '
+                        f'{_FV2_MAX_VARCHAR_BIND} bytes (utf-8); 9i has no '
+                        f'streamed LOB/LONG bind path'
+                    )
 
 
 def _run_pipeline_op(conn, cur, op, T):
     # Run a single pipeline operation on `cur` and return its PipelineOpResult
     # (#132, sync). The async connection has its own awaiting copy of this.
     from oracle.pipeline import PipelineOpResult
+
     result = PipelineOpResult(op)
     params = op.parameters or []
     try:
@@ -410,13 +487,11 @@ def _run_pipeline_op(conn, cur, op, T):
         elif op.op_type == T.FETCH_ONE:
             cur.execute(op.statement, params)
             row = cur.fetchone()
-            result.rows = _apply_rowfactory([] if row is None else [row],
-                                            op.rowfactory)
+            result.rows = _apply_rowfactory([] if row is None else [row], op.rowfactory)
             result.columns = cur.description
         elif op.op_type == T.FETCH_MANY:
             cur.execute(op.statement, params)
-            result.rows = _apply_rowfactory(cur.fetchmany(op.num_rows),
-                                            op.rowfactory)
+            result.rows = _apply_rowfactory(cur.fetchmany(op.num_rows), op.rowfactory)
             result.columns = cur.description
         elif op.op_type == T.FETCH_ALL:
             cur.execute(op.statement, params)
@@ -442,10 +517,9 @@ def _normalize_sessionless_txn_id(transaction_id) -> bytes:
     if isinstance(transaction_id, str):
         transaction_id = transaction_id.encode()
     elif not isinstance(transaction_id, (bytes, bytearray)):
-        raise TypeError("transaction_id must be str, bytes, or None")
+        raise TypeError('transaction_id must be str, bytes, or None')
     if len(transaction_id) > TNS_SESSIONLESS_TXN_ID_MAX:
-        raise ValueError(
-            f"transaction_id exceeds {TNS_SESSIONLESS_TXN_ID_MAX} bytes")
+        raise ValueError(f'transaction_id exceeds {TNS_SESSIONLESS_TXN_ID_MAX} bytes')
     return bytes(transaction_id)
 
 
@@ -454,14 +528,35 @@ def _split_proxy_user(user: str) -> tuple[str, str | None]:
     # user name (or None) returns (user, None). Mirrors python-oracledb
     # parse_user: only a trailing [...] after a non-empty name counts.
     if user:
-        Start = user.find("[")
-        if Start > 0 and user.endswith("]"):
-            return (user[:Start], user[Start + 1:-1])
+        Start = user.find('[')
+        if Start > 0 and user.endswith(']'):
+            return (user[:Start], user[Start + 1 : -1])
     return (user, None)
 
 
 class OracleConnect:
-    def __init__(self, host: str = "localhost", port: int = 1521, user: str = "", password: str = "", sid: str = "", service_name: str = "", ssl: object = None, socket_options: object = None, timeout: int = 15000, autocommit: bool = True, fetch: int = 15, role: int = 0, prelim: int = 0, sdu: int = 8192, charset: str = "utf-8", app_name: str = "pyoracle", field_version: int = FIELD_VERSION_23_4, cclass: str | None = None, purity: int = PURITY_DEFAULT):
+    def __init__(
+        self,
+        host: str = 'localhost',
+        port: int = 1521,
+        user: str = '',
+        password: str = '',
+        sid: str = '',
+        service_name: str = '',
+        ssl: object = None,
+        socket_options: object = None,
+        timeout: int = 15000,
+        autocommit: bool = True,
+        fetch: int = 15,
+        role: int = 0,
+        prelim: int = 0,
+        sdu: int = 8192,
+        charset: str = 'utf-8',
+        app_name: str = 'pyoracle',
+        field_version: int = FIELD_VERSION_23_4,
+        cclass: str | None = None,
+        purity: int = PURITY_DEFAULT,
+    ):
         # field_version is the highest TTC field version pyoracle advertises;
         # the server negotiates it down (min(client, server)). The default is the
         # 23ai max (24), reached via fast-auth (#89) — older servers settle at
@@ -497,7 +592,7 @@ class OracleConnect:
         self.seq = 1
         # Bytes received past a marker packet, held for the next recv() so a
         # coalesced break|reset|error is not lost (#45). Empty between calls.
-        self._pending = b""
+        self._pending = b''
         # True while a server break/reset handshake is in progress: we answer a
         # server break with exactly ONE reset, then drain the server's terminal
         # reset (and any straggler markers) WITHOUT replying, matching
@@ -509,11 +604,11 @@ class OracleConnect:
         # while a client-initiated break (cancel/timeout) is outstanding so the
         # reader drains the server's interrupt response exactly once.
         self._break_in_progress = False
-        self._call_timeout = 0          # ms; 0 = no timeout
+        self._call_timeout = 0  # ms; 0 = no timeout
         self._timed_out = False
-        self._supports_oob = False      # set from the accept (#144)
-        self._supports_eor = False      # end-of-response framing (#155/#132)
-        self._large_packets = False     # 4-byte packet length (#155, ver >= 315)
+        self._supports_oob = False  # set from the accept (#144)
+        self._supports_eor = False  # end-of-response framing (#155/#132)
+        self._large_packets = False  # 4-byte packet length (#155, ver >= 315)
         # End-to-end application tracing (#183): current module / action /
         # client_identifier values, and the subset changed since the last flush
         # (sent as a SET_END_TO_END_ATTR piggyback in front of the next execute).
@@ -556,7 +651,7 @@ class OracleConnect:
         # Ordered attribute layout per SQL object type (#115), keyed by
         # (owner, type_name). Populated on demand from ALL_TYPE_ATTRS the first
         # time an object of that type is fetched.
-        self._object_type_cache: dict[tuple[str, str], "DbObjectType"] = {}
+        self._object_type_cache: dict[tuple[str, str], 'DbObjectType'] = {}
 
     @property
     def stmtcachesize(self) -> int:
@@ -674,24 +769,25 @@ class OracleConnect:
         #                 server_hostname (override the SNI hostname)
         #   SSLContext — used verbatim
         import ssl as _ssl
+
         Server = self.host
         if isinstance(self.ssl, _ssl.SSLContext):
             Ctx = self.ssl
         elif isinstance(self.ssl, dict):
             Opts = dict(self.ssl)
-            Server = Opts.pop("server_hostname", Server)
-            Ctx = _ssl.create_default_context(cafile=Opts.pop("ca_certs", None))
+            Server = Opts.pop('server_hostname', Server)
+            Ctx = _ssl.create_default_context(cafile=Opts.pop('ca_certs', None))
             Ctx.minimum_version = _ssl.TLSVersion.TLSv1_2
-            if "check_hostname" in Opts:
-                Ctx.check_hostname = bool(Opts.pop("check_hostname"))
-            if "verify_mode" in Opts:
-                Ctx.verify_mode = Opts.pop("verify_mode")
-            CertFile = Opts.pop("certfile", None)
-            KeyFile = Opts.pop("keyfile", None)
+            if 'check_hostname' in Opts:
+                Ctx.check_hostname = bool(Opts.pop('check_hostname'))
+            if 'verify_mode' in Opts:
+                Ctx.verify_mode = Opts.pop('verify_mode')
+            CertFile = Opts.pop('certfile', None)
+            KeyFile = Opts.pop('keyfile', None)
             if CertFile:
                 Ctx.load_cert_chain(CertFile, KeyFile)
             if Opts:
-                raise ValueError(f"unknown ssl options: {sorted(Opts)}")
+                raise ValueError(f'unknown ssl options: {sorted(Opts)}')
         else:
             Ctx = _ssl.create_default_context()
             Ctx.minimum_version = _ssl.TLSVersion.TLSv1_2
@@ -705,10 +801,10 @@ class OracleConnect:
         # handshake could approach Python's default recursion limit, and
         # an EOF during the handshake crashed unpacking `recv() → False`.
         while True:
-            Received = self.recv(b"", b"")
+            Received = self.recv(b'', b'')
             if Received is False:
                 # Peer closed during handshake.
-                logger.debug("handle_login: connection closed by peer")
+                logger.debug('handle_login: connection closed by peer')
                 return 1
             (Type, Packet) = Received
             if Type != TNS_MARKER:
@@ -716,9 +812,9 @@ class OracleConnect:
                 self._in_break = False
             match Type:
                 case t if t == TNS_ACCEPT:
-                    logger.debug("handle_login: accept")
+                    logger.debug('handle_login: accept')
                     # Extract negotiated SDU from the accept body
-                    (Ver, Opts, Sdu) = struct.unpack(">Hhh", Packet[:6])
+                    (Ver, Opts, Sdu) = struct.unpack('>Hhh', Packet[:6])
                     # 319-era accept (#155): a >= 315 server negotiates the
                     # large (32-bit) SDU and switches to 4-byte packet framing;
                     # a >= 318 server's flags2 carries the end-of-response bit.
@@ -732,14 +828,16 @@ class OracleConnect:
                     # otherwise we use the in-band INTERRUPT marker.
                     self._supports_oob = bool(Opts & TNS_GSO_CAN_RECV_ATTENTION)
                     self.conn_state = CONN_STATE_CONNECTED
-                    logger.debug("handle_login: Ver=%s, Opts=%s, Sdu=%s", Ver, Opts, Sdu)
+                    logger.debug(
+                        'handle_login: Ver=%s, Opts=%s, Sdu=%s', Ver, Opts, Sdu
+                    )
                     Data = encode_dictionary(self._make_dict(DictionaryType.pro))
                     self.send(TNS_DATA, Data)
                     continue
                 case t if t == TNS_DATA:
                     match Packet[0]:
                         case p if p == TTI_PRO:
-                            logger.debug("handle_login: recv PRO")
+                            logger.debug('handle_login: recv PRO')
                             self._negotiate_capabilities(Packet)
                             if self.field_version > FIELD_VERSION_23_1:
                                 # 23ai (#89): the negotiated field version is
@@ -751,38 +849,48 @@ class OracleConnect:
                                 # the bundle. Only reached when the caller opts in
                                 # with field_version >= 18 (default stays 21.1).
                                 return self._fast_auth_login()
-                            Data = encode_dictionary(self._make_dict(DictionaryType.dty))
+                            Data = encode_dictionary(
+                                self._make_dict(DictionaryType.dty)
+                            )
                             self.send(TNS_DATA, Data)
                         case p if p == TTI_DTY:
-                            logger.debug("handle_login: recv DTY")
+                            logger.debug('handle_login: recv DTY')
                             if self.field_version < FIELD_VERSION_10_2:
                                 # Pre-10g (9i, field version 2): O3LOGON thin
                                 # auth — TTI_3LOGA fetches the session key (#90).
                                 from oracle.tns import encode_o3logon_phase1
+
                                 self._o3_phase = 1
-                                self.send(TNS_DATA, encode_o3logon_phase1(
-                                    self._next_seq(), self.user.encode('utf-8')))
+                                self.send(
+                                    TNS_DATA,
+                                    encode_o3logon_phase1(
+                                        self._next_seq(), self.user.encode('utf-8')
+                                    ),
+                                )
                             else:
-                                Data = encode_dictionary(self._make_dict(DictionaryType.sess))
+                                Data = encode_dictionary(
+                                    self._make_dict(DictionaryType.sess)
+                                )
                                 self.send(TNS_DATA, Data)
                         case p if p == TTI_RPA:
-                            logger.debug("handle_login: recv RPA")
-                            if getattr(self, "_o3_phase", 0) == 1:
+                            logger.debug('handle_login: recv RPA')
+                            if getattr(self, '_o3_phase', 0) == 1:
                                 self._send_o3logon_phase2(Packet)
                                 continue
                             return self._handle_rpa(Packet[1:])
                         case p if p == TTI_WRN:
-                            logger.debug("handle_login: recv WRN %s", Packet[1:])
+                            logger.debug('handle_login: recv WRN %s', Packet[1:])
                         case p if p == TTI_OER:
                             # The server reports an auth-time failure (bad
                             # password, rejected password change, ...) as an OER
                             # token, sometimes preceded by a break marker.
                             # Decode it and raise rather than looping forever on
                             # an empty socket.
-                            logger.debug("handle_login: recv OER")
-                            from oracle.tns import decode_packet, decode_ub4
+                            logger.debug('handle_login: recv OER')
                             from oracle.exceptions import DatabaseError, from_ora_code
-                            if getattr(self, "_o3_phase", 0) == 2:
+                            from oracle.tns import decode_packet, decode_ub4
+
+                            if getattr(self, '_o3_phase', 0) == 2:
                                 # 9i's OER is shorter than the 11g+ form
                                 # decode_token_oer expects (no batch-error
                                 # arrays), so decode just the leading fields:
@@ -796,46 +904,50 @@ class OracleConnect:
                                 # Via decode_packet so the negotiated field
                                 # version is published for the version-gated
                                 # OER decode.
-                                Result = cast(tuple, decode_packet(
-                                    Packet, (None, None, []),
-                                    self.field_version))
+                                Result = cast(
+                                    tuple,
+                                    decode_packet(
+                                        Packet, (None, None, []), self.field_version
+                                    ),
+                                )
                                 ErrCode = Result[1]
                                 Message = Result[5] if len(Result) > 5 else None
                             if ErrCode and ErrCode not in (0, 1403):
                                 raise from_ora_code(ErrCode)(
-                                    Message or f"ORA-{ErrCode:05d}", code=ErrCode)
-                            if getattr(self, "_o3_phase", 0) == 2:
+                                    Message or f'ORA-{ErrCode:05d}', code=ErrCode
+                                )
+                            if getattr(self, '_o3_phase', 0) == 2:
                                 # O3LOGON phase two answered with a clean OER =
                                 # authenticated (#90). No AUTH_SVR_RESPONSE to
                                 # validate on the pre-10g path.
                                 self.conn_state = CONN_STATE_AUTHENTICATED
-                                logger.debug("handle_login: authenticated (O3LOGON)")
+                                logger.debug('handle_login: authenticated (O3LOGON)')
                                 return 0
-                            raise DatabaseError("authentication failed")
+                            raise DatabaseError('authentication failed')
                         case _:
-                            logger.debug("handle_login: unknown token %s", Packet[0])
+                            logger.debug('handle_login: unknown token %s', Packet[0])
                     continue
                 case t if t == TNS_MARKER:
-                    logger.debug("handle_login: marker")
+                    logger.debug('handle_login: marker')
                     # Single reset per break episode, then drain (#45) — never
                     # echo every marker, which storms the line.
                     if not self._in_break:
-                        self.send(TNS_MARKER, b"\x01\x00\x02")
+                        self.send(TNS_MARKER, b'\x01\x00\x02')
                         self._in_break = True
                     continue
                 case t if t == TNS_REDIRECT:
                     from oracle.tns import parse_redirect_address
+
                     (NewHost, NewPort) = parse_redirect_address(Packet)
                     if NewHost is None or NewPort is None:
-                        logger.debug("handle_login: unparseable redirect %r",
-                                     Packet)
+                        logger.debug('handle_login: unparseable redirect %r', Packet)
                         return 1
-                    self._redirects = getattr(self, "_redirects", 0) + 1
+                    self._redirects = getattr(self, '_redirects', 0) + 1
                     if self._redirects > _MAX_REDIRECTS:
                         raise OperationalError(
-                            f"too many TNS redirects (> {_MAX_REDIRECTS})")
-                    logger.debug("handle_login: redirect -> %s:%s",
-                                 NewHost, NewPort)
+                            f'too many TNS redirects (> {_MAX_REDIRECTS})'
+                        )
+                    logger.debug('handle_login: redirect -> %s:%s', NewHost, NewPort)
                     # Reconnect to the address the server handed back and start
                     # the handshake over against it.
                     self.host, self.port = NewHost, NewPort
@@ -843,17 +955,17 @@ class OracleConnect:
                     self._open_transport()
                     continue
                 case t if t == TNS_REFUSE:
-                    logger.debug("handle_login: refuse")
+                    logger.debug('handle_login: refuse')
                     self.disconnect()
                     return 1
                 case t if t == TNS_RESEND:
-                    logger.debug("handle_login: resend")
+                    logger.debug('handle_login: resend')
                     self.conn_state = CONN_STATE_AUTH_NEGOTIATE
                     Data = encode_dictionary(self._make_dict(DictionaryType.login))
                     self.send(TNS_CONNECT, Data)
                     continue
                 case _:
-                    logger.debug("handle_login: unexpected %s", Type)
+                    logger.debug('handle_login: unexpected %s', Type)
                     return 1
 
     def _fast_auth_login(self) -> int | None:
@@ -869,15 +981,18 @@ class OracleConnect:
         self.send(TNS_DATA, encode_fast_auth(Pro, Dty, Sess))
         Received = self._next_data_packet()
         if Received is False:
-            logger.debug("fast_auth: connection closed by peer")
+            logger.debug('fast_auth: connection closed by peer')
             return 1
         (Type, Packet) = Received
         Off = find_fast_auth_rpa(Packet) if Type == TNS_DATA else -1
         if Off < 0:
-            logger.error("fast_auth: no auth challenge in bundled reply "
-                         "(type=%s, head=%r)", Type, Packet[:16])
-            raise OperationalError("fast-auth handshake failed")
-        return self._handle_rpa(Packet[Off + 1:])
+            logger.error(
+                'fast_auth: no auth challenge in bundled reply (type=%s, head=%r)',
+                Type,
+                Packet[:16],
+            )
+            raise OperationalError('fast-auth handshake failed')
+        return self._handle_rpa(Packet[Off + 1 :])
 
     def _negotiate_capabilities(self, Packet: bytes) -> None:
         # Parse the server's PRO response and lower our field version to the
@@ -891,47 +1006,53 @@ class OracleConnect:
             if len(Caps) > CCAP_FIELD_VERSION:
                 ServerFv = Caps[CCAP_FIELD_VERSION]
                 self.field_version = min(self.field_version, ServerFv)
-            logger.debug("handle_login: PRO server_version=%s banner=%r "
-                         "field_version=%s", Pro['server_version'],
-                         Pro['banner'], self.field_version)
+            logger.debug(
+                'handle_login: PRO server_version=%s banner=%r field_version=%s',
+                Pro['server_version'],
+                Pro['banner'],
+                self.field_version,
+            )
         except Exception:
             # Unknown PRO layout — keep the default field version (11.2).
-            logger.debug("handle_login: could not parse PRO caps", exc_info=True)
+            logger.debug('handle_login: could not parse PRO caps', exc_info=True)
 
     def _handle_rpa(self, Data: bytes) -> int | None:
         Result = decode_token_rpa(Data, ())
         if Result[0] == TTI_SESS:
             # Auth challenge: (TTI_SESS, SessKey, Salt, DerivedSalt)
             (_, SessKey, Salt, DerivedSalt) = Result
-            logger.debug("handle_login: auth challenge received")
+            logger.debug('handle_login: auth challenge received')
             self.conn_state = CONN_STATE_AUTH_NEGOTIATE
             Auth = {
                 'sess': bytes.fromhex(SessKey.decode('utf-8')) if SessKey else None,
                 'salt': bytes.fromhex(Salt.decode('utf-8')) if Salt else None,
-                'derived_salt': bytes.fromhex(DerivedSalt.decode('utf-8')) if DerivedSalt else None,
+                'derived_salt': bytes.fromhex(DerivedSalt.decode('utf-8'))
+                if DerivedSalt
+                else None,
             }
             (Data, ConnKey) = encode_dictionary_auth(
-                self._make_dict(DictionaryType.auth, auth=Auth))
+                self._make_dict(DictionaryType.auth, auth=Auth)
+            )
             self.conn_key = ConnKey
             self.send(TNS_DATA, Data)
             return self.handle_login()
         elif Result[0] == TTI_AUTH:
             # Auth result: (TTI_AUTH, Resp, Ver, SessId)
             (_, Resp, Ver, SessId) = Result
-            logger.debug("handle_login: auth result Ver=%s SessId=%s", Ver, SessId)
+            logger.debug('handle_login: auth result Ver=%s SessId=%s', Ver, SessId)
             assert self.conn_key is not None
             if validate(bytes.fromhex(Resp.decode('utf-8')), self.conn_key):
                 self.server_version = Ver
                 self.session_id = SessId
                 self.conn_state = CONN_STATE_AUTHENTICATED
-                logger.debug("handle_login: authenticated")
+                logger.debug('handle_login: authenticated')
                 return 0
             else:
-                logger.error("handle_login: server validation failed")
+                logger.error('handle_login: server validation failed')
                 self.disconnect()
                 return 1
         else:
-            logger.error("handle_login: unexpected RPA result %s", Result[0])
+            logger.error('handle_login: unexpected RPA result %s', Result[0])
             return 1
 
     def _send_o3logon_phase2(self, Packet: bytes) -> None:
@@ -942,25 +1063,35 @@ class OracleConnect:
         # zero-padded password under it, and send TTI_3LOGON with AUTH_PASSWORD
         # = upper-hex(cipher) + decimal(pad count).
         from binascii import hexlify, unhexlify
-        from oracle.crypto import o3logon, des_verifier
+
+        from oracle.crypto import des_verifier, o3logon
         from oracle.tns import encode_o3logon_phase2
+
         Length = Packet[2]
-        SessKey = unhexlify(Packet[3:3 + Length])
+        SessKey = unhexlify(Packet[3 : 3 + Length])
         UserB = self.user.encode('utf-8')
         PassB = self.password.encode('utf-8')
         Verifier = des_verifier(UserB, PassB)
         (AuthPass, _, _) = o3logon(SessKey, Verifier, PassB)
         PadCount = (8 - len(PassB) % 8) % 8
-        PwdField = (hexlify(AuthPass).decode('ascii').upper()
-                    + str(PadCount)).encode('ascii')
+        PwdField = (hexlify(AuthPass).decode('ascii').upper() + str(PadCount)).encode(
+            'ascii'
+        )
         self._o3_phase = 2
-        self.send(TNS_DATA, encode_o3logon_phase2(
-            self._next_seq(), UserB, PwdField))
+        self.send(TNS_DATA, encode_o3logon_phase2(self._next_seq(), UserB, PwdField))
 
-    def execute(self, Query: str, Bind: list | None = None, Def: list | None = None,
-                Batch: list | None = None, BatchErrors: bool = False,
-                ArrayDmlRowCounts: bool = False, ReturnBinds=None,
-                scrollable: bool = False, Prefetch: int | None = None) -> object:
+    def execute(
+        self,
+        Query: str,
+        Bind: list | None = None,
+        Def: list | None = None,
+        Batch: list | None = None,
+        BatchErrors: bool = False,
+        ArrayDmlRowCounts: bool = False,
+        ReturnBinds=None,
+        scrollable: bool = False,
+        Prefetch: int | None = None,
+    ) -> object:
         if Bind is None:
             Bind = []
         if Def is None:
@@ -978,8 +1109,10 @@ class OracleConnect:
                 # path — it would silently apply only the first row. Fail loudly
                 # instead of corrupting data (#168).
                 from oracle.exceptions import NotSupportedError
+
                 raise NotSupportedError(
-                    "executemany (array DML) is not supported on Oracle 9i")
+                    'executemany (array DML) is not supported on Oracle 9i'
+                )
             if Head.startswith('SELECT'):
                 return self._drain_cursor(self._execute_fv2(Query, Bind))
             # Anonymous PL/SQL blocks (BEGIN/DECLARE) over the fv2 block path
@@ -1023,7 +1156,7 @@ class OracleConnect:
         if Type == 'change' and not Def and self.field_version < FIELD_VERSION_12_1:
             CacheKey = (Query, exec_oac_signature(Bind, Batch))
             CachedCursor = self._cursor_cache.get(CacheKey, 0)
-        SendQuery = "" if CachedCursor else Query
+        SendQuery = '' if CachedCursor else Query
         QueryDict = {
             'type': Type,
             'auto': Auto,
@@ -1062,8 +1195,7 @@ class OracleConnect:
         Timer = None
         if self._call_timeout:
             self._timed_out = False
-            Timer = threading.Timer(self._call_timeout / 1000.0,
-                                    self._on_call_timeout)
+            Timer = threading.Timer(self._call_timeout / 1000.0, self._on_call_timeout)
             Timer.start()
         try:
             # Seed the decoder with the bind list so the IOV decoder can tell a
@@ -1076,8 +1208,8 @@ class OracleConnect:
                 self._cursor_cache.pop(CacheKey, None)
             if self._timed_out:
                 raise OperationalError(
-                    f"call timeout of {self._call_timeout} ms exceeded "
-                    f"(ORA-03136)") from exc
+                    f'call timeout of {self._call_timeout} ms exceeded (ORA-03136)'
+                ) from exc
             raise
         finally:
             if Timer is not None:
@@ -1088,10 +1220,16 @@ class OracleConnect:
         # the same SQL can skip parsing. Same scoping as the lookup:
         # DML only, no Def overrides.
         Stored = False
-        if (CacheKey is not None and Type == 'change' and not Def
-                and isinstance(Result, tuple) and len(Result) >= 3
-                and isinstance(Result[2], int) and Result[2] > 0
-                and Result[1] in (0, 1403)):
+        if (
+            CacheKey is not None
+            and Type == 'change'
+            and not Def
+            and isinstance(Result, tuple)
+            and len(Result) >= 3
+            and isinstance(Result[2], int)
+            and Result[2] > 0
+            and Result[1] in (0, 1403)
+        ):
             # CacheKey is None whenever the cache is disabled for this execute
             # (12c+, where a cached re-execute fails) — gating the write on it
             # too keeps a stray {None: cursor_id} entry out of the cache (#80).
@@ -1115,14 +1253,25 @@ class OracleConnect:
         # for reuse (#191). The result set is fully buffered by now, and this is
         # the main statement cursor — REF CURSOR / implicit-result cursors carry
         # their own distinct ids and are untouched.
-        if (not Stored and isinstance(Drained, tuple) and len(Drained) >= 3
-                and isinstance(Drained[2], int) and Drained[2] > 0):
+        if (
+            not Stored
+            and isinstance(Drained, tuple)
+            and len(Drained) >= 3
+            and isinstance(Drained[2], int)
+            and Drained[2] > 0
+        ):
             self._cursors_to_close.append(Drained[2])
         return Drained
 
-    def scroll_fetch(self, CursorId: int, Orientation: int, Position: int,
-                     RowFormat: list, Fetch: int | None = None,
-                     PrevRow: list | None = None) -> tuple:
+    def scroll_fetch(
+        self,
+        CursorId: int,
+        Orientation: int,
+        Position: int,
+        RowFormat: list,
+        Fetch: int | None = None,
+        PrevRow: list | None = None,
+    ) -> tuple:
         """Re-execute an open scrollable cursor (#181) with a fetch orientation
         and 1-based position, returning ``(rows, at_eof, server_rowcount)``. The
         response carries RXD rows but no DCB, so the prior RowFormat is seeded
@@ -1134,16 +1283,23 @@ class OracleConnect:
         NO_CANCEL_ON_EOF). ``Fetch`` overrides the prefetch row count for this
         batch (default: the connection's ``fetch``)."""
         QueryDict = {
-            'type': 'select', 'auto': 0,
+            'type': 'select',
+            'auto': 0,
             'fetch': self.fetch if Fetch is None else Fetch,
-            'server_version': self.server_version, 'cursor': CursorId,
-            'query': '', 'bind': [], 'batch': [], 'def': [],
-            'batcherrors': None, 'arraydmlrowcounts': None, 'return_binds': None,
-            'scrollable': True, 'scroll': (Orientation, Position),
+            'server_version': self.server_version,
+            'cursor': CursorId,
+            'query': '',
+            'bind': [],
+            'batch': [],
+            'def': [],
+            'batcherrors': None,
+            'arraydmlrowcounts': None,
+            'return_binds': None,
+            'scrollable': True,
+            'scroll': (Orientation, Position),
         }
         Pre = self._flush_cursor_closes_bytes() + self._flush_end_to_end_bytes()
-        Data = encode_dictionary(self._make_dict(DictionaryType.exec,
-                                                 query=QueryDict))
+        Data = encode_dictionary(self._make_dict(DictionaryType.exec, query=QueryDict))
         self.send(TNS_DATA, Data if not Pre else Pre + Data)
         # Seed the prior batch's last row so a reused (bit-unset) column on the
         # first row of this re-execute resolves to its real value (#181).
@@ -1156,8 +1312,9 @@ class OracleConnect:
             return ([], True, 0)
         (_, OraCode, _, RetFormat, Rows, *_) = Result
         AtEof = (OraCode == 1403) or not Rows
-        ServerRowCount = RetFormat[0] if (isinstance(RetFormat, tuple)
-                                          and RetFormat) else 0
+        ServerRowCount = (
+            RetFormat[0] if (isinstance(RetFormat, tuple) and RetFormat) else 0
+        )
         return (list(Rows or []), AtEof, ServerRowCount)
 
     def _fv2_raise_for_error(self, Packet: bytes) -> None:
@@ -1167,24 +1324,24 @@ class OracleConnect:
         (ErrCode, Message) = decode_fv2_oer_error(Packet)
         if ErrCode and ErrCode not in (0, 1403):
             from oracle.exceptions import from_ora_code
-            raise from_ora_code(ErrCode)(
-                Message or f"ORA-{ErrCode:05d}", code=ErrCode)
+
+            raise from_ora_code(ErrCode)(Message or f'ORA-{ErrCode:05d}', code=ErrCode)
 
     def _execute_fv2(self, Query: str, Bind: list | None = None) -> object:
         # Oracle 9i (field version 2) SELECT: the four-call TTI_ALL7 sequence
         # (PROTOCOL.md §19) — parse, describe columns, execute+fetch, close.
         # Returns the same tuple shape as a normal execute response so the
         # cursor/_drain_cursor machinery is unchanged.
-        self.send(TNS_DATA, encode_o7_open(0))       # allocate a server cursor
-        self._next_data_packet()                     # OOPEN RPA (cursor id)
+        self.send(TNS_DATA, encode_o7_open(0))  # allocate a server cursor
+        self._next_data_packet()  # OOPEN RPA (cursor id)
         self.send(TNS_DATA, encode_o7_parse(0, Query, Bind))
-        Resp = self._next_data_packet()              # parse RPA ack — or an OER
-        if Resp is not False:                        # surface a parse error
-            self._fv2_raise_for_error(Resp[1])       # (e.g. ORA-00942)
+        Resp = self._next_data_packet()  # parse RPA ack — or an OER
+        if Resp is not False:  # surface a parse error
+            self._fv2_raise_for_error(Resp[1])  # (e.g. ORA-00942)
         self.send(TNS_DATA, encode_o7_describe(0))
         Resp = self._next_data_packet()
         if Resp is False:
-            raise Exception("Connection closed during 9i describe")
+            raise Exception('Connection closed during 9i describe')
         (_, Packet) = Resp
         Columns = decode_fv2_describe(Packet)
         # CLOB (112) / BLOB (113) are read by the two-call TTI_LOBOPS GETLEN +
@@ -1201,7 +1358,7 @@ class OracleConnect:
             self.send(TNS_DATA, encode_o7_exec(0, Columns))
             Resp = self._next_data_packet()
             if Resp is False:
-                raise Exception("Connection closed during 9i fetch")
+                raise Exception('Connection closed during 9i fetch')
             (_, Packet) = Resp
             (Rows, ErrCode) = decode_fv2_exec_response(Packet, Columns)
             AllRows.extend(Rows)
@@ -1212,10 +1369,11 @@ class OracleConnect:
         # left LOB objects in the rows; replace each with its content.
         self._resolve_fv2_lobs(AllRows, Columns)
         self.send(TNS_DATA, encode_o7_close(0))
-        self._next_data_packet()                     # close STA
+        self._next_data_packet()  # close STA
         if ErrCode and ErrCode not in (0, 1403):
             from oracle.exceptions import from_ora_code
-            raise from_ora_code(ErrCode)(f"ORA-{ErrCode:05d}", code=ErrCode)
+
+            raise from_ora_code(ErrCode)(f'ORA-{ErrCode:05d}', code=ErrCode)
         # (call_status, ora_code, cursor_id, (rowcount, row_format), rows, ...)
         # call_status 0 + ora_code 0 => _drain_cursor won't issue TTI_FETCHes.
         return (0, 0, 0, (len(AllRows), Columns), AllRows, None, None, [], None)
@@ -1226,12 +1384,12 @@ class OracleConnect:
         # chars/bytes. Returns raw bytes (CLOB decoding happens in the caller
         # with the column charset). An empty LOB (amount 0) reads nothing.
         self.send(TNS_DATA, encode_o7_lob_getlen(0, Locator))
-        Resp = self._next_data_packet(b"", b"")
+        Resp = self._next_data_packet(b'', b'')
         if Resp is False:
-            raise Exception("Connection closed during 9i LOB GETLEN")
+            raise Exception('Connection closed during 9i LOB GETLEN')
         Amount = decode_fv2_lob_getlen(Resp[1])
         if Amount <= 0:
-            return b""
+            return b''
         self.send(TNS_DATA, encode_o7_lob_read(0, Locator, Amount))
         return self._read_fv2_lob_content()
 
@@ -1242,38 +1400,37 @@ class OracleConnect:
         # bytes. The FILE_CLOSE runs in a finally so an opened file is always
         # closed even if the read fails.
         self.send(TNS_DATA, encode_o7_bfile_open(0, Locator))
-        Resp = self._next_data_packet(b"", b"")
+        Resp = self._next_data_packet(b'', b'')
         if Resp is False:
-            raise Exception("Connection closed during 9i BFILE FILE_OPEN")
-        self._fv2_raise_for_error(Resp[1])           # e.g. ORA-22285
+            raise Exception('Connection closed during 9i BFILE FILE_OPEN')
+        self._fv2_raise_for_error(Resp[1])  # e.g. ORA-22285
         Opened = decode_fv2_opened_locator(Resp[1])
         if Opened is None:
-            raise Exception("Unexpected 9i BFILE FILE_OPEN reply",
-                            Resp[1][:8].hex())
+            raise Exception('Unexpected 9i BFILE FILE_OPEN reply', Resp[1][:8].hex())
         try:
             self.send(TNS_DATA, encode_o7_lob_getlen(0, Opened))
-            Resp = self._next_data_packet(b"", b"")
+            Resp = self._next_data_packet(b'', b'')
             if Resp is False:
-                raise Exception("Connection closed during 9i BFILE GETLEN")
+                raise Exception('Connection closed during 9i BFILE GETLEN')
             Amount = decode_fv2_lob_getlen(Resp[1])
             if Amount <= 0:
-                return b""
+                return b''
             self.send(TNS_DATA, encode_o7_lob_read(0, Opened, Amount))
             return self._read_fv2_lob_content()
         finally:
             self.send(TNS_DATA, encode_o7_bfile_close(0, Opened))
-            self._next_data_packet(b"", b"")         # drain FILE_CLOSE RPA + OER
+            self._next_data_packet(b'', b'')  # drain FILE_CLOSE RPA + OER
 
     def _read_fv2_lob_content(self) -> bytes:
         # Read the content of a 9i (fv2) TTI_LOBOPS READ reply by accumulating
         # packets and re-parsing with decode_fv2_lob_chunks until it reports the
         # zero-length terminator. The fv2 reply carries no OER call-status, so
         # that terminator (not an OER) is the stop signal. (#102)
-        Data = b""
+        Data = b''
         while True:
-            Received = self._next_data_packet(b"", b"")
+            Received = self._next_data_packet(b'', b'')
             if Received is False:
-                raise Exception("Connection closed during 9i LOB READ")
+                raise Exception('Connection closed during 9i LOB READ')
             Data += Received[1]
             (Content, Complete) = decode_fv2_lob_chunks(Data)
             if Complete:
@@ -1285,16 +1442,19 @@ class OracleConnect:
         # the 9i cursor is still open.
         from oracle.lob import LOB
         from oracle.types import decode_fv2_lob
+
         for Row in Rows:
             for I, Val in enumerate(Row):
                 if isinstance(Val, LOB):
-                    if Val.data_type == 114:        # BFILE: open / read / close
+                    if Val.data_type == 114:  # BFILE: open / read / close
                         Content = self._bfile_read_fv2(Val.raw)
-                    else:                           # CLOB / BLOB: GETLEN + READ
+                    else:  # CLOB / BLOB: GETLEN + READ
                         Content = self._lob_read_fv2(Val.raw)
-                    Row[I] = decode_fv2_lob(Columns[I].get('data_type'),
-                                            Content,
-                                            Columns[I].get('charset') or 0)
+                    Row[I] = decode_fv2_lob(
+                        Columns[I].get('data_type'),
+                        Content,
+                        Columns[I].get('charset') or 0,
+                    )
 
     def _execute_fv2_dml(self, Query: str, Bind: list | None = None) -> object:
         # Oracle 9i DML over TTI_ALL7 (#101): OOPEN, then a single parse that
@@ -1302,19 +1462,20 @@ class OracleConnect:
         # affected-row count comes back in the response OER. Commit explicitly
         # when autocommit is on (9i's parse doesn't carry an autocommit bit).
         self.send(TNS_DATA, encode_o7_open(0))
-        self._next_data_packet()                     # OOPEN RPA
+        self._next_data_packet()  # OOPEN RPA
         self.send(TNS_DATA, encode_o7_parse(0, Query, Bind))
         Resp = self._next_data_packet()
         if Resp is False:
-            raise Exception("Connection closed during 9i DML")
+            raise Exception('Connection closed during 9i DML')
         (_, Packet) = Resp
-        self._fv2_raise_for_error(Packet)            # e.g. ORA-00942 / constraint
+        self._fv2_raise_for_error(Packet)  # e.g. ORA-00942 / constraint
         (RowCount, ErrCode) = decode_fv2_dml_response(Packet)
         self.send(TNS_DATA, encode_o7_close(0))
-        self._next_data_packet()                     # close STA
+        self._next_data_packet()  # close STA
         if ErrCode and ErrCode not in (0, 1403):
             from oracle.exceptions import from_ora_code
-            raise from_ora_code(ErrCode)(f"ORA-{ErrCode:05d}", code=ErrCode)
+
+            raise from_ora_code(ErrCode)(f'ORA-{ErrCode:05d}', code=ErrCode)
         if self.autocommit:
             self.commit()
         return (0, 0, 0, (RowCount, None), [], None, None, [], None)
@@ -1332,37 +1493,40 @@ class OracleConnect:
         # values are handed back as an {out_positions, out_values} record the
         # cursor's _assign_out_binds decodes into the Var objects.
         from oracle.datatypes import Var
+
         Bind = Bind or []
         # IN + IN OUT binds carry an input value to send; every Var is an OUT
         # (its returned value comes back). IN OUT = a Var with has_value set.
-        InputValues = [(B._value if isinstance(B, Var) else B)
-                       for B in Bind
-                       if not isinstance(B, Var) or B.has_value]
+        InputValues = [
+            (B._value if isinstance(B, Var) else B)
+            for B in Bind
+            if not isinstance(B, Var) or B.has_value
+        ]
         OutPositions = [I for I, B in enumerate(Bind) if isinstance(B, Var)]
         self.send(TNS_DATA, encode_o7_open(0))
-        self._next_data_packet()                     # OOPEN RPA
+        self._next_data_packet()  # OOPEN RPA
         self.send(TNS_DATA, encode_o7_block(0, Query, Bind))
         Resp = self._next_data_packet()
         if Resp is False:
-            raise Exception("Connection closed during 9i PL/SQL block")
+            raise Exception('Connection closed during 9i PL/SQL block')
         (_, Packet) = Resp
         if InputValues:
             # `Packet` is the bind prompt (or an OER on a compile error). Send
             # the input values; the reply carries OUT values + RPA + OER.
             self._fv2_raise_for_error(Packet)
-            self.send(TNS_DATA, encode_tokens_rxd(InputValues, b""))
+            self.send(TNS_DATA, encode_tokens_rxd(InputValues, b''))
             Resp = self._next_data_packet()
             if Resp is False:
-                raise Exception("Connection closed during 9i PL/SQL bind send")
+                raise Exception('Connection closed during 9i PL/SQL bind send')
             (_, Packet) = Resp
-        self._fv2_raise_for_error(Packet)            # runtime error (ORA-06512 …)
-        (OutValues, RowCount, ErrCode) = decode_fv2_block_out(
-            Packet, len(OutPositions))
+        self._fv2_raise_for_error(Packet)  # runtime error (ORA-06512 …)
+        (OutValues, RowCount, ErrCode) = decode_fv2_block_out(Packet, len(OutPositions))
         self.send(TNS_DATA, encode_o7_close(0))
-        self._next_data_packet()                     # close STA
+        self._next_data_packet()  # close STA
         if ErrCode and ErrCode not in (0, 1403):
             from oracle.exceptions import from_ora_code
-            raise from_ora_code(ErrCode)(f"ORA-{ErrCode:05d}", code=ErrCode)
+
+            raise from_ora_code(ErrCode)(f'ORA-{ErrCode:05d}', code=ErrCode)
         if self.autocommit:
             self.commit()
         if OutPositions:
@@ -1383,15 +1547,17 @@ class OracleConnect:
         (CallStatus, OraCode, CursorId, RetFormat, Rows, *Tail) = Result
         AllRows = list(Rows or [])
         RowFormat = None
-        if isinstance(RetFormat, tuple) and len(RetFormat) > 1 \
-                and isinstance(RetFormat[1], list):
+        if (
+            isinstance(RetFormat, tuple)
+            and len(RetFormat) > 1
+            and isinstance(RetFormat[1], list)
+        ):
             RowFormat = RetFormat[1]
         # No row format means there's nothing further to fetch (DDL / DML
         # responses), and CursorId == 0 means no cursor to fetch from.
         if RowFormat and CursorId and CallStatus == 1 and OraCode != 1403:
             while True:
-                FetchResult = self.fetch_more(CursorId, self.fetch,
-                                              RowFormat=RowFormat)
+                FetchResult = self.fetch_more(CursorId, self.fetch, RowFormat=RowFormat)
                 if not isinstance(FetchResult, tuple) or len(FetchResult) < 6:
                     break
                 (CallStatus, OraCode, _, _, MoreRows, *_) = FetchResult
@@ -1407,16 +1573,18 @@ class OracleConnect:
             OraCode = 0
         return (CallStatus, OraCode, CursorId, RetFormat, AllRows) + tuple(Tail)
 
-    def fetch_more(self, CursorId: int, Rows: int | None = None,
-                   RowFormat: list | None = None) -> object:
+    def fetch_more(
+        self, CursorId: int, Rows: int | None = None, RowFormat: list | None = None
+    ) -> object:
         # FETCH responses carry RXH / RXD / OER but no DCB — the column
         # metadata was already established during the original EXEC. Seed
         # the decoder Acc with the prior RowFormat so the per-row DALC
         # parser knows how many columns to read.
         if Rows is None:
             Rows = self.fetch
-        Data = encode_dictionary(self._make_dict(DictionaryType.fetch,
-                                                  cursor=CursorId, fetch=Rows))
+        Data = encode_dictionary(
+            self._make_dict(DictionaryType.fetch, cursor=CursorId, fetch=Rows)
+        )
         self.send(TNS_DATA, Data)
         return self._handle_response(Acc=(None, RowFormat, []))
 
@@ -1435,8 +1603,9 @@ class OracleConnect:
                 break
         return AllRows
 
-    def lob_read(self, Locator: bytes, DataType: int,
-                 prefixed: bool = False) -> str | bytes:
+    def lob_read(
+        self, Locator: bytes, DataType: int, prefixed: bool = False
+    ) -> str | bytes:
         # Send TTI_LOBOPS READ for the given locator and decode the response.
         # The response carries:
         #
@@ -1448,9 +1617,12 @@ class OracleConnect:
         # CLOB / NCLOB content is sent as UTF-16BE on the wire; BLOB / BFILE
         # is raw bytes. We decode CLOB to `str` and surface BLOB as `bytes`.
         from oracle.tns_consts import TNS_TYPE_CLOB
-        Data = encode_dictionary(self._make_dict(DictionaryType.lobops,
-                                                  locator=Locator,
-                                                  locator_prefixed=prefixed))
+
+        Data = encode_dictionary(
+            self._make_dict(
+                DictionaryType.lobops, locator=Locator, locator_prefixed=prefixed
+            )
+        )
         self.send(TNS_DATA, Data)
         Content = self._read_lob_response()
         if DataType == TNS_TYPE_CLOB:
@@ -1460,8 +1632,11 @@ class OracleConnect:
     def _rows(self, result: object) -> list:
         # The row block of an execute() result (execute is typed `object`); [] if
         # the result carries no rows.
-        return (result[4] if isinstance(result, tuple)
-                and len(result) > 4 and result[4] else [])
+        return (
+            result[4]
+            if isinstance(result, tuple) and len(result) > 4 and result[4]
+            else []
+        )
 
     def gettype(self, name: str) -> 'DbObjectType':
         """Look up a SQL object type by name and return a ``DbObjectType``.
@@ -1473,18 +1648,22 @@ class OracleConnect:
         """
         if '.' in name:
             Schema, _, TypeName = name.partition('.')
-            Schema = Schema.strip('"').upper() if '"' not in Schema else Schema.strip('"')
+            Schema = (
+                Schema.strip('"').upper() if '"' not in Schema else Schema.strip('"')
+            )
         else:
             Schema, TypeName = None, name
         TypeName = TypeName.strip('"') if '"' in TypeName else TypeName.upper()
         Typ = self._describe_object_type(Schema, TypeName)
         if Typ is None or (not Typ.attrs and not Typ.is_collection):
             from oracle.exceptions import DatabaseError
-            raise DatabaseError(f"object type {name!r} not found")
+
+            raise DatabaseError(f'object type {name!r} not found')
         return Typ
 
-    def _describe_object_type(self, schema: str | None,
-                              name: str | None) -> 'DbObjectType | None':
+    def _describe_object_type(
+        self, schema: str | None, name: str | None
+    ) -> 'DbObjectType | None':
         # Fetch a SQL object type's identity (16-byte OID + version) and ordered
         # attribute layout from the data dictionary, cached per connection keyed
         # by (owner, name). Used both by the row decoder (#115) and gett() /
@@ -1494,9 +1673,10 @@ class OracleConnect:
         if not name:
             return None
         from oracle.dbobject import DbObjectType, type_name_to_tns
+
         Owner = schema
         if Owner is None:
-            Result = self.execute("SELECT USER FROM dual")
+            Result = self.execute('SELECT USER FROM dual')
             Rows = self._rows(Result)
             Owner = Rows[0][0] if Rows else None
         if not Owner:
@@ -1505,27 +1685,33 @@ class OracleConnect:
         Cached = self._object_type_cache.get(Key)
         if Cached is not None:
             return Cached
-        OidSQL = ("SELECT type_oid, typecode FROM all_types "
-                  "WHERE owner = :1 AND type_name = :2")
+        OidSQL = (
+            'SELECT type_oid, typecode FROM all_types '
+            'WHERE owner = :1 AND type_name = :2'
+        )
         OidRes = self.execute(OidSQL, Bind=[Owner, name])
         OidRows = self._rows(OidRes)
-        Oid = bytes(OidRows[0][0]) if OidRows and OidRows[0][0] else b""
+        Oid = bytes(OidRows[0][0]) if OidRows and OidRows[0][0] else b''
         TypeCode = OidRows[0][1] if OidRows else None
-        SQL = ("SELECT attr_name, attr_type_name, length, precision, scale "
-               "FROM all_type_attrs "
-               "WHERE owner = :1 AND type_name = :2 "
-               "ORDER BY attr_no")
+        SQL = (
+            'SELECT attr_name, attr_type_name, length, precision, scale '
+            'FROM all_type_attrs '
+            'WHERE owner = :1 AND type_name = :2 '
+            'ORDER BY attr_no'
+        )
         Result = self.execute(SQL, Bind=[Owner, name])
         Rows = self._rows(Result)
         Attrs = []
         for Row in Rows:
             TypeName = Row[1]
-            Attrs.append({
-                'name': Row[0],
-                'type_name': TypeName,
-                'data_type': type_name_to_tns(TypeName),
-                'charset': None,
-            })
+            Attrs.append(
+                {
+                    'name': Row[0],
+                    'type_name': TypeName,
+                    'data_type': type_name_to_tns(TypeName),
+                    'charset': None,
+                }
+            )
         CollKW = self._collection_describe(Owner, name, TypeCode)
         # The OAC type version: the freshly-created/common case is 1; the server
         # validated this across 10g..23ai in the round-trip tests.
@@ -1540,21 +1726,33 @@ class OracleConnect:
         if typecode != 'COLLECTION':
             return {}
         from oracle.dbobject import (
-            type_name_to_tns, COLLECTION_VARRAY, COLLECTION_NESTED_TABLE)
+            COLLECTION_NESTED_TABLE,
+            COLLECTION_VARRAY,
+            type_name_to_tns,
+        )
+
         Res = self.execute(
-            "SELECT coll_type, elem_type_name, length, precision, scale, "
-            "upper_bound FROM all_coll_types WHERE owner = :1 AND type_name = :2",
-            Bind=[owner, name])
+            'SELECT coll_type, elem_type_name, length, precision, scale, '
+            'upper_bound FROM all_coll_types WHERE owner = :1 AND type_name = :2',
+            Bind=[owner, name],
+        )
         Rows = self._rows(Res)
         if not Rows:
             return {'is_collection': True}
         (CollType, ElemType, _Len, _Prec, _Scale, Upper) = Rows[0][:6]
         return {
             'is_collection': True,
-            'collection_type': (COLLECTION_VARRAY if CollType == 'VARYING ARRAY'
-                                else COLLECTION_NESTED_TABLE),
-            'element': {'name': 'element', 'type_name': ElemType,
-                        'data_type': type_name_to_tns(ElemType), 'charset': None},
+            'collection_type': (
+                COLLECTION_VARRAY
+                if CollType == 'VARYING ARRAY'
+                else COLLECTION_NESTED_TABLE
+            ),
+            'element': {
+                'name': 'element',
+                'type_name': ElemType,
+                'data_type': type_name_to_tns(ElemType),
+                'charset': None,
+            },
             'max_elements': int(Upper) if Upper else 0,
         }
 
@@ -1572,22 +1770,25 @@ class OracleConnect:
         # callers gate on field_version. The response is a single TTI_RPA token
         # carrying the new locator: 0x08, ub2 length, then the locator bytes.
         from oracle.tns_consts import TTI_RPA
-        Data = encode_dictionary(self._make_dict(DictionaryType.lobops,
-                                                 create_temp=True,
-                                                 is_blob=is_blob))
+
+        Data = encode_dictionary(
+            self._make_dict(DictionaryType.lobops, create_temp=True, is_blob=is_blob)
+        )
         self.send(TNS_DATA, Data)
-        Received = self._next_data_packet(b"", b"")
+        Received = self._next_data_packet(b'', b'')
         if Received is False:
-            raise Exception("Connection closed during CREATE_TEMP")
+            raise Exception('Connection closed during CREATE_TEMP')
         (_, Packet) = Received
         if not Packet or Packet[0] != TTI_RPA:
-            raise Exception("Unexpected CREATE_TEMP response",
-                            Packet[:8].hex() if Packet else None)
+            raise Exception(
+                'Unexpected CREATE_TEMP response', Packet[:8].hex() if Packet else None
+            )
         LocLen = (Packet[1] << 8) | Packet[2]
-        return Packet[3:3 + LocLen]
+        return Packet[3 : 3 + LocLen]
 
-    def write_temp_lob(self, Locator: bytes, Data: str | bytes,
-                       is_blob: bool = False) -> None:
+    def write_temp_lob(
+        self, Locator: bytes, Data: str | bytes, is_blob: bool = False
+    ) -> None:
         # Write `Data` into a (temporary) LOB via TTI_LOBOPS WRITE (op 0x0040,
         # #91), starting at offset 1. CLOB content goes on the wire as UTF-16BE;
         # BLOB content is raw bytes. The server answers with TTI_RPA (updated
@@ -1595,9 +1796,14 @@ class OracleConnect:
         # the OER and raise on a real error. 12c+ only (paired with
         # create_temp_lob). The encoder chunks payloads > 0xFC bytes itself.
         from oracle.tns_consts import TNS_LOB_OP_WRITE
+
         Payload = Data if is_blob else cast(str, Data).encode('utf-16-be')
-        Dict = self._make_dict(DictionaryType.lobops, locator=Locator,
-                               data=Payload, operation=TNS_LOB_OP_WRITE)
+        Dict = self._make_dict(
+            DictionaryType.lobops,
+            locator=Locator,
+            data=Payload,
+            operation=TNS_LOB_OP_WRITE,
+        )
         self.send(TNS_DATA, encode_dictionary(Dict))
         self._confirm_lobops()
 
@@ -1605,9 +1811,9 @@ class OracleConnect:
         # Drain a TTI_LOBOPS response that carries no content (WRITE / temp /
         # BFILE open-close ops): receive the RPA + OER packet and raise on a
         # non-zero ORA error.
-        Received = self._next_data_packet(b"", b"")
+        Received = self._next_data_packet(b'', b'')
         if Received is False:
-            raise Exception("Connection closed during LOBOPS")
+            raise Exception('Connection closed during LOBOPS')
         self._raise_lobops_error(Received[1])
 
     def _raise_lobops_error(self, Packet: bytes) -> None:
@@ -1616,12 +1822,12 @@ class OracleConnect:
         # matches the OER regardless of call status (which is 5, not 1,
         # immediately after a PL/SQL execute — the case that desynced the temp
         # LOB write following a temp-LOB-bind exec).
-        from oracle.tns import decode_lobops_oer
         from oracle.exceptions import from_ora_code
+        from oracle.tns import decode_lobops_oer
+
         (ErrCode, Message) = decode_lobops_oer(Packet, self.field_version)
         if ErrCode and ErrCode not in (0, 1403):
-            raise from_ora_code(ErrCode)(
-                Message or f"ORA-{ErrCode:05d}", code=ErrCode)
+            raise from_ora_code(ErrCode)(Message or f'ORA-{ErrCode:05d}', code=ErrCode)
 
     def bfile_read_native(self, Locator: bytes) -> bytes:
         # Read a BFILE natively over TTI_LOBOPS (#46): FILE_OPEN -> READ ->
@@ -1630,34 +1836,59 @@ class OracleConnect:
         # a READ against the original locator returns empty bytes (the symptom
         # that originally blocked native BFILE support). The locator goes on the
         # wire ub2-length-prefixed (locator_prefixed), as for temp LOBs.
-        from oracle.tns_consts import (TTI_RPA, TNS_LOB_OP_FILE_OPEN,
-                                       TNS_LOB_OP_FILE_CLOSE)
+        from oracle.tns_consts import (
+            TNS_LOB_OP_FILE_CLOSE,
+            TNS_LOB_OP_FILE_OPEN,
+            TTI_RPA,
+        )
+
         # A BFILE locator as fetched (LOB.raw) leads with its own ub2
         # inner-length; the encoder re-adds that prefix, so pass the body. The
         # FILE_OPEN response RPA already hands back the body form.
         if len(Locator) >= 2 and ((Locator[0] << 8) | Locator[1]) == len(Locator) - 2:
             Locator = Locator[2:]
-        self.send(TNS_DATA, encode_dictionary(self._make_dict(
-            DictionaryType.lobops, locator=Locator,
-            operation=TNS_LOB_OP_FILE_OPEN)))
-        Received = self._next_data_packet(b"", b"")
+        self.send(
+            TNS_DATA,
+            encode_dictionary(
+                self._make_dict(
+                    DictionaryType.lobops,
+                    locator=Locator,
+                    operation=TNS_LOB_OP_FILE_OPEN,
+                )
+            ),
+        )
+        Received = self._next_data_packet(b'', b'')
         if Received is False:
-            raise Exception("Connection closed during BFILE FILE_OPEN")
+            raise Exception('Connection closed during BFILE FILE_OPEN')
         (_, Packet) = Received
         self._raise_lobops_error(Packet)
         if not Packet or Packet[0] != TTI_RPA:
-            raise Exception("Unexpected FILE_OPEN response",
-                            Packet[:8].hex() if Packet else None)
+            raise Exception(
+                'Unexpected FILE_OPEN response', Packet[:8].hex() if Packet else None
+            )
         OpenLen = (Packet[1] << 8) | Packet[2]
-        Opened = Packet[3:3 + OpenLen]
+        Opened = Packet[3 : 3 + OpenLen]
         try:
-            self.send(TNS_DATA, encode_dictionary(self._make_dict(
-                DictionaryType.lobops, locator=Opened, locator_prefixed=True)))
+            self.send(
+                TNS_DATA,
+                encode_dictionary(
+                    self._make_dict(
+                        DictionaryType.lobops, locator=Opened, locator_prefixed=True
+                    )
+                ),
+            )
             Content = self._read_lob_response()
         finally:
-            self.send(TNS_DATA, encode_dictionary(self._make_dict(
-                DictionaryType.lobops, locator=Opened,
-                operation=TNS_LOB_OP_FILE_CLOSE)))
+            self.send(
+                TNS_DATA,
+                encode_dictionary(
+                    self._make_dict(
+                        DictionaryType.lobops,
+                        locator=Opened,
+                        operation=TNS_LOB_OP_FILE_CLOSE,
+                    )
+                ),
+            )
             self._confirm_lobops()
         return Content
 
@@ -1669,8 +1900,9 @@ class OracleConnect:
         # FILE_CLOSE sequence removed that, along with its CREATE PROCEDURE
         # privilege requirement and schema side effects.)
         Cur = self.cursor()
-        Cur.execute("SELECT BFILENAME(:d, :f) FROM DUAL",
-                    {"d": directory_name, "f": file_name})
+        Cur.execute(
+            'SELECT BFILENAME(:d, :f) FROM DUAL', {'d': directory_name, 'f': file_name}
+        )
         return Cur.fetchone()[0]
 
     def _read_lob_response(self) -> bytes:
@@ -1681,17 +1913,18 @@ class OracleConnect:
         # use OER as the stop signal; everything between LOB and OER is
         # RPA-shaped metadata we don't need.
         from oracle.tns_consts import TTI_LOB, TTI_OER
-        Buffer = b""
+
+        Buffer = b''
         while True:
             # Same break/reset-aware receive as the main response path (#45):
             # a LOB read that gets cancelled mid-stream must complete the reset
             # handshake instead of echoing markers and dropping content.
-            Received = self._next_data_packet(b"", b"")
+            Received = self._next_data_packet(b'', b'')
             if Received is False:
-                raise Exception("Connection closed during LOBOPS response")
+                raise Exception('Connection closed during LOBOPS response')
             (Type, Packet) = Received
             if Type != TNS_DATA:
-                raise Exception("Unexpected LOBOPS response type", Type)
+                raise Exception('Unexpected LOBOPS response type', Type)
             Pos = 0
             OerSeen = False
             while Pos < len(Packet):
@@ -1710,16 +1943,17 @@ class OracleConnect:
                         # Chunked content. 12c+ prefixes each chunk with a ub4
                         # length (terminated by a zero-length chunk); 11g uses a
                         # single length byte per chunk.
-                        if self.field_version >= 8:        # FIELD_VERSION_12_2
+                        if self.field_version >= 8:  # FIELD_VERSION_12_2
                             while Pos < len(Packet):
                                 NLen = Packet[Pos]
                                 Pos += 1
                                 if NLen == 0:
                                     break
                                 ChunkLen = int.from_bytes(
-                                    Packet[Pos:Pos + NLen], "big")
+                                    Packet[Pos : Pos + NLen], 'big'
+                                )
                                 Pos += NLen
-                                Buffer += Packet[Pos:Pos + ChunkLen]
+                                Buffer += Packet[Pos : Pos + ChunkLen]
                                 Pos += ChunkLen
                         else:
                             while Pos < len(Packet):
@@ -1727,10 +1961,10 @@ class OracleConnect:
                                 Pos += 1
                                 if ChunkLen == 0:
                                     break
-                                Buffer += Packet[Pos:Pos + ChunkLen]
+                                Buffer += Packet[Pos : Pos + ChunkLen]
                                 Pos += ChunkLen
                     else:
-                        Buffer += Packet[Pos:Pos + Length]
+                        Buffer += Packet[Pos : Pos + Length]
                         Pos += Length
                 elif Token == TTI_OER:
                     # End of call. Anything after is fluff.
@@ -1746,9 +1980,11 @@ class OracleConnect:
                     # prefix as well as the historical `04 01 XX 01` form.
                     Found = -1
                     for I in range(Pos, len(Packet) - 3):
-                        if (Packet[I] == TTI_OER and Packet[I + 1] == 0x01
-                                and (Packet[I + 2] == 0x01
-                                     or Packet[I + 3] == 0x01)):
+                        if (
+                            Packet[I] == TTI_OER
+                            and Packet[I + 1] == 0x01
+                            and (Packet[I + 2] == 0x01 or Packet[I + 3] == 0x01)
+                        ):
                             Found = I
                             break
                     if Found >= 0:
@@ -1762,6 +1998,7 @@ class OracleConnect:
 
     def commit(self) -> None:
         from oracle.tns_consts import TTI_COMMIT
+
         Data = encode_dictionary(self._make_dict(DictionaryType.tran, req=TTI_COMMIT))
         self.send(TNS_DATA, Data)
         self._handle_response()
@@ -1771,6 +2008,7 @@ class OracleConnect:
 
     def rollback(self) -> None:
         from oracle.tns_consts import TTI_ROLLBACK
+
         Data = encode_dictionary(self._make_dict(DictionaryType.tran, req=TTI_ROLLBACK))
         self.send(TNS_DATA, Data)
         self._handle_response()
@@ -1784,6 +2022,7 @@ class OracleConnect:
             self.execute("SELECT 'X' FROM dual")
             return
         from oracle.tns_consts import TTI_PING
+
         Data = encode_dictionary(self._make_dict(DictionaryType.tran, req=TTI_PING))
         self.send(TNS_DATA, Data)
         self._handle_response()
@@ -1798,30 +2037,26 @@ class OracleConnect:
         `old_password` raises ORA-01017; a rejected new password (policy /
         verifier) raises e.g. ORA-28003.
         """
-        from oracle.exceptions import (InterfaceError, from_ora_code,
-                                        NotSupportedError)
+        from oracle.exceptions import InterfaceError, NotSupportedError, from_ora_code
+
         if self.field_version < FIELD_VERSION_10_2:
             # 9i changes a password via the O3LOGON-era exchange, not the single
             # TTI_AUTH this sends; gate it rather than break the session (#168).
-            raise NotSupportedError(
-                "changepassword is not supported on Oracle 9i")
+            raise NotSupportedError('changepassword is not supported on Oracle 9i')
         if self.conn_state != CONN_STATE_AUTHENTICATED or self.conn_key is None:
-            raise InterfaceError(
-                "changepassword requires an authenticated connection")
+            raise InterfaceError('changepassword requires an authenticated connection')
         Auth = {
             'conn_key': self.conn_key,
             'old_password': old_password,
             'new_password': new_password,
         }
-        Data = encode_dictionary(
-            self._make_dict(DictionaryType.chgpwd, auth=Auth))
+        Data = encode_dictionary(self._make_dict(DictionaryType.chgpwd, auth=Auth))
         self.send(TNS_DATA, Data)
         Result = cast(tuple, self._handle_response())
         ErrCode = Result[1] if isinstance(Result, tuple) and len(Result) > 1 else 0
         if ErrCode and ErrCode not in (0, 1403):
             Message = Result[5] if len(Result) > 5 else None
-            raise from_ora_code(ErrCode)(
-                Message or f"ORA-{ErrCode:05d}", code=ErrCode)
+            raise from_ora_code(ErrCode)(Message or f'ORA-{ErrCode:05d}', code=ErrCode)
         self.password = new_password
 
     def close(self) -> None:
@@ -1845,7 +2080,7 @@ class OracleConnect:
                 # reconnect cycles. Format: 10-byte header (PacketSize,
                 # PacketFlags, Type, Flags, DataFlags=0x0040 EOF).
                 if self.sock is not None:
-                    self._sock.send(struct.pack(">hhBBh", 10, 0, TNS_DATA, 0, 0x0040))
+                    self._sock.send(struct.pack('>hhBBh', 10, 0, TNS_DATA, 0, 0x0040))
         except (OSError, Exception):
             # If the server already hung up or our state is out of sync, we
             # still want to release the local socket.
@@ -1859,19 +2094,20 @@ class OracleConnect:
         # with a DCB (which sets RowFormat for the subsequent RXDs). FETCH
         # responses skip the DCB and need the prior RowFormat passed in.
         from oracle.tns import decode_packet
+
         if Acc is None:
             Acc = (None, None, [])
         # Receive the next DATA packet, transparently completing any server
         # break/reset handshake (#45). _next_data_packet sends a single reset
         # per break episode and drains the rest, so a cancelled/errored call
         # no longer storms the line or discards the trailing error/result.
-        Received = self._next_data_packet(b"", b"")
+        Received = self._next_data_packet(b'', b'')
         if Received is False:
-            raise Exception("Connection closed while awaiting response")
+            raise Exception('Connection closed while awaiting response')
         (Type, Packet) = Received
         if Type == TNS_DATA:
             return decode_packet(Packet, Acc, self.field_version)
-        raise Exception("Unexpected response type", Type)
+        raise Exception('Unexpected response type', Type)
 
     def send(self, Type: int, Data: bytes | None) -> bool | None:
         # Iterative split-and-send. Was previously recursive, which blew
@@ -1879,20 +2115,19 @@ class OracleConnect:
         # cross more than a few SDU boundaries (test_basic crashed with
         # RecursionError on the auth handshake).
         while Data is not None:
-            (Packet, Rest) = encode_packet(Type, Data, self.sdu,
-                                           self._large_packets)
+            (Packet, Rest) = encode_packet(Type, Data, self.sdu, self._large_packets)
             try:
                 self._sock.send(Packet)
             except TimeoutError as exc:
-                raise self._timeout_error("write") from exc
+                raise self._timeout_error('write') from exc
             Data = Rest
-        logger.debug("Send OK")
+        logger.debug('Send OK')
         return True
 
     def _timeout_error(self, op: str) -> OperationalError:
         return OperationalError(
-            f"network {op} timed out after {self.timeout} ms "
-            f"(connection timeout)")
+            f'network {op} timed out after {self.timeout} ms (connection timeout)'
+        )
 
     # --- Two-phase commit / XA (#131) ---
 
@@ -1905,115 +2140,158 @@ class OracleConnect:
         # (the bytes after the leading token). The return parameters (context /
         # state) sit at the front, followed by the call-status OER.
         self.send(TNS_DATA, Data)
-        Received = self._next_data_packet(b"", b"")
+        Received = self._next_data_packet(b'', b'')
         if Received is False:
-            raise OperationalError("connection closed during TPC operation")
+            raise OperationalError('connection closed during TPC operation')
         (_, Packet) = Received
         return Packet
 
-    def tpc_begin(self, xid: Xid, flags: int = TPC_BEGIN_NEW,
-                  timeout: int = 0) -> None:
+    def tpc_begin(self, xid: Xid, flags: int = TPC_BEGIN_NEW, timeout: int = 0) -> None:
         """Begin a TPC (global) transaction branch identified by `xid`."""
         if self.field_version < FIELD_VERSION_12_1:
             from oracle.exceptions import NotSupportedError
+
             raise NotSupportedError(
-                "two-phase commit (TPC/XA) requires an Oracle 12.1+ server")
-        Data = encode_tpc_switch(self._next_seq(), self.field_version,
-                                 TNS_TPC_TXN_START, xid, flags, timeout, None)
+                'two-phase commit (TPC/XA) requires an Oracle 12.1+ server'
+            )
+        Data = encode_tpc_switch(
+            self._next_seq(),
+            self.field_version,
+            TNS_TPC_TXN_START,
+            xid,
+            flags,
+            timeout,
+            None,
+        )
         self._transaction_context = _decode_tpc_context(self._tpc_request(Data))
 
     def tpc_end(self, xid: Xid, flags: int = TPC_END_NORMAL) -> None:
         """Detach from the TPC transaction branch (end the local work)."""
-        Data = encode_tpc_switch(self._next_seq(), self.field_version,
-                                 TNS_TPC_TXN_DETACH, xid, flags, 0,
-                                 self._transaction_context)
+        Data = encode_tpc_switch(
+            self._next_seq(),
+            self.field_version,
+            TNS_TPC_TXN_DETACH,
+            xid,
+            flags,
+            0,
+            self._transaction_context,
+        )
         self._tpc_request(Data)
         self._transaction_context = None
 
     def tpc_prepare(self, xid: Xid) -> bool:
         """Prepare the branch. Returns True if a commit is needed, False if the
         branch was read-only (nothing to commit)."""
-        Data = encode_tpc_change_state(self._next_seq(), self.field_version,
-                                       TNS_TPC_TXN_PREPARE, 0, xid, 0,
-                                       self._transaction_context)
+        Data = encode_tpc_change_state(
+            self._next_seq(),
+            self.field_version,
+            TNS_TPC_TXN_PREPARE,
+            0,
+            xid,
+            0,
+            self._transaction_context,
+        )
         State = _decode_tpc_state(self._tpc_request(Data))
         if State == TNS_TPC_TXN_STATE_REQUIRES_COMMIT:
             return True
         if State == TNS_TPC_TXN_STATE_READ_ONLY:
             return False
-        raise DatabaseError(f"unknown TPC transaction state {State}")
+        raise DatabaseError(f'unknown TPC transaction state {State}')
 
     def tpc_commit(self, xid: Xid, one_phase: bool = False) -> None:
         """Commit the branch. `one_phase` commits without a prior prepare."""
-        State = (TNS_TPC_TXN_STATE_READ_ONLY if one_phase
-                 else TNS_TPC_TXN_STATE_COMMITTED)
-        Data = encode_tpc_change_state(self._next_seq(), self.field_version,
-                                       TNS_TPC_TXN_COMMIT, State, xid, 0,
-                                       self._transaction_context)
+        State = (
+            TNS_TPC_TXN_STATE_READ_ONLY if one_phase else TNS_TPC_TXN_STATE_COMMITTED
+        )
+        Data = encode_tpc_change_state(
+            self._next_seq(),
+            self.field_version,
+            TNS_TPC_TXN_COMMIT,
+            State,
+            xid,
+            0,
+            self._transaction_context,
+        )
         Result = _decode_tpc_state(self._tpc_request(Data))
         self._transaction_context = None
-        Ok = (Result in (TNS_TPC_TXN_STATE_READ_ONLY,
-                         TNS_TPC_TXN_STATE_COMMITTED) if one_phase
-              else Result == TNS_TPC_TXN_STATE_FORGOTTEN)
+        Ok = (
+            Result in (TNS_TPC_TXN_STATE_READ_ONLY, TNS_TPC_TXN_STATE_COMMITTED)
+            if one_phase
+            else Result == TNS_TPC_TXN_STATE_FORGOTTEN
+        )
         if not Ok:
-            raise DatabaseError(f"unexpected TPC commit state {Result}")
+            raise DatabaseError(f'unexpected TPC commit state {Result}')
 
     def tpc_rollback(self, xid: Xid) -> None:
         """Roll back the branch."""
-        Data = encode_tpc_change_state(self._next_seq(), self.field_version,
-                                       TNS_TPC_TXN_ABORT,
-                                       TNS_TPC_TXN_STATE_ABORTED, xid, 0,
-                                       self._transaction_context)
+        Data = encode_tpc_change_state(
+            self._next_seq(),
+            self.field_version,
+            TNS_TPC_TXN_ABORT,
+            TNS_TPC_TXN_STATE_ABORTED,
+            xid,
+            0,
+            self._transaction_context,
+        )
         Result = _decode_tpc_state(self._tpc_request(Data))
         self._transaction_context = None
         if Result != TNS_TPC_TXN_STATE_ABORTED:
-            raise DatabaseError(f"unexpected TPC rollback state {Result}")
+            raise DatabaseError(f'unexpected TPC rollback state {Result}')
 
     # --- Sessionless transactions (#133, 23ai) ---
 
     def _check_sessionless_support(self) -> None:
         if self.field_version < FIELD_VERSION_23_1:
             from oracle.exceptions import NotSupportedError
-            raise NotSupportedError(
-                "sessionless transactions require an Oracle 23ai+ server")
 
-    def _sessionless_switch(self, operation: int, transaction_id, flags: int,
-                            timeout: int):
+            raise NotSupportedError(
+                'sessionless transactions require an Oracle 23ai+ server'
+            )
+
+    def _sessionless_switch(
+        self, operation: int, transaction_id, flags: int, timeout: int
+    ):
         # Send a func-103 switch carrying the magic sessionless format-id. The
         # txn id (gtrid) is only attached for start/resume; detach sends none.
         xid = None
         if transaction_id is not None:
-            xid = Xid(TNS_TPC_SESSIONLESS_FORMAT_ID, transaction_id, b"")
-        Data = encode_tpc_switch(self._next_seq(), self.field_version,
-                                 operation, xid, flags, timeout, None)
+            xid = Xid(TNS_TPC_SESSIONLESS_FORMAT_ID, transaction_id, b'')
+        Data = encode_tpc_switch(
+            self._next_seq(), self.field_version, operation, xid, flags, timeout, None
+        )
         self._tpc_request(Data)
 
-    def begin_sessionless_transaction(self, transaction_id=None,
-                                      timeout: int = 60) -> bytes:
+    def begin_sessionless_transaction(
+        self, transaction_id=None, timeout: int = 60
+    ) -> bytes:
         """Start a sessionless transaction. `transaction_id` (str/bytes, <=64
         bytes) defaults to a fresh uuid4; returns the id used. `timeout` is the
         seconds the server keeps the suspended transaction resumable."""
         self._check_sessionless_support()
         if self._sessionless_txn_active:
-            raise DatabaseError("a sessionless transaction is already active")
+            raise DatabaseError('a sessionless transaction is already active')
         txnid = _normalize_sessionless_txn_id(transaction_id)
-        self._sessionless_switch(TNS_TPC_TXN_START, txnid,
-                                 TPC_BEGIN_NEW | TPC_TXN_FLAGS_SESSIONLESS,
-                                 timeout)
+        self._sessionless_switch(
+            TNS_TPC_TXN_START, txnid, TPC_BEGIN_NEW | TPC_TXN_FLAGS_SESSIONLESS, timeout
+        )
         self._sessionless_txn_active = True
         return txnid
 
-    def resume_sessionless_transaction(self, transaction_id,
-                                       timeout: int = 60) -> bytes:
+    def resume_sessionless_transaction(
+        self, transaction_id, timeout: int = 60
+    ) -> bytes:
         """Resume a previously suspended sessionless transaction (possibly on a
         different session). `transaction_id` is required; returns it."""
         self._check_sessionless_support()
         if self._sessionless_txn_active:
-            raise DatabaseError("a sessionless transaction is already active")
+            raise DatabaseError('a sessionless transaction is already active')
         txnid = _normalize_sessionless_txn_id(transaction_id)
-        self._sessionless_switch(TNS_TPC_TXN_START, txnid,
-                                 TPC_BEGIN_RESUME | TPC_TXN_FLAGS_SESSIONLESS,
-                                 timeout)
+        self._sessionless_switch(
+            TNS_TPC_TXN_START,
+            txnid,
+            TPC_BEGIN_RESUME | TPC_TXN_FLAGS_SESSIONLESS,
+            timeout,
+        )
         self._sessionless_txn_active = True
         return txnid
 
@@ -2022,9 +2300,8 @@ class OracleConnect:
         resume it. The transaction's work is preserved (not committed)."""
         self._check_sessionless_support()
         if not self._sessionless_txn_active:
-            raise DatabaseError("no sessionless transaction is active")
-        self._sessionless_switch(TNS_TPC_TXN_DETACH, None,
-                                 TPC_TXN_FLAGS_SESSIONLESS, 0)
+            raise DatabaseError('no sessionless transaction is active')
+        self._sessionless_switch(TNS_TPC_TXN_DETACH, None, TPC_TXN_FLAGS_SESSIONLESS, 0)
         self._sessionless_txn_active = False
 
     # --- Request pipelining (#132) ---
@@ -2044,6 +2321,7 @@ class OracleConnect:
         if self._pipeline_wire_eligible(pipeline):
             return self._run_pipeline_pipelined(pipeline, continue_on_error)
         from oracle.pipeline import PipelineOpType as T
+
         results = []
         Cur = self.cursor()
         for Op in pipeline.operations:
@@ -2059,8 +2337,8 @@ class OracleConnect:
         # verified against a capture. A pipeline with a commit / callproc /
         # callfunc op runs serially instead (correct results, no optimisation).
         from oracle.pipeline import PipelineOpType as T
-        WireOps = (T.EXECUTE, T.EXECUTE_MANY, T.FETCH_ONE, T.FETCH_MANY,
-                   T.FETCH_ALL)
+
+        WireOps = (T.EXECUTE, T.EXECUTE_MANY, T.FETCH_ONE, T.FETCH_MANY, T.FETCH_ALL)
         if not self._supports_eor or not pipeline.operations:
             return False
         return all(Op.op_type in WireOps for Op in pipeline.operations)
@@ -2073,11 +2351,11 @@ class OracleConnect:
         # serially after the burst.
         from oracle.cursor import _resolve_parameters
         from oracle.pipeline import PipelineOpType as T
+
         Bind = _resolve_parameters(Op.statement, Op.parameters)
         Batch = []
         if Op.op_type == T.EXECUTE_MANY:
-            Rows = [_resolve_parameters(Op.statement, P)
-                    for P in (Op.parameters or [])]
+            Rows = [_resolve_parameters(Op.statement, P) for P in (Op.parameters or [])]
             Bind = Rows[0] if Rows else []
             Batch = Rows[1:]
         Head = Op.statement.strip().upper()
@@ -2109,12 +2387,14 @@ class OracleConnect:
             'arraydmlrowcounts': False,
             'return_binds': None,
         }
-        Data = encode_dictionary(self._make_dict(
-            DictionaryType.exec, query=QueryDict, token_num=TokenNum))
+        Data = encode_dictionary(
+            self._make_dict(DictionaryType.exec, query=QueryDict, token_num=TokenNum)
+        )
         return (Data, Bind)
 
-    def _pipeline_send_op(self, Data: bytes, FinalFlags: int,
-                          FirstFlags: int = 0) -> None:
+    def _pipeline_send_op(
+        self, Data: bytes, FinalFlags: int, FirstFlags: int = 0
+    ) -> None:
         # Send one pipelined op's request as DATA packet(s): an oversized op
         # fragments at the SDU with the 0x0020 "more" flag, the final fragment
         # carries FinalFlags (END_OF_REQUEST), and the very first packet of the
@@ -2123,8 +2403,9 @@ class OracleConnect:
         First = True
         while len(Data) > BodyMax:
             Flags = 0x0020 | (FirstFlags if First else 0)
-            self._sock.send(encode_data_packet(Data[:BodyMax], Flags,
-                                               self._large_packets))
+            self._sock.send(
+                encode_data_packet(Data[:BodyMax], Flags, self._large_packets)
+            )
             Data = Data[BodyMax:]
             First = False
         Flags = FinalFlags | (FirstFlags if First else 0)
@@ -2137,13 +2418,14 @@ class OracleConnect:
         # into one blob — fatal here, since each op response must be decoded on
         # its own — so the pipelined read assembles packets directly and stops
         # at the first response-final packet.
-        Body = b""
+        Body = b''
         while True:
             if len(self._pending) >= 8:
                 (Flag, Type, Chunk, Rest) = assemble_packet(
-                    self._pending, self.sdu, self._large_packets)
+                    self._pending, self.sdu, self._large_packets
+                )
                 if Chunk is not None:
-                    self._pending = Rest if Rest is not None else b""
+                    self._pending = Rest if Rest is not None else b''
                     if Type == TNS_MARKER:
                         # A pipelined op that errors makes the server interject a
                         # bare break marker (01 00 01) between op responses — but
@@ -2157,8 +2439,7 @@ class OracleConnect:
                     continue
             More = self._sock.recv(self.sdu)
             if not More:
-                raise OperationalError(
-                    "connection closed during pipeline read")
+                raise OperationalError('connection closed during pipeline read')
             self._pending = self._pending + More
 
     def _run_pipeline_pipelined(self, pipeline, continue_on_error: bool) -> list:
@@ -2168,34 +2449,37 @@ class OracleConnect:
         # responses back-to-back. The wire always runs in CONTINUE_ON_ERROR
         # mode so the server returns a response for every op (no partial-burst
         # desync); the caller's abort semantics are enforced client-side.
-        from oracle.pipeline import PipelineOpResult, PipelineOpType as T
+        from oracle.pipeline import PipelineOpResult
+        from oracle.pipeline import PipelineOpType as T
+
         Ops = pipeline.operations
         # Phase 1 — build the burst. The begin piggyback takes the first seq and
         # shares op 1's token; each op then claims its own seq via _make_dict.
         BeginSeq = self._next_seq()
-        Built = [self._encode_pipeline_op(Op, K)
-                 for K, Op in enumerate(Ops, start=1)]
+        Built = [self._encode_pipeline_op(Op, K) for K, Op in enumerate(Ops, start=1)]
         EndSeq = self._next_seq()
-        Begin = encode_pipeline_begin(BeginSeq, self.field_version, 1,
-                                      TNS_PIPELINE_MODE_CONTINUE_ON_ERROR)
+        Begin = encode_pipeline_begin(
+            BeginSeq, self.field_version, 1, TNS_PIPELINE_MODE_CONTINUE_ON_ERROR
+        )
         # Phase 2 — send. First packet: begin + op 1 (BEGIN_PIPELINE |
         # END_OF_REQUEST); each later op: END_OF_REQUEST; then the ordinary
         # end-pipeline message (data flags 0).
         self._pipeline_send_op(
-            Begin + Built[0][0], TNS_DATA_FLAGS_END_OF_REQUEST,
-            FirstFlags=TNS_DATA_FLAGS_BEGIN_PIPELINE)
-        for (Data, _Bind) in Built[1:]:
+            Begin + Built[0][0],
+            TNS_DATA_FLAGS_END_OF_REQUEST,
+            FirstFlags=TNS_DATA_FLAGS_BEGIN_PIPELINE,
+        )
+        for Data, _Bind in Built[1:]:
             self._pipeline_send_op(Data, TNS_DATA_FLAGS_END_OF_REQUEST)
         self.send(TNS_DATA, encode_pipeline_end(EndSeq, self.field_version))
         # Phase 3 — read every op's response before any draining, so no
         # follow-up TTI_FETCH is interleaved with the queued responses.
         Raw = []
-        for (_Data, Bind) in Built:
+        for _Data, Bind in Built:
             Body = self._pipeline_recv_response()
             set_decode_dml_rowcounts(False)
             set_decode_return_binds(None)
-            Raw.append(decode_packet(Body, (None, None, [], Bind),
-                                     self.field_version))
+            Raw.append(decode_packet(Body, (None, None, [], Bind), self.field_version))
         # The end-pipeline message (func 200) draws its own terminating
         # response after the N op responses; read and discard it so the next
         # call on this connection is not left reading a stale packet.
@@ -2205,7 +2489,7 @@ class OracleConnect:
         Results = []
         FirstError = None
         Cur = self.cursor()
-        for (Op, (_Data, Bind), RawResult) in zip(Ops, Built, Raw):
+        for Op, (_Data, Bind), RawResult in zip(Ops, Built, Raw):
             Result = PipelineOpResult(Op)
             Results.append(Result)
             try:
@@ -2214,15 +2498,16 @@ class OracleConnect:
                 if Op.op_type == T.FETCH_ONE:
                     Row = Cur.fetchone()
                     Result.rows = _apply_rowfactory(
-                        [] if Row is None else [Row], Op.rowfactory)
+                        [] if Row is None else [Row], Op.rowfactory
+                    )
                     Result.columns = Cur.description
                 elif Op.op_type == T.FETCH_MANY:
                     Result.rows = _apply_rowfactory(
-                        Cur.fetchmany(Op.num_rows), Op.rowfactory)
+                        Cur.fetchmany(Op.num_rows), Op.rowfactory
+                    )
                     Result.columns = Cur.description
                 elif Op.op_type == T.FETCH_ALL:
-                    Result.rows = _apply_rowfactory(Cur.fetchall(),
-                                                    Op.rowfactory)
+                    Result.rows = _apply_rowfactory(Cur.fetchall(), Op.rowfactory)
                     Result.columns = Cur.description
             except DatabaseError as exc:
                 Result.error = exc
@@ -2240,28 +2525,41 @@ class OracleConnect:
         from oracle.aq import Queue
         from oracle.datatypes import JSON as _JSON
         from oracle.exceptions import NotSupportedError
+
         if self.field_version < FIELD_VERSION_12_1:
-            raise NotSupportedError(
-                "Advanced Queuing requires an Oracle 12.1+ server")
+            raise NotSupportedError('Advanced Queuing requires an Oracle 12.1+ server')
         if payload_type is _JSON:
             return Queue(self, name, payload_type=None, is_json=True)
         return Queue(self, name, payload_type=payload_type)
 
-    def msgproperties(self, payload=None, correlation=None, delay=0,
-                      expiration=-1, priority=0, exceptionq=None,
-                      recipients=None):
+    def msgproperties(
+        self,
+        payload=None,
+        correlation=None,
+        delay=0,
+        expiration=-1,
+        priority=0,
+        exceptionq=None,
+        recipients=None,
+    ):
         """Build a MessageProperties for enqueue."""
         from oracle.aq import MessageProperties
-        return MessageProperties(payload=payload, correlation=correlation,
-                                 delay=delay, expiration=expiration,
-                                 priority=priority, exceptionq=exceptionq,
-                                 recipients=recipients)
+
+        return MessageProperties(
+            payload=payload,
+            correlation=correlation,
+            delay=delay,
+            expiration=expiration,
+            priority=priority,
+            exceptionq=exceptionq,
+            recipients=recipients,
+        )
 
     def _aq_request(self, Data: bytes) -> bytes:
         self.send(TNS_DATA, Data)
-        Received = self._next_data_packet(b"", b"")
+        Received = self._next_data_packet(b'', b'')
         if Received is False:
-            raise OperationalError("connection closed during AQ operation")
+            raise OperationalError('connection closed during AQ operation')
         (_, Packet) = Received
         return Packet
 
@@ -2275,19 +2573,33 @@ class OracleConnect:
 
     def _aq_enq_many(self, queue, props_list) -> None:
         from oracle.tns_consts import TNS_AQ_ARRAY_ENQ
-        Data = encode_aq_array(self._next_seq(), self.field_version, queue,
-                               TNS_AQ_ARRAY_ENQ, props_list, len(props_list))
-        _decode_aq_array(self._aq_request(Data), queue, TNS_AQ_ARRAY_ENQ,
-                         props_list)
+
+        Data = encode_aq_array(
+            self._next_seq(),
+            self.field_version,
+            queue,
+            TNS_AQ_ARRAY_ENQ,
+            props_list,
+            len(props_list),
+        )
+        _decode_aq_array(self._aq_request(Data), queue, TNS_AQ_ARRAY_ENQ, props_list)
 
     def _aq_deq_many(self, queue, max_messages):
         from oracle.aq import MessageProperties
         from oracle.tns_consts import TNS_AQ_ARRAY_DEQ
+
         Placeholders = [MessageProperties() for _ in range(max_messages)]
-        Data = encode_aq_array(self._next_seq(), self.field_version, queue,
-                               TNS_AQ_ARRAY_DEQ, Placeholders, max_messages)
-        return _decode_aq_array(self._aq_request(Data), queue,
-                                TNS_AQ_ARRAY_DEQ, Placeholders)
+        Data = encode_aq_array(
+            self._next_seq(),
+            self.field_version,
+            queue,
+            TNS_AQ_ARRAY_DEQ,
+            Placeholders,
+            max_messages,
+        )
+        return _decode_aq_array(
+            self._aq_request(Data), queue, TNS_AQ_ARRAY_DEQ, Placeholders
+        )
 
     @property
     def call_timeout(self) -> int:
@@ -2332,11 +2644,14 @@ class OracleConnect:
         self._break_in_progress = True
         try:
             if self._supports_oob:
-                self._sock.send(b"!", socket.MSG_OOB)
+                self._sock.send(b'!', socket.MSG_OOB)
             else:
                 (Packet, _) = encode_packet(
-                    TNS_MARKER, bytes([1, 0, TNS_MARKER_TYPE_INTERRUPT]),
-                    self.sdu, self._large_packets)
+                    TNS_MARKER,
+                    bytes([1, 0, TNS_MARKER_TYPE_INTERRUPT]),
+                    self.sdu,
+                    self._large_packets,
+                )
                 self._sock.send(Packet)
         except OSError:
             # Best-effort interrupt: if the socket is already gone the call we're
@@ -2348,7 +2663,7 @@ class OracleConnect:
         # The connected socket, narrowed non-None for the send/recv paths (it is
         # None only before connect() / after close()).
         if self.sock is None:
-            raise InterfaceError("connection is not open")
+            raise InterfaceError('connection is not open')
         return self.sock
 
     def recv(self, Acc: bytes, Data: bytes) -> tuple[int, bytes] | Literal[False]:
@@ -2362,27 +2677,27 @@ class OracleConnect:
         # DATA in one TCP read, so on a marker we keep `Rest` in self._pending
         # instead of dropping it, and drain it here before touching the socket.
         Acc = self._pending + Acc
-        self._pending = b""
+        self._pending = b''
         while True:
             # Drain as many complete packets as `Acc` already contains
             # before going back to the socket for more bytes. Need at
             # least 8 bytes for a TNS header before assemble_packet can
             # do anything useful.
             while len(Acc) >= 8:
-                (Flag, Type, Body, Rest) = assemble_packet(Acc, self.sdu,
-                                                            self._large_packets)
+                (Flag, Type, Body, Rest) = assemble_packet(
+                    Acc, self.sdu, self._large_packets
+                )
                 if Flag is True:
                     # A full packet was assembled, so type/body/rest are set.
-                    assert Type is not None and Body is not None \
-                        and Rest is not None
+                    assert Type is not None and Body is not None and Rest is not None
                     if Type == TNS_MARKER:
                         # Preserve everything after the marker (the coalesced
                         # reset / error DATA) for the next recv() rather than
                         # discarding it — the break state machine in
                         # _next_data_packet drives the reset handshake.
                         self._pending = Rest
-                        return (TNS_MARKER, b"")
-                    if Rest == b"":
+                        return (TNS_MARKER, b'')
+                    if Rest == b'':
                         return (Type, Data + Body)
                     Acc = Rest
                     Data = Data + Body
@@ -2392,7 +2707,7 @@ class OracleConnect:
                     # extracted. Consume the body and keep reading; the
                     # next packet's header is in Rest (may be empty,
                     # in which case the outer loop will read more).
-                    Acc = Rest or b""
+                    Acc = Rest or b''
                     Data = Data + Body
                     continue
                 # Not enough bytes yet for a full packet — back to recv.
@@ -2400,14 +2715,15 @@ class OracleConnect:
             try:
                 NetworkData = self._sock.recv(self.sdu)
             except TimeoutError as exc:
-                raise self._timeout_error("read") from exc
+                raise self._timeout_error('read') from exc
             if not NetworkData:
                 # Peer closed the connection.
                 return False
             Acc = Acc + NetworkData
 
-    def _next_data_packet(self, Acc: bytes = b"", Data: bytes = b"") \
-            -> tuple[int, bytes] | Literal[False]:
+    def _next_data_packet(
+        self, Acc: bytes = b'', Data: bytes = b''
+    ) -> tuple[int, bytes] | Literal[False]:
         # Receive the next TNS_DATA packet, transparently completing a server
         # break/reset handshake (#45). The 21c server cancels an errored or
         # interrupted call by sending a break marker (01 00 01) followed by a
@@ -2426,7 +2742,7 @@ class OracleConnect:
                 self._in_break = False
                 return (Type, Packet)
             if not self._in_break:
-                self.send(TNS_MARKER, b"\x01\x00\x02")
+                self.send(TNS_MARKER, b'\x01\x00\x02')
                 self._in_break = True
             # else: drain the server's terminal reset (and any straggler
             # markers) silently — do NOT reply, or the server replies again.
@@ -2455,12 +2771,14 @@ class OracleConnect:
         # scrollable cursor; pyoracle buffers the result set so scroll() works
         # regardless, but the flag is accepted and surfaced for compatibility.
         from oracle.cursor import Cursor
+
         return Cursor(self, scrollable=scrollable)
 
     def getSodaDatabase(self):
         """Return a `SodaDatabase` for document-store (SODA) access (#163).
         Raises NotSupportedError on a pre-18c server (no DBMS_SODA)."""
         from oracle.soda import SodaDatabase, _check_soda_supported
+
         _check_soda_supported(self)
         return SodaDatabase(self)
 
@@ -2474,8 +2792,10 @@ class OracleConnect:
         # itself 12.1+ only). #183.
         if self.field_version < FIELD_VERSION_12_1:
             from oracle.exceptions import NotSupportedError
+
             raise NotSupportedError(
-                "end-to-end tracing attributes require an Oracle 12.1+ server")
+                'end-to-end tracing attributes require an Oracle 12.1+ server'
+            )
         self._e2e_values[name] = value
         self._e2e_pending[name] = value
 
@@ -2484,7 +2804,7 @@ class OracleConnect:
         # since the last flush, then clear the pending set. Empty when nothing
         # changed. Allocate the piggyback's seq here so it precedes the execute.
         if not self._e2e_pending:
-            return b""
+            return b''
         Pending = self._pending_e2e_with_module_action()
         Seq = self._next_seq()
         Bytes = encode_end_to_end_piggyback(Seq, self.field_version, Pending)
@@ -2497,10 +2817,11 @@ class OracleConnect:
         # Rides in front of the next call, like the tracing piggyback; its seq is
         # allocated here so it precedes the call's.
         if not self._cursors_to_close:
-            return b""
+            return b''
         Seq = self._next_seq()
         Data = encode_close_cursors_piggyback(
-            Seq, self.field_version, self._cursors_to_close)
+            Seq, self.field_version, self._cursors_to_close
+        )
         self._cursors_to_close = []
         return Data
 
