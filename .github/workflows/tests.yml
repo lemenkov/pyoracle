@@ -53,6 +53,21 @@ jobs:
           tests.test_api_conveniences
           tests.test_connection
 
+  # Static type-check gate (#232). Enforces mypy on the already-clean modules;
+  # the larger driver modules are exempt via [tool.mypy] overrides until cleaned
+  # incrementally, so the list ratchets down over time.
+  typecheck:
+    name: Type check (mypy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+      - run: pip install . mypy
+      - run: python -m mypy
+
   # Integration tests against a real Oracle server, run across three testbeds
   # (#28, #52): 11g (:1521/XE), 21c (:1521/XEPDB1, field version 16) and 23ai
   # Free (:1521/FREEPDB1, field version 17). fail-fast is off so a flake on one

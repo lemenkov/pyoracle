@@ -180,7 +180,7 @@ def encode_oson(value) -> bytes:
     if not isinstance(value, (dict, list)):
         node = _oson_scalar_node(value)
         return b"\xff\x4a\x5a\x01" + b"\x00\x16\x00" + bytes([len(node)]) + node
-    fnames = []
+    fnames: list[str] = []
     ids = {}
 
     def fid(name):
@@ -307,7 +307,8 @@ def _decode_child(tree: bytes, off: int, field_name, off_size: int,
 
 
 def _decode_node(seg: bytes, off: int, field_name, tree: bytes,
-                 off_size: int = 2, memo: dict = None, stack: set = None):
+                 off_size: int = 2, memo: dict | None = None,
+                 stack: set | None = None):
     # Returns (python_value, next_offset). `tree` is the tree segment that
     # container value-offsets are relative to; `field_name` maps an object's
     # field id to its key (None for scalar-only images). `off_size` is the
@@ -315,7 +316,9 @@ def _decode_node(seg: bytes, off: int, field_name, tree: bytes,
     # `stack` bound the offset-following recursion (see _decode_child); they are
     # created on the top-level call and threaded through the descent.
     if memo is None:
-        memo, stack = {}, set()
+        memo = {}
+    if stack is None:
+        stack = set()
     tag = seg[off]
     if tag <= 0x1F:                           # inline short string
         return seg[off + 1:off + 1 + tag].decode("utf-8"), off + 1 + tag

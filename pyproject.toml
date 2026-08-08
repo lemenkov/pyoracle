@@ -37,3 +37,31 @@ include = ["oracle*"]
 [tool.setuptools.package-data]
 # PEP 561 marker so type checkers (mypy, pyright) treat pyoracle as typed.
 oracle = ["py.typed"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["oracle"]
+# Runtime deps (pycryptodome, pyarrow) ship no stubs; treat them as Any.
+ignore_missing_imports = true
+
+# Type-check debt, cleaned up incrementally (#232): these modules still carry
+# annotation gaps and are exempt from the gate until fixed one at a time. Every
+# other module IS enforced, so the gate protects the already-clean surface and
+# ratchets as modules are removed from this list.
+[[tool.mypy.overrides]]
+module = [
+    "oracle.tns",
+    "oracle.connection",
+    "oracle.aconnection",
+    "oracle.apool",
+    "oracle.cursor",
+    "oracle.acursor",
+    "oracle.dbobject",
+    "oracle.aq",
+    "oracle.vector",
+    "oracle.soda",
+    "oracle.lob",
+    "oracle.datatypes",
+    "oracle.crypto",
+]
+ignore_errors = true
