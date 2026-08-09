@@ -15,7 +15,14 @@ from dataclasses import dataclass
 
 from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import _bytes_with_length, decode_ub4, encode_sb4
-from seerdb.common.tns_consts import TTI_ALL8, TTI_DCB, TTI_FUN, TTI_RXD, TTI_RXH
+from seerdb.common.tns_consts import (
+    TTI_ALL8,
+    TTI_DCB,
+    TTI_FUN,
+    TTI_OER,
+    TTI_RXD,
+    TTI_RXH,
+)
 
 # AL32UTF8 — what seerdb advertises and what an 11g DUAL column reports.
 _CHARSET_AL32UTF8 = 873
@@ -185,6 +192,43 @@ _END_OF_FETCH = (
     )
     + b'ORA-01403: no data found\n'
 )
+
+
+def encode_error(ora_code: int, message: str) -> bytes:
+    """Build an OER return-status token reporting an error — §6.5 (11g).
+
+    The TTC payload (starting at TTI_OER) the Mirror sends when a call fails:
+    the client raises ``ORA-<ora_code>: <message>`` and the connection stays
+    usable. All the OER's rowid / batch / cursor fields are zero for a plain
+    error; only the error number and the message text carry meaning.
+    """
+    text = message.encode('utf-8')
+    return (
+        bytes([TTI_OER])
+        + encode_sb4(1)  # call status
+        + encode_sb4(0)  # end-to-end seq
+        + encode_sb4(0)  # current row number
+        + encode_sb4(ora_code)  # the ORA error number
+        + encode_sb4(0)  # array element error 1
+        + encode_sb4(0)  # array element error 2
+        + encode_sb4(0)  # cursor id
+        + encode_sb4(0)  # error position
+        + bytes(6)  # sql_type, fatal, flags, user_cursor_opts, upi_param, warn
+        + encode_sb4(0)  # rowid data object number
+        + encode_sb4(0)  # rowid relative file number
+        + bytes(1)  # rowid reserved
+        + encode_sb4(0)  # rowid block number
+        + encode_sb4(0)  # rowid slot number
+        + encode_sb4(0)  # os error
+        + bytes(2)  # statement number, call number
+        + encode_sb4(0)  # padding
+        + encode_sb4(1)  # successful iterations
+        + _bytes_with_length(b'')  # oerrdd (logical rowid)
+        + encode_sb4(0)  # batch error codes count
+        + encode_sb4(0)  # batch error offsets count
+        + encode_sb4(0)  # batch error messages count
+        + _bytes_with_length(text)  # the "ORA-nnnnn: ..." message
+    )
 
 
 def encode_query_response(columns: list[ColumnMeta], rows: list[tuple]) -> bytes:

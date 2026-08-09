@@ -16,7 +16,7 @@ usernames match case-insensitively); a backend-mapped auth API comes later.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 
 from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns_consts import (
@@ -34,6 +34,7 @@ from seerdb.server.auth import (
     parse_auth_response,
     parse_osesskey,
 )
+from seerdb.server.backend import Backend, BackendError
 from seerdb.server.framing import PacketStream
 from seerdb.server.handshake import (
     encode_accept,
@@ -41,7 +42,12 @@ from seerdb.server.handshake import (
     encode_pro_reply,
     parse_connect,
 )
-from seerdb.server.query import ColumnMeta, encode_query_response, parse_exec
+from seerdb.server.query import (
+    ExecRequest,
+    encode_error,
+    encode_query_response,
+    parse_exec,
+)
 
 logger = logging.getLogger('seerdb.server')
 
@@ -49,9 +55,9 @@ logger = logging.getLogger('seerdb.server')
 # identifiers to upper-case).
 Credentials = Mapping[str, str]
 
-# A backend answers a SQL string with its result columns and rows. This is the
-# seam a PostgreSQL-backed demo implements; the DUAL milestone uses a trivial one.
-Backend = Callable[[str], 'tuple[list[ColumnMeta], list[tuple]]']
+# A generic backend failure that leaked past the Backend contract still becomes
+# a clean ORA error rather than a wire desync (ORA-00600, internal error).
+_INTERNAL_ERROR = 600
 
 
 def _expect(stream: PacketStream, want: int, what: str) -> bytes:
@@ -107,9 +113,10 @@ def serve_session(
     """Log a client in, then answer its queries until it disconnects.
 
     After :func:`handle_login`, each OALL8 execute is parsed, handed to
-    ``backend`` for its columns and rows, and answered with a full describe +
-    rows + end-of-fetch response. A logoff (or EOF) ends the session and
-    returns the authenticated username.
+    ``backend.execute``, and answered with a describe + rows response — or, if
+    the backend refuses (:class:`BackendError` / :class:`UnsupportedFeature`) or
+    fails, with an ORA error that leaves the connection usable. A logoff (or
+    EOF) ends the session and returns the authenticated username.
     """
     user = handle_login(stream, credentials)
     while True:
@@ -120,8 +127,23 @@ def serve_session(
         if packet_type != TNS_DATA or len(body) < 2 or body[0] != TTI_FUN:
             continue
         if body[1] == TTI_ALL8:
-            request = parse_exec(body)
-            columns, rows = backend(request.sql)
-            stream.write_packet(TNS_DATA, encode_query_response(columns, rows))
+            _answer_query(stream, backend, parse_exec(body))
         elif body[1] == TTI_LOGOFF:
             return user
+
+
+def _answer_query(stream: PacketStream, backend: Backend, request: ExecRequest) -> None:
+    # Run the query and reply. Any failure becomes an ORA error on a healthy
+    # connection — the Mirror must never desync, so even a backend that leaks a
+    # native exception is caught and reported rather than dropping the wire.
+    try:
+        result = backend.execute(request.sql)
+    except BackendError as err:
+        logger.info('query refused: %s', err.ora_message)
+        response = encode_error(err.ora_code, err.ora_message)
+    except Exception as exc:
+        logger.warning('backend raised a non-ORA error: %s', exc)
+        response = encode_error(_INTERNAL_ERROR, f'ORA-00600: backend error: {exc}')
+    else:
+        response = encode_query_response(result.columns, result.rows)
+    stream.write_packet(TNS_DATA, response)

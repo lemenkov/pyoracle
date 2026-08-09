@@ -23,6 +23,13 @@ those land in later increments, each authored against a real-Oracle capture.
 
 from __future__ import annotations
 
+from seerdb.server.backend import (
+    Backend,
+    BackendError,
+    Capability,
+    Result,
+    UnsupportedFeature,
+)
 from seerdb.server.framing import PacketStream
 from seerdb.server.handshake import (
     ConnectRequest,
@@ -36,22 +43,28 @@ from seerdb.server.query import (
     ColumnMeta,
     ExecRequest,
     encode_describe,
+    encode_error,
     encode_query_response,
     encode_rows,
     parse_exec,
 )
-from seerdb.server.session import Backend, Credentials, handle_login, serve_session
+from seerdb.server.session import Credentials, handle_login, serve_session
 
 __all__ = [
     'Backend',
+    'BackendError',
+    'Capability',
     'ColumnMeta',
     'ConnectRequest',
     'Credentials',
     'ExecRequest',
     'Listener',
     'PacketStream',
+    'Result',
+    'UnsupportedFeature',
     'encode_accept',
     'encode_describe',
+    'encode_error',
     'encode_dty_reply',
     'encode_pro_reply',
     'encode_query_response',
