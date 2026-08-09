@@ -851,7 +851,7 @@ Bind values are encoded inline following OAC descriptors:
 |-------------------------|--------------------------------------------------------|
 | `int`, `bool`           | Oracle NUMBER format (length-prefixed mantissa bytes)  |
 | `float`, `complex`      | Oracle NUMBER format (non-finite `inf`/`nan` auto-route to BINARY_DOUBLE) |
-| `decimal.Decimal`       | Oracle NUMBER (integer-valued decimals via int path, fractional via float) |
+| `decimal.Decimal`       | Oracle NUMBER, exact base-100 encoding (all significant digits preserved, up to Oracle's ~38-digit limit — no float detour) |
 | `seerdb.BinaryFloat`    | 4-byte order-preserving IEEE-754 (§11.7)               |
 | `seerdb.BinaryDouble`   | 8-byte order-preserving IEEE-754 (§11.7)               |
 | `str`                   | Length-prefixed UTF-8 character data (chunked if > 64 bytes) |
@@ -1237,10 +1237,17 @@ length | flags | typ| f | data_flags = EOF
 Oracle's proprietary variable-length number format:
 
 - Byte 0: Exponent byte. High bit indicates sign (1 = positive, 0 = negative).
+  The magnitude is biased by 193 (positive) or its one's complement (negative);
+  exponent *N* means the first mantissa group carries `100**N`.
 - Bytes 1..N: Mantissa digits, each representing a base-100 digit.
   - Positive: digit + 1 (range 1-100).
   - Negative: 101 - digit (range 1-100), with a trailing `102` sentinel.
 - Special value `0x80` represents zero.
+
+`encode_token_decimal` encodes a `Decimal` straight to this base-100 form (no
+float round-trip), so up to ~38 significant digits (20 base-100 groups) survive
+exactly; `encode_token_num` keeps the int / float fast paths. Both are the exact
+inverse of `decode_number`.
 
 ### 11.2 Oracle DATE
 
@@ -1786,8 +1793,9 @@ here and guards neither.
 A bare Python `dict` is auto-detected as JSON (it has no other bind meaning);
 wrap a `list` / scalar in `seerdb.JSON(value)` to bind it as JSON too, since a
 bare `list` means a VECTOR and bare scalars bind as their native SQL types.
-`Decimal` binds as a JSON number (integral values stay exact, others via
-`float`), matching the decoder, which returns JSON numbers as `Decimal`.
+`Decimal` binds as a JSON number via the exact base-100 NUMBER encoder (all
+significant digits preserved), matching the decoder, which returns JSON numbers
+as `Decimal`.
 
 seerdb prefers a **native binary OSON** bind (#70, the inverse of the §17.1
 decoder in `seerdb/oson.py:encode_oson`). It is sent exactly like the native

@@ -11,6 +11,7 @@
 import datetime
 import math
 import unittest
+from decimal import Decimal
 
 from seerdb.common.datatypes import (
     DB_TYPE_BINARY_DOUBLE,
@@ -35,8 +36,10 @@ from seerdb.common.tns import (
     encode_sb4,
     encode_token_binary_double,
     encode_token_binary_float,
+    encode_token_decimal,
     encode_token_interval_ds,
     encode_token_interval_ym,
+    encode_token_num,
     encode_token_oac,
     encode_token_rxd,
     exec_oac_signature,
@@ -260,6 +263,60 @@ class TestMalformedScalarDecode(unittest.TestCase):
             decode_date(bytes.fromhex('787c060f010101')),
             datetime.datetime(2024, 6, 15, 0, 0, 0),
         )
+
+
+class TestEncodeTokenDecimal(unittest.TestCase):
+    # Exact base-100 NUMBER encoding for Decimal: every value round-trips through
+    # decode_number() unchanged, including precision beyond float's ~15 digits.
+
+    def test_round_trips_exactly(self):
+        cases = [
+            Decimal('0'),
+            Decimal('5'),
+            Decimal('-3'),
+            Decimal('100'),
+            Decimal('1234.5'),
+            Decimal('0.005'),
+            Decimal('-0.005'),
+            Decimal('3.14'),
+            Decimal('0.1'),
+            Decimal('1E-20'),
+            Decimal('1.5E-10'),
+            Decimal('-9999999999.9999999999'),
+            # Precision beyond float: the old float detour truncated these.
+            Decimal('1.2345678901234567890'),
+            Decimal('-1.2345678901234567890'),
+            Decimal('123456789012345678901234567890'),
+            Decimal('9999999999999999999999999999999999999'),
+            Decimal('0.30000000000000004'),
+        ]
+        for value in cases:
+            with self.subTest(value=value):
+                self.assertEqual(
+                    Decimal(decode_number(encode_token_decimal(value))), value
+                )
+
+    def test_high_precision_beats_the_float_path(self):
+        # The exact encoder keeps all 19 significant digits where the historical
+        # float path lost everything past the 15th.
+        value = Decimal('1.234567890123456789')
+        self.assertEqual(decode_number(encode_token_decimal(value)), value)
+        self.assertNotEqual(decode_number(encode_token_num(float(value))), value)
+
+    def test_zero_is_the_single_byte_form(self):
+        self.assertEqual(encode_token_decimal(Decimal('0')), bytes([128]))
+        self.assertEqual(encode_token_decimal(Decimal('0.00')), bytes([128]))
+
+    def test_integral_matches_the_int_encoder(self):
+        for i in (5, -3, 100, 0, 123456789, -987654321):
+            with self.subTest(i=i):
+                self.assertEqual(encode_token_decimal(Decimal(i)), encode_token_num(i))
+
+    def test_non_finite_raises(self):
+        for value in (Decimal('NaN'), Decimal('Infinity'), Decimal('-Infinity')):
+            with self.subTest(value=value):
+                with self.assertRaises(DataError):
+                    encode_token_decimal(value)
 
 
 class TestBinaryFloat(unittest.TestCase):
