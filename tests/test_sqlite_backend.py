@@ -113,3 +113,25 @@ def test_bad_sql_is_an_ora_error_not_a_desync() -> None:
 
     assert result.get('error') is None, result.get('error')
     assert rows == [(42,)]
+
+
+def test_bind_variables() -> None:
+    listen, server, result = _start_mirror()
+    conn = _connect(listen.getsockname()[1])
+    try:
+        cur = conn.cursor()
+        cur.execute('create table t (id number, name varchar2(20))')
+        cur.execute('insert into t values (:1, :2)', [1, 'alice'])
+        cur.execute('insert into t values (:1, :2)', [2, 'bob'])
+        cur.execute('select name from t where id = :1', [2])
+        row = cur.fetchone()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert row == ('bob',)

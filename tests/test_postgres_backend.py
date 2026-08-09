@@ -153,3 +153,27 @@ def test_date_and_timestamp_columns() -> None:
         datetime.datetime(2020, 12, 31, 0, 0),
     )
     assert isinstance(now_value, datetime.datetime)
+
+
+def test_bind_variables_postgres() -> None:
+    listen, server, result = _start_mirror()
+    conn = _connect(listen.getsockname()[1])
+    try:
+        cur = conn.cursor()
+        cur.execute('drop table if exists t_bind')
+        cur.execute('create table t_bind (id integer, name varchar(20))')
+        cur.execute('insert into t_bind values (:1, :2)', [1, 'alice'])
+        cur.execute('insert into t_bind values (:1, :2)', [2, 'bob'])
+        cur.execute('select name from t_bind where id = :1', [2])
+        row = cur.fetchone()
+        cur.execute('drop table t_bind')
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert row == ('bob',)

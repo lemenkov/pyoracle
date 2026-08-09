@@ -15,8 +15,13 @@ dependency — ``sqlite3`` is in the standard library.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Sequence
+
+# Oracle numbered/named binds (:1, :name) → SQLite positional '?'. The negative
+# lookbehind leaves any '::' cast untouched.
+_ORACLE_BIND = re.compile(r'(?<!:):\w+')
 
 from seerdb.common.tns_consts import TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_VARCHAR
 from seerdb.server import BackendError, Capability, ColumnMeta, Result
@@ -60,6 +65,8 @@ class SqliteBackend:
         self._conn = sqlite3.connect(database)
 
     def execute(self, sql: str, binds: Sequence = ()) -> Result:
+        if binds:
+            sql = _ORACLE_BIND.sub('?', sql)
         try:
             cursor = self._conn.execute(sql, tuple(binds))
         except sqlite3.Error as exc:

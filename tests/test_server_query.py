@@ -188,3 +188,29 @@ def test_encode_rows_date_values() -> None:
         [datetime.datetime(2024, 1, 15, 13, 30, 45)],
         [datetime.datetime(2020, 12, 31, 0, 0)],
     ]
+
+
+def test_parse_exec_extracts_bind_values() -> None:
+    from seerdb.common.tns import encode_dictionary_exec
+
+    msg = encode_dictionary_exec(
+        {
+            'seq': 3,
+            'field_version': 6,
+            'query': {
+                'type': 'select',
+                'auto': 0,
+                'fetch': 15,
+                'server_version': 186647040,
+                'cursor': 0,
+                'query': 'select :1, :2 from dual',
+                'bind': ['hi', 42],
+                'batch': [],
+                'def': [],
+            },
+        }
+    )
+    req = parse_exec(msg)
+    assert req.sql == 'select :1, :2 from dual'
+    assert req.bind_count == 2
+    assert req.binds == ['hi', 42]
