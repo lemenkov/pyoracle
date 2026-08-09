@@ -227,6 +227,37 @@ fails fast rather than spinning. Sync and async (`§handle_login`).
 
 Requests the client to re-send the TNS_CONNECT packet. If using TLS, the client renegotiates the TLS session before resending.
 
+### 2.6 Server-side handshake — a captured 11g exchange (the Mirror)
+
+The server side of §2.1–2.5, as a real Oracle XE 11.2.0.2 listener answers it.
+Captured through `tools/capture_proxy.py` with `sqlplus` 11.2 as the client; the
+exact bytes live in `tests/handshake_11g.py`. This is what the Mirror server
+(`seerdb/server/`) must reproduce for an 11g client.
+
+| # | Dir | Packet   | Size | Notes                                             |
+|---|-----|----------|------|---------------------------------------------------|
+| 1 | C→S | CONNECT  | 212  | connect descriptor                                |
+| 2 | S→C | RESEND   | 8    | header only — asks the client to re-send CONNECT  |
+| 3 | C→S | CONNECT  | 212  | identical re-send                                 |
+| 4 | S→C | ACCEPT   | 32   | negotiated **version 0x013a = 314**               |
+| 5 | C→S | DATA/PRO | 161  | protocol negotiation (§4.1), body marker `dead…`  |
+| 6 | S→C | DATA/PRO | 127  | server PRO reply (version banner)                 |
+| 7 | C→S | DATA/DTY | 38   | data-type negotiation (§4.2)                      |
+| 8 | S→C | DATA/DTY | 238  | server DTY reply (type capabilities)              |
+
+then the O5LOGON auth rounds (§4) and the query.
+
+**ACCEPT specifics for 11g.** Version **314** is `< 315` (`TNS_VERSION_MIN_LARGE_SDU`),
+so the connection uses **legacy 2-byte packet framing** — no large-SDU uint32
+trailer. It is also `< 318` (`TNS_VERSION_MIN_OOB_CHECK`), so there is **no
+extended flags2 / end-of-response** negotiation. The negotiated SDU is the
+16-bit field at accept-body offset 4–5 (`8192` here). seerdb's own client
+parsers (`_parse_accept_sdu` / `_parse_accept_eor`) decode the captured ACCEPT
+without error — the capture is conformant, not a guess.
+
+Unlike modern versions, **PRO and DTY are ordinary TTC `DATA` messages**, not
+distinct TNS packet types — the server's replies are DATA-framed payloads.
+
 ## 3. Presentation Layer: TTC (Two-Task Common)
 
 Once the TNS connection is accepted, all further communication occurs inside TNS_DATA packets using the TTC/TTI protocol. Each TTC message begins with a 1-byte token identifier.
