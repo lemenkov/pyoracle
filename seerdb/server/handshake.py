@@ -15,6 +15,9 @@ import struct
 from dataclasses import dataclass
 
 from seerdb.exceptions import InterfaceError
+from seerdb.server.framing import DEFAULT_SDU
+from seerdb.tns import encode_packet
+from seerdb.tns_consts import TNS_ACCEPT
 
 # The connect-data OFFSET field is measured from the start of the whole packet
 # (it includes the 8-byte TNS header), while parse_connect receives the CONNECT
@@ -28,11 +31,27 @@ _TNS_HEADER_LEN = 8
 # fixed position — is authoritative.
 _OFF_VERSION = 0
 _OFF_LOWEST = 2
+_OFF_OPTIONS = 4  # global service options
 _OFF_SDU = 6
 _OFF_TDU = 8
 _OFF_CDATA_LEN = 16
 _OFF_CDATA_OFFSET = 18
 _MIN_HEADER = 20  # bytes we must have to read every field above
+
+# The highest TNS protocol version the Mirror speaks. Pinned to 11g (0x013a =
+# 314): < 315 so the connection uses legacy 2-byte framing, no large SDU, no
+# end-of-response. A newer client negotiates down to this, exactly as it would
+# against a real 11g listener.
+_SERVER_TNS_VERSION = 314
+
+# ACCEPT body fields that are server constants at 11g, read straight off the
+# captured XE 11.2 ACCEPT (tests/handshake_11g.py): protocol characteristics,
+# an accept-data length of 0, a flags word, and a reserved word.
+_ACCEPT_PROTO_CHARS = 0x0100
+_ACCEPT_DATA_LEN = 0x0000
+_ACCEPT_FLAGS = 0x0020
+_ACCEPT_RESERVED = 0x4141
+_DEFAULT_TDU = 0xFFFF
 
 _SERVICE_RE = re.compile(rb'\(SERVICE_NAME\s*=\s*([^)\s]+)', re.IGNORECASE)
 _SID_RE = re.compile(rb'\(SID\s*=\s*([^)\s]+)', re.IGNORECASE)
@@ -46,6 +65,7 @@ class ConnectRequest:
 
     protocol_version: int
     lowest_version: int
+    global_service_options: int
     sdu: int
     tdu: int
     service_name: str | None
@@ -84,6 +104,7 @@ def parse_connect(body: bytes) -> ConnectRequest:
     return ConnectRequest(
         protocol_version=_u16(body, _OFF_VERSION),
         lowest_version=_u16(body, _OFF_LOWEST),
+        global_service_options=_u16(body, _OFF_OPTIONS),
         sdu=_u16(body, _OFF_SDU),
         tdu=_u16(body, _OFF_TDU),
         service_name=_match(_SERVICE_RE, descriptor) or _match(_SID_RE, descriptor),
@@ -91,3 +112,29 @@ def parse_connect(body: bytes) -> ConnectRequest:
         user=_match(_USER_RE, descriptor),
         descriptor=descriptor,
     )
+
+
+def encode_accept(request: ConnectRequest, *, sdu: int = DEFAULT_SDU) -> bytes:
+    """Build the ACCEPT reply to a parsed CONNECT (the server side of §2.2).
+
+    Negotiates the TNS version down to what the Mirror speaks, echoes the
+    client's global service options, and settles the SDU/TDU to the smaller of
+    each side's. Returns the full TNS_ACCEPT packet (header included), ready to
+    hand to :meth:`PacketStream.write_packet`.
+    """
+    version = min(request.protocol_version, _SERVER_TNS_VERSION)
+    negotiated_sdu = min(request.sdu, sdu)
+    negotiated_tdu = min(request.tdu, _DEFAULT_TDU)
+    body = struct.pack(
+        '>HHHHHHHH',
+        version,
+        request.global_service_options,
+        negotiated_sdu,
+        negotiated_tdu,
+        _ACCEPT_PROTO_CHARS,
+        _ACCEPT_DATA_LEN,
+        _ACCEPT_FLAGS,
+        _ACCEPT_RESERVED,
+    ) + bytes(8)
+    packet, _ = encode_packet(TNS_ACCEPT, body, sdu)
+    return packet
