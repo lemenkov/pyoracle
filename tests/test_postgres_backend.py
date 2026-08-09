@@ -191,6 +191,32 @@ def test_high_precision_numeric() -> None:
     )
 
 
+def test_fractional_number_bind_postgres() -> None:
+    # psycopg maps a Decimal bind straight to numeric; the exact value survives
+    # (the SQLite backend takes a lossy REAL path — this is the exact one).
+    listen, server, result = _start_mirror()
+    conn = _connect(listen.getsockname()[1])
+    try:
+        cur = conn.cursor()
+        cur.execute('drop table if exists t_dec')
+        cur.execute('create table t_dec (id integer, v numeric)')
+        cur.execute('insert into t_dec values (:1, :2)', [1, Decimal('3.14159')])
+        cur.execute('insert into t_dec values (:1, :2)', [2, 2.5])
+        cur.execute('select v from t_dec order by id')
+        rows = cur.fetchall()
+        cur.execute('drop table t_dec')
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert rows == [(Decimal('3.14159'),), (Decimal('2.5'),)]
+
+
 def test_bind_variables_postgres() -> None:
     listen, server, result = _start_mirror()
     conn = _connect(listen.getsockname()[1])

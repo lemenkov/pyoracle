@@ -138,6 +138,32 @@ def test_bind_variables() -> None:
     assert row == ('bob',)
 
 
+def test_fractional_number_bind() -> None:
+    # A non-integer NUMBER bind decodes server-side to a Decimal; the SQLite
+    # backend must accept it (as REAL) rather than reject it. float binds take
+    # the same path (the client encodes both as NUMBER).
+    listen, server, result = _start_mirror()
+    conn = _connect(listen.getsockname()[1])
+    try:
+        cur = conn.cursor()
+        cur.execute('create table t (id number, v number)')
+        cur.execute('insert into t values (:1, :2)', [1, Decimal('3.14159')])
+        cur.execute('insert into t values (:1, :2)', [2, 2.5])
+        cur.execute('select v from t order by id')
+        rows = cur.fetchall()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    # Stored as REAL and read back through NUMBER — both round-trip as Decimal.
+    assert rows == [(Decimal('3.14159'),), (Decimal('2.5'),)]
+
+
 def test_date_and_timestamp_round_trip() -> None:
     # A DATE column keeps day+second precision; a TIMESTAMP column additionally
     # keeps the sub-second part, all the way through the wire and back.
