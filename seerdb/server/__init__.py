@@ -24,7 +24,13 @@ those land in later increments, each authored against a real-Oracle capture.
 from __future__ import annotations
 
 from seerdb.server.framing import PacketStream
-from seerdb.server.handshake import ConnectRequest, encode_accept, parse_connect
+from seerdb.server.handshake import (
+    ConnectRequest,
+    encode_accept,
+    encode_dty_reply,
+    encode_pro_reply,
+    parse_connect,
+)
 from seerdb.server.listener import Listener, serve
 
 __all__ = [
@@ -32,6 +38,8 @@ __all__ = [
     'Listener',
     'PacketStream',
     'encode_accept',
+    'encode_dty_reply',
+    'encode_pro_reply',
     'parse_connect',
     'serve',
 ]

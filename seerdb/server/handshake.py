@@ -15,9 +15,10 @@ import struct
 from dataclasses import dataclass
 
 from seerdb.exceptions import InterfaceError
+from seerdb.server._handshake_11g import DTY_REPLY, PRO_REPLY
 from seerdb.server.framing import DEFAULT_SDU
 from seerdb.tns import encode_packet
-from seerdb.tns_consts import TNS_ACCEPT
+from seerdb.tns_consts import TNS_ACCEPT, TNS_DATA
 
 # The connect-data OFFSET field is measured from the start of the whole packet
 # (it includes the 8-byte TNS header), while parse_connect receives the CONNECT
@@ -52,6 +53,11 @@ _ACCEPT_DATA_LEN = 0x0000
 _ACCEPT_FLAGS = 0x0020
 _ACCEPT_RESERVED = 0x4141
 _DEFAULT_TDU = 0xFFFF
+
+# A DATA packet's TTC payload starts after the 8-byte TNS header + 2-byte data
+# flags. The captured PRO/DTY replies are stored as full packets; re-wrapping
+# their payload reproduces the packet and proves our framing matches the wire.
+_DATA_PREFIX = 10
 
 _SERVICE_RE = re.compile(rb'\(SERVICE_NAME\s*=\s*([^)\s]+)', re.IGNORECASE)
 _SID_RE = re.compile(rb'\(SID\s*=\s*([^)\s]+)', re.IGNORECASE)
@@ -137,4 +143,26 @@ def encode_accept(request: ConnectRequest, *, sdu: int = DEFAULT_SDU) -> bytes:
         _ACCEPT_RESERVED,
     ) + bytes(8)
     packet, _ = encode_packet(TNS_ACCEPT, body, sdu)
+    return packet
+
+
+def encode_pro_reply(*, sdu: int = DEFAULT_SDU) -> bytes:
+    """Build the server's PRO (protocol negotiation) reply — §4.1.
+
+    Serves the oracledb/seerdb (``TTI_PRO``) dialect: replays the real 11g
+    server's PRO reply, whose capability array pins the negotiated field
+    version to 6. Returns the full TNS_DATA packet. The old sqlplus
+    ``deadbeef`` PRO dialect is a different reply shape, not served yet.
+    """
+    packet, _ = encode_packet(TNS_DATA, PRO_REPLY[_DATA_PREFIX:], sdu)
+    return packet
+
+
+def encode_dty_reply(*, sdu: int = DEFAULT_SDU) -> bytes:
+    """Build the server's DTY (data-type negotiation) reply — §4.2.
+
+    Replays the real 11g server's DTY reply (oracledb/seerdb dialect) as a
+    full TNS_DATA packet.
+    """
+    packet, _ = encode_packet(TNS_DATA, DTY_REPLY[_DATA_PREFIX:], sdu)
     return packet
