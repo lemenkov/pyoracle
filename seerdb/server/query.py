@@ -14,7 +14,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from seerdb.common.exceptions import InterfaceError
-from seerdb.common.tns import _bytes_with_length, decode_ub4, encode_sb4
+from seerdb.common.tns import (
+    _bytes_with_length,
+    decode_ub4,
+    encode_sb4,
+    encode_token_num,
+)
 from seerdb.common.tns_consts import (
     TTI_ALL8,
     TTI_DCB,
@@ -146,10 +151,16 @@ def encode_describe(columns: list[ColumnMeta]) -> bytes:
 
 def _encode_value(value: object) -> bytes:
     # A scalar column value as a DALC (1-byte length + data). NULL is the empty
-    # DALC. Only text values are supported here — NUMBER and the rest carry
-    # their own wire formats and land with later tickets.
+    # DALC; text is UTF-8; a number is Oracle's base-100 NUMBER encoding. Other
+    # types (DATE, LOB, …) carry their own wire formats and land with later work.
     if value is None:
         return bytes([0])
+    if isinstance(value, bool):
+        # No 11g BOOLEAN type; a bool is a NUMBER 0/1 (bool is an int subclass,
+        # so match it before the int branch would silently swallow it).
+        return _bytes_with_length(encode_token_num(int(value)))
+    if isinstance(value, (int, float)):
+        return _bytes_with_length(encode_token_num(value))
     if isinstance(value, str):
         return _bytes_with_length(value.encode('utf-8'))
     if isinstance(value, bytes):
@@ -194,21 +205,18 @@ _END_OF_FETCH = (
 )
 
 
-def encode_error(ora_code: int, message: str) -> bytes:
-    """Build an OER return-status token reporting an error — §6.5 (11g).
-
-    The TTC payload (starting at TTI_OER) the Mirror sends when a call fails:
-    the client raises ``ORA-<ora_code>: <message>`` and the connection stays
-    usable. All the OER's rowid / batch / cursor fields are zero for a plain
-    error; only the error number and the message text carry meaning.
-    """
-    text = message.encode('utf-8')
+def _encode_oer(
+    call_status: int, ora_code: int, rowcount: int, message: bytes
+) -> bytes:
+    # An OER return-status token (§6.5, 11g) — the terminal of every response.
+    # All rowid / batch / cursor fields are zero here; only call status, the ORA
+    # error number, the affected-row count, and the message text carry meaning.
     return (
         bytes([TTI_OER])
-        + encode_sb4(1)  # call status
+        + encode_sb4(call_status)
         + encode_sb4(0)  # end-to-end seq
-        + encode_sb4(0)  # current row number
-        + encode_sb4(ora_code)  # the ORA error number
+        + encode_sb4(rowcount)  # current row number == DML affected rows on 11g
+        + encode_sb4(ora_code)  # the ORA error number (0 on success)
         + encode_sb4(0)  # array element error 1
         + encode_sb4(0)  # array element error 2
         + encode_sb4(0)  # cursor id
@@ -227,8 +235,20 @@ def encode_error(ora_code: int, message: str) -> bytes:
         + encode_sb4(0)  # batch error codes count
         + encode_sb4(0)  # batch error offsets count
         + encode_sb4(0)  # batch error messages count
-        + _bytes_with_length(text)  # the "ORA-nnnnn: ..." message
+        + _bytes_with_length(message)  # the message DALC (read only when ora_code≠0)
     )
+
+
+def encode_error(ora_code: int, message: str) -> bytes:
+    """OER reporting an error: the client raises ``ORA-<code>: <message>`` and
+    the connection stays usable."""
+    return _encode_oer(1, ora_code, 0, message.encode('utf-8'))
+
+
+def encode_status(rowcount: int = 0) -> bytes:
+    """OER reporting success for a non-query (DDL / DML), with the affected-row
+    count. No describe, no rows — the client just sees the statement completed."""
+    return _encode_oer(0, 0, rowcount, b'')
 
 
 def encode_query_response(columns: list[ColumnMeta], rows: list[tuple]) -> bytes:
