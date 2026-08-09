@@ -28,6 +28,7 @@ values is layered on top separately.
 
 from __future__ import annotations
 
+from binascii import unhexlify
 from dataclasses import dataclass
 from hashlib import sha1
 from secrets import token_bytes
@@ -35,6 +36,9 @@ from secrets import token_bytes
 from Crypto.Cipher import AES
 
 from seerdb.crypto import cat_key, conn_key, pad2
+from seerdb.exceptions import InterfaceError
+from seerdb.tns import decode_kv, decode_ub4, encode_kv, encode_sb4
+from seerdb.tns_consts import TTI_AUTH, TTI_FUN, TTI_RPA, TTI_SESS
 
 # O5LOGON uses AES-CBC with an all-zero IV throughout.
 _IV = bytes(16)
@@ -46,6 +50,10 @@ _SERVER_PROOF = b'SERVER_TO_CLIENT'
 # A server session key is 40 random bytes + an 8-byte pad2 tail, so the client
 # recognises it and mints a matching 48-byte session key (see crypto.o5logon0).
 _SERVER_SESSION_LEN = 40
+# Packed server version returned in the auth result (AUTH_VERSION_NO), from a
+# real XE 11.2 auth result: 186647040 = 11.2.0.x. On the wire all these values
+# (session key, salt, proof) are uppercase-hex ASCII.
+_SERVER_VERSION_NO = 186647040
 
 
 def _key_sess(password: bytes, salt: bytes) -> bytes:
@@ -100,3 +108,85 @@ def derive_conn_key(challenge: Challenge, client_auth_sesskey: bytes) -> bytes:
 def server_proof(session_key: bytes) -> bytes:
     """The AUTH_SVR_RESPONSE value: SERVER_TO_CLIENT encrypted under ConnKey."""
     return AES.new(session_key, AES.MODE_CBC, _IV).encrypt(_SERVER_PROOF)
+
+
+def _hexval(raw: bytes) -> bytes:
+    # The wire form for AUTH_SESSKEY / AUTH_VFR_DATA / AUTH_SVR_RESPONSE: an
+    # uppercase-hex ASCII string (the client bytes.fromhex()es it back).
+    return raw.hex().upper().encode('ascii')
+
+
+def encode_challenge(challenge: Challenge) -> bytes:
+    """The auth-challenge RPA payload — AUTH_SESSKEY + the salt (AUTH_VFR_DATA).
+
+    Returns the TTC payload starting at the TTI_RPA token, ready for
+    ``PacketStream.write_packet(TNS_DATA, …)``. Decodes back through the
+    client's ``decode_token_rpa`` as a ``TTI_SESS`` challenge.
+    """
+    return (
+        bytes([TTI_RPA])
+        + encode_sb4(2)
+        + encode_kv(b'AUTH_SESSKEY', _hexval(challenge.auth_sesskey), 1)
+        + encode_kv(b'AUTH_VFR_DATA', _hexval(challenge.salt), 1)
+    )
+
+
+def encode_result(
+    session_key: bytes,
+    *,
+    session_id: int = 0,
+    version_no: int = _SERVER_VERSION_NO,
+) -> bytes:
+    """The auth-result RPA payload — the server proof, version, and session id.
+
+    Decodes back through ``decode_token_rpa`` as a ``TTI_AUTH`` result whose
+    ``AUTH_SVR_RESPONSE`` the client's ``validate()`` accepts.
+    """
+    return (
+        bytes([TTI_RPA])
+        + encode_sb4(3)
+        + encode_kv(b'AUTH_SVR_RESPONSE', _hexval(server_proof(session_key)), 1)
+        + encode_kv(b'AUTH_VERSION_NO', str(version_no).encode('ascii'), 1)
+        + encode_kv(b'AUTH_SESSION_ID', str(session_id).encode('ascii'), 1)
+    )
+
+
+def _parse_fun_auth(payload: bytes) -> tuple[int, bytes, dict[bytes, bytes | None]]:
+    # Parse a client TTI_FUN auth message (OSESSKEY or AUTH), 11g/fv<12.1 shape:
+    #   TTI_FUN, subtype, seq, 0x01, sb4(userlen), sb4(mode), 0x01,
+    #   sb4(numpairs), 0x01, 0x01, user[userlen], <numpairs key-value pairs>
+    if len(payload) < 4 or payload[0] != TTI_FUN:
+        raise InterfaceError('not a TTI_FUN message')
+    subtype = payload[1]
+    rest = payload[4:]  # skip TTI_FUN, subtype, seq, 0x01
+    userlen, rest = decode_ub4(rest)
+    _mode, rest = decode_ub4(rest)
+    rest = rest[1:]  # skip the 0x01 has-more byte
+    numpairs, rest = decode_ub4(rest)
+    rest = rest[2:]  # skip the 0x01 0x01 pointer pair
+    user = rest[:userlen]
+    kvs, _ = decode_kv(rest[userlen:], numpairs, [])
+    return subtype, user, dict(kvs)
+
+
+def parse_osesskey(payload: bytes) -> bytes:
+    """Return the username from the client's OSESSKEY (phase-one) request."""
+    subtype, user, _ = _parse_fun_auth(payload)
+    if subtype != TTI_SESS:
+        raise InterfaceError(f'expected OSESSKEY, got subtype {subtype}')
+    return user
+
+
+def parse_auth_response(payload: bytes) -> tuple[bytes, bytes]:
+    """Return ``(username, client AUTH_SESSKEY bytes)`` from the phase-two AUTH.
+
+    The client's session key is what the server needs to derive the shared
+    ConnKey; AUTH_PASSWORD is ignored (the ConnKey agreement is the check).
+    """
+    subtype, user, kvs = _parse_fun_auth(payload)
+    if subtype != TTI_AUTH:
+        raise InterfaceError(f'expected AUTH, got subtype {subtype}')
+    sesskey = kvs.get(b'AUTH_SESSKEY')
+    if sesskey is None:
+        raise InterfaceError('AUTH response missing AUTH_SESSKEY')
+    return user, unhexlify(sesskey)
