@@ -8,17 +8,19 @@ from __future__ import annotations
 import pytest
 
 from seerdb.exceptions import InterfaceError
-from seerdb.server.query import ColumnMeta, encode_describe, parse_exec
+from seerdb.server.query import ColumnMeta, encode_describe, encode_rows, parse_exec
 from seerdb.tns import (
     _DECODE_FIELD_VERSION,
     _decode_describe_body,
     _skip_chunked_bytes,
+    decode_packet,
 )
 from seerdb.tns_consts import (
     FIELD_VERSION_11_2,
     TNS_TYPE_NUMBER,
     TNS_TYPE_VARCHAR,
     TTI_DCB,
+    TTI_STA,
 )
 
 
@@ -29,6 +31,14 @@ def _decode_describe(payload: bytes) -> list[dict]:
     columns, rest = _decode_describe_body(_skip_chunked_bytes(payload[1:]))
     assert rest == b'', 'describe did not consume cleanly'
     return columns
+
+
+def _decode_response(response: bytes) -> tuple[list, list]:
+    # Decode a full describe+rows+status response with the client's decoder.
+    _DECODE_FIELD_VERSION.set(FIELD_VERSION_11_2)
+    done, acc = decode_packet(response, (0, [], []))
+    assert done
+    return acc[1], acc[2]  # columns, rows
 
 
 # A real 11g OALL8 execute for `select * from dual`, captured from seerdb 11.2
@@ -91,3 +101,41 @@ def test_multiple_columns_and_not_null_roundtrip() -> None:
     assert cols[0]['data_type'] == TNS_TYPE_NUMBER
     assert cols[0]['null_ok'] == 0  # NOT NULL
     assert cols[1]['max_size'] == 30
+
+
+def test_encode_rows_dual() -> None:
+    col = ColumnMeta(
+        name=b'DUMMY', data_type=TNS_TYPE_VARCHAR, data_length=1, max_size=1
+    )
+    response = encode_describe([col]) + encode_rows([('X',)], [col]) + bytes([TTI_STA])
+    columns, rows = _decode_response(response)
+    assert [c['column_name'] for c in columns] == [b'DUMMY']
+    assert rows == [['X']]
+
+
+def test_encode_rows_multiple_with_null() -> None:
+    cols = [
+        ColumnMeta(name=b'A', data_type=TNS_TYPE_VARCHAR, data_length=5, max_size=5),
+        ColumnMeta(name=b'B', data_type=TNS_TYPE_VARCHAR, data_length=5, max_size=5),
+    ]
+    response = (
+        encode_describe(cols)
+        + encode_rows([('hi', 'yo'), ('lo', None)], cols)
+        + bytes([TTI_STA])
+    )
+    _, rows = _decode_response(response)
+    assert rows == [['hi', 'yo'], ['lo', None]]
+
+
+def test_row_width_mismatch_raises() -> None:
+    col = ColumnMeta(
+        name=b'DUMMY', data_type=TNS_TYPE_VARCHAR, data_length=1, max_size=1
+    )
+    with pytest.raises(InterfaceError):
+        encode_rows([('X', 'extra')], [col])
+
+
+def test_unsupported_value_type_raises() -> None:
+    col = ColumnMeta(name=b'N', data_type=TNS_TYPE_NUMBER, data_length=22, max_size=22)
+    with pytest.raises(InterfaceError):
+        encode_rows([(42,)], [col])

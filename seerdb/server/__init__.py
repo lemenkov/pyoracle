@@ -32,7 +32,13 @@ from seerdb.server.handshake import (
     parse_connect,
 )
 from seerdb.server.listener import Listener, serve
-from seerdb.server.query import ColumnMeta, ExecRequest, encode_describe, parse_exec
+from seerdb.server.query import (
+    ColumnMeta,
+    ExecRequest,
+    encode_describe,
+    encode_rows,
+    parse_exec,
+)
 from seerdb.server.session import Credentials, handle_login
 
 __all__ = [
@@ -46,6 +52,7 @@ __all__ = [
     'encode_describe',
     'encode_dty_reply',
     'encode_pro_reply',
+    'encode_rows',
     'handle_login',
     'parse_connect',
     'parse_exec',
