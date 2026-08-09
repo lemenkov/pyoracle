@@ -19,6 +19,7 @@ import datetime
 import re
 import sqlite3
 from collections.abc import Sequence
+from decimal import Decimal
 
 # Oracle numbered/named binds (:1, :name) → SQLite positional '?'. The negative
 # lookbehind leaves any '::' cast untouched.
@@ -43,7 +44,7 @@ _ORA_INVALID_SQL = 900
 # adapters are deprecated (3.12) and gone in newer Python, so register explicit
 # ISO-8601 ones — module-global, matching sqlite3's own registry scope. A
 # TIMESTAMP column round-trips microseconds; a DATE column keeps day precision.
-def _register_temporal_codecs() -> None:
+def _register_codecs() -> None:
     sqlite3.register_adapter(datetime.date, datetime.date.isoformat)
     sqlite3.register_adapter(datetime.datetime, lambda dt: dt.isoformat(sep=' '))
     # A DATE bind arrives over the wire as a midnight datetime, so a DATE column
@@ -54,9 +55,14 @@ def _register_temporal_codecs() -> None:
     sqlite3.register_converter(
         'timestamp', lambda blob: datetime.datetime.fromisoformat(blob.decode())
     )
+    # A fractional NUMBER bind decodes to a Decimal, which sqlite3 refuses
+    # natively. SQLite has no exact-decimal storage class, so bind it as REAL
+    # (float) — the same lossy-but-numeric form this backend already infers for
+    # NUMBER columns. Integral NUMBERs arrive as int and need no adapter.
+    sqlite3.register_adapter(Decimal, float)
 
 
-_register_temporal_codecs()
+_register_codecs()
 
 
 def _column_meta(name: str, values: list) -> ColumnMeta:
