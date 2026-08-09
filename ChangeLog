@@ -1,6 +1,9 @@
 Entries are sorted chronologically from oldest to youngest within each release,
 releases are sorted from youngest to oldest.
 
+version 2.1.0:
+- Fix high-precision Decimal NUMBER values being truncated on encode: a `Decimal` with more than ~15 significant digits was routed through `float` and lost precision. It is now encoded exactly in Oracle's base-100 form, preserving all significant digits up to Oracle's ~38-digit limit. Affects NUMBER binds and OSON (JSON) numbers (#281)
+
 version 2.0.0:
 - Renamed the project to **seerdb**. The import package is now `seerdb` (was `oracle`): change `import oracle` / `from oracle...` to `import seerdb` / `from seerdb...`, and `oracle.connect(...)` to `seerdb.connect(...)`. The PyPI distribution is `seerdb`. Test env vars are now `SEERDB_TEST_*`. No functional or protocol changes — purely the rename. (breaking)
 - Adopt ruff (format + lint) across the codebase, with a Lint CI gate.

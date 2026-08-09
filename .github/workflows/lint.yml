@@ -9,6 +9,7 @@ on:
     paths-ignore:
       - '**.md'
       - 'docs/**'
+      - 'ChangeLog'
       - 'LICENSES/**'
       - 'NOTICE'
       - 'REUSE.toml'
@@ -20,6 +21,7 @@ on:
     paths-ignore:
       - '**.md'
       - 'docs/**'
+      - 'ChangeLog'
       - 'LICENSES/**'
       - 'NOTICE'
       - 'REUSE.toml'
