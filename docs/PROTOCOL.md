@@ -895,6 +895,18 @@ the client hides that sentinel from the caller. Only the describe's column
 type/length/charset/name and the row DALC values carry meaning; the many
 skipped scalar fields are emitted as well-formed zeros.
 
+**Temporal values are width-fixed by the column type, not the value.** The
+client-side encoder (§10.3) is value-driven — it picks 7/11/13 bytes from
+whether a `datetime` carries sub-second or zone parts — but a *column* must emit
+one consistent width for every row it describes. So the server encodes each
+temporal value by its column's `data_type`: `DATE` (12) → 7 bytes (second
+precision), `TIMESTAMP` (180) → 11 bytes always (a value with no microseconds
+still writes 4 zero nanosecond bytes), `TIMESTAMP WITH TIME ZONE` (181) → 13
+bytes (a naive value is taken as UTC). `seerdb/server/query.py::_encode_temporal`
+does this; the example backends map each source column to the matching Oracle
+type (Postgres `date`/`timestamp`/`timestamptz` OIDs 1082/1114/1184; SQLite a
+column declared `DATE`/`TIMESTAMP` via `PARSE_DECLTYPES`).
+
 ### 6.1 Row Header (TTI_RXH)
 
 Precedes row data in SELECT results. All numeric fields use Oracle's

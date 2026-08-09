@@ -15,6 +15,7 @@ dependency — ``sqlite3`` is in the standard library.
 
 from __future__ import annotations
 
+import datetime
 import re
 import sqlite3
 from collections.abc import Sequence
@@ -23,7 +24,13 @@ from collections.abc import Sequence
 # lookbehind leaves any '::' cast untouched.
 _ORACLE_BIND = re.compile(r'(?<!:):\w+')
 
-from seerdb.common.tns_consts import TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_VARCHAR
+from seerdb.common.tns_consts import (
+    TNS_TYPE_DATE,
+    TNS_TYPE_NUMBER,
+    TNS_TYPE_RAW,
+    TNS_TYPE_TIMESTAMP,
+    TNS_TYPE_VARCHAR,
+)
 from seerdb.server import BackendError, Capability, ColumnMeta, Result
 
 # ORA-00900: invalid SQL statement — the generic code for a SQL the backend
@@ -31,14 +38,50 @@ from seerdb.server import BackendError, Capability, ColumnMeta, Result
 _ORA_INVALID_SQL = 900
 
 
+# SQLite stores no real temporal type, so DATE/TIMESTAMP survive a round trip
+# only if we (de)serialise them ourselves. The stdlib's built-in date/timestamp
+# adapters are deprecated (3.12) and gone in newer Python, so register explicit
+# ISO-8601 ones — module-global, matching sqlite3's own registry scope. A
+# TIMESTAMP column round-trips microseconds; a DATE column keeps day precision.
+def _register_temporal_codecs() -> None:
+    sqlite3.register_adapter(datetime.date, datetime.date.isoformat)
+    sqlite3.register_adapter(datetime.datetime, lambda dt: dt.isoformat(sep=' '))
+    # A DATE bind arrives over the wire as a midnight datetime, so a DATE column
+    # may hold 'YYYY-MM-DD HH:MM:SS'; keep only the date part (leading 10 chars).
+    sqlite3.register_converter(
+        'date', lambda blob: datetime.date.fromisoformat(blob.decode()[:10])
+    )
+    sqlite3.register_converter(
+        'timestamp', lambda blob: datetime.datetime.fromisoformat(blob.decode())
+    )
+
+
+_register_temporal_codecs()
+
+
 def _column_meta(name: str, values: list) -> ColumnMeta:
     # Infer an Oracle column type from the first non-NULL value. Oracle folds
     # unquoted identifiers to upper-case, so match that on the name.
     ident = name.upper().encode('utf-8')
     sample = next((v for v in values if v is not None), None)
-    if isinstance(sample, (bool, int, float)):
+    if isinstance(sample, bool):
+        # bool is an int subclass; a NUMBER either way, matched first for clarity.
         return ColumnMeta(
             name=ident, data_type=TNS_TYPE_NUMBER, data_length=22, max_size=22
+        )
+    if isinstance(sample, (int, float)):
+        return ColumnMeta(
+            name=ident, data_type=TNS_TYPE_NUMBER, data_length=22, max_size=22
+        )
+    if isinstance(sample, datetime.datetime):
+        # datetime is a date subclass, so match it before the plain-date branch:
+        # a declared TIMESTAMP column keeps its time-of-day and sub-second parts.
+        return ColumnMeta(
+            name=ident, data_type=TNS_TYPE_TIMESTAMP, data_length=11, max_size=11
+        )
+    if isinstance(sample, datetime.date):
+        return ColumnMeta(
+            name=ident, data_type=TNS_TYPE_DATE, data_length=7, max_size=7
         )
     if isinstance(sample, bytes):
         width = max((len(v) for v in values if isinstance(v, bytes)), default=1)
@@ -62,7 +105,9 @@ class SqliteBackend:
     capabilities = frozenset({Capability.TRANSACTIONS})
 
     def __init__(self, database: str = ':memory:') -> None:
-        self._conn = sqlite3.connect(database)
+        # PARSE_DECLTYPES turns a column declared DATE / TIMESTAMP back into a
+        # datetime.date / datetime.datetime via the converters registered above.
+        self._conn = sqlite3.connect(database, detect_types=sqlite3.PARSE_DECLTYPES)
 
     def execute(self, sql: str, binds: Sequence = ()) -> Result:
         if binds:

@@ -25,6 +25,8 @@ from seerdb.common.tns_consts import (
     TNS_TYPE_DATE,
     TNS_TYPE_NUMBER,
     TNS_TYPE_RAW,
+    TNS_TYPE_TIMESTAMP,
+    TNS_TYPE_TIMESTAMPTZ,
     TNS_TYPE_VARCHAR,
 )
 from seerdb.server import (
@@ -54,7 +56,13 @@ _NUMBER_OIDS = frozenset(
 )
 _TEXT_OIDS = frozenset({18, 19, 25, 1042, 1043})  # char name text bpchar varchar
 _RAW_OIDS = frozenset({17})  # bytea
-_DATE_OIDS = frozenset({1082, 1114, 1184})  # date, timestamp, timestamptz
+# Each PostgreSQL temporal OID maps to the Oracle type of matching precision:
+# a bare date → DATE (7 bytes), timestamp → TIMESTAMP (11), timestamptz → 13.
+_TEMPORAL_OIDS = {
+    1082: (TNS_TYPE_DATE, 7),  # date
+    1114: (TNS_TYPE_TIMESTAMP, 11),  # timestamp (without time zone)
+    1184: (TNS_TYPE_TIMESTAMPTZ, 13),  # timestamptz
+}
 
 _ORA_INVALID_SQL = 900
 
@@ -65,10 +73,10 @@ def _column_meta(name: str, oid: int, values: list) -> ColumnMeta:
         return ColumnMeta(
             name=ident, data_type=TNS_TYPE_NUMBER, data_length=22, max_size=22
         )
-    if oid in _DATE_OIDS:
-        # Oracle DATE (second precision); sub-second / time zone is dropped.
+    if oid in _TEMPORAL_OIDS:
+        data_type, width = _TEMPORAL_OIDS[oid]
         return ColumnMeta(
-            name=ident, data_type=TNS_TYPE_DATE, data_length=7, max_size=7
+            name=ident, data_type=data_type, data_length=width, max_size=width
         )
     if oid in _RAW_OIDS:
         width = max(
