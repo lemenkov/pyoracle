@@ -45,7 +45,11 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
-          queries: security-and-quality
+          # Security queries only. ruff (F/W/I) and mypy already own import
+          # hygiene, unused imports, and style, so the extra `-and-quality`
+          # queries (py/cyclic-import, py/unused-import, py/import-and-import-from)
+          # are pure duplicate noise here — and they re-anchor on every reformat.
+          queries: security-extended
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4.37.6
