@@ -14,8 +14,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from seerdb.exceptions import InterfaceError
-from seerdb.tns import decode_ub4
-from seerdb.tns_consts import TTI_ALL8, TTI_FUN
+from seerdb.tns import _bytes_with_length, decode_ub4, encode_sb4
+from seerdb.tns_consts import TTI_ALL8, TTI_DCB, TTI_FUN
+
+# AL32UTF8 — what seerdb advertises and what an 11g DUAL column reports.
+_CHARSET_AL32UTF8 = 873
+_CSFRM_DB = 1
 
 # The 11g tail between the fixed header and the SQL: a [0, 0, 1] marker and a
 # 5-byte server-version slot (empty only when the client thinks it is talking to
@@ -64,3 +68,70 @@ def parse_exec(payload: bytes) -> ExecRequest:
     rest = rest[_MARKER_LEN + _SERVER_VERSION_SLOT :]
     sql = rest[:query_len].decode('utf-8') if query_flag else ''
     return ExecRequest(sql=sql, cursor=cursor, bind_count=bind_count, fetch=fetch)
+
+
+@dataclass(frozen=True)
+class ColumnMeta:
+    """One result column's metadata for the describe (11g scalar column)."""
+
+    name: bytes
+    data_type: int
+    data_length: int
+    max_size: int
+    charset: int = _CHARSET_AL32UTF8
+    csfrm: int = _CSFRM_DB
+    precision: int = 0
+    scale: int = 0
+    null_ok: int = 1
+
+
+def _str_with_length(data: bytes) -> bytes:
+    # Inverse of _read_str_with_length: a ub4 char-count then a DALC. An empty
+    # value is just the zero count (the reader returns b'' without a DALC).
+    if not data:
+        return encode_sb4(0)
+    return encode_sb4(len(data)) + _bytes_with_length(data)
+
+
+def _encode_dcb_column(col: ColumnMeta, position: int) -> bytes:
+    # Inverse of _decode_dcb_column (11g / fv < 12.2). Fields the client skips
+    # are written as well-formed zeros; only type/precision/scale/length/
+    # charset/csfrm/max_size/null_ok/name carry meaning.
+    return (
+        bytes([col.data_type, 0, col.precision])
+        + encode_sb4(col.scale)
+        + encode_sb4(col.data_length)  # buffer size
+        + encode_sb4(0)  # max array elements
+        + encode_sb4(0)  # cont flags
+        + encode_sb4(0)  # type OID length (no ADT)
+        + encode_sb4(0)  # version
+        + encode_sb4(col.charset)
+        + bytes([col.csfrm])
+        + encode_sb4(col.max_size)
+        + bytes([col.null_ok, 0])  # null_ok + (skipped) v7 name length
+        + _str_with_length(col.name)
+        + _str_with_length(b'')  # type schema (ADT owner)
+        + _str_with_length(b'')  # type name
+        + encode_sb4(position)  # column position
+        + encode_sb4(0)  # uds flags (11g addition)
+    )
+
+
+def encode_describe(columns: list[ColumnMeta]) -> bytes:
+    """Build the describe (TTI_DCB) block for a result's columns — §19.1 (11g).
+
+    Returns the TTC payload starting at the TTI_DCB token. The cursor-uuid
+    preamble is empty (the client skips it); the row tokens are appended
+    separately by the exec-response encoder.
+    """
+    body = encode_sb4(sum(c.max_size for c in columns))  # max row size (skipped)
+    body += encode_sb4(len(columns))
+    if columns:
+        body += bytes([0])  # reserved
+    for position, col in enumerate(columns, start=1):
+        body += _encode_dcb_column(col, position)
+    body += _bytes_with_length(b'')  # current date (skipped)
+    body += encode_sb4(0) * 4  # dcbflag / dcbmdbz / dcbmnpr / dcbmxpr
+    body += _bytes_with_length(b'')  # dcbqcky query-cache key (11g)
+    preamble = _bytes_with_length(b'')  # cursor uuid / timestamp (skipped)
+    return bytes([TTI_DCB]) + preamble + body
