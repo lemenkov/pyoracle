@@ -14,12 +14,22 @@ on:
       - '**.md'
       - 'docs/**'
       - 'LICENSES/**'
+      - 'NOTICE'
+      - 'REUSE.toml'
+      - '.gitignore'
+      - '.git-blame-ignore-revs'
+      - '.github/dependabot.yml'
   pull_request:
     branches: [master]
     paths-ignore:
       - '**.md'
       - 'docs/**'
       - 'LICENSES/**'
+      - 'NOTICE'
+      - 'REUSE.toml'
+      - '.gitignore'
+      - '.git-blame-ignore-revs'
+      - '.github/dependabot.yml'
 
 # Cancel a superseded run when a new commit is pushed to the same ref, so rapid
 # pushes don't stack up and exhaust the Actions concurrency/usage budget.

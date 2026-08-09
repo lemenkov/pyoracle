@@ -11,12 +11,22 @@ on:
       - '**.md'
       - 'docs/**'
       - 'LICENSES/**'
+      - 'NOTICE'
+      - 'REUSE.toml'
+      - '.gitignore'
+      - '.git-blame-ignore-revs'
+      - '.github/dependabot.yml'
   pull_request:
     branches: [master]
     paths-ignore:
       - '**.md'
       - 'docs/**'
       - 'LICENSES/**'
+      - 'NOTICE'
+      - 'REUSE.toml'
+      - '.gitignore'
+      - '.git-blame-ignore-revs'
+      - '.github/dependabot.yml'
   schedule:
     # Weekly Monday 06:17 UTC — off the hour to dodge cron spikes.
     - cron: '17 6 * * 1'
