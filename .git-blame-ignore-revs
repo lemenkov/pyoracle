@@ -8,3 +8,6 @@
 
 # style: adopt ruff (format + lint) across oracle/ and tests/
 45f88704d39fe46c647c83f2fceb4195b91ea765
+
+# Rename the project to seerdb (2.0.0) — mass import/reference substitution
+6c173ff75b866dc1d1501657381825c10e4dcc24
