@@ -11,7 +11,9 @@ from dataclasses import replace
 import handshake_11g as fx
 import pytest
 
-from seerdb.exceptions import InterfaceError
+from seerdb.common.exceptions import InterfaceError
+from seerdb.common.tns import CCAP_FIELD_VERSION, decode_token_pro
+from seerdb.common.tns_consts import FIELD_VERSION_11_2, TNS_DATA, TTI_DTY, TTI_PRO
 from seerdb.server._handshake_11g import DTY_REPLY, PRO_REPLY
 from seerdb.server.handshake import (
     encode_accept,
@@ -19,8 +21,6 @@ from seerdb.server.handshake import (
     encode_pro_reply,
     parse_connect,
 )
-from seerdb.tns import CCAP_FIELD_VERSION, decode_token_pro
-from seerdb.tns_consts import FIELD_VERSION_11_2, TNS_DATA, TTI_DTY, TTI_PRO
 
 
 def test_parse_real_11g_connect() -> None:

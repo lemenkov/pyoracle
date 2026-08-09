@@ -7,21 +7,21 @@ from __future__ import annotations
 
 import pytest
 
-from seerdb.exceptions import InterfaceError
-from seerdb.server.query import ColumnMeta, encode_describe, encode_rows, parse_exec
-from seerdb.tns import (
+from seerdb.common.exceptions import InterfaceError
+from seerdb.common.tns import (
     _DECODE_FIELD_VERSION,
     _decode_describe_body,
     _skip_chunked_bytes,
     decode_packet,
 )
-from seerdb.tns_consts import (
+from seerdb.common.tns_consts import (
     FIELD_VERSION_11_2,
     TNS_TYPE_NUMBER,
     TNS_TYPE_VARCHAR,
     TTI_DCB,
     TTI_STA,
 )
+from seerdb.server.query import ColumnMeta, encode_describe, encode_rows, parse_exec
 
 
 def _decode_describe(payload: bytes) -> list[dict]:

@@ -13,8 +13,8 @@ import struct
 
 import handshake_11g as fx
 
-from seerdb.connection import _parse_accept_eor, _parse_accept_sdu
-from seerdb.tns_consts import TNS_ACCEPT, TNS_CONNECT, TNS_DATA
+from seerdb.client.connection import _parse_accept_eor, _parse_accept_sdu
+from seerdb.common.tns_consts import TNS_ACCEPT, TNS_CONNECT, TNS_DATA
 
 
 def _packet_type(packet: bytes) -> int:

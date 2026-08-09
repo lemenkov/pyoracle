@@ -39,7 +39,7 @@ offsets (oracledb-produced and large documents) and ub2 field-ids (>255 distinct
 keys) — both tracked under #69.
 """
 
-from seerdb.types import (
+from seerdb.common.types import (
     decode_binary_double,
     decode_binary_float,
     decode_date,
@@ -113,7 +113,7 @@ def json_to_text(value: object) -> str:
 def _oson_scalar_node(value) -> bytes:
     from decimal import Decimal
 
-    from seerdb.tns import encode_token_decimal, encode_token_num
+    from seerdb.common.tns import encode_token_decimal, encode_token_num
 
     if value is None:
         return b'\x30'

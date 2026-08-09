@@ -3,7 +3,7 @@
 
 """Server-side O5LOGON (11g, 192-bit salted path).
 
-The encode side of the client crypto in :mod:`seerdb.crypto` (``o5logon`` /
+The encode side of the client crypto in :mod:`seerdb.common.crypto` (``o5logon`` /
 ``validate``). O5LOGON is *mutually* authenticated, so the server must hold the
 account password — a configured credential for now; a backend-mapped auth API
 comes later. The flow the server drives:
@@ -35,10 +35,10 @@ from secrets import token_bytes
 
 from Crypto.Cipher import AES
 
-from seerdb.crypto import cat_key, conn_key, pad2
-from seerdb.exceptions import InterfaceError
-from seerdb.tns import decode_kv, decode_ub4, encode_kv, encode_sb4
-from seerdb.tns_consts import TTI_AUTH, TTI_FUN, TTI_RPA, TTI_SESS
+from seerdb.common.crypto import cat_key, conn_key, pad2
+from seerdb.common.exceptions import InterfaceError
+from seerdb.common.tns import decode_kv, decode_ub4, encode_kv, encode_sb4
+from seerdb.common.tns_consts import TTI_AUTH, TTI_FUN, TTI_RPA, TTI_SESS
 
 # O5LOGON uses AES-CBC with an all-zero IV throughout.
 _IV = bytes(16)

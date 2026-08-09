@@ -8,10 +8,15 @@
 
 import unittest
 
-from seerdb.aq import DeqOptions, EnqOptions, MessageProperties, Queue
-from seerdb.connection import _aq_error_info, _decode_aq_deq, _decode_aq_enq
-from seerdb.tns import encode_aq_enq
-from seerdb.tns_consts import TNS_AQ_DEQ_REMOVE, TNS_FUNC_AQ_ENQ, TTI_FUN, TTI_RPA
+from seerdb.client.aq import DeqOptions, EnqOptions, MessageProperties, Queue
+from seerdb.client.connection import _aq_error_info, _decode_aq_deq, _decode_aq_enq
+from seerdb.common.tns import encode_aq_enq
+from seerdb.common.tns_consts import (
+    TNS_AQ_DEQ_REMOVE,
+    TNS_FUNC_AQ_ENQ,
+    TTI_FUN,
+    TTI_RPA,
+)
 
 
 class _FakeConn:
@@ -51,7 +56,7 @@ class TestEncode(unittest.TestCase):
         # JSON enqueue (#150): the OSON image is wrapped in the AQ JSON
         # descriptor (fixed prefix + ub2 length + 22 zeros + length-prefixed
         # image), NOT a plain length-prefix. The OSON magic (ff 4a 5a) follows.
-        from seerdb.tns import _AQ_JSON_DESCRIPTOR
+        from seerdb.common.tns import _AQ_JSON_DESCRIPTOR
 
         q = Queue(_FakeConn(), 'JQ', payload_type=None, is_json=True)
         out = encode_aq_enq(3, 16, q, MessageProperties(payload={'id': 7}))
@@ -63,7 +68,7 @@ class TestArrayJsonGate(unittest.TestCase):
     # array enqueue/dequeue of JSON is gated (server-side ORA-00600 on these
     # editions); single enqone/deqone JSON works (#150).
     def test_enqmany_gated_for_json(self):
-        from seerdb.exceptions import NotSupportedError
+        from seerdb.common.exceptions import NotSupportedError
 
         q = Queue(_FakeConn(), 'JQ', payload_type=None, is_json=True)
         with self.assertRaises(NotSupportedError):

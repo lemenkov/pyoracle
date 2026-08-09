@@ -4,15 +4,15 @@
 import re
 from typing import Any
 
-from seerdb.datatypes import TempLob, Var
-from seerdb.exceptions import (
+from seerdb.common.datatypes import TempLob, Var
+from seerdb.common.exceptions import (
     DatabaseError,
     InterfaceError,
     NotSupportedError,
     ProgrammingError,
     from_ora_code,
 )
-from seerdb.tns_consts import (
+from seerdb.common.tns_consts import (
     AL32UTF8_CHARSET,
     FIELD_VERSION_10_2,
     FIELD_VERSION_12_1,
@@ -33,7 +33,7 @@ _NAMED_BIND_RE = re.compile(r':([A-Za-z_]\w*)')
 
 class cursor:
     # Sentinel passed as a bind value to indicate a REFCURSOR slot. Consumed by
-    # the encoder in seerdb.tns (encode_token_oac / encode_token_rxd). Kept
+    # the encoder in seerdb.common.tns (encode_token_oac / encode_token_rxd). Kept
     # lowercase for backwards-compatibility with existing call sites.
     id: int = 0
 
@@ -552,7 +552,7 @@ class Cursor:
         self._check_open()
         if self._description is None:
             raise InterfaceError('no result set; call execute() with a SELECT first')
-        from seerdb.dataframe import build_table
+        from seerdb.client.dataframe import build_table
 
         Rows = self._rows[self._row_index :]
         self._row_index = len(self._rows)
@@ -565,7 +565,7 @@ class Cursor:
         self._check_open()
         if self._description is None:
             raise InterfaceError('no result set; call execute() with a SELECT first')
-        from seerdb.dataframe import build_table
+        from seerdb.client.dataframe import build_table
 
         if size is None:
             size = self.arraysize
@@ -728,7 +728,7 @@ def _assign_out_binds(Bind, Result) -> list:
     Rows = Result[4]
     if not Rows or not isinstance(Rows[0], dict) or 'out_positions' not in Rows[0]:
         return []
-    from seerdb.types import decode_value
+    from seerdb.common.types import decode_value
 
     Record = Rows[0]
     RefCursors = []
@@ -761,7 +761,7 @@ def _assign_return_binds(Bind, Result) -> None:
     Rows = Result[4]
     if not Rows or not isinstance(Rows[0], dict) or 'return_positions' not in Rows[0]:
         return
-    from seerdb.types import decode_value
+    from seerdb.common.types import decode_value
 
     Record = Rows[0]
     for Pos, Values in zip(Record['return_positions'], Record['return_values']):
@@ -806,7 +806,7 @@ def _resolve_lobs(Connection, Row: list) -> list:
     # CLOB → str, BLOB → bytes, empty → "" / b"", NULL stays as None (the
     # row decoder already handed back None for NULL LOBs before they ever
     # became LOB objects).
-    from seerdb.lob import LOB
+    from seerdb.common.lob import LOB
 
     Out = list(Row)
     for I, Val in enumerate(Out):
@@ -823,7 +823,7 @@ def _check_object_bind_support(Connection, Bind, Batch=None) -> None:
     # PL/SQL associative-array bind (#122; pre-12c mis-types it, PLS-00306).
     # Refuse both up front on pre-12c with a clear error. (Object/collection
     # *decode* works on all tiers — only these binds are 12c+.)
-    from seerdb.dbobject import DbObject, DbRef
+    from seerdb.common.dbobject import DbObject, DbRef
 
     if getattr(Connection, 'field_version', 0) >= FIELD_VERSION_12_1:
         return
@@ -851,14 +851,14 @@ def _resolve_objects(Connection, Row: list) -> list:
     # kept the packed image without decoding it (the attribute layout isn't
     # known at decode time); fetch the layout for the type now (cached on the
     # connection) and walk the image. NULL objects already came back as None.
-    from seerdb.dbobject import (
+    from seerdb.common.dbobject import (
         DbObject,
         ObjectImage,
         decode_collection_image,
         decode_object_image,
         decode_xmltype,
     )
-    from seerdb.lob import LOB
+    from seerdb.common.lob import LOB
 
     Out = list(Row)
     for I, Val in enumerate(Out):

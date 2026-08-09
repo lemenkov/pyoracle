@@ -8,10 +8,10 @@
 # from connection.gettype()), or JSON (payload_type=seerdb.JSON). Messages are
 # carried by MessageProperties (connection.msgproperties(payload=...)); enqueue/
 # dequeue behaviour is tuned via the queue's enqoptions / deqoptions. The wire
-# framing is in seerdb.tns (encode_aq_enq / encode_aq_deq / encode_aq_array);
+# framing is in seerdb.common.tns (encode_aq_enq / encode_aq_deq / encode_aq_array);
 # the connection's _aq_* methods send and parse.
 
-from seerdb.tns_consts import (
+from seerdb.common.tns_consts import (
     TNS_AQ_DEQ_NEXT_MSG,
     TNS_AQ_DEQ_ON_COMMIT,
     TNS_AQ_DEQ_REMOVE,
@@ -112,7 +112,7 @@ class _QueueBase:
         # errors (ORA-00600 from python-oracledb too) on these editions, so it's
         # gated rather than shipped broken. Single enqone/deqone JSON works.
         if self.is_json:
-            from seerdb.exceptions import NotSupportedError
+            from seerdb.common.exceptions import NotSupportedError
 
             raise NotSupportedError(
                 'array enqueue/dequeue (enqmany/deqmany) is not supported for '

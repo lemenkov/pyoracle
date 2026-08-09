@@ -8,8 +8,8 @@
 import struct
 import unittest
 
-from seerdb.connection import _parse_accept_eor, _parse_accept_sdu
-from seerdb.tns import (
+from seerdb.client.connection import _parse_accept_eor, _parse_accept_sdu
+from seerdb.common.tns import (
     CCAP_TTC4,
     assemble_packet,
     decode_packet,
@@ -17,7 +17,7 @@ from seerdb.tns import (
     encode_dictionary_login,
     encode_packet,
 )
-from seerdb.tns_consts import (
+from seerdb.common.tns_consts import (
     TNS_CCAP_END_OF_RESPONSE,
     TNS_DATA,
     TTI_END_OF_RESPONSE,

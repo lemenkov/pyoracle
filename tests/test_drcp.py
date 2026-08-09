@@ -8,9 +8,9 @@
 
 import unittest
 
-from seerdb.connection import OracleConnect
-from seerdb.tns import decode_packet, encode_dictionary_description
-from seerdb.tns_consts import PURITY_SELF, TTI_STA, TTI_SVR_PIGGYBACK
+from seerdb.client.connection import OracleConnect
+from seerdb.common.tns import decode_packet, encode_dictionary_description
+from seerdb.common.tns_consts import PURITY_SELF, TTI_STA, TTI_SVR_PIGGYBACK
 
 
 def _env(**extra):

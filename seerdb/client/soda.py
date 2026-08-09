@@ -25,8 +25,8 @@ round trip per oversized document.
 
 import json
 
-from seerdb.datatypes import DB_TYPE_NUMBER, DB_TYPE_RAW, DB_TYPE_VARCHAR
-from seerdb.exceptions import DatabaseError, NotSupportedError
+from seerdb.common.datatypes import DB_TYPE_NUMBER, DB_TYPE_RAW, DB_TYPE_VARCHAR
+from seerdb.common.exceptions import DatabaseError, NotSupportedError
 
 # get_data_guide raises this when the collection has no data-guide-enabled
 # search index; oracledb returns None in that case, so we map it.

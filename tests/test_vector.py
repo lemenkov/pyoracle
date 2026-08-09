@@ -10,7 +10,7 @@ a known vector (see docs/PROTOCOL.md §18). No server is needed to run these.
 import array
 import unittest
 
-from seerdb.vector import (
+from seerdb.common.vector import (
     SparseVector,
     VectorError,
     decode_vector,

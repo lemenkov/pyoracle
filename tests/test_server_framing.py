@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import socket
 
+from seerdb.common.tns import encode_packet
+from seerdb.common.tns_consts import TNS_CONNECT, TNS_DATA
 from seerdb.server.framing import PacketStream
-from seerdb.tns import encode_packet
-from seerdb.tns_consts import TNS_CONNECT, TNS_DATA
 
 
 def _pair() -> tuple[socket.socket, socket.socket]:

@@ -25,10 +25,10 @@ import os
 import signal
 import unittest
 
-from seerdb.exceptions import DatabaseError
-from seerdb.oson import OsonError, decode_oson
-from seerdb.tns import decode_dalc
-from seerdb.types import (
+from seerdb.common.exceptions import DatabaseError
+from seerdb.common.oson import OsonError, decode_oson
+from seerdb.common.tns import decode_dalc
+from seerdb.common.types import (
     decode_binary_double,
     decode_binary_float,
     decode_date,
@@ -36,7 +36,7 @@ from seerdb.types import (
     decode_interval_ym,
     decode_number,
 )
-from seerdb.vector import VectorError, decode_vector
+from seerdb.common.vector import VectorError, decode_vector
 
 _HERE = os.path.dirname(__file__)
 _DECODERS_CORPUS = os.path.join(_HERE, 'fuzz_corpus_decoders.txt')

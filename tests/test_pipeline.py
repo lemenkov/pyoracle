@@ -9,15 +9,15 @@
 import unittest
 
 import seerdb
-from seerdb.pipeline import Pipeline, PipelineOpType, create_pipeline
-from seerdb.tns import (
+from seerdb.client.pipeline import Pipeline, PipelineOpType, create_pipeline
+from seerdb.common.tns import (
     _fun_header,
     encode_data_packet,
     encode_dictionary,
     encode_pipeline_begin,
     encode_pipeline_end,
 )
-from seerdb.tns_consts import (
+from seerdb.common.tns_consts import (
     FIELD_VERSION_23_4,
     TNS_DATA,
     TNS_DATA_FLAGS_BEGIN_PIPELINE,
@@ -119,7 +119,7 @@ class TestTokenDecode(unittest.TestCase):
         # decoder consumes it and decodes the body (here STATUS + EOR). The
         # marker decode is field-version-independent, so don't perturb the
         # shared _DECODE_FIELD_VERSION context (it would leak into later tests).
-        from seerdb.tns import decode_packet
+        from seerdb.common.tns import decode_packet
 
         data = bytes.fromhex('210101') + bytes.fromhex('0903010005024be9') + bytes([29])
         self.assertEqual(

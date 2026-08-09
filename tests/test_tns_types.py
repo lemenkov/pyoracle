@@ -12,7 +12,7 @@ import datetime
 import math
 import unittest
 
-from seerdb.datatypes import (
+from seerdb.common.datatypes import (
     DB_TYPE_BINARY_DOUBLE,
     DB_TYPE_BINARY_FLOAT,
     DB_TYPE_INTERVAL_DS,
@@ -24,8 +24,8 @@ from seerdb.datatypes import (
     IntervalYM,
     Var,
 )
-from seerdb.exceptions import DataError
-from seerdb.tns import (
+from seerdb.common.exceptions import DataError
+from seerdb.common.tns import (
     _read_iov,
     _read_long_column,
     _read_rowid_column,
@@ -41,13 +41,13 @@ from seerdb.tns import (
     encode_token_rxd,
     exec_oac_signature,
 )
-from seerdb.tns_consts import (
+from seerdb.common.tns_consts import (
     TNS_TYPE_BDOUBLE,
     TNS_TYPE_BFLOAT,
     TNS_TYPE_INTERVALDS,
     TNS_TYPE_INTERVALYM,
 )
-from seerdb.types import (
+from seerdb.common.types import (
     decode_binary_double,
     decode_binary_float,
     decode_date,
@@ -503,12 +503,12 @@ class TestLong(unittest.TestCase):
         self.assertEqual(Rest, bytes.fromhex('02c164'))
 
     def test_decode_value_long_is_str(self):
-        from seerdb.tns_consts import TNS_TYPE_LONG
+        from seerdb.common.tns_consts import TNS_TYPE_LONG
 
         self.assertEqual(decode_value({'data_type': TNS_TYPE_LONG}, b'hi'), 'hi')
 
     def test_decode_value_longraw_is_bytes(self):
-        from seerdb.tns_consts import TNS_TYPE_LONGRAW
+        from seerdb.common.tns_consts import TNS_TYPE_LONGRAW
 
         Out = decode_value({'data_type': TNS_TYPE_LONGRAW}, b'\xde\xad')
         self.assertEqual(Out, b'\xde\xad')
@@ -523,7 +523,7 @@ class TestPasswordRedaction(unittest.TestCase):
     def test_redacted_omits_password(self):
         # Allow-list: the password key is never read, so it is absent from the
         # safe copy; non-secret fields are kept.
-        from seerdb.tns import _redacted
+        from seerdb.common.tns import _redacted
 
         out = _redacted({'env': {'user': 'u', 'password': 'secret', 'host': 'h'}})
         self.assertNotIn('password', out['env'])
@@ -533,7 +533,7 @@ class TestPasswordRedaction(unittest.TestCase):
     def test_redacted_drops_auth_secrets(self):
         # The changepassword auth dict (session key + old/new passwords) is
         # dropped wholesale (#21).
-        from seerdb.tns import _redacted
+        from seerdb.common.tns import _redacted
 
         out = _redacted(
             {
@@ -544,7 +544,7 @@ class TestPasswordRedaction(unittest.TestCase):
         self.assertEqual(out['auth'], '<redacted>')
 
     def test_description_debug_log_omits_password(self):
-        from seerdb.tns import encode_dictionary_description
+        from seerdb.common.tns import encode_dictionary_description
 
         d = {
             'env': {
@@ -559,7 +559,7 @@ class TestPasswordRedaction(unittest.TestCase):
             },
             'seq': 1,
         }
-        with self.assertLogs('seerdb.tns', level='DEBUG') as cm:
+        with self.assertLogs('seerdb.common.tns', level='DEBUG') as cm:
             encode_dictionary_description(d)
         joined = '\n'.join(cm.output)
         self.assertNotIn('tiger', joined)
@@ -579,8 +579,8 @@ class TestRefCursor(unittest.TestCase):
     )
 
     def test_refcursor_iov_parse(self):
-        from seerdb.cursor import cursor as RefCur
-        from seerdb.tns import _read_iov
+        from seerdb.client.cursor import cursor as RefCur
+        from seerdb.common.tns import _read_iov
 
         directions, out_values, _ = _read_iov(self.WIRE, [RefCur()])
         self.assertEqual(directions, [16])  # one OUT bind
@@ -595,7 +595,7 @@ class TestRefCursor(unittest.TestCase):
 
     def test_scalar_bind_not_treated_as_refcursor(self):
         # Without a REF CURSOR bind, a scalar OUT value stays raw bytes.
-        from seerdb.tns import _read_iov
+        from seerdb.common.tns import _read_iov
 
         wire = bytes(
             [
@@ -624,28 +624,28 @@ class TestRefCursor(unittest.TestCase):
 
 class TestVar(unittest.TestCase):
     def test_var_python_type(self):
-        from seerdb.datatypes import Var
-        from seerdb.tns_consts import TNS_TYPE_NUMBER, TNS_TYPE_VARCHAR
+        from seerdb.common.datatypes import Var
+        from seerdb.common.tns_consts import TNS_TYPE_NUMBER, TNS_TYPE_VARCHAR
 
         self.assertEqual(Var(int).dbtype.tns_type, TNS_TYPE_NUMBER)
         self.assertEqual(Var(str).dbtype.tns_type, TNS_TYPE_VARCHAR)
 
     def test_var_type_constant(self):
-        from seerdb.datatypes import NUMBER, STRING, Var
-        from seerdb.tns_consts import TNS_TYPE_NUMBER, TNS_TYPE_VARCHAR
+        from seerdb.common.datatypes import NUMBER, STRING, Var
+        from seerdb.common.tns_consts import TNS_TYPE_NUMBER, TNS_TYPE_VARCHAR
 
         self.assertEqual(Var(NUMBER).dbtype.tns_type, TNS_TYPE_NUMBER)
         self.assertEqual(Var(STRING).dbtype.tns_type, TNS_TYPE_VARCHAR)
 
     def test_var_size_default_and_override(self):
-        from seerdb.datatypes import Var
+        from seerdb.common.datatypes import Var
 
         self.assertEqual(Var(int).size, 22)
         self.assertEqual(Var(str).size, 32767)
         self.assertEqual(Var(str, 100).size, 100)
 
     def test_var_setget(self):
-        from seerdb.datatypes import Var
+        from seerdb.common.datatypes import Var
 
         v = Var(int)
         self.assertIsNone(v.getvalue())
@@ -656,19 +656,19 @@ class TestVar(unittest.TestCase):
 
     def test_var_oac_by_declared_type(self):
         # OAC type comes from the Var's type even when the value is NULL.
-        from seerdb.datatypes import Var
-        from seerdb.tns_consts import TNS_TYPE_NUMBER, TNS_TYPE_VARCHAR
+        from seerdb.common.datatypes import Var
+        from seerdb.common.tns_consts import TNS_TYPE_NUMBER, TNS_TYPE_VARCHAR
 
         self.assertEqual(encode_token_oac(Var(int))[0], TNS_TYPE_NUMBER)
         self.assertEqual(encode_token_oac(Var(str))[0], TNS_TYPE_VARCHAR)
 
     def test_var_rxd_null_when_unseeded(self):
-        from seerdb.datatypes import Var
+        from seerdb.common.datatypes import Var
 
         self.assertEqual(encode_token_rxd(Var(int)), bytes([0]))
 
     def test_var_rxd_seeded_value(self):
-        from seerdb.datatypes import Var
+        from seerdb.common.datatypes import Var
 
         v = Var(int)
         v.setvalue(0, 5)
@@ -784,7 +784,7 @@ class TestBindDispatch(unittest.TestCase):
             self.assertEqual(encode_token_oac(V)[0], TNS_TYPE_BDOUBLE)
 
     def test_finite_plain_float_stays_number(self):
-        from seerdb.tns_consts import TNS_TYPE_NUMBER
+        from seerdb.common.tns_consts import TNS_TYPE_NUMBER
 
         self.assertEqual(encode_token_oac(1.5)[0], TNS_TYPE_NUMBER)
 
@@ -796,7 +796,7 @@ class TestCharsetAwareDecode(unittest.TestCase):
     national (csfrm 2) data as AL16UTF16."""
 
     def test_csfrm1_decodes_as_utf8_not_db_charset(self):
-        from seerdb.tns_consts import ISO_LATIN_1_CHARSET, TNS_TYPE_VARCHAR
+        from seerdb.common.tns_consts import ISO_LATIN_1_CHARSET, TNS_TYPE_VARCHAR
 
         # A 9i column on a WE8ISO8859P1 (id 31) DB reports charset 31, but the
         # server sends the value in the AL32UTF8 session charset. 'é' = c3 a9
@@ -809,14 +809,14 @@ class TestCharsetAwareDecode(unittest.TestCase):
         self.assertEqual(decode_value(Col, b'caf\xc3\xa9'), 'café')
 
     def test_csfrm2_decodes_as_al16utf16(self):
-        from seerdb.tns_consts import AL16UTF16_CHARSET, TNS_TYPE_VARCHAR
+        from seerdb.common.tns_consts import AL16UTF16_CHARSET, TNS_TYPE_VARCHAR
 
         # National (csfrm 2) data arrives as UTF-16BE. 'AÄ' = 0041 00c4.
         Col = {'data_type': TNS_TYPE_VARCHAR, 'charset': AL16UTF16_CHARSET, 'csfrm': 2}
         self.assertEqual(decode_value(Col, b'\x00A\x00\xc4'), 'AÄ')
 
     def test_missing_csfrm_falls_back_to_column_charset(self):
-        from seerdb.tns_consts import ISO_LATIN_1_CHARSET, TNS_TYPE_VARCHAR
+        from seerdb.common.tns_consts import ISO_LATIN_1_CHARSET, TNS_TYPE_VARCHAR
 
         # Decode paths that don't record csfrm keep the old column-charset
         # behaviour (no KeyError, no surprise re-interpretation).

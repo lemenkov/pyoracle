@@ -10,8 +10,8 @@ engineered from python-oracledb on 21c (docs/PROTOCOL.md §14); no server needed
 
 import unittest
 
-from seerdb.tns import encode_dictionary_lobops
-from seerdb.tns_consts import (
+from seerdb.common.tns import encode_dictionary_lobops
+from seerdb.common.tns_consts import (
     TNS_LOB_OP_FILE_CLOSE,
     TNS_LOB_OP_FILE_OPEN,
     TNS_LOB_OP_READ,

@@ -6,8 +6,7 @@
 
 import unittest
 
-from seerdb.exceptions import NotSupportedError
-from seerdb.soda import (
+from seerdb.client.soda import (
     SodaDocument,
     _check_soda_supported,
     _doc_to_bind,
@@ -16,6 +15,7 @@ from seerdb.soda import (
     _norm_filter,
     _norm_metadata,
 )
+from seerdb.common.exceptions import NotSupportedError
 
 
 class _FakeConn:

@@ -6,11 +6,19 @@ apilevel = '2.0'
 threadsafety = 1  # threads may share the module, not connections
 paramstyle = 'named'  # bind variables not yet wired through Cursor
 
-from seerdb.aconnection import AsyncOracleConnect
-from seerdb.apool import AsyncPool
-from seerdb.aq import DeqOptions, EnqOptions, MessageProperties, Queue
-from seerdb.connection import OracleConnect, Xid
-from seerdb.datatypes import (
+from seerdb.client.aconnection import AsyncOracleConnect
+from seerdb.client.apool import AsyncPool
+from seerdb.client.aq import DeqOptions, EnqOptions, MessageProperties, Queue
+from seerdb.client.connection import OracleConnect, Xid
+from seerdb.client.pipeline import (
+    Pipeline,
+    PipelineOp,
+    PipelineOpResult,
+    PipelineOpType,
+    create_pipeline,
+)
+from seerdb.client.pool import Pool
+from seerdb.common.datatypes import (
     CURSOR,
     DB_TYPE_BINARY_DOUBLE,
     DB_TYPE_BINARY_FLOAT,
@@ -33,8 +41,8 @@ from seerdb.datatypes import (
     IntervalYM,
     Var,
 )
-from seerdb.dbobject import DbObject, DbObjectType, DbRef
-from seerdb.exceptions import (
+from seerdb.common.dbobject import DbObject, DbObjectType, DbRef
+from seerdb.common.exceptions import (
     DatabaseError,
     DataError,
     Error,
@@ -46,15 +54,7 @@ from seerdb.exceptions import (
     ProgrammingError,
     Warning,
 )
-from seerdb.pipeline import (
-    Pipeline,
-    PipelineOp,
-    PipelineOpResult,
-    PipelineOpType,
-    create_pipeline,
-)
-from seerdb.pool import Pool
-from seerdb.tns_consts import (
+from seerdb.common.tns_consts import (
     PURITY_DEFAULT,
     PURITY_NEW,
     PURITY_SELF,
@@ -65,7 +65,7 @@ from seerdb.tns_consts import (
     TPC_END_NORMAL,
     TPC_END_SUSPEND,
 )
-from seerdb.vector import SparseVector
+from seerdb.common.vector import SparseVector
 
 
 def connect(*args, **kwargs) -> OracleConnect:
