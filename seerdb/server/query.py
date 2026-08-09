@@ -174,3 +174,23 @@ def encode_rows(
             raise InterfaceError('row width does not match the column count')
         body += bytes([TTI_RXD]) + b''.join(_encode_value(v) for v in row)
     return header + body
+
+
+# The end-of-fetch OER (ORA-01403 "no data found"), captured verbatim from a real
+# 11g response. It terminates a fetch that has returned all of its rows; the
+# client reads the 1403 status as "cursor drained" rather than an error.
+_END_OF_FETCH = (
+    bytes.fromhex(
+        '0401010104010102057b00000101010e03000000000000000000000000070001010000000019'
+    )
+    + b'ORA-01403: no data found\n'
+)
+
+
+def encode_query_response(columns: list[ColumnMeta], rows: list[tuple]) -> bytes:
+    """Assemble a full SELECT response: describe + rows + end-of-fetch (§6).
+
+    The TTC payload the Mirror sends in reply to an OALL8 execute for a query
+    that returns ``rows`` over ``columns``.
+    """
+    return encode_describe(columns) + encode_rows(rows, columns) + _END_OF_FETCH

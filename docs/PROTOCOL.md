@@ -874,6 +874,27 @@ the OAC block.
 
 ## 6. Response Processing
 
+### 6.0 A SELECT response, server-side (the Mirror)
+
+For completeness, the whole shape a server sends in reply to an `OALL8`
+execute of a query (`seerdb/server/query.py` builds it — the inverse of the
+decoders below):
+
+```
+TTI_DCB  describe (§6-describe): cursor-uuid preamble + column metadata
+TTI_RXH  row header (§6.1)
+TTI_RXD  one per row (§6.2): each column value a DALC
+TTI_OER  status (§6.5): ORA-01403 "no data found" ends the fetch
+```
+
+The describe rides **inline** in the first execute's response (no separate
+describe round-trip). The client reads rows until the terminal OER; a `1403`
+status means "cursor drained" (all rows delivered), *not* an error — so a
+finite result set with every row already sent terminates on `ORA-01403`, and
+the client hides that sentinel from the caller. Only the describe's column
+type/length/charset/name and the row DALC values carry meaning; the many
+skipped scalar fields are emitted as well-formed zeros.
+
 ### 6.1 Row Header (TTI_RXH)
 
 Precedes row data in SELECT results. All numeric fields use Oracle's

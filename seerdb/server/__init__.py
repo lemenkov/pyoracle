@@ -36,12 +36,14 @@ from seerdb.server.query import (
     ColumnMeta,
     ExecRequest,
     encode_describe,
+    encode_query_response,
     encode_rows,
     parse_exec,
 )
-from seerdb.server.session import Credentials, handle_login
+from seerdb.server.session import Backend, Credentials, handle_login, serve_session
 
 __all__ = [
+    'Backend',
     'ColumnMeta',
     'ConnectRequest',
     'Credentials',
@@ -52,9 +54,11 @@ __all__ = [
     'encode_describe',
     'encode_dty_reply',
     'encode_pro_reply',
+    'encode_query_response',
     'encode_rows',
     'handle_login',
     'parse_connect',
     'parse_exec',
     'serve',
+    'serve_session',
 ]
