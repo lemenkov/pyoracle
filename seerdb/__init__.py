@@ -66,6 +66,7 @@ from seerdb.common.tns_consts import (
     TPC_END_SUSPEND,
 )
 from seerdb.common.vector import SparseVector
+from seerdb.server import Server, serve
 
 
 def connect(*args, **kwargs) -> OracleConnect:
@@ -122,6 +123,8 @@ __all__ = [
     'paramstyle',
     'connect',
     'connect_async',
+    'serve',
+    'Server',
     'create_pool',
     'create_pool_async',
     'OracleConnect',

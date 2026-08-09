@@ -38,7 +38,7 @@ from seerdb.server.handshake import (
     encode_pro_reply,
     parse_connect,
 )
-from seerdb.server.listener import Listener, serve
+from seerdb.server.listener import Listener
 from seerdb.server.query import (
     ColumnMeta,
     ExecRequest,
@@ -49,11 +49,13 @@ from seerdb.server.query import (
     encode_status,
     parse_exec,
 )
+from seerdb.server.service import BackendFactory, Server, serve
 from seerdb.server.session import Credentials, handle_login, serve_session
 
 __all__ = [
     'Backend',
     'BackendError',
+    'BackendFactory',
     'Capability',
     'ColumnMeta',
     'ConnectRequest',
@@ -62,6 +64,7 @@ __all__ = [
     'Listener',
     'PacketStream',
     'Result',
+    'Server',
     'UnsupportedFeature',
     'encode_accept',
     'encode_describe',

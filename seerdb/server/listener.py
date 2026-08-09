@@ -124,7 +124,7 @@ class Listener:
             self._sock = None
 
 
-def serve(
+def serve_observer(
     host: str = '127.0.0.1',
     port: int = 1521,
     *,
