@@ -24,15 +24,11 @@ Then point any thin-dialect Oracle client at ``127.0.0.1:PORT`` as
 from __future__ import annotations
 
 import logging
-import socket
 import sys
-import threading
 
 from sqlite_backend import SqliteBackend
 
-from seerdb.server import PacketStream, serve_session
-
-_CREDENTIALS = {'PYO': 'pyo123'}
+import seerdb
 
 
 def main() -> None:
@@ -41,32 +37,14 @@ def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format='%(asctime)s %(name)s %(levelname)s %(message)s'
     )
-    log = logging.getLogger('mirror')
-
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(('127.0.0.1', port))
-    server.listen(5)
-    log.info('Mirror over SQLite %r listening on 127.0.0.1:%d', database, port)
-
-    def handle(client: socket.socket) -> None:
-        # One SQLite session per client connection (thread-affine).
-        try:
-            serve_session(PacketStream(client), _CREDENTIALS, SqliteBackend(database))
-        except Exception:
-            log.exception('session error')
-        finally:
-            client.close()
-
-    try:
-        while True:
-            client, addr = server.accept()
-            log.info('connection from %s:%d', *addr)
-            threading.Thread(target=handle, args=(client,), daemon=True).start()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.close()
+    # A fresh SQLite session per client connection (sqlite3 objects are
+    # thread-affine, so the backend must be built inside its own session).
+    seerdb.serve(
+        '127.0.0.1',
+        port,
+        credentials={'PYO': 'pyo123'},
+        backend_factory=lambda: SqliteBackend(database),
+    )
 
 
 if __name__ == '__main__':

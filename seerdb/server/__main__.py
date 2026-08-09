@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import logging
 
-from seerdb.server.listener import serve
+from seerdb.server.listener import serve_observer
 
 
 def main() -> None:
@@ -31,7 +31,7 @@ def main() -> None:
         format='%(asctime)s %(name)s %(levelname)s %(message)s',
     )
     try:
-        serve(args.host, args.port)
+        serve_observer(args.host, args.port)
     except KeyboardInterrupt:
         pass
 

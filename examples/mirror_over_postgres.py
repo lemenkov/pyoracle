@@ -23,15 +23,12 @@ from __future__ import annotations
 
 import logging
 import os
-import socket
 import sys
-import threading
 
 from postgres_backend import PostgresBackend
 
-from seerdb.server import PacketStream, serve_session
+import seerdb
 
-_CREDENTIALS = {'PYO': 'pyo123'}
 _DEFAULT_CONNINFO = 'host=127.0.0.1 port=5432 user=pyo password=pyo123 dbname=mirror'
 
 
@@ -45,32 +42,13 @@ def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format='%(asctime)s %(name)s %(levelname)s %(message)s'
     )
-    log = logging.getLogger('mirror')
-
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(('127.0.0.1', port))
-    server.listen(5)
-    log.info('Mirror over PostgreSQL listening on 127.0.0.1:%d', port)
-
-    def handle(client: socket.socket) -> None:
-        # One PostgreSQL session per client connection.
-        try:
-            serve_session(PacketStream(client), _CREDENTIALS, PostgresBackend(conninfo))
-        except Exception:
-            log.exception('session error')
-        finally:
-            client.close()
-
-    try:
-        while True:
-            client, addr = server.accept()
-            log.info('connection from %s:%d', *addr)
-            threading.Thread(target=handle, args=(client,), daemon=True).start()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.close()
+    # One PostgreSQL session per client connection.
+    seerdb.serve(
+        '127.0.0.1',
+        port,
+        credentials={'PYO': 'pyo123'},
+        backend_factory=lambda: PostgresBackend(conninfo),
+    )
 
 
 if __name__ == '__main__':
