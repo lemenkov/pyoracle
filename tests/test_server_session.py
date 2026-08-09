@@ -15,9 +15,21 @@ import threading
 
 import seerdb
 from seerdb.server.framing import PacketStream
-from seerdb.server.session import handle_login
+from seerdb.server.query import ColumnMeta
+from seerdb.server.session import handle_login, serve_session
+from seerdb.tns_consts import TNS_TYPE_VARCHAR
 
 _CREDS = {'PYO': 'pyo123'}
+
+
+def _dual_backend(sql: str) -> tuple[list, list]:
+    # A trivial backend: answer any `... dual` with DUAL's single 'X' row.
+    if 'dual' in sql.lower():
+        col = ColumnMeta(
+            name=b'DUMMY', data_type=TNS_TYPE_VARCHAR, data_length=1, max_size=1
+        )
+        return [col], [('X',)]
+    return [], []
 
 
 def _run_mirror(listen: socket.socket, result: dict) -> None:
@@ -68,3 +80,52 @@ def test_live_seerdb_login() -> None:
 
     assert result.get('error') is None, result.get('error')
     assert result.get('user') == 'PYO'
+
+
+def _run_mirror_session(listen: socket.socket, result: dict) -> None:
+    conn, _ = listen.accept()
+    try:
+        result['user'] = serve_session(PacketStream(conn), _CREDS, _dual_backend)
+    except Exception as exc:  # noqa: BLE001 - surfaced to the test thread
+        result['error'] = exc
+    finally:
+        conn.close()
+
+
+def test_live_seerdb_dual_query() -> None:
+    # The 2.1.0 capstone: a real client runs SELECT * FROM DUAL against the
+    # Mirror (no Oracle, no Postgres) and gets the DUMMY 'X' row back.
+    listen = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listen.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listen.bind(('127.0.0.1', 0))
+    listen.listen(1)
+    port = listen.getsockname()[1]
+
+    result: dict = {}
+    server = threading.Thread(
+        target=_run_mirror_session, args=(listen, result), daemon=True
+    )
+    server.start()
+
+    conn = seerdb.connect(
+        host='127.0.0.1',
+        port=port,
+        user='PYO',
+        password='pyo123',
+        service_name='XE',
+        timeout=5000,
+    )
+    try:
+        cursor = conn.cursor()
+        cursor.execute('select * from dual')
+        row = cursor.fetchone()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert row == ('X',)
