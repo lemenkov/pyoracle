@@ -907,6 +907,19 @@ does this; the example backends map each source column to the matching Oracle
 type (Postgres `date`/`timestamp`/`timestamptz` OIDs 1082/1114/1184; SQLite a
 column declared `DATE`/`TIMESTAMP` via `PARSE_DECLTYPES`).
 
+**Transaction control (the Mirror).** The client drives commit / rollback two
+ways, both of which the Mirror honours. In autocommit mode it sets the
+commit-on-success bit (`0x100`) in the OALL8 options word, and the Mirror
+commits the backend right after a successful execute. In explicit-transaction
+mode it sends a bare `TTI_COMMIT` (14) / `TTI_ROLLBACK` (15) function message and
+blocks for a reply; the Mirror runs `backend.commit()` / `rollback()` and answers
+with a success status (`encode_status(0)`) — a message the loop must handle, or
+the client's `commit()` hangs waiting. Backends therefore run transactionally
+(not autocommit) so a rollback truly discards. The example PostgreSQL backend
+wraps each statement in a `SAVEPOINT` so a failed statement rolls back only
+itself and the surrounding transaction survives — Oracle's statement-level error
+model, not PostgreSQL's abort-the-whole-transaction default.
+
 ### 6.1 Row Header (TTI_RXH)
 
 Precedes row data in SELECT results. All numeric fields use Oracle's

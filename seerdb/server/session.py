@@ -24,10 +24,12 @@ from seerdb.common.tns_consts import (
     TNS_CONNECT,
     TNS_DATA,
     TTI_ALL8,
+    TTI_COMMIT,
     TTI_FUN,
     TTI_LOGOFF,
     TTI_MSG_TYPE_PIGGYBACK,
     TTI_OCCA,
+    TTI_ROLLBACK,
 )
 from seerdb.server.auth import (
     derive_conn_key,
@@ -135,6 +137,10 @@ def serve_session(
             continue
         if body[1] == TTI_ALL8:
             _answer_query(stream, backend, parse_exec(body))
+        elif body[1] == TTI_COMMIT:
+            _answer_txn(stream, backend, commit=True)
+        elif body[1] == TTI_ROLLBACK:
+            _answer_txn(stream, backend, commit=False)
         elif body[1] == TTI_LOGOFF:
             return user
 
@@ -164,6 +170,11 @@ def _answer_query(stream: PacketStream, backend: Backend, request: ExecRequest) 
     # native exception is caught and reported rather than dropping the wire.
     try:
         result = backend.execute(request.sql, request.binds)
+        # Autocommit mode: the client set the commit-on-success option, so
+        # persist this statement before replying (an explicit-transaction client
+        # leaves the bit clear and drives commit/rollback itself).
+        if request.autocommit:
+            backend.commit()
     except BackendError as err:
         logger.info('query refused: %s', err.ora_message)
         response = encode_error(err.ora_code, err.ora_message)
@@ -178,4 +189,24 @@ def _answer_query(stream: PacketStream, backend: Backend, request: ExecRequest) 
             response = encode_query_response(result.columns, result.rows)
         else:
             response = encode_status(result.rowcount)
+    stream.write_packet(TNS_DATA, response)
+
+
+def _answer_txn(stream: PacketStream, backend: Backend, *, commit: bool) -> None:
+    # Explicit transaction control: the client's commit() / rollback() each send
+    # a bare function message and block for a reply. Drive the backend and answer
+    # with a success status; a backend failure is reported as an ORA error rather
+    # than dropped (same never-desync rule as the query path).
+    try:
+        if commit:
+            backend.commit()
+        else:
+            backend.rollback()
+    except BackendError as err:
+        response = encode_error(err.ora_code, err.ora_message)
+    except Exception as exc:
+        logger.warning('backend raised a non-ORA error: %s', exc)
+        response = encode_error(_INTERNAL_ERROR, f'ORA-00600: backend error: {exc}')
+    else:
+        response = encode_status(0)
     stream.write_packet(TNS_DATA, response)

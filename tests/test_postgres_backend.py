@@ -217,6 +217,84 @@ def test_fractional_number_bind_postgres() -> None:
     assert rows == [(Decimal('3.14159'),), (Decimal('2.5'),)]
 
 
+def _connect_no_autocommit(port: int):
+    return seerdb.connect(
+        host='127.0.0.1',
+        port=port,
+        user='PYO',
+        password='pyo123',
+        service_name='XE',
+        timeout=5000,
+        autocommit=False,
+    )
+
+
+def test_commit_and_rollback_postgres() -> None:
+    listen, server, result = _start_mirror()
+    conn = _connect_no_autocommit(listen.getsockname()[1])
+    try:
+        cur = conn.cursor()
+        cur.execute('drop table if exists t_txn')
+        conn.commit()
+        cur.execute('create table t_txn (n integer)')
+        conn.commit()
+        cur.execute('insert into t_txn values (1)')
+        cur.execute('insert into t_txn values (2)')
+        conn.rollback()
+        cur.execute('select n from t_txn')
+        after_rollback = cur.fetchall()
+        cur.execute('insert into t_txn values (3)')
+        conn.commit()
+        cur.execute('select n from t_txn order by n')
+        after_commit = cur.fetchall()
+        cur.execute('drop table t_txn')
+        conn.commit()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert after_rollback == []
+    assert after_commit == [(3,)]
+
+
+def test_statement_error_keeps_the_transaction() -> None:
+    # A failed statement rolls back only itself (via the per-statement SAVEPOINT):
+    # the connection stays usable and earlier uncommitted work survives — Oracle's
+    # statement-level model, not PostgreSQL's abort-the-whole-transaction default.
+    listen, server, result = _start_mirror()
+    conn = _connect_no_autocommit(listen.getsockname()[1])
+    try:
+        cur = conn.cursor()
+        cur.execute('drop table if exists t_iso')
+        conn.commit()
+        cur.execute('create table t_iso (n integer)')
+        conn.commit()
+        cur.execute('insert into t_iso values (10)')  # good, uncommitted
+        with pytest.raises(seerdb.DatabaseError):
+            cur.execute('insert into t_iso values (no_such_column)')  # PG error
+        cur.execute('insert into t_iso values (20)')  # connection still usable
+        conn.commit()
+        cur.execute('select n from t_iso order by n')
+        rows = cur.fetchall()
+        cur.execute('drop table t_iso')
+        conn.commit()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert rows == [(10,), (20,)]  # the pre-error row was not rolled back
+
+
 def test_bind_variables_postgres() -> None:
     listen, server, result = _start_mirror()
     conn = _connect(listen.getsockname()[1])
