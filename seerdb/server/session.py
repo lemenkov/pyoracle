@@ -19,12 +19,15 @@ import logging
 from collections.abc import Mapping
 
 from seerdb.common.exceptions import InterfaceError
+from seerdb.common.tns import decode_ub4
 from seerdb.common.tns_consts import (
     TNS_CONNECT,
     TNS_DATA,
     TTI_ALL8,
     TTI_FUN,
     TTI_LOGOFF,
+    TTI_MSG_TYPE_PIGGYBACK,
+    TTI_OCCA,
 )
 from seerdb.server.auth import (
     derive_conn_key,
@@ -125,12 +128,34 @@ def serve_session(
         if received is None:
             return user
         packet_type, body = received
-        if packet_type != TNS_DATA or len(body) < 2 or body[0] != TTI_FUN:
+        if packet_type != TNS_DATA:
+            continue
+        body = _skip_piggybacks(body)  # e.g. CLOSE_CURSORS after a drained fetch
+        if len(body) < 2 or body[0] != TTI_FUN:
             continue
         if body[1] == TTI_ALL8:
             _answer_query(stream, backend, parse_exec(body))
         elif body[1] == TTI_LOGOFF:
             return user
+
+
+def _skip_piggybacks(body: bytes) -> bytes:
+    # A call can be preceded by piggybacks — most commonly CLOSE_CURSORS, which
+    # a client sends to free the cursors it drained on the previous fetch. The
+    # Mirror keeps no cursor/session state, so it skips them and processes the
+    # trailing function. Only the shapes clients actually send are handled; an
+    # unknown piggyback is left in place (the caller then ignores the message
+    # rather than mis-parsing it).
+    while len(body) >= 3 and body[0] == TTI_MSG_TYPE_PIGGYBACK:
+        if body[1] != TTI_OCCA:  # CLOSE_CURSORS (105)
+            break
+        rest = body[3:]  # skip the piggyback token, function code, sequence
+        rest = rest[1:]  # pointer byte
+        count, rest = decode_ub4(rest)
+        for _ in range(count):
+            _, rest = decode_ub4(rest)  # each closed cursor id (ignored)
+        body = rest
+    return body
 
 
 def _answer_query(stream: PacketStream, backend: Backend, request: ExecRequest) -> None:
