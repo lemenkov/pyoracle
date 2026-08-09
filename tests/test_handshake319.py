@@ -8,8 +8,8 @@
 import struct
 import unittest
 
-from oracle.connection import _parse_accept_eor, _parse_accept_sdu
-from oracle.tns import (
+from seerdb.connection import _parse_accept_eor, _parse_accept_sdu
+from seerdb.tns import (
     CCAP_TTC4,
     assemble_packet,
     decode_packet,
@@ -17,7 +17,7 @@ from oracle.tns import (
     encode_dictionary_login,
     encode_packet,
 )
-from oracle.tns_consts import (
+from seerdb.tns_consts import (
     TNS_CCAP_END_OF_RESPONSE,
     TNS_DATA,
     TTI_END_OF_RESPONSE,

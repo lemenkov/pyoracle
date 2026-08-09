@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: 2019 Peter Lemenkov <lemenkov@gmail.com>
 # SPDX-License-Identifier: MIT
 
-"""Repeatable pyoracle performance benchmark (#166).
+"""Repeatable seerdb performance benchmark (#166).
 
 Opt-in (needs a live Oracle, like the integration suite): connection parameters
-come from the same PYORACLE_TEST_* environment variables.
+come from the same SEERDB_TEST_* environment variables.
 
-    PYORACLE_TEST_USER=pyo PYORACLE_TEST_PASSWORD=pyo123 \
-    PYORACLE_TEST_PORT=1521 PYORACLE_TEST_SERVICE=XE \
+    SEERDB_TEST_USER=pyo SEERDB_TEST_PASSWORD=pyo123 \
+    SEERDB_TEST_PORT=1521 SEERDB_TEST_SERVICE=XE \
         python3 tools/benchmark.py [scale]
 
 `scale` (default 50000) is the row/iteration count the throughput scenarios use;
@@ -19,7 +19,7 @@ because that is where the Arrow build benefits most from explicit typing (#190).
 Each scenario prints one stable line — name, count, seconds, rate — so runs are
 easy to diff across changes (guards perf regressions; quantifies future work
 such as the Arrow fetch fast path). Numbers are wall-clock against whatever
-server PYORACLE_TEST_* points at; compare like-for-like, not across tiers.
+server SEERDB_TEST_* points at; compare like-for-like, not across tiers.
 """
 
 import os
@@ -27,14 +27,14 @@ import sys
 import time
 
 sys.path.insert(0, ".")
-import oracle                                              # noqa: E402
+import seerdb                                              # noqa: E402
 
 _KW = dict(
-    host=os.environ.get("PYORACLE_TEST_HOST", "localhost"),
-    port=int(os.environ.get("PYORACLE_TEST_PORT", "1521")),
-    user=os.environ.get("PYORACLE_TEST_USER", "pyo"),
-    password=os.environ.get("PYORACLE_TEST_PASSWORD", ""),
-    service_name=os.environ.get("PYORACLE_TEST_SERVICE", "XE"),
+    host=os.environ.get("SEERDB_TEST_HOST", "localhost"),
+    port=int(os.environ.get("SEERDB_TEST_PORT", "1521")),
+    user=os.environ.get("SEERDB_TEST_USER", "pyo"),
+    password=os.environ.get("SEERDB_TEST_PASSWORD", ""),
+    service_name=os.environ.get("SEERDB_TEST_SERVICE", "XE"),
 )
 _TABLE = "PYORACLE_BENCH"
 
@@ -52,7 +52,7 @@ def bench_connect(scale):
     n = min(max(scale // 200, 20), 50)
     start = time.perf_counter()
     for _ in range(n):
-        oracle.connect(**_KW).close()
+        seerdb.connect(**_KW).close()
     elapsed = time.perf_counter() - start
     _report("connect+close", n, elapsed, "conns")
     print(f"{'':22} {'':>9}        {elapsed / n * 1000:8.2f}ms / connect")
@@ -62,7 +62,7 @@ def _setup(conn):
     cur = conn.cursor()
     try:
         cur.execute(f"DROP TABLE {_TABLE}")
-    except oracle.DatabaseError:
+    except seerdb.DatabaseError:
         # table may not exist on the first run; ignore
         pass
     # Include a NUMBER(p,s) column: it decodes to Decimal, the case where
@@ -79,7 +79,7 @@ def bench_insert(scale):
     # keeping the throughput scenarios clean) and stop gracefully if it trips.
     done = 0
     start = time.perf_counter()
-    with oracle.connect(**_KW) as conn:        # closing frees the leaked cursors
+    with seerdb.connect(**_KW) as conn:        # closing frees the leaked cursors
         conn.autocommit = False
         cur = conn.cursor()
         for i in range(min(scale, 2000)):
@@ -87,7 +87,7 @@ def bench_insert(scale):
                 cur.execute(f"INSERT INTO {_TABLE} VALUES (:1, :2, :3)",
                             [i, f"row{i}", i])
                 done += 1
-            except oracle.DatabaseError as exc:
+            except seerdb.DatabaseError as exc:
                 if getattr(exc, "code", None) != 1000:
                     raise
                 print(f"  (per-row insert stopped at {done}: ORA-01000, #191)")
@@ -130,10 +130,10 @@ def bench_fetch_df(conn, scale):
 
 def main():
     scale = int(sys.argv[1]) if len(sys.argv) > 1 else 50_000
-    print(f"pyoracle benchmark  service={_KW['service_name']} scale={scale}")
+    print(f"seerdb benchmark  service={_KW['service_name']} scale={scale}")
     print("-" * 64)
     bench_connect(scale)
-    with oracle.connect(**_KW) as conn:
+    with seerdb.connect(**_KW) as conn:
         conn.autocommit = False
         _setup(conn)
         bench_insert(scale)

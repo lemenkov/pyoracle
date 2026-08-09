@@ -10,13 +10,13 @@
 
 import unittest
 
-from oracle.cursor import (
+from seerdb.cursor import (
     _assign_return_binds,
     _returning_bind_positions,
 )
-from oracle.datatypes import Var
-from oracle.tns import decode_token_rxd, set_decode_return_binds
-from oracle.tns_consts import TTI_STA
+from seerdb.datatypes import Var
+from seerdb.tns import decode_token_rxd, set_decode_return_binds
+from seerdb.tns_consts import TTI_STA
 
 
 class TestReturningDetection(unittest.TestCase):

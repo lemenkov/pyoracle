@@ -10,13 +10,13 @@
 
 import unittest
 
-from oracle.connection import Xid, _normalize_sessionless_txn_id
-from oracle.tns import (
+from seerdb.connection import Xid, _normalize_sessionless_txn_id
+from seerdb.tns import (
     _ENCODE_FIELD_VERSION,
     decode_token_server_piggyback,
     encode_tpc_switch,
 )
-from oracle.tns_consts import (
+from seerdb.tns_consts import (
     TNS_FUNC_TPC_TXN_SWITCH,
     TNS_TPC_SESSIONLESS_FORMAT_ID,
     TNS_TPC_TXN_DETACH,
@@ -64,7 +64,7 @@ class TestEncode(unittest.TestCase):
     # Begin body for begin_sessionless_transaction("pyo-sl-001", timeout=120):
     # func 103, op START, magic format-id 0x4e5c3e, gtrid in the xid slot
     # padded to 128 bytes, flags NEW|SESSIONLESS = 0x11 ("01 11"), timeout 0x78.
-    # Verified live on 23ai: the server accepts pyoracle's minimal sb4 form of
+    # Verified live on 23ai: the server accepts seerdb's minimal sb4 form of
     # the format-id ("03 4e5c3e"); the oracledb reference pads it to four bytes.
     _BEGIN = (
         bytes.fromhex(
@@ -110,7 +110,7 @@ class TestEncode(unittest.TestCase):
 class TestSyncPiggybackDecode(unittest.TestCase):
     # Real SYNC server-side piggyback (opcode 5) from a 23ai commit that ended a
     # sessionless transaction: keyword 201 (transaction id) carrying the 2-byte
-    # sync state 0x83 0x01 (UNSET | version 1). pyoracle consumes it byte for
+    # sync state 0x83 0x01 (UNSET | version 1). seerdb consumes it byte for
     # byte and continues with the rest of the response.
     _SYNC = bytes.fromhex('170501011001011600010202830101c900090105022f65')
 

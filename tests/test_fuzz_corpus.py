@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2019 Peter Lemenkov <lemenkov@gmail.com>
 # SPDX-License-Identifier: MIT
 
-"""Replay the vendored SeerODBC fuzz corpora through pyoracle's decoders (#165).
+"""Replay the vendored SeerODBC fuzz corpora through seerdb's decoders (#165).
 
 The sibling SeerODBC project fuzzes the shared TNS codecs and image decoders,
 feeding each corpus blob to *every* decoder. We mirror that here:
@@ -25,10 +25,10 @@ import os
 import signal
 import unittest
 
-from oracle.exceptions import DatabaseError
-from oracle.oson import OsonError, decode_oson
-from oracle.tns import decode_dalc
-from oracle.types import (
+from seerdb.exceptions import DatabaseError
+from seerdb.oson import OsonError, decode_oson
+from seerdb.tns import decode_dalc
+from seerdb.types import (
     decode_binary_double,
     decode_binary_float,
     decode_date,
@@ -36,7 +36,7 @@ from oracle.types import (
     decode_interval_ym,
     decode_number,
 )
-from oracle.vector import VectorError, decode_vector
+from seerdb.vector import VectorError, decode_vector
 
 _HERE = os.path.dirname(__file__)
 _DECODERS_CORPUS = os.path.join(_HERE, 'fuzz_corpus_decoders.txt')
@@ -56,7 +56,7 @@ _DECODER_BATTERY = (
     decode_dalc,
 )
 # The image corpus targets the ADT/VECTOR image decoders; decode_vector is the
-# self-describing one pyoracle exposes (object/collection images need a type
+# self-describing one seerdb exposes (object/collection images need a type
 # descriptor, so they are not reachable from raw bytes alone).
 _IMAGE_BATTERY = (decode_vector,)
 

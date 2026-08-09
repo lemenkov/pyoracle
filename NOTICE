@@ -1,0 +1,12 @@
+SPDX-FileCopyrightText: © 2026 Peter Lemenkov
+SPDX-License-Identifier: CC0-1.0
+
+seerdb — a pure-Python, clean-room DB-API 2.0 driver that speaks Oracle
+Database's native TNS/TTC wire protocol.
+
+Oracle and Oracle Database are trademarks or registered trademarks of Oracle
+Corporation and/or its affiliates. This project is an independent, unaffiliated,
+clean-room implementation. It is not endorsed by, sponsored by, or affiliated
+with Oracle Corporation. Every reference to "Oracle" in this project is
+nominative — used solely to describe the database this software interoperates
+with — and no trademark ownership is claimed or implied.

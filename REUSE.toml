@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: CC0-1.0
 
 version = 1
-SPDX-PackageName = "pyoracle"
+SPDX-PackageName = "seerdb"
 SPDX-PackageSupplier = "Peter Lemenkov <lemenkov@gmail.com>"
-SPDX-PackageDownloadLocation = "https://github.com/lemenkov/pyoracle"
+SPDX-PackageDownloadLocation = "https://github.com/seerdb/seerdb"
 
 [[annotations]]
 path = ["README.md", "docs/PROTOCOL.md", "CONTRIBUTING.md", "ChangeLog"]
@@ -21,7 +21,7 @@ SPDX-License-Identifier = "CC0-1.0"
 [[annotations]]
 # PEP 561 marker; conventionally empty so it carries no inline SPDX tag. Trivial
 # (empty) file, so CC0-1.0 like the repo's other config.
-path = ["oracle/py.typed"]
+path = ["seerdb/py.typed"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Peter Lemenkov <lemenkov@gmail.com>"
 SPDX-License-Identifier = "CC0-1.0"

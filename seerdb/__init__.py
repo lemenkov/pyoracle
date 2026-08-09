@@ -6,11 +6,11 @@ apilevel = '2.0'
 threadsafety = 1  # threads may share the module, not connections
 paramstyle = 'named'  # bind variables not yet wired through Cursor
 
-from oracle.aconnection import AsyncOracleConnect
-from oracle.apool import AsyncPool
-from oracle.aq import DeqOptions, EnqOptions, MessageProperties, Queue
-from oracle.connection import OracleConnect, Xid
-from oracle.datatypes import (
+from seerdb.aconnection import AsyncOracleConnect
+from seerdb.apool import AsyncPool
+from seerdb.aq import DeqOptions, EnqOptions, MessageProperties, Queue
+from seerdb.connection import OracleConnect, Xid
+from seerdb.datatypes import (
     CURSOR,
     DB_TYPE_BINARY_DOUBLE,
     DB_TYPE_BINARY_FLOAT,
@@ -33,8 +33,8 @@ from oracle.datatypes import (
     IntervalYM,
     Var,
 )
-from oracle.dbobject import DbObject, DbObjectType, DbRef
-from oracle.exceptions import (
+from seerdb.dbobject import DbObject, DbObjectType, DbRef
+from seerdb.exceptions import (
     DatabaseError,
     DataError,
     Error,
@@ -46,15 +46,15 @@ from oracle.exceptions import (
     ProgrammingError,
     Warning,
 )
-from oracle.pipeline import (
+from seerdb.pipeline import (
     Pipeline,
     PipelineOp,
     PipelineOpResult,
     PipelineOpType,
     create_pipeline,
 )
-from oracle.pool import Pool
-from oracle.tns_consts import (
+from seerdb.pool import Pool
+from seerdb.tns_consts import (
     PURITY_DEFAULT,
     PURITY_NEW,
     PURITY_SELF,
@@ -65,7 +65,7 @@ from oracle.tns_consts import (
     TPC_END_NORMAL,
     TPC_END_SUSPEND,
 )
-from oracle.vector import SparseVector
+from seerdb.vector import SparseVector
 
 
 def connect(*args, **kwargs) -> OracleConnect:
@@ -87,7 +87,7 @@ async def create_pool_async(*args, **kwargs) -> AsyncPool:
     """Create an `AsyncPool` and pre-warm `min` connections.
 
     Same keyword arguments as `create_pool` (plus the regular
-    `oracle.connect()` kwargs forwarded to each pooled connection).
+    `seerdb.connect()` kwargs forwarded to each pooled connection).
     """
     Pool_ = AsyncPool(*args, **kwargs)
     await Pool_.prewarm()
@@ -97,7 +97,7 @@ async def create_pool_async(*args, **kwargs) -> AsyncPool:
 def create_pool(*args, **kwargs) -> Pool:
     """Create a `Pool` of authenticated connections.
 
-    All `oracle.connect()` keyword arguments are accepted and forwarded
+    All `seerdb.connect()` keyword arguments are accepted and forwarded
     to each pooled connection. Pool-specific knobs:
 
       - ``min`` / ``max`` (default 1 / 4): bounds on the pool size.

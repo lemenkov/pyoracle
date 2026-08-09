@@ -42,7 +42,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       # Install the package so runtime deps (pycryptodome, tzdata) are present
       # for every offline module. The DB-backed integration tests skip
-      # automatically without PYORACLE_TEST_USER.
+      # automatically without SEERDB_TEST_USER.
       - run: pip install .
       - run: >-
           python -m unittest -v
@@ -120,15 +120,15 @@ jobs:
       - run: pip install .
       - name: Run integration suite against ${{ matrix.db.name }}
         env:
-          PYORACLE_TEST_USER: pyo
-          PYORACLE_TEST_PASSWORD: pyo123
-          PYORACLE_TEST_HOST: localhost
-          PYORACLE_TEST_PORT: "1521"
-          PYORACLE_TEST_SERVICE: ${{ matrix.db.service }}
-          PYORACLE_TEST_FIELD_VERSION: ${{ matrix.db.field_version }}
+          SEERDB_TEST_USER: pyo
+          SEERDB_TEST_PASSWORD: pyo123
+          SEERDB_TEST_HOST: localhost
+          SEERDB_TEST_PORT: "1521"
+          SEERDB_TEST_SERVICE: ${{ matrix.db.service }}
+          SEERDB_TEST_FIELD_VERSION: ${{ matrix.db.field_version }}
           # Pace logins under XE's logon-storm throttle (ORA-01013), and retry a
           # whole test that still trips it.
-          PYORACLE_TEST_CONNECT_DELAY: "0.25"
-          PYORACLE_TEST_THROTTLE_RETRIES: "4"
-          PYORACLE_TEST_THROTTLE_DELAY: "1.0"
+          SEERDB_TEST_CONNECT_DELAY: "0.25"
+          SEERDB_TEST_THROTTLE_RETRIES: "4"
+          SEERDB_TEST_THROTTLE_DELAY: "1.0"
         run: python -m unittest -v tests.test_integration

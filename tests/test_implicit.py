@@ -11,8 +11,8 @@
 
 import unittest
 
-from oracle.cursor import _extract_implicit_results
-from oracle.tns import _DECODE_FIELD_VERSION, decode_packet
+from seerdb.cursor import _extract_implicit_results
+from seerdb.tns import _DECODE_FIELD_VERSION, decode_packet
 
 # A full token-27 (0x1b) response: num_results=1, the ID/NAME describe, a
 # cursor id, then the block's RPA + OER (ORA-0).

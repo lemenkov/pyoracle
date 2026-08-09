@@ -6,7 +6,7 @@
 wire protocol for a 0.5.0 feature against a modern server (12.1+).
 
 python-oracledb thin is a pure-Python reference client that speaks the same
-TNS/TTC protocol pyoracle implements, and (unlike against 11g) it connects
+TNS/TTC protocol seerdb implements, and (unlike against 11g) it connects
 happily to 12c+/23ai. Run one scenario at a time *through* tools/capture_proxy.py
 so the proxy log contains just that exchange, then reverse-engineer it.
 
@@ -43,7 +43,7 @@ def _table(cur, name, ddl):
 
 def scenario_lobwrite(conn):
     # Force a TTI_LOBOPS WRITE: build a temp CLOB and stream a >32KB payload
-    # into it, then bind the locator. This is the path pyoracle can't do on 11g
+    # into it, then bind the locator. This is the path seerdb can't do on 11g
     # (issue #14).
     cur = conn.cursor()
     _table(cur, "PYO_REF_LOB", "(id NUMBER, c CLOB)")

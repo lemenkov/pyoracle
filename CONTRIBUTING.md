@@ -1,13 +1,13 @@
-# Contributing to pyoracle
+# Contributing to seerdb
 
 Thank you for considering a contribution. Before opening a pull request,
-please read this document — pyoracle's posture toward the proprietary
+please read this document — seerdb's posture toward the proprietary
 protocol it implements imposes some requirements that other open-source
 projects don't have.
 
 ## Project posture: clean-room reverse-engineering
 
-pyoracle is an independent implementation of Oracle's TNS / TTC wire
+seerdb is an independent implementation of Oracle's TNS / TTC wire
 protocol. The project has no relationship to Oracle Corporation and no
 access to Oracle's proprietary protocol specifications. Every byte the
 driver sends or decodes was derived from public artifacts and / or from
@@ -28,7 +28,7 @@ work from:
   License 2.0). Reading the Cython implementation to understand a
   message layout is fine. Copying code wholesale is not — both
   licenses are permissive but require attribution, and direct copies
-  would muddy pyoracle's own license. Re-express what you learn in
+  would muddy seerdb's own license. Re-express what you learn in
   your own words / code.
 - **cx_Oracle 5.x and earlier** under its old BSD-style license, same
   rules as above.

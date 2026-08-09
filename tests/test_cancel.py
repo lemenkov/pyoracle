@@ -15,8 +15,8 @@
 import socket
 import unittest
 
-from oracle.connection import OracleConnect
-from oracle.tns_consts import TNS_MARKER, TNS_MARKER_TYPE_INTERRUPT
+from seerdb.connection import OracleConnect
+from seerdb.tns_consts import TNS_MARKER, TNS_MARKER_TYPE_INTERRUPT
 
 
 class _FakeSock:

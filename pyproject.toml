@@ -6,8 +6,8 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pyoracle"
-version = "1.10.3"
+name = "seerdb"
+version = "2.0.0"
 description = "Python module to interact with a proprietary database"
 readme = "README.md"
 license = "MIT"
@@ -29,18 +29,18 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/lemenkov/pyoracle"
+Homepage = "https://github.com/seerdb/seerdb"
 
 [tool.setuptools.packages.find]
-include = ["oracle*"]
+include = ["seerdb*"]
 
 [tool.setuptools.package-data]
-# PEP 561 marker so type checkers (mypy, pyright) treat pyoracle as typed.
-oracle = ["py.typed"]
+# PEP 561 marker so type checkers (mypy, pyright) treat seerdb as typed.
+seerdb = ["py.typed"]
 
 [tool.mypy]
 python_version = "3.10"
-files = ["oracle"]
+files = ["seerdb"]
 # Runtime deps (pycryptodome, pyarrow) ship no stubs; treat them as Any.
 ignore_missing_imports = true
 

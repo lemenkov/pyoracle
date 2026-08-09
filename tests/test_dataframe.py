@@ -10,8 +10,8 @@ from decimal import Decimal
 
 import pyarrow as pa
 
-from oracle.dataframe import _explicit_type, build_table
-from oracle.tns_consts import (
+from seerdb.dataframe import _explicit_type, build_table
+from seerdb.tns_consts import (
     TNS_TYPE_BFLOAT,
     TNS_TYPE_DATE,
     TNS_TYPE_NUMBER,

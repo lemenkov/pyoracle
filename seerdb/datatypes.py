@@ -9,7 +9,7 @@
 import datetime
 from decimal import Decimal
 
-from oracle.tns_consts import (
+from seerdb.tns_consts import (
     TNS_TYPE_BDOUBLE,
     TNS_TYPE_BFLOAT,
     TNS_TYPE_CHAR,
@@ -75,7 +75,7 @@ class _DbType:
 DB_TYPE_NUMBER = NUMBER = _DbType('DB_TYPE_NUMBER', TNS_TYPE_NUMBER, 22)
 DB_TYPE_VARCHAR = STRING = _DbType('DB_TYPE_VARCHAR', TNS_TYPE_VARCHAR, 32767)
 # National-charset string types (#174): csfrm 2 → AL16UTF16. Bind a str through
-# cursor.var(oracle.DB_TYPE_NVARCHAR) / DB_TYPE_NCHAR to target an NVARCHAR2 /
+# cursor.var(seerdb.DB_TYPE_NVARCHAR) / DB_TYPE_NCHAR to target an NVARCHAR2 /
 # NCHAR column. Needed on 9i (a non-Unicode DB charset can't store all of
 # Unicode, but the national charset can); harmless on 10g+.
 DB_TYPE_NVARCHAR = _DbType('DB_TYPE_NVARCHAR', TNS_TYPE_VARCHAR, 32767, csfrm=2)
@@ -115,7 +115,7 @@ class Var:
     """A bind container that can receive an OUT / IN OUT value.
 
     Create via `cursor.var(typ, size=None)`, where `typ` is a Python type
-    (`int`, `str`, `bytes`, `datetime`, ...) or an `oracle.*` type constant.
+    (`int`, `str`, `bytes`, `datetime`, ...) or an `seerdb.*` type constant.
     Pass it in a `callproc` / `execute` parameter list for an OUT or IN OUT
     argument; seed an IN OUT value with `setvalue(0, value)` and read the
     result afterwards with `getvalue()`.
@@ -212,7 +212,7 @@ class IntervalYM:
 
 
 # IntervalYM is defined above, so register its Python-type mapping now that the
-# class exists (lets `cursor.var(oracle.IntervalYM)` resolve).
+# class exists (lets `cursor.var(seerdb.IntervalYM)` resolve).
 _PYTYPE_TO_DBTYPE[IntervalYM] = DB_TYPE_INTERVAL_YM
 
 
@@ -223,7 +223,7 @@ class JSON:
     as JSON too (a bare list otherwise means a VECTOR, and bare scalars bind as
     their native SQL types). The value must be JSON-serialisable.
 
-    pyoracle serialises the value to JSON text and binds it as a string; the
+    seerdb serialises the value to JSON text and binds it as a string; the
     server casts it to the column's JSON type (see docs/PROTOCOL.md §17.2).
     """
 

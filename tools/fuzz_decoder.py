@@ -4,7 +4,7 @@
 
 """Extended ad-hoc decoder fuzzer (#165).
 
-Mutation-fuzzes oracle.tns.decode_packet from the same seed corpus the bounded
+Mutation-fuzzes seerdb.tns.decode_packet from the same seed corpus the bounded
 CI test (tests/test_fuzz.py) uses, but for as many iterations as you ask — for
 hunting a latent hang / out-of-bounds read the short CI run would not reach.
 
@@ -21,7 +21,7 @@ import sys
 
 sys.path.insert(0, ".")
 from tests.test_fuzz import _SEEDS, _ACC, _mutate          # noqa: E402
-from oracle.tns import decode_packet                       # noqa: E402
+from seerdb.tns import decode_packet                       # noqa: E402
 
 
 class _Timeout(Exception):

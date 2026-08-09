@@ -8,9 +8,9 @@ client-side logic without a live server."""
 import types
 import unittest
 
-from oracle.connection import OracleConnect
-from oracle.cursor import Cursor
-from oracle.exceptions import InterfaceError, ProgrammingError
+from seerdb.connection import OracleConnect
+from seerdb.cursor import Cursor
+from seerdb.exceptions import InterfaceError, ProgrammingError
 
 
 def _stub_cursor(rows, description=None):
@@ -196,7 +196,7 @@ if __name__ == '__main__':
 
 class TestScrollableCursor(unittest.TestCase):
     # Scrollable cursor API parity (#161): the cursor accepts and exposes the
-    # `scrollable` flag. pyoracle buffers the result set so scroll() works
+    # `scrollable` flag. seerdb buffers the result set so scroll() works
     # regardless; the flag is for oracledb compatibility.
     def test_default_not_scrollable(self):
         cur = Cursor(types.SimpleNamespace(sock=object()))

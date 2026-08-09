@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 # Tiny TLS-to-TCP forwarding proxy used by the integration tests to give
-# pyoracle a TLS endpoint to talk to without reconfiguring the Oracle
+# seerdb a TLS endpoint to talk to without reconfiguring the Oracle
 # listener. Accepts TLS on a local port, decrypts, and pipes the cleartext
 # both directions to a plaintext Oracle listener.
 #

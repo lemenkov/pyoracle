@@ -24,7 +24,7 @@ TNS_MARKER_TYPE_INTERRUPT = 3
 # out-of-band break (attention). When set we prefer OOB over the in-band
 # marker for cancel()/call_timeout (#144).
 TNS_GSO_CAN_RECV_ATTENTION = 0x0400
-# Protocol-version-319 / large-SDU handshake (#155). pyoracle advertises version
+# Protocol-version-319 / large-SDU handshake (#155). seerdb advertises version
 # 319 in the CONNECT; a server whose negotiated version is >= 315 switches to the
 # 4-byte ("large") packet length, and a >= 318 server's ACCEPT carries an
 # extended flags2 word whose HAS_END_OF_RESPONSE bit lets the client opt into the
@@ -253,9 +253,9 @@ TTI_PING = 147
 
 # TNS_CCAP_FIELD_VERSION_* values (the byte written at CCAP_FIELD_VERSION). The
 # negotiated TTC field version gates the auth verifier and the version-specific
-# wire formats. Kept here in the leaf constants module (rather than oracle.tns)
-# so oracle.cursor can import the 12.1 threshold without forming an import cycle
-# — oracle.tns imports oracle.cursor.
+# wire formats. Kept here in the leaf constants module (rather than seerdb.tns)
+# so seerdb.cursor can import the 12.1 threshold without forming an import cycle
+# — seerdb.tns imports seerdb.cursor.
 FIELD_VERSION_9_2 = 2  # Oracle 9i (pre-10g O3LOGON thin auth, #90)
 FIELD_VERSION_10_2 = 4  # Oracle 10g — oldest tier using the O5LOGON path
 FIELD_VERSION_11_2 = 6
@@ -272,9 +272,9 @@ FIELD_VERSION_23_4 = 24  # 23ai max; reached only via FAST_AUTH (#89)
 # Oracle 23ai "fast auth" (#89): a single TNS DATA packet (message type 0x22)
 # bundling the protocol, datatypes, and OSESSKEY messages in one round trip. It is
 # the only way to advertise CCAP_FIELD_VERSION >= 18 — the legacy three-message
-# handshake is rejected with ORA-03146 at fv >= 18. pyoracle gates on the server's
+# handshake is rejected with ORA-03146 at fv >= 18. seerdb gates on the server's
 # own field version (learned from its PRO reply, 23ai advertises 27), not an ACCEPT
-# flag: at the protocol version pyoracle sends (313) the ACCEPT carries no flag.
+# flag: at the protocol version seerdb sends (313) the ACCEPT carries no flag.
 TNS_MSG_TYPE_FAST_AUTH = 0x22
 TNS_SERVER_CONVERTS_CHARS = 0x01  # fast-auth envelope flag byte
 
@@ -291,7 +291,7 @@ TNS_EXEC_OPTION_BATCH_ERRORS = 0x80000
 # Value the 12c+ OALL8 al8i4 array carries at element index 9 when array-DML
 # row counts are requested (oracledb arraydmlrowcounts). oracledb always sends
 # 0x8000 there; with arraydmlrowcounts it sets 0xC000 (the extra 0x4000 bit).
-# pyoracle's baseline is 0, so the whole 0xC000 is written when requested — the
+# seerdb's baseline is 0, so the whole 0xC000 is written when requested — the
 # server's kpoal8Check rejects the al8pidmlrc pointer (below) as malformed
 # (ORA-03137) without it. Reverse-engineered from an oracledb-thin capture (#18).
 TNS_AL8I4_ARRAY_DML_ROWCOUNTS = 0xC000

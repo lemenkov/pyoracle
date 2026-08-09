@@ -7,16 +7,16 @@
 
 import unittest
 
-from oracle.cursor import Cursor, _assign_out_binds
-from oracle.datatypes import Var
-from oracle.tns import (
+from seerdb.cursor import Cursor, _assign_out_binds
+from seerdb.datatypes import Var
+from seerdb.tns import (
     _ENCODE_FIELD_VERSION,
     decode_ub4,
     encode_sb4,
     encode_token_oac,
     encode_token_rxd,
 )
-from oracle.tns_consts import TNS_TYPE_NUMBER
+from seerdb.tns_consts import TNS_TYPE_NUMBER
 
 
 def _arrayvar(typ, value_or_n):

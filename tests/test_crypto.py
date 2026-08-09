@@ -4,11 +4,11 @@
 import unittest
 from unittest.mock import patch
 
-from oracle.crypto import o5logon0
+from seerdb.crypto import o5logon0
 
 
 class TestCryptoLogonMethods(unittest.TestCase):
-    @patch('oracle.crypto.token_bytes')
+    @patch('seerdb.crypto.token_bytes')
     def test_o5logon0_192_bit(self, mock_token_bytes):
         mock_token_bytes.return_value = bytes(
             [
@@ -275,7 +275,7 @@ class TestCryptoLogonMethods(unittest.TestCase):
 
 from binascii import unhexlify
 
-from oracle.crypto import validate
+from seerdb.crypto import validate
 
 
 class TestCryptoValidateMethods(unittest.TestCase):
@@ -384,7 +384,7 @@ class TestCryptoValidateMethods(unittest.TestCase):
         self.assertFalse(validate(Resp, Key))
 
 
-from oracle.crypto import des_verifier, o3logon
+from seerdb.crypto import des_verifier, o3logon
 
 
 class TestO3logon(unittest.TestCase):
@@ -404,7 +404,7 @@ class TestO3logon(unittest.TestCase):
         self.assertEqual(AuthPass[:8].hex().upper(), 'F18CC9AF1CE5A7E8')
 
 
-from oracle.crypto import bin_xor, cat_key, conn_key, norm, pad1, pad2
+from seerdb.crypto import bin_xor, cat_key, conn_key, norm, pad1, pad2
 
 
 class TestCryptoPrivateMethods(unittest.TestCase):
@@ -659,7 +659,7 @@ class TestCryptoPrivateMethods(unittest.TestCase):
         )
 
 
-from oracle.crypto import o5logon
+from seerdb.crypto import o5logon
 
 
 class TestO3Logon10g(unittest.TestCase):
@@ -678,7 +678,7 @@ class TestO3Logon10g(unittest.TestCase):
         # 8-byte verifier zero-padded to 16) and not raise "unsupported key
         # scheme". token_bytes is mocked so the result is deterministic.
         Sess = bytes(32)
-        with patch('oracle.crypto.token_bytes', return_value=bytes(32)):
+        with patch('seerdb.crypto.token_bytes', return_value=bytes(32)):
             AuthPass, AuthSess, SpeedyKey, SpeedyKeyInd, ConnKey = o5logon(
                 Sess, None, None, b'PYO', b'pyo123'
             )

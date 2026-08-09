@@ -1,7 +1,7 @@
 # Oracle TNS/TTC Protocol Description
 
 This document describes the Oracle Net Services protocol as used by
-this library. pyoracle communicates with Oracle Database over TCP/IP
+this library. seerdb communicates with Oracle Database over TCP/IP
 (or TLS) using the Transparent Network Substrate (TNS) transport
 layer and the Two-Task Common (TTC/TTI) presentation layer.
 
@@ -10,7 +10,7 @@ python-oracledb's open-source thin-mode implementation (UPL / Apache
 2.0), publicly-available reverse-engineering writeups, and packet
 captures of authorized Oracle servers. See `CONTRIBUTING.md` for the
 sourcing rules. Where the protocol differs between Oracle versions
-(notably 11g vs 12c+) the document calls it out per section; pyoracle
+(notably 11g vs 12c+) the document calls it out per section; seerdb
 is currently validated against Oracle XE 11g.
 
 ## 1. Transport Layer: TNS Packets
@@ -36,12 +36,12 @@ All communication is framed into TNS packets. Every packet begins with an 8- or 
 - **Header Checksum** (16 bits): Set to `0x0000`.
 
 > **Large-SDU header (#155).** When the negotiated protocol version is **≥ 315**
-> (a 21c/23ai-era server, reached because pyoracle advertises version 319 in the
+> (a 21c/23ai-era server, reached because seerdb advertises version 319 in the
 > CONNECT — see §2), the header changes: the **Packet Length becomes 32 bits**
 > (bytes 0–3), replacing the legacy 16-bit length + 16-bit packet-flags pair.
 > The Packet Type stays at byte 4, so the rest of the layout is unchanged. The
 > CONNECT and ACCEPT packets themselves stay in the legacy 16-bit form; only the
-> post-ACCEPT DATA stream on a ≥315 session uses the 4-byte length. pyoracle
+> post-ACCEPT DATA stream on a ≥315 session uses the 4-byte length. seerdb
 > flips `self._large_packets` from the ACCEPT's negotiated version and
 > `encode_packet` / `assemble_packet` take a `Large` flag. Older tiers (9i/10g/
 > 11g) negotiate down below 315 and keep the legacy 16-bit header.
@@ -49,7 +49,7 @@ All communication is framed into TNS packets. Every packet begins with an 8- or 
 > **End-of-response framing (#155 → #132).** A ≥318 server's ACCEPT carries an
 > extended `flags2` word (uint32 at accept-body offset 33); its
 > `0x02000000` bit means the server supports **end-of-response** delimiting. When
-> set, pyoracle advertises `CCAP_TTC4 |= 0x20` in the DTY, and the server then
+> set, seerdb advertises `CCAP_TTC4 |= 0x20` in the DTY, and the server then
 > ends **every** response with a `TTI_END_OF_RESPONSE` (29) marker. For an
 > ordinary single call this marker simply trails the existing STATUS/OER
 > terminal in the same packet (so it is consumed implicitly); it becomes load-
@@ -106,7 +106,7 @@ Messages larger than the Session Data Unit (SDU) are split across multiple TNS_D
   than that maximum is the final fragment.
 - The receiver reassembles by concatenating fragment bodies until it sees a
   short (sub-maximum) packet. `assemble_packet()` / `recv()` in
-  `oracle/connection.py` implement exactly this size test.
+  `seerdb/connection.py` implement exactly this size test.
 
 In principle the size test cannot distinguish a final fragment that happens to
 be *exactly* maximum-sized from a true continuation. In practice this has not
@@ -130,7 +130,7 @@ The receive-side handshake that keeps the stream in sync (#45):
   including the server's terminal reset — *without replying*, until the real
   DATA packet arrives. python-oracledb does **2 server markers : 1 client
   reset** per cancel; matching that ratio is the whole fix. Replying to *every*
-  marker (the old pyoracle behaviour) ping-pongs resets into a storm, and a
+  marker (the old seerdb behaviour) ping-pongs resets into a storm, and a
   stray client reset landing while the server streams a large LOB makes the
   client discard that content — the CLOB-comes-back-empty desync.
 - **Preserve the post-marker bytes.** A `break|reset|error` (or
@@ -140,11 +140,11 @@ The receive-side handshake that keeps the stream in sync (#45):
   the next operation reads it misframed. (Preserving *without* the one-reset
   rule above was a dead end — the still-storming bytes crash the packet parser;
   both halves are required.)
-- pyoracle implements both in `OracleConnect._next_data_packet` (and its async
+- seerdb implements both in `OracleConnect._next_data_packet` (and its async
   twin), with a `self._in_break` latch so at most one reset is sent per episode,
   cleared when a real DATA packet returns. `_handle_response`, `_read_lob_response`
   and the login loop all receive through it.
-- pyoracle never *initiates* a break (no client-side Ctrl-C/interrupt path), so
+- seerdb never *initiates* a break (no client-side Ctrl-C/interrupt path), so
   only the server-break case above arises.
 
 ## 2. Connection Phase
@@ -175,7 +175,7 @@ The client sends a TNS_CONNECT packet containing a fixed header and a connect de
 | 58     | 4    | Connect flags 1              | `0x00000000`      |
 | 62     | 4    | Connect flags 2              | `0x00000001` (OOB check) |
 
-pyoracle advertises **protocol version 319** (`#155`) — the version a 23ai
+seerdb advertises **protocol version 319** (`#155`) — the version a 23ai
 server needs to negotiate the end-of-response framing pipelining (`#132`) rides
 on. The 319 layout adds the 16-byte trailer (offsets 50–66: large SDU/TDU +
 connect flags) and moves the connect data to offset 74. The `300` lowest-
@@ -218,7 +218,7 @@ descriptor carrying the new address, e.g.
 echo the original `CONNECT_DATA` (whose `CID` holds the *client* host) after a
 NUL, so the parser scopes to the `ADDRESS` block for the reconnect target.
 
-pyoracle follows the redirect: it pulls `HOST`/`PORT` out of the `ADDRESS`,
+seerdb follows the redirect: it pulls `HOST`/`PORT` out of the `ADDRESS`,
 closes the socket, reconnects to that address, and re-sends `TNS_CONNECT` to
 restart the handshake there. Redirects are capped (5) so a looping listener
 fails fast rather than spinning. Sync and async (`§handle_login`).
@@ -329,7 +329,7 @@ TTI_PRO | server_version (UB1) | 0 |
   compile_caps (UB1 len + bytes) | runtime_caps (UB1 len + bytes)
 ```
 The server's field version is `compile_caps[7]` (`CCAP_FIELD_VERSION`, §4.2).
-pyoracle stores the negotiated minimum as `connection.field_version` and sends
+seerdb stores the negotiated minimum as `connection.field_version` and sends
 it back in its own DTY; against 11g both sides are `6` (11.2). `server_version`
 is the TTC protocol byte (`6` = 8.1+), distinct from the product release that
 arrives later in the auth result (`AUTH_VERSION_NO`).
@@ -347,7 +347,7 @@ msgtype=2 | charset_in (UB2 LE) | charset_out (UB2 LE) | flag (UB1) |
 ```
 
 - **charset_in / charset_out**: the client's database and national charset ids.
-  pyoracle advertises **AL32UTF8 (873)** for both — establishing an AL32UTF8
+  seerdb advertises **AL32UTF8 (873)** for both — establishing an AL32UTF8
   *session* charset, independent of the server's actual database charset. This
   must be 873 (real UTF-8), **not** Oracle's legacy "UTF8" (871) — 871 is
   CESU-8, which encodes supplementary-plane characters (emoji, rare CJK, U+10000
@@ -371,20 +371,20 @@ msgtype=2 | charset_in (UB2 LE) | charset_out (UB2 LE) | flag (UB1) |
   is a named feature slot (`TNS_CCAP_*` / `TNS_RCAP_*`). The most important is
   the **field version** at compile-cap index 7 (`TNS_CCAP_FIELD_VERSION`): it
   selects the auth-verifier scheme and the version-gated wire formats the rest
-  of the session uses. pyoracle advertises `16` (21.1) by default and the
+  of the session uses. seerdb advertises `16` (21.1) by default and the
   server negotiates it down to its own max (`min(client, server)`), so an 11g
-  server settles on `6` (11.2) and pyoracle then emits the 11g vectors/formats;
+  server settles on `6` (11.2) and seerdb then emits the 11g vectors/formats;
   pass `field_version=FIELD_VERSION_11_2` to force the legacy vector. The
   capability *contents* are stable across 12c+ releases, so for any negotiated
-  12c+ version pyoracle renders the 21.1 base vector with that version byte
+  12c+ version seerdb renders the 21.1 base vector with that version byte
   patched in (`capability_arrays`).
-- **datatype table**: per-type `(type, conv, repr, flags)` entries. pyoracle
+- **datatype table**: per-type `(type, conv, repr, flags)` entries. seerdb
   uses the 11g 1-byte-per-field form (4 bytes/entry, terminated by `0 0`); 12c+
   uses a 2-byte-per-field form (`UB2`×4, terminated by `UB2 0`).
 
 Selected capability indices (reverse-engineered from python-oracledb's
 `constants.pxi`/`data_types.pyx` and verified against live 11g and 21c
-captures), with the values pyoracle's 11.2 vector vs python-oracledb's 21.1
+captures), with the values seerdb's 11.2 vector vs python-oracledb's 21.1
 vector send:
 
 | idx | name | 11.2 | 21.1 | notes |
@@ -402,11 +402,11 @@ vector send:
 
 The compile array grew from 38 bytes (`TNS_CCAP_MAX` 11g) to 53 (12c+); the
 runtime array from 7 to 11, with runtime index 6 (`TNS_RCAP_TTC`) gaining
-`ZERO_COPY | 32K` (`0x05`). pyoracle models both arrays as `{index: value}`
-maps keyed on the field version in `oracle/tns.py` (`capability_arrays`).
+`ZERO_COPY | 32K` (`0x05`). seerdb models both arrays as `{index: value}`
+maps keyed on the field version in `seerdb/tns.py` (`capability_arrays`).
 
 The negotiated version can also go *below* 11.2: an Oracle **10g** server
-settles on field version **4**. pyoracle advertises its highest version and
+settles on field version **4**. seerdb advertises its highest version and
 gates the *older* wire formats on `field_version < FIELD_VERSION_11_2` — the
 pre-11g describe layout (§6.4) and the unsalted DES auth (§4.4) — so a single
 build speaks 10g through 23ai. (Reference field versions: 10.2 = 4, 11.2 = 6,
@@ -417,7 +417,7 @@ build speaks 10g through 23ai. (Reference field versions: 10.2 = 4, 11.2 = 6,
 > every subsequent message (DTY table form, OER layout, datatype encodings), so
 > it had to land together with the matching version-gated decoders. All of that
 > is now done — the 256-bit O5LOGON crypto (§4.5), the capability layout (this
-> section) and the version-gated formats. pyoracle logs in and runs its full
+> section) and the version-gated formats. seerdb logs in and runs its full
 > test suite against 11g, **12c+ (21c, 23ai)** and 10g from one build.
 
 ### 4.3 Session Setup (TTI_FUN/TTI_SESS)
@@ -451,14 +451,14 @@ The `AUTH_VFR_DATA` length (NbPair field) determines the authentication variant:
 
 **Oracle 10g (field version 4)** has no 11g/12c password verifier, so it sends
 `AUTH_SESSKEY` with an **empty** `AUTH_VFR_DATA` (no salt) and no PBKDF2 fields.
-pyoracle detects the absence of *both* the salt and the derived salt and takes
+seerdb detects the absence of *both* the salt and the derived salt and takes
 the legacy **DES-verifier** path (the 128-bit case below). Note this is still an
 AES session key: **O5LOGON debuted in 10g** — 11g only *added* the salted SHA-1
 verifier (the 192-bit variant), and 12c the PBKDF2 verifier (256-bit). The
 genuinely older **O3LOGON** (an 8-byte *DES* session key; Oracle 8i/9i; tokens
-`TTI_3LOGON` / `TTI_3LOGA`, §3.2) is a different, pre-10g handshake that pyoracle
+`TTI_3LOGON` / `TTI_3LOGA`, §3.2) is a different, pre-10g handshake that seerdb
 carries (`crypto.o3logon`) but cannot test for lack of a 9i/8i server, so 10g is
-the oldest auth pyoracle is verified against.
+the oldest auth seerdb is verified against.
 
 ### 4.5 Authentication Response (TTI_FUN/TTI_AUTH)
 
@@ -506,7 +506,7 @@ The client computes the authentication response:
 > **12c+ login — RESOLVED.** The 256-bit crypto above is byte-identical to
 > python-oracledb and 21c / 23ai now log in and run the full test suite. The
 > earlier `ORA-01017` was indeed not in the auth message: it was the capability
-> negotiation — pyoracle's compile/runtime cap arrays had to match the 21.1
+> negotiation — seerdb's compile/runtime cap arrays had to match the 21.1
 > vectors (§4.2) for the server to accept the 12c verifier.
 
 The auth response message:
@@ -540,7 +540,7 @@ The client validates by decrypting `AUTH_SVR_RESPONSE` with the connection key a
 the server's release. Decode it as `major` (bits 24-31), `minor`
 (20-23), `update` (12-19), `patch` (8-11), `port-specific update`
 (0-7) — e.g. `186647040` = `0x0B200200` = `11.2.0.2.0`, matching
-`product_component_version` on XE. pyoracle exposes the dotted form as
+`product_component_version` on XE. seerdb exposes the dotted form as
 `Connection.version` and masks the major release out for its protocol
 version gate.
 
@@ -623,7 +623,7 @@ Common option combinations:
 - Type: `1` for SELECT, `0` for DML/PL/SQL.
 
 **Cursor reuse**: The protocol allows reusing a previously-parsed cursor ID
-instead of resending the SQL text, skipping the server-side re-parse. pyoracle
+instead of resending the SQL text, skipping the server-side re-parse. seerdb
 caches the cursor id the server returns (per connection, LRU, DML only) and on
 a repeat execute of the same SQL sends that id with an empty query string; the
 OAC descriptors are then omitted (the server already knows the column types
@@ -653,7 +653,7 @@ modes layer onto an array-DML execute, each oracledb-compatible:
   (`ORA-03137 [kpoal8Check-4]`). The counts come back in the response **RPA
   region** (`TTI_RPA`, token 8) that precedes the trailing OER, as a
   `count(UB4) | count × UB4` block sitting between the opaque RPA body and the
-  OER token. pyoracle extracts it in `decode_token_rpa_piggyback` (armed for
+  OER token. seerdb extracts it in `decode_token_rpa_piggyback` (armed for
   the execute via a context flag) and surfaces it through
   `cursor.getarraydmlrowcounts()`. The two modes combine: a failed iteration
   reports a row count of `0`.
@@ -677,7 +677,7 @@ happens unconditionally when at least one column is a LOB (`§11.9`) —
 Oracle returns DCB + RPA piggyback + OER with `call_status = 1` and
 no inline rows for LOB queries, regardless of the result-set size.
 
-pyoracle implements the FETCH flow in `OracleConnect._drain_cursor`:
+seerdb implements the FETCH flow in `OracleConnect._drain_cursor`:
 after the initial EXEC response, if `call_status == 1` and a cursor
 handle was returned, it loops issuing `TTI_FETCH` (with the prior
 DCB's RowFormat threaded into the decoder via `_handle_response`'s
@@ -781,7 +781,7 @@ value's real size, **not** a flat maximum. A VARCHAR/RAW bind whose
 `MaxDataLength` exceeds the 4000-byte VARCHAR2 limit is treated by the server
 as a streamed LONG and processed *after* the following bind — which silently
 reorders binds relative to their placeholders (so e.g. `SET name=:1 WHERE
-id=:2` binds the string to `id`). pyoracle therefore sizes a VARCHAR/RAW OAC to
+id=:2` binds the string to `id`). seerdb therefore sizes a VARCHAR/RAW OAC to
 the actual value's byte length (NULL → 1); values genuinely over 4000 bytes
 keep their true size and the intended LONG handling (the multi-KiB CLOB/BLOB
 regular-path bind). For array DML the single OAC is sized to the widest value
@@ -796,18 +796,18 @@ Bind values are encoded inline following OAC descriptors:
 | `int`, `bool`           | Oracle NUMBER format (length-prefixed mantissa bytes)  |
 | `float`, `complex`      | Oracle NUMBER format (non-finite `inf`/`nan` auto-route to BINARY_DOUBLE) |
 | `decimal.Decimal`       | Oracle NUMBER (integer-valued decimals via int path, fractional via float) |
-| `oracle.BinaryFloat`    | 4-byte order-preserving IEEE-754 (§11.7)               |
-| `oracle.BinaryDouble`   | 8-byte order-preserving IEEE-754 (§11.7)               |
+| `seerdb.BinaryFloat`    | 4-byte order-preserving IEEE-754 (§11.7)               |
+| `seerdb.BinaryDouble`   | 8-byte order-preserving IEEE-754 (§11.7)               |
 | `str`                   | Length-prefixed UTF-8 character data (chunked if > 64 bytes) |
 | `bytes` / `bytearray`   | Length-prefixed RAW (verbatim bytes)                   |
 | `datetime.date`         | 7-byte Oracle DATE (century, year, month, day, h, m, s) |
 | `datetime.datetime`     | 7-byte DATE if microsecond == 0; otherwise 11-byte TIMESTAMP (+ 4-byte BE nanoseconds) |
 | `datetime.datetime` w/ `tzinfo` | 13-byte TIMESTAMP WITH TIME ZONE (UTC wall clock + offset bias bytes) |
 | `datetime.timedelta`    | 11-byte INTERVAL DAY TO SECOND (§11.6)                 |
-| `oracle.IntervalYM`     | 5-byte INTERVAL YEAR TO MONTH (§11.5)                  |
+| `seerdb.IntervalYM`     | 5-byte INTERVAL YEAR TO MONTH (§11.5)                  |
 | `None`                  | Single `0x00` byte                                     |
-| `oracle.Var` (OUT/IN OUT) | the seeded value, or `0x00` (NULL) for a pure OUT; OAC driven by the Var's declared type |
-| `oracle.cursor.cursor` / `Var(oracle.CURSOR)` | `0x01, 0x00` (REF CURSOR placeholder); value returned in the IOV (§6.5) |
+| `seerdb.Var` (OUT/IN OUT) | the seeded value, or `0x00` (NULL) for a pure OUT; OAC driven by the Var's declared type |
+| `seerdb.cursor.cursor` / `Var(seerdb.CURSOR)` | `0x01, 0x00` (REF CURSOR placeholder); value returned in the IOV (§6.5) |
 
 **Chunked encoding** (for data > 64 bytes): `0xFE` header, then repeated `<length><data>` chunks of up to 64 bytes each, terminated by `0x00`.
 
@@ -907,13 +907,13 @@ above shows, both of which are 11g additions:
   so there is no query-cache key. Skipping a phantom `bytes_with_length` here
   consumes the first row token.
 
-pyoracle gates both on `field_version >= FIELD_VERSION_11_2` (#84/#85),
+seerdb gates both on `field_version >= FIELD_VERSION_11_2` (#84/#85),
 reverse-engineered by diffing 1/2/6-column, mixed-type and 0-row describes from a
 live 10.2.0.5 server against the identical 11g responses.
 
 12c+ (field version >= 12.2) differs from 11g in the per-column block:
 scale is `sb1` (a raw signed byte) rather than 11g's variable-length
-sb4, and an extra `oaccolid` ub4 follows `max_size`. pyoracle decodes
+sb4, and an extra `oaccolid` ub4 follows `max_size`. seerdb decodes
 all three (10g / 11g / 12c+), gated on the negotiated TTC field version
 (§4.2): the response handler passes `connection.field_version` into
 `decode_packet`, which publishes it (via a `ContextVar`) to the token
@@ -923,7 +923,7 @@ decoders for the duration of that response.
 `uds_flags`: the column's **SQL-domain schema** and **domain name**, each a
 `str_with_length` (a `ub4` count, then a DALC string — the same codec as
 `column_name`), empty (a single `00`) for a column with no domain. Earlier
-pyoracle read them as plain `ub4`s, which only survives the empty case; a real
+seerdb read them as plain `ub4`s, which only survives the empty case; a real
 domain (`01 03 03 'PYO' 01 07 07 'PYO_DOM'`) then desynced the row decode
 (#53). Reverse-engineered by diffing a domain column vs a plain one on 23ai and
 cross-checked against python-oracledb's `domain_schema` / `domain_name`. Column
@@ -977,7 +977,7 @@ value per OUT / IN OUT bind **in bind order** (IN binds contribute nothing):
   `_create_cursor_from_describe`. Because this nested describe reuses the §6.4
   format, it carries the **same pre-11g difference**: at field version < 11.2 (10g)
   there is no `dcbqcky` trailer, so skipping a phantom one consumes the cursor id
-  and desyncs the IOV decode. pyoracle gates it identically (#84/#87); the
+  and desyncs the IOV decode. seerdb gates it identically (#84/#87); the
   per-column metadata already shares the field-version-gated decoder.
 
 After the values come the usual `TTI_RPA` and `TTI_OER` tokens.
@@ -1023,13 +1023,13 @@ rows touched there. The later `successful_iterations` field is the
 call iteration count — always 1 for a single non-array execute — so
 it cannot serve as the rowcount the caller wants. 12c+ moved the
 affected count to a separate ub8 field at the end of the OER (after
-two additional `info.num` / `info.rowcount` extensions); pyoracle
+two additional `info.num` / `info.rowcount` extensions); seerdb
 doesn't parse that variant yet.
 
 **Rowid → `lastrowid`.** The `rowid` field carries the rowid of the row
 the statement touched, in the same physical-rowid layout as a ROWID
 column (`§14`): data object number, relative file number, an unused
-byte, block number, slot number. pyoracle renders it via the same
+byte, block number, slot number. seerdb renders it via the same
 base-64 encoder and surfaces it as `Cursor.lastrowid` for
 INSERT / UPDATE / DELETE. For a SELECT the server fills it with the last
 fetched row's rowid, which is not a "last modified row", so the driver
@@ -1171,11 +1171,11 @@ in UTC) plus a 2-byte timezone encoding.
 
 Timezone encoding has two forms:
 - **Offset-based**: `Hour + 20`, `Minute + 60` (when bit 0x80 of the
-  first byte is clear). pyoracle handles this form.
+  first byte is clear). seerdb handles this form.
 - **Named zone (region ID)**: when bit 0x80 of the first byte is set,
   the two TZ bytes carry an Oracle timezone region id instead of an
-  offset: `region_id = ((byte0 & 0x7f) << 6) + (byte1 >> 2)`. pyoracle
-  maps the id to an IANA zone name (`oracle/_tzregions.py`, a stable
+  offset: `region_id = ((byte0 & 0x7f) << 6) + (byte1 >> 2)`. seerdb
+  maps the id to an IANA zone name (`seerdb/_tzregions.py`, a stable
   id→name table generated from the server's `V$TIMEZONE_NAMES`) and then
   asks the standard-library `zoneinfo` module for the offset **at that
   instant** — so DST is applied correctly and offsets track the live IANA
@@ -1183,7 +1183,7 @@ Timezone encoding has two forms:
   not present in the table (a few obsolete Oracle aliases) falls back to a
   naive `datetime.datetime`.
 
-When decoding, pyoracle treats the wall-clock bytes as UTC and then
+When decoding, seerdb treats the wall-clock bytes as UTC and then
 shifts to the tagged offset, so the resulting Python `datetime` both
 compares equal to the original instant and prints with the original
 local time. The encoder is symmetric: a `datetime` with `tzinfo` is
@@ -1194,7 +1194,7 @@ original offset.
 
 5 bytes: `Year(4 bytes, big-endian) | Month(1 byte)`, biased by `2**31` and `60`
 respectively. Both fields share the interval's sign. Maps to
-`oracle.IntervalYM(years, months)`.
+`seerdb.IntervalYM(years, months)`.
 Example: `3-7` → `80 00 00 03 43` (years `0x80000003 − 2**31 = 3`, months
 `0x43 − 60 = 7`); `-1-2` → `7f ff ff ff 3a`.
 
@@ -1273,7 +1273,7 @@ The TNS data type numbers (`§3.1`) for LOBs are:
 | BFILE   | 114      |
 | NCLOB   | 112 + national charset form |
 
-pyoracle's row decoder reads the LOB column as `ub4 num_bytes |
+seerdb's row decoder reads the LOB column as `ub4 num_bytes |
 DALC locator_block`. The locator block (the locator metadata plus any
 inline content section) is a **DALC** (`§12.2`): a single length-prefixed
 chunk while the block stays under 254 bytes, or the `0xFE` chunked form
@@ -1287,7 +1287,7 @@ mid-size inline LOBs decode instead of spilling content bytes into the
 token stream (#37). The reassembled locator is exactly what the server
 expects back as the source pointer in a `TTI_LOBOPS` READ. NULL LOBs
 (single `0x00` byte) come back as Python `None`; non-NULL LOBs come back
-as `oracle.lob.LOB` objects that `Cursor.execute` automatically resolves
+as `seerdb.lob.LOB` objects that `Cursor.execute` automatically resolves
 to `str` (CLOB) or `bytes` (BLOB) via `LOB.read()`.
 
 Confirmed against XE 11g captures: `num_bytes` scales with content
@@ -1372,10 +1372,10 @@ The library supports a wide range of Oracle character sets, identified by Oracle
 | CL8MSWIN1251     | 171   | ZHS16GBK         | 852   |
 | UTF8             | 871   | ZHT16BIG5        | 865   |
 
-pyoracle advertises and decodes **AL32UTF8 (873)** — real UTF-8 — for both the
+seerdb advertises and decodes **AL32UTF8 (873)** — real UTF-8 — for both the
 database and national charset (see §4.1). Note the trap: Oracle's `UTF8` (871)
 is **not** the same as AL32UTF8; it is CESU-8, which mis-encodes
-supplementary-plane characters. pyoracle never advertises 871. National-charset
+supplementary-plane characters. seerdb never advertises 871. National-charset
 columns (`NCHAR` / `NVARCHAR2` / `NCLOB`, charset id 2000 / AL16UTF16, CharsetForm
 2) are converted by the server to AL32UTF8 on the wire and decode through the
 same UTF-8 path.
@@ -1420,7 +1420,7 @@ op (CREATE_TEMP / WRITE, and a READ of a temp locator) instead sends the
 locator as a `ub2`-length-prefixed field and declares `source_locator_length`
 = locator length **+ 2** (counting the prefix) — the form python-oracledb uses.
 A temp-LOB READ returns empty content without the prefix; switching persistent
-reads to the prefixed form regresses them on 11g + 21c. pyoracle keeps the raw
+reads to the prefixed form regresses them on 11g + 21c. seerdb keeps the raw
 form by default and opts into the prefix per call (`locator_prefixed`).
 
 ### 14.2 Opcodes
@@ -1457,7 +1457,7 @@ position (1 = overwrite from start).
 
 **BFILE native read (#46).** A BFILE must be opened before it can be read.
 python-oracledb's `lob.read()` issues, on 21c: `FILE_ISOPEN` (pre-check, boolean
-result) → `FILE_OPEN` → `READ` → `FILE_CLOSE`. pyoracle does the minimal
+result) → `FILE_OPEN` → `READ` → `FILE_CLOSE`. seerdb does the minimal
 `FILE_OPEN → READ → FILE_CLOSE` (the ISOPEN pre-check is skippable). Details,
 reverse-engineered byte-for-byte and verified on 10g / 11g / 21c / 23ai:
 
@@ -1517,24 +1517,24 @@ scan misses the post-PL/SQL `04 01 05` and hangs.
 
 ### 14.4 Implementation status
 
-pyoracle implements `TTI_LOBOPS` READ (`encode_dictionary_lobops`
-in `oracle/tns.py`, response handling in
+seerdb implements `TTI_LOBOPS` READ (`encode_dictionary_lobops`
+in `seerdb/tns.py`, response handling in
 `OracleConnect._read_lob_response`) and uses it transparently from
 `LOB.read()` for every non-empty LOB cell. Worth noting:
 
 - **Don't send `amount = 0xFFFFFFFF`.** XE 11g quietly stops
   responding when the request asks for `uint32` max. Use a large but
-  finite value instead — pyoracle defaults to `0x40000000` (1 GiB),
+  finite value instead — seerdb defaults to `0x40000000` (1 GiB),
   comfortably past any realistic LOB while staying inside signed
   int32.
-- **Locator bytes go on the wire as-is.** The bytes pyoracle extracts
+- **Locator bytes go on the wire as-is.** The bytes seerdb extracts
   from the RXD column (after skipping the `ub4 num_bytes` prefix +
   the 1-byte size echo) are exactly what the server expects as the
   source pointer; no DALC wrapping, no length prefix beyond what the
   request body already carries.
 - **The response carries `TTI_LOB` (content) + `TTI_RPA`
   (updated locator) + `TTI_OER` (call status)** in a single packet.
-  pyoracle decodes the LOB chunk(s) and skips past the RPA block by
+  seerdb decodes the LOB chunk(s) and skips past the RPA block by
   scanning forward for the OER `04 01 XX 01` signature — the RPA
   layout is complex enough that we don't try to parse it, and we
   don't need anything out of it.
@@ -1554,7 +1554,7 @@ size; the integration suite covers 50 KiB and 500 KiB of both on 11g and
 path above only works for LOB *columns*. Binding a str / bytes value over the
 32767-byte PL/SQL VARCHAR2 / RAW limit into a `CLOB` / `BLOB` **parameter** of a
 PL/SQL block fails with **ORA-01460** ("unimplemented or unreasonable
-conversion"). pyoracle handles it the way python-oracledb does, on 12c+:
+conversion"). seerdb handles it the way python-oracledb does, on 12c+:
 
 1. `CREATE_TEMP` (§14.2) allocates a session-duration temp LOB; the locator
    comes back in the response RPA.
@@ -1594,8 +1594,8 @@ Each TTC function call includes an incrementing sequence number (1 byte, wrappin
 Oracle 21c+ stores a native `JSON` column as a BLOB-backed **OSON** image (a
 compact binary JSON). The column's TNS data type is **119** (`TNS_TYPE_JSON`).
 On the wire it behaves exactly like a BLOB: the RXD row carries a LOB *locator*,
-and the OSON image is fetched over `TTI_LOBOPS` (§14). pyoracle reads it through
-the normal LOB locator path and then decodes the OSON in `oracle/oson.py`.
+and the OSON image is fetched over `TTI_LOBOPS` (§14). seerdb reads it through
+the normal LOB locator path and then decodes the OSON in `seerdb/oson.py`.
 
 The format below was reverse-engineered from images captured off a live 21c
 server, each with known content. An OSON image is:
@@ -1695,13 +1695,13 @@ here and guards neither.
 ### 17.2 Binds (#50, #70)
 
 A bare Python `dict` is auto-detected as JSON (it has no other bind meaning);
-wrap a `list` / scalar in `oracle.JSON(value)` to bind it as JSON too, since a
+wrap a `list` / scalar in `seerdb.JSON(value)` to bind it as JSON too, since a
 bare `list` means a VECTOR and bare scalars bind as their native SQL types.
 `Decimal` binds as a JSON number (integral values stay exact, others via
 `float`), matching the decoder, which returns JSON numbers as `Decimal`.
 
-pyoracle prefers a **native binary OSON** bind (#70, the inverse of the §17.1
-decoder in `oracle/oson.py:encode_oson`). It is sent exactly like the native
+seerdb prefers a **native binary OSON** bind (#70, the inverse of the §17.1
+decoder in `seerdb/oson.py:encode_oson`). It is sent exactly like the native
 VECTOR bind (§18.1): the bind OAC is the JSON one (`JSON_BIND_OAC`, type 119
 with a 32 MiB max length, captured from python-oracledb on 21c) and the value
 carries the same 19-byte LOB-backed descriptor, the image length (ub2), 22 zero
@@ -1725,8 +1725,8 @@ pre-existing long-string decode gap, not a bind limitation.)
 Oracle 23ai+ stores a native `VECTOR` column as a binary image delivered, like
 JSON (§17), through a LOB locator: the RXD row carries a locator and the image
 is fetched over `TTI_LOBOPS` (§14). The column's TNS data type is **127**
-(`TNS_TYPE_VECTOR`). pyoracle reads it through the normal LOB locator path and
-decodes the image in `oracle/vector.py`.
+(`TNS_TYPE_VECTOR`). seerdb reads it through the normal LOB locator path and
+decodes the image in `seerdb/vector.py`.
 
 The format below was reverse-engineered from images captured off a live 23ai
 server, each with known content. A VECTOR image is:
@@ -1755,7 +1755,7 @@ otherwise invert all bits. Then read the result as a big-endian IEEE-754 float.
 
 **BINARY** (bit vectors): `num_elements` is the **dimension (bit) count**, not a
 byte count, and the payload is those bits packed 8 to a byte —
-`ceil(num_elements / 8)` bytes. pyoracle surfaces the packed bytes verbatim as a
+`ceil(num_elements / 8)` bytes. seerdb surfaces the packed bytes verbatim as a
 list of ints, matching the form a `VECTOR(n, BINARY)` literal takes (e.g.
 `'[170, 1]'` for a 16-dim vector stores bytes `AA 01` and reads back `[170, 1]`).
 
@@ -1775,7 +1775,7 @@ raises `VectorError` rather than spinning to build an unbounded list (#228).
 
 ### 18.1 Binds (#55 / #62)
 
-pyoracle binds a vector with the **native binary image** (matching
+seerdb binds a vector with the **native binary image** (matching
 python-oracledb). The full exec bind for a vector is `OAC | TTI_RXD | value`:
 
 - **OAC** (`encode_token_oac`): a fixed 25-byte block — type 127, the *cont-flag*
@@ -1806,7 +1806,7 @@ count (ub2) | indices (ub4 × count) | values (element × count)
 
 `num_elements` (header) is the total dimension count; `count` is the number of
 stored elements; the values use the same per-element encoding as a dense image
-(sortable FLOAT32/64, raw INT8). pyoracle decodes it to an `oracle.SparseVector`
+(sortable FLOAT32/64, raw INT8). seerdb decodes it to an `seerdb.SparseVector`
 (`num_dimensions`, `indices`, `values`) and binds one back natively via §18.1
 (the sparse image carries the same OAC + descriptor). Captured on 23ai across
 FLOAT32/INT8 and a 300-dim vector (index 299 confirms the ub4 indices).
@@ -1818,7 +1818,7 @@ FLOAT32/INT8 and a 300-dim vector (index 299 confirms the ub4 indices).
 
 Oracle 9i negotiates **TTC field version 2** (`FIELD_VERSION_9_2`). Its login is
 O3LOGON (§4, gated `field_version < FIELD_VERSION_10_2`); its **query/fetch path
-is a different RPC** from the `TTI_ALL8` (§5.1) pyoracle sends to 10g+. A 9i
+is a different RPC** from the `TTI_ALL8` (§5.1) seerdb sends to 10g+. A 9i
 server answers an `ALL8` execute with an empty return, so SELECTs come back with
 no describe and no rows. 9i instead uses the older **`TTI_ALL7` (func `0x47`)**
 execute, and a query is a **four-call sequence** (reverse-engineered from the
@@ -1843,7 +1843,7 @@ Call 1 carries the SQL inline, length-prefixed, after a fixed option header
 (`02 80 21 01 01 01 01 <sqllen> 00 00 01 01 07 01 01 02 00 00 00 00 00 <SQL>
 01 01 01 01 00 00 00 00 00`); call 3 repeats `0x47` with option word `02 80 50`
 and a per-column **define block**. The `ORA-01403` ("no data found") trailing the
-row stream is the **end-of-fetch marker**, not an error (pyoracle already treats
+row stream is the **end-of-fetch marker**, not an error (seerdb already treats
 01403 as end-of-cursor, §6.7).
 
 ### 19.1 fv2 describe (the `0x62` response — describe lives in the RPA)
@@ -1865,7 +1865,7 @@ MaxArrLen(ub4) Flags2(ub4) ToId(DALC) Version(ub4) Charset(ub4) FormOfUse(1B)
 ```
 
 The leading **`DataType` byte is the standard Oracle internal type code** — the
-same numbering as pyoracle's `TNS_TYPE_*` constants (1=VARCHAR2, 2=NUMBER,
+same numbering as seerdb's `TNS_TYPE_*` constants (1=VARCHAR2, 2=NUMBER,
 12=DATE, 23=RAW, 96=CHAR, 181=TIMESTAMP) — so the fv2 path **reuses the existing
 type→value decoders**, no new numbering. The OAC is followed by a **`null_ok`
 byte** (`0x00` = NOT NULL, `0x01` = nullable), a **1-byte `namelen_bytes`**, a
@@ -2086,16 +2086,16 @@ BFILE) and, with §19.6 / §19.7, the PL/SQL surface (IN, OUT, IN OUT).
 
 Column **annotations** are only delivered when the client advertises a TTC
 field version ≥ 18. But advertising fv ≥ 18 changes both the login and the data
-path; the legacy forms are rejected (ORA-03146 / ORA-03120) or hang. pyoracle
+path; the legacy forms are rejected (ORA-03146 / ORA-03120) or hang. seerdb
 reaches field version 24 — the 23ai maximum — and decodes annotations.
 
 ### 20.1 Gating and the protocol version
 
-pyoracle keeps its **CONNECT packet at protocol version 313**, deliberately
+seerdb keeps its **CONNECT packet at protocol version 313**, deliberately
 below the end-of-response era (≥ 319). At 319 a 23ai server requires
 end-of-response response framing and closes the connection if the client clears
 that capability bit; staying at 313 sidesteps that whole layer while still
-reaching fv24. At 313 the ACCEPT carries no fast-auth flag, so pyoracle gates on
+reaching fv24. At 313 the ACCEPT carries no fast-auth flag, so seerdb gates on
 the **server's own field version** taken from its TTI_PRO reply (23ai advertises
 27): after a normal PRO exchange, if `min(client, server) > 17`, switch to
 fast-auth. The default `field_version` is the fv24 constant; older servers
@@ -2186,7 +2186,7 @@ live; there is no field-version-specific variation.
 In the per-column `TTI_DCB` (§6.4) an object column carries the type's **16-byte
 OID** (the `OidLen > 0` branch, previously skipped) and, in the trailing
 schema / type-name fields, the type's **owner** and **name** (e.g. `PYO` /
-`ADDR_T`). pyoracle stashes these on the column metadata (`type_oid`,
+`ADDR_T`). seerdb stashes these on the column metadata (`type_oid`,
 `type_schema`, `type_name`) so the row decoder can find the attribute layout.
 
 ### 21.2 Row value framing (`read_dbobject`)
@@ -2207,7 +2207,7 @@ The image is a **self-delimiting blob** — a 1-byte length (or the `0xFE` chunk
 form), *not* `gate` raw bytes; the `ub4` gate only signals whether an image
 follows (a NULL object stops after the flags). Reading the gate count as the
 image length is off by the blob's own length prefix and desyncs the next row.
-This framing needs no attribute layout, so pyoracle reads it into an
+This framing needs no attribute layout, so seerdb reads it into an
 `ObjectImage` placeholder during row decode (keeping the stream in sync) and
 resolves it after the fetch.
 
@@ -2237,13 +2237,13 @@ raises `NotSupportedError`.
 
 The ordered layout is fetched from `ALL_TYPE_ATTRS` (`attr_name`,
 `attr_type_name`, `length`, `precision`, `scale` `ORDER BY attr_no`) keyed by
-`(owner, type_name)` and **cached per connection** — pyoracle buffers the whole
+`(owner, type_name)` and **cached per connection** — seerdb buffers the whole
 result set on execute (the server cursor is drained), so this extra query runs
 safely during row resolution. The SQL type name maps to a TNS type code for the
 scalar decoder; a name we don't map (e.g. a nested object type — #117/#118)
 leaves the attribute as raw bytes rather than desyncing.
 
-Decoded values surface as an `oracle.DbObject` exposing attributes by name
+Decoded values surface as an `seerdb.DbObject` exposing attributes by name
 (`obj.STREET`) / item (`obj['STREET']`), plus `aslist()` / `asdict()`. A NULL
 object is `None`. VARRAY / nested table / REF are #117 / #118 / #119; XMLType
 (type 109 with no object type) is #124.
@@ -2272,10 +2272,10 @@ the exact inverse of the read path (python-oracledb `write_dbobject` /
   via `two_lengths`, and the type version (no charset). This is the **12c+** OAC;
   there is no python-oracledb reference for a pre-12c object-bind OAC (thin needs
   12.1+) and a 12c+ OAC sent to 10g/11g is rejected with a fatal ORA-03106, so
-  pyoracle **gates object binds on field version ≥ 12.1** (`NotSupportedError`)
+  seerdb **gates object binds on field version ≥ 12.1** (`NotSupportedError`)
   before anything goes on the wire. Object *decode* still works on every tier.
 
-Verified by round-trip (bind via pyoracle, read back via §21.1–21.4) on 21c and
+Verified by round-trip (bind via seerdb, read back via §21.1–21.4) on 21c and
 23ai, scalar attribute types + NULL attributes, sync + async. Binding a bare
 Python `None` to an object column is unsupported (an untyped `None` carries no
 type identity); use a typed value. REF binds are #119.
@@ -2301,7 +2301,7 @@ the same bind OAC (§21.5) — only the *type metadata* and the *image body* dif
 - **Value framing + OAC**: unchanged from §21.2 / §21.5; only the image body is
   collection-shaped. The 12c+ bind gate applies identically.
 
-A fetched collection surfaces as an `oracle.DbObject` with **list semantics**
+A fetched collection surfaces as an `seerdb.DbObject` with **list semantics**
 (`iter` / index / `len` / `append` / `extend` / `aslist()`), carrying its type so
 it can be re-bound; build one with `typ.newobject([...])`. Decode works on every
 tier (verified 10g/11g read), bind is 12c+ (round-trip 21c/23ai, sync + async).
@@ -2322,7 +2322,7 @@ length-prefixed value (no special framing), so it reads on every tier without
 desync. To read the referenced object, dereference in SQL —
 `SELECT DEREF(ref_col) ...` returns a normal object that decodes via §21.1–21.4.
 
-pyoracle surfaces a REF as `oracle.DbRef` exposing `.bytes` / `.hex` and the
+seerdb surfaces a REF as `seerdb.DbRef` exposing `.bytes` / `.hex` and the
 referenced type identity (`.type_name` / `.type_schema` / `.type_oid`, captured
 from the per-column describe, which carries the referenced type's OID +
 owner/name in the same fields an ADT column uses, §21.1). Note python-oracledb
@@ -2372,7 +2372,7 @@ from the SQL. Two framing differences from a plain DML:
    multi-row UPDATE/DELETE RETURNING returns several, a zero-row DML returns an
    empty list.
 
-pyoracle detects the return-bind positions by parsing the `RETURNING ... INTO`
+seerdb detects the return-bind positions by parsing the `RETURNING ... INTO`
 clause (the trailing K binds), arms the RXD decoder for that one response (a
 ContextVar, like the array-DML row counts), keeps the raw return-value bytes,
 and the cursor decodes each by its `Var`'s type. `var.getvalue()` returns the
@@ -2386,7 +2386,7 @@ A 12c+ PL/SQL block can hand result sets back to the client with
 `DBMS_SQL.RETURN_RESULT(refcursor)`. The client opts in by setting
 **`TNS_EXEC_FLAGS_IMPLICIT_RESULTSET` (0x8000)** in the execute's al8i4[9]
 exec-flags word; without it the server rejects the block with **ORA-29481**
-("implicit results cannot be returned to client"). pyoracle sets the flag on
+("implicit results cannot be returned to client"). seerdb sets the flag on
 PL/SQL **block** executes on 12c+ (scoping it to blocks leaves the DML/DDL exec
 paths untouched).
 
@@ -2403,7 +2403,7 @@ per result:
 ```
 
 Each result is therefore a server cursor (a cursor id + a row format), exactly
-like a REF CURSOR (§ REF CURSOR) — pyoracle keeps the `(row_format, cursor_id)`
+like a REF CURSOR (§ REF CURSOR) — seerdb keeps the `(row_format, cursor_id)`
 pairs and **`cursor.nextset()`** fetches each on demand (via the same
 `fetch_all_rows` path), making that set's rows fetchable and updating
 `cursor.description`; it returns `True` per set and `None` when exhausted. The
@@ -2416,7 +2416,7 @@ Sync + async; verified on 21c / 23ai (multiple result sets, varying shapes);
 An XMLType column is **TNS type 109 with no user object type** — the same row
 framing as a SQL object (§21.2), but the packed image is decoded by a
 specialised walk (python-oracledb `read_xmltype`) instead of the attribute walk.
-pyoracle recognises it by the column's described type identity (`SYS.XMLTYPE`,
+seerdb recognises it by the column's described type identity (`SYS.XMLTYPE`,
 §21.1) and short-circuits the object describe.
 
 Image (after the shared header, §21.3):
@@ -2431,7 +2431,7 @@ ub4   xml_flag
 - `xml_flag & 0x0004` (**STRING**) → the content is the document text (decoded
   with the DB charset). This covers inline documents and SQL-built XML
   (`XMLELEMENT`/`XMLAGG`, which set the SKIP_NEXT_4 bit) on every tier.
-- `xml_flag & 0x0001` (**LOB**) → the content is a CLOB locator; pyoracle reads
+- `xml_flag & 0x0001` (**LOB**) → the content is a CLOB locator; seerdb reads
   it through the LOB path (§14) and returns the string. This is the large-document
   form on 12c+, and how 10g stores XMLType columns.
 
@@ -2442,9 +2442,9 @@ limit hits the usual streamed-LONG ORA-01461 — the general large-bind limit, n
 XMLType-specific.)
 
 **Limitation:** Oracle **11g** XMLType *columns* are CLOB-stored with a complex
-binary image whose locator pyoracle can't read (a reference-less case —
+binary image whose locator seerdb can't read (a reference-less case —
 python-oracledb requires 12.1+). That image sets a distinguishing flag bit
-(`0x01000000`, never set on the working 10g / 12c+ forms), so pyoracle raises a
+(`0x01000000`, never set on the working 10g / 12c+ forms), so seerdb raises a
 clear `NotSupportedError` for it rather than returning corrupt data; cast such a
 column in SQL (`XMLTYPE.getclobval(col)` / `XMLSERIALIZE`) to read it. Inline XML
 (`XMLELEMENT`, etc.) on 11g uses the STRING flag and works. Sync + async.
@@ -2458,7 +2458,7 @@ python-oracledb (#144, fixing the OOB-only break originally shipped in #123):
 
 - **OOB** — when the server advertised attention support, an out-of-band urgent
   byte `send(b"!", MSG_OOB)`. The accept packet's global service options carry
-  `TNS_GSO_CAN_RECV_ATTENTION` (`0x0400`); pyoracle records it as
+  `TNS_GSO_CAN_RECV_ATTENTION` (`0x0400`); seerdb records it as
   `connection._supports_oob`. The urgent byte reaches the server's attention
   handler immediately, even while it's compute-bound — the fastest interrupt.
 - **In-band** — otherwise, a `TNS_MARKER` packet with body `01 00 03`
@@ -2478,7 +2478,7 @@ resyncs, and it's immediately reusable.
   fires the break after the timeout; the resulting `ORA-01013` is remapped to a
   call-timeout `OperationalError`. The timer is disarmed as soon as the call
   completes, so a normal call with `call_timeout` armed is unaffected.
-- Marker packet form `01 00 <type>`: BREAK=1, RESET=2, INTERRUPT=3 (pyoracle
+- Marker packet form `01 00 <type>`: BREAK=1, RESET=2, INTERRUPT=3 (seerdb
   sends INTERRUPT to cancel and replies RESET=2 to a server break).
 
 **Verified** end-to-end on 10g/11g/21c/23ai, sync + async: `cancel()` (from
@@ -2517,7 +2517,7 @@ cur.callproc('pkg.make_names', [3, names])  # OUT -> ['name1', 'name2', 'name3']
 
 Sync + async. **12c+ only:** there is no python-oracledb reference for a pre-12c
 array bind OAC (thin requires 12.1+), and the pre-12c short OAC doesn't signal
-array-ness — the server then mis-types the argument (PLS-00306). So pyoracle
+array-ness — the server then mis-types the argument (PLS-00306). So seerdb
 gates array binds on field version ≥ 12.1 with a clear `NotSupportedError`
 (alongside the object-bind gate, §21.5), raised before anything goes on the
 wire. Verified on 21c/23ai (IN / OUT / IN OUT, NUMBER + VARCHAR2 elements);
@@ -2532,7 +2532,7 @@ current schema becomes `schema` while `SYS_CONTEXT('USERENV','PROXY_USER')`
 reports `proxy_user`. The target must have granted it
 (`ALTER USER schema GRANT CONNECT THROUGH proxy_user`).
 
-It's almost free on the wire: pyoracle splits the user name (`_split_proxy_user`:
+It's almost free on the wire: seerdb splits the user name (`_split_proxy_user`:
 `proxy_user[schema]` → real user `proxy_user` + bracketed `schema`), performs the
 **normal** O5LOGON/O3LOGON as `proxy_user`, and adds **one auth key/value pair**
 to the final auth message — `PROXY_CLIENT_NAME = schema` — bumping the pair
@@ -2604,7 +2604,7 @@ drifts the whole parse. The shard id (props and array) and the JSON pointer are
 gated at field versions 21.1 / 20.1.
 
 **Payloads:** RAW (`bytes`), SQL object (a `DbObjectType` from `gettype()`,
-reusing the §21 object machinery), and **JSON** (`queue(name, oracle.JSON)`,
+reusing the §21 object machinery), and **JSON** (`queue(name, seerdb.JSON)`,
 #150). RAW + object support both single and array; sync + async.
 
 **JSON payload framing** (#150): the OSON image is wrapped in a fixed
@@ -2632,7 +2632,7 @@ Pool server. Two small additions to the existing connect flow:
   route to the connection broker instead of a dedicated server.
 - **Auth pairs** — the final auth message carries `AUTH_KPPL_CONN_CLASS` (the
   connection class) and `AUTH_KPPL_PURITY` (the purity as a decimal string), the
-  same way proxy auth (§27) adds its pair. Purity is `oracle.PURITY_NEW` (1) or
+  same way proxy auth (§27) adds its pair. Purity is `seerdb.PURITY_NEW` (1) or
   `PURITY_SELF` (2); when DRCP is requested with `PURITY_DEFAULT` a standalone
   connection defaults to `NEW` (matching python-oracledb).
 
@@ -2673,7 +2673,7 @@ there is **no new function code**.
   piggybacks a **`SYNC` server-side piggyback (opcode 5)** onto the next call's
   response, carrying keyword-value pairs (keyword `201` = the transaction id and
   a 2-byte sync state, e.g. `0x83 0x01` = unset|version-1 after a commit).
-  pyoracle tracks the active flag client-side and consumes the piggyback
+  seerdb tracks the active flag client-side and consumes the piggyback
   byte-for-byte in `decode_token_server_piggyback`; without that the stream
   desyncs on the first call after `begin`. The pair loop mirrors `SESS_RET`
   (§30): per pair a ub2-gated text value, a ub2-gated binary value, then the
@@ -2684,14 +2684,14 @@ joins the transaction; a suspended transaction's rows are invisible to other
 sessions until committed. Sync + async. **23ai+ only:** `begin`/`resume`/
 `suspend` raise `NotSupportedError` on field version < 23.1 (before any wire
 activity). The wire format was confirmed against the oracledb-thin reference
-through the logging proxy; the server accepts pyoracle's minimal sb4 encoding of
+through the logging proxy; the server accepts seerdb's minimal sb4 encoding of
 the format-id (`03 4e5c3e`) where oracledb pads to four bytes. Verified on 23ai
 (suspend/resume across sessions, cross-session isolation, rollback), sync +
 async.
 
 ## 32. Request pipelining (#132, #158)
 
-`pipeline = oracle.create_pipeline()` collects operations
+`pipeline = seerdb.create_pipeline()` collects operations
 (`add_execute` / `add_executemany` / `add_fetchone` / `add_fetchmany` /
 `add_fetchall` / `add_commit` / `add_callproc` / `add_callfunc`); running
 `connection.run_pipeline(pipeline, continue_on_error=False)` returns a
@@ -2705,7 +2705,7 @@ sent as **one token-tagged burst and its responses read back in a single round
 trip** (#158). Other servers — or a pipeline carrying a commit / callproc /
 callfunc op — run each op **serially**; the API, ordering and results are
 identical either way. The wire flow, byte-validated against both an
-oracledb-thin async-pipeline capture and pyoracle's own capture on 23ai:
+oracledb-thin async-pipeline capture and seerdb's own capture on 23ai:
 
 - **Token framing** — at field version 24 each function-call header carries a
   ub8 token number after the sequence byte (`_fun_header`). An ordinary call
