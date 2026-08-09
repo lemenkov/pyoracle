@@ -101,31 +101,54 @@ class PostgresBackend:
 
     One instance per Mirror session. ``conninfo`` is a libpq connection string,
     e.g. ``host=127.0.0.1 port=5432 user=pyo password=... dbname=mirror``.
-    Autocommit is on so each statement persists (matching the Oracle client's
-    default autocommit).
+
+    The connection is transactional (``autocommit`` off), so the Mirror's
+    commit / rollback are real: work persists only on commit and is discarded on
+    rollback. Each statement runs inside an implicit ``SAVEPOINT`` so a failed
+    statement rolls back only itself — the transaction (and any earlier
+    uncommitted work) survives, matching Oracle's statement-level error model
+    rather than PostgreSQL's abort-the-whole-transaction default.
     """
 
     capabilities = frozenset({Capability.TRANSACTIONS})
 
     def __init__(self, conninfo: str = '') -> None:
-        self._conn = psycopg.connect(conninfo, autocommit=True)
+        self._conn = psycopg.connect(conninfo)
 
     def execute(self, sql: str, binds: Sequence = ()) -> Result:
         if binds:
             sql = _ORACLE_BIND.sub('%s', sql)
+        cursor = self._conn.cursor()
+        # SAVEPOINT isolates this statement: on any error we roll back to here
+        # (which also clears PostgreSQL's aborted-transaction state) and leave the
+        # rest of the transaction intact; on success we release it. Either way
+        # the savepoint is resolved, so they never accumulate across statements.
+        cursor.execute('SAVEPOINT _mirror_stmt')
         try:
-            cursor = self._conn.execute(sql, tuple(binds) or None)
+            cursor.execute(sql, tuple(binds) or None)
+            if cursor.description is None:
+                result = Result(rowcount=max(cursor.rowcount, 0))
+            else:
+                rows = cursor.fetchall()
+                columns = [
+                    _column_meta(desc.name, desc.type_code, [r[i] for r in rows])
+                    for i, desc in enumerate(cursor.description)
+                ]
+                result = Result(columns=columns, rows=rows)
         except psycopg.Error as exc:
+            self._conn.execute('ROLLBACK TO SAVEPOINT _mirror_stmt')
+            self._conn.execute('RELEASE SAVEPOINT _mirror_stmt')
             # A PostgreSQL failure surfaces as a clean ORA error — never a desync.
             raise BackendError(str(exc).strip(), ora_code=_ORA_INVALID_SQL) from exc
-        if cursor.description is None:
-            return Result(rowcount=max(cursor.rowcount, 0))
-        rows = cursor.fetchall()
-        columns = [
-            _column_meta(desc.name, desc.type_code, [row[index] for row in rows])
-            for index, desc in enumerate(cursor.description)
-        ]
-        return Result(columns=columns, rows=rows)
+        except Exception:
+            # An our-side rejection (e.g. UnsupportedFeature on an unmapped column
+            # type) after the statement ran — undo it and re-raise for the session
+            # to map to an ORA error.
+            self._conn.execute('ROLLBACK TO SAVEPOINT _mirror_stmt')
+            self._conn.execute('RELEASE SAVEPOINT _mirror_stmt')
+            raise
+        self._conn.execute('RELEASE SAVEPOINT _mirror_stmt')
+        return result
 
     def commit(self) -> None:
         self._conn.commit()

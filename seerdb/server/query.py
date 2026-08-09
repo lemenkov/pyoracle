@@ -50,6 +50,12 @@ _MARKER_LEN = 3
 _SERVER_VERSION_SLOT = 5
 
 
+# The autocommit bit in the OALL8 options word: the client sets it (0x100) when
+# the connection is in autocommit mode, asking the server to commit after this
+# statement (set_opts encodes it as Param * 256 into the options word).
+_EXEC_OPTION_COMMIT = 0x100
+
+
 @dataclass(frozen=True)
 class ExecRequest:
     """A parsed execute: the SQL text, its options, and any bind values."""
@@ -59,6 +65,7 @@ class ExecRequest:
     bind_count: int
     fetch: int
     binds: list = field(default_factory=list)
+    autocommit: bool = False
 
 
 def _decode_bind_value(data_type: int, raw: bytes | list) -> object:
@@ -88,7 +95,8 @@ def parse_exec(payload: bytes) -> ExecRequest:
         raise InterfaceError('not an OALL8 execute')
 
     rest = payload[3:]  # skip TTI_FUN, TTI_ALL8, seq
-    _opt, rest = decode_ub4(rest)
+    options, rest = decode_ub4(rest)
+    autocommit = bool(options & _EXEC_OPTION_COMMIT)
     cursor, rest = decode_ub4(rest)
     query_flag, rest = rest[0], rest[1:]
     query_len, rest = decode_ub4(rest)
@@ -125,7 +133,12 @@ def parse_exec(payload: bytes) -> ExecRequest:
             binds.append(_decode_bind_value(data_type, raw))
 
     return ExecRequest(
-        sql=sql, cursor=cursor, bind_count=bind_count, fetch=fetch, binds=binds
+        sql=sql,
+        cursor=cursor,
+        bind_count=bind_count,
+        fetch=fetch,
+        binds=binds,
+        autocommit=autocommit,
     )
 
 

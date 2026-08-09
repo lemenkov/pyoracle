@@ -295,3 +295,30 @@ def test_parse_exec_extracts_bind_values() -> None:
     assert req.sql == 'select :1, :2 from dual'
     assert req.bind_count == 2
     assert req.binds == ['hi', 42]
+
+
+def test_parse_exec_reads_the_autocommit_flag() -> None:
+    from seerdb.common.tns import encode_dictionary_exec
+
+    def dml(auto: int):
+        return encode_dictionary_exec(
+            {
+                'seq': 3,
+                'field_version': 6,
+                'query': {
+                    'type': 'change',  # DML — the options word carries autocommit
+                    'auto': auto,
+                    'fetch': 0,
+                    'server_version': 186647040,
+                    'cursor': 0,
+                    'query': 'insert into t values (:1)',
+                    'bind': ['x'],
+                    'batch': [],
+                    'def': [],
+                },
+            }
+        )
+
+    # The client sets the commit-on-success option (0x100) in autocommit mode.
+    assert parse_exec(dml(1)).autocommit is True
+    assert parse_exec(dml(0)).autocommit is False

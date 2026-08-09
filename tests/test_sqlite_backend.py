@@ -164,6 +164,44 @@ def test_fractional_number_bind() -> None:
     assert rows == [(Decimal('3.14159'),), (Decimal('2.5'),)]
 
 
+def test_commit_and_rollback() -> None:
+    # With autocommit off, rollback() must discard uncommitted work and commit()
+    # must keep it — real transaction control, not a no-op reply.
+    listen, server, result = _start_mirror()
+    conn = seerdb.connect(
+        host='127.0.0.1',
+        port=listen.getsockname()[1],
+        user='PYO',
+        password='pyo123',
+        service_name='XE',
+        timeout=5000,
+        autocommit=False,
+    )
+    try:
+        cur = conn.cursor()
+        cur.execute('create table t (n number)')  # DDL self-commits
+        cur.execute('insert into t values (1)')
+        cur.execute('insert into t values (2)')
+        conn.rollback()
+        cur.execute('select n from t')
+        after_rollback = cur.fetchall()
+        cur.execute('insert into t values (3)')
+        conn.commit()
+        cur.execute('select n from t order by n')
+        after_commit = cur.fetchall()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert after_rollback == []  # the two inserts were rolled back
+    assert after_commit == [(3,)]  # the committed insert survived
+
+
 def test_date_and_timestamp_round_trip() -> None:
     # A DATE column keeps day+second precision; a TIMESTAMP column additionally
     # keeps the sub-second part, all the way through the wire and back.
