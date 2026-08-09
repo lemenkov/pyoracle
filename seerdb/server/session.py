@@ -39,7 +39,7 @@ from seerdb.server.auth import (
     parse_auth_response,
     parse_osesskey,
 )
-from seerdb.server.backend import Backend, BackendError
+from seerdb.server.backend import Backend, BackendError, Result
 from seerdb.server.framing import PacketStream
 from seerdb.server.handshake import (
     encode_accept,
@@ -169,7 +169,15 @@ def _answer_query(stream: PacketStream, backend: Backend, request: ExecRequest) 
     # connection — the Mirror must never desync, so even a backend that leaks a
     # native exception is caught and reported rather than dropping the wire.
     try:
-        result = backend.execute(request.sql, request.binds)
+        if len(request.bind_rows) > 1:
+            # Array DML (executemany): apply each bind row and report the total
+            # affected-row count — one execute message, one aggregated reply.
+            affected = 0
+            for row in request.bind_rows:
+                affected += backend.execute(request.sql, row).rowcount
+            result = Result(rowcount=affected)
+        else:
+            result = backend.execute(request.sql, request.binds)
         # Autocommit mode: the client set the commit-on-success option, so
         # persist this statement before replying (an explicit-transaction client
         # leaves the bit clear and drives commit/rollback itself).

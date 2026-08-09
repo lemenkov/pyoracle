@@ -138,6 +138,34 @@ def test_bind_variables() -> None:
     assert row == ('bob',)
 
 
+def test_executemany_array_dml() -> None:
+    # executemany sends one execute carrying every row; the Mirror applies them
+    # all and reports the total affected count.
+    listen, server, result = _start_mirror()
+    conn = _connect(listen.getsockname()[1])
+    try:
+        cur = conn.cursor()
+        cur.execute('create table t (id number, name varchar2(20))')
+        cur.executemany(
+            'insert into t values (:1, :2)',
+            [(1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')],
+        )
+        rowcount = cur.rowcount
+        cur.execute('select id, name from t order by id')
+        rows = cur.fetchall()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert rowcount == 4
+    assert rows == [(1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')]
+
+
 def test_fractional_number_bind() -> None:
     # A non-integer NUMBER bind decodes server-side to a Decimal; the SQLite
     # backend must accept it (as REAL) rather than reject it. float binds take

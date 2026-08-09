@@ -322,3 +322,30 @@ def test_parse_exec_reads_the_autocommit_flag() -> None:
     # The client sets the commit-on-success option (0x100) in autocommit mode.
     assert parse_exec(dml(1)).autocommit is True
     assert parse_exec(dml(0)).autocommit is False
+
+
+def test_parse_exec_extracts_array_dml_rows() -> None:
+    from seerdb.common.tns import encode_dictionary_exec
+
+    # executemany: the first row is `bind`, the rest ride in `batch`. parse_exec
+    # must recover every iteration's values, in order.
+    msg = encode_dictionary_exec(
+        {
+            'seq': 3,
+            'field_version': 6,
+            'query': {
+                'type': 'change',
+                'auto': 1,
+                'fetch': 0,
+                'server_version': 186647040,
+                'cursor': 0,
+                'query': 'insert into t values (:1, :2)',
+                'bind': [1, 'a'],
+                'batch': [[2, 'b'], [3, 'c']],
+                'def': [],
+            },
+        }
+    )
+    req = parse_exec(msg)
+    assert req.bind_rows == [[1, 'a'], [2, 'b'], [3, 'c']]
+    assert req.binds == [1, 'a']  # first row remains the single-execute view

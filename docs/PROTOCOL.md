@@ -920,6 +920,14 @@ wraps each statement in a `SAVEPOINT` so a failed statement rolls back only
 itself and the surrounding transaction survives — Oracle's statement-level error
 model, not PostgreSQL's abort-the-whole-transaction default.
 
+**Array DML / `executemany` (the Mirror).** An array-DML execute carries the OAC
+type descriptors once (one per bind column) followed by **one `TTI_RXD` row per
+iteration**. `parse_exec` reads the column types, then loops consuming an RXD row
+(a `TTI_RXD` token plus one DALC per column) until the rows run out — a plain
+execute is just the one-row case. The session applies every row through the
+backend and replies with the **summed** affected-row count, so `cursor.rowcount`
+matches the total inserted/updated.
+
 ### 6.1 Row Header (TTI_RXH)
 
 Precedes row data in SELECT results. All numeric fields use Oracle's

@@ -65,6 +65,9 @@ class ExecRequest:
     bind_count: int
     fetch: int
     binds: list = field(default_factory=list)
+    # One entry per array-DML (executemany) iteration; a plain execute has a
+    # single row equal to ``binds`` (empty for a statement with no binds).
+    bind_rows: list = field(default_factory=list)
     autocommit: bool = False
 
 
@@ -116,9 +119,11 @@ def parse_exec(payload: bytes) -> ExecRequest:
     sql = rest[:query_len].decode('utf-8') if query_flag else ''
 
     binds: list = []
+    bind_rows: list = []
     if bind_count > 0:
         # After the SQL: the al8 option array, then one OAC (type descriptor)
-        # per bind, then an RXD carrying the bind values.
+        # per bind column, then one RXD row of values per array-DML iteration
+        # (an ordinary single execute is just one row).
         after = rest[query_len:]
         for _ in range(all8_len):
             _, after = decode_ub4(after)
@@ -126,11 +131,17 @@ def parse_exec(payload: bytes) -> ExecRequest:
         for _ in range(bind_count):
             data_type, _maxlen, _scale, _charset, after = decode_token_oac(after, ())
             types.append(data_type)
-        if after and after[0] == TTI_RXD:
+        # Each row is a TTI_RXD token followed by one DALC per bind column; loop
+        # until the rows run out (executemany sends N, a plain execute sends 1).
+        while after and after[0] == TTI_RXD:
             after = after[1:]
-        for data_type in types:
-            raw, after = decode_dalc(after)
-            binds.append(_decode_bind_value(data_type, raw))
+            row = []
+            for data_type in types:
+                raw, after = decode_dalc(after)
+                row.append(_decode_bind_value(data_type, raw))
+            bind_rows.append(row)
+        if bind_rows:
+            binds = bind_rows[0]
 
     return ExecRequest(
         sql=sql,
@@ -138,6 +149,7 @@ def parse_exec(payload: bytes) -> ExecRequest:
         bind_count=bind_count,
         fetch=fetch,
         binds=binds,
+        bind_rows=bind_rows,
         autocommit=autocommit,
     )
 
