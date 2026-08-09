@@ -116,3 +116,11 @@ class PacketStream:
         while data is not None:
             packet, data = encode_packet(packet_type, data, self.sdu, self.large)
             self._sock.sendall(packet)
+
+    def send_raw(self, packet: bytes) -> None:
+        """Send an already-framed packet verbatim (it includes its TNS header).
+
+        For the handshake replies (ACCEPT / PRO / DTY) that are built as whole
+        packets; TTC payloads go through :meth:`write_packet` instead.
+        """
+        self._sock.sendall(packet)
