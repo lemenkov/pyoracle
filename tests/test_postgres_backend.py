@@ -10,6 +10,7 @@ skips — the same pattern as the live-Oracle integration tests.
 
 from __future__ import annotations
 
+import datetime
 import os
 import socket
 import sys
@@ -111,7 +112,7 @@ def test_unsupported_pg_type_is_an_ora_error() -> None:
     try:
         cur = conn.cursor()
         with pytest.raises(seerdb.DatabaseError) as excinfo:
-            cur.execute('select now()')
+            cur.execute("select '[]'::json")  # json isn't mapped yet
         assert 'ORA-03001' in str(excinfo.value)
         cur.execute('select 7 as n')
         rows = cur.fetchall()
@@ -125,3 +126,30 @@ def test_unsupported_pg_type_is_an_ora_error() -> None:
 
     assert result.get('error') is None, result.get('error')
     assert rows == [(7,)]
+
+
+def test_date_and_timestamp_columns() -> None:
+    listen, server, result = _start_mirror()
+    conn = _connect(listen.getsockname()[1])
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "select timestamp '2024-01-15 13:30:45' as ts, date '2020-12-31' as d"
+        )
+        row = cur.fetchone()
+        cur.execute('select now() as n')  # was ORA-03001; now a DATE
+        now_value = cur.fetchone()[0]
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert row == (
+        datetime.datetime(2024, 1, 15, 13, 30, 45),
+        datetime.datetime(2020, 12, 31, 0, 0),
+    )
+    assert isinstance(now_value, datetime.datetime)

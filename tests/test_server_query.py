@@ -164,3 +164,27 @@ def test_encode_rows_number_values() -> None:
     )
     _, rows = _decode_response(response)
     assert rows == [[1], [-7], [0], [Decimal('3.14')], [1000000]]
+
+
+def test_encode_rows_date_values() -> None:
+    import datetime
+
+    from seerdb.common.tns_consts import TNS_TYPE_DATE
+
+    col = ColumnMeta(name=b'D', data_type=TNS_TYPE_DATE, data_length=7, max_size=7)
+    response = (
+        encode_describe([col])
+        + encode_rows(
+            [
+                (datetime.datetime(2024, 1, 15, 13, 30, 45),),
+                (datetime.date(2020, 12, 31),),
+            ],
+            [col],
+        )
+        + bytes([TTI_STA])
+    )
+    _, rows = _decode_response(response)
+    assert rows == [
+        [datetime.datetime(2024, 1, 15, 13, 30, 45)],
+        [datetime.datetime(2020, 12, 31, 0, 0)],
+    ]
