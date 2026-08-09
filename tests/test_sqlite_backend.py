@@ -9,6 +9,7 @@ database — with DDL, DML and a typed SELECT, no Oracle and no Postgres in sigh
 
 from __future__ import annotations
 
+import datetime
 import socket
 import sys
 import threading
@@ -135,3 +136,29 @@ def test_bind_variables() -> None:
 
     assert result.get('error') is None, result.get('error')
     assert row == ('bob',)
+
+
+def test_date_and_timestamp_round_trip() -> None:
+    # A DATE column keeps day+second precision; a TIMESTAMP column additionally
+    # keeps the sub-second part, all the way through the wire and back.
+    listen, server, result = _start_mirror()
+    conn = _connect(listen.getsockname()[1])
+    ts = datetime.datetime(2024, 1, 15, 13, 30, 45, 123456)
+    day = datetime.date(2020, 12, 31)
+    try:
+        cur = conn.cursor()
+        cur.execute('create table t (d date, ts timestamp)')
+        cur.execute('insert into t values (:1, :2)', [day, ts])
+        cur.execute('select d, ts from t')
+        row = cur.fetchone()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    # DATE decodes to a datetime at midnight; TIMESTAMP preserves microseconds.
+    assert row == (datetime.datetime(2020, 12, 31, 0, 0), ts)

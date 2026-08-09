@@ -129,16 +129,19 @@ def test_unsupported_pg_type_is_an_ora_error() -> None:
 
 
 def test_date_and_timestamp_columns() -> None:
+    # Each temporal PostgreSQL type maps to the Oracle type of matching
+    # precision: date → DATE (day), timestamp → TIMESTAMP (sub-second),
+    # timestamptz → TIMESTAMPTZ (offset-aware).
     listen, server, result = _start_mirror()
     conn = _connect(listen.getsockname()[1])
     try:
         cur = conn.cursor()
-        cur.execute(
-            "select timestamp '2024-01-15 13:30:45' as ts, date '2020-12-31' as d"
-        )
-        row = cur.fetchone()
-        cur.execute('select now() as n')  # was ORA-03001; now a DATE
-        now_value = cur.fetchone()[0]
+        cur.execute("select date '2020-12-31' as d")
+        date_value = cur.fetchone()[0]
+        cur.execute("select timestamp '2024-01-15 13:30:45.123456' as ts")
+        ts_value = cur.fetchone()[0]
+        cur.execute("select timestamptz '2024-06-01 09:00:00+02' as tz")
+        tz_value = cur.fetchone()[0]
     finally:
         try:
             conn.close()
@@ -148,11 +151,15 @@ def test_date_and_timestamp_columns() -> None:
         listen.close()
 
     assert result.get('error') is None, result.get('error')
-    assert row == (
-        datetime.datetime(2024, 1, 15, 13, 30, 45),
-        datetime.datetime(2020, 12, 31, 0, 0),
+    # DATE keeps day precision (midnight of that day).
+    assert date_value == datetime.datetime(2020, 12, 31, 0, 0)
+    # TIMESTAMP keeps the microseconds.
+    assert ts_value == datetime.datetime(2024, 1, 15, 13, 30, 45, 123456)
+    # TIMESTAMPTZ is offset-aware and equals the same instant as 07:00Z.
+    assert tz_value.tzinfo is not None
+    assert tz_value == datetime.datetime(
+        2024, 6, 1, 7, 0, 0, tzinfo=datetime.timezone.utc
     )
-    assert isinstance(now_value, datetime.datetime)
 
 
 def test_bind_variables_postgres() -> None:

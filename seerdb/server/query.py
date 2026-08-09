@@ -18,6 +18,7 @@ from decimal import Decimal
 from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import (
     _bytes_with_length,
+    _encode_date_prefix,
     decode_dalc,
     decode_token_oac,
     decode_ub4,
@@ -26,6 +27,8 @@ from seerdb.common.tns import (
     encode_token_num,
 )
 from seerdb.common.tns_consts import (
+    TNS_TYPE_TIMESTAMP,
+    TNS_TYPE_TIMESTAMPTZ,
     TTI_ALL8,
     TTI_DCB,
     TTI_FUN,
@@ -192,10 +195,40 @@ def encode_describe(columns: list[ColumnMeta]) -> bytes:
     return bytes([TTI_DCB]) + preamble + body
 
 
-def _encode_value(value: object) -> bytes:
+def _encode_temporal(value: datetime.date, data_type: int) -> bytes:
+    # A temporal column has a fixed wire width fixed by its *type*, not by the
+    # particular value — so we dispatch on the column's data_type rather than
+    # letting encode_token_datetime() pick 7/11/13 bytes from the value. A plain
+    # date is promoted to midnight of that day.
+    dt = (
+        value
+        if isinstance(value, datetime.datetime)
+        else datetime.datetime(value.year, value.month, value.day)
+    )
+    if data_type == TNS_TYPE_TIMESTAMPTZ:
+        # 13 bytes: DATE prefix + nanoseconds + offset. Assume UTC if the value
+        # carries no zone (a naive value in a TZ column).
+        aware = (
+            dt if dt.tzinfo is not None else dt.replace(tzinfo=datetime.timezone.utc)
+        )
+        return encode_token_datetime(aware)
+    if data_type == TNS_TYPE_TIMESTAMP:
+        # 11 bytes always: DATE prefix + 4 BE nanosecond bytes (zero when the
+        # value has no sub-second part), keeping the column a fixed width.
+        naive = dt.replace(tzinfo=None)
+        return _encode_date_prefix(naive) + (naive.microsecond * 1000).to_bytes(
+            4, 'big'
+        )
+    # Oracle DATE: date + time to the second, 7 bytes. Sub-second and zone parts
+    # are dropped (that is what DATE, as distinct from TIMESTAMP, means).
+    return _encode_date_prefix(dt.replace(microsecond=0, tzinfo=None))
+
+
+def _encode_value(value: object, data_type: int) -> bytes:
     # A scalar column value as a DALC (1-byte length + data). NULL is the empty
-    # DALC; text is UTF-8; a number is Oracle's base-100 NUMBER encoding. Other
-    # types (DATE, LOB, …) carry their own wire formats and land with later work.
+    # DALC; text is UTF-8; a number is Oracle's base-100 NUMBER encoding; a
+    # datetime/date is encoded per the column's temporal type. Other types (LOB,
+    # …) carry their own wire formats and land with later work.
     if value is None:
         return bytes([0])
     if isinstance(value, bool):
@@ -212,19 +245,10 @@ def _encode_value(value: object) -> bytes:
         return _bytes_with_length(
             encode_token_num(int(value) if integral else float(value))
         )
-    if isinstance(value, datetime.datetime):
-        # Oracle DATE: date + time to the second. Sub-second precision and time
-        # zones (TIMESTAMP / TIMESTAMP WITH TIME ZONE) are dropped for now — the
-        # 7-byte DATE form keeps a fixed width for the column.
-        return _bytes_with_length(
-            encode_token_datetime(value.replace(microsecond=0, tzinfo=None))
-        )
     if isinstance(value, datetime.date):
-        # A plain date is midnight of that day as a DATE (datetime is a date
-        # subclass, so it is matched above first).
-        return _bytes_with_length(
-            encode_token_datetime(datetime.datetime(value.year, value.month, value.day))
-        )
+        # datetime is a date subclass, so this one branch covers both; the
+        # column's data_type decides DATE / TIMESTAMP / TIMESTAMPTZ width.
+        return _bytes_with_length(_encode_temporal(value, data_type))
     if isinstance(value, str):
         return _bytes_with_length(value.encode('utf-8'))
     if isinstance(value, bytes):
@@ -254,7 +278,9 @@ def encode_rows(
     for row in rows:
         if len(row) != len(columns):
             raise InterfaceError('row width does not match the column count')
-        body += bytes([TTI_RXD]) + b''.join(_encode_value(v) for v in row)
+        body += bytes([TTI_RXD]) + b''.join(
+            _encode_value(v, col.data_type) for v, col in zip(row, columns)
+        )
     return header + body
 
 

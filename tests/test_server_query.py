@@ -190,6 +190,66 @@ def test_encode_rows_date_values() -> None:
     ]
 
 
+def test_encode_rows_timestamp_values() -> None:
+    import datetime
+
+    from seerdb.common.tns_consts import TNS_TYPE_TIMESTAMP
+
+    # A TIMESTAMP column is fixed at 11 bytes and keeps the sub-second part; a
+    # value with no microseconds still encodes 11 bytes (nanos == 0).
+    col = ColumnMeta(
+        name=b'TS', data_type=TNS_TYPE_TIMESTAMP, data_length=11, max_size=11
+    )
+    response = (
+        encode_describe([col])
+        + encode_rows(
+            [
+                (datetime.datetime(2024, 1, 15, 13, 30, 45, 123456),),
+                (datetime.datetime(2020, 12, 31, 23, 59, 59),),
+            ],
+            [col],
+        )
+        + bytes([TTI_STA])
+    )
+    _, rows = _decode_response(response)
+    assert rows == [
+        [datetime.datetime(2024, 1, 15, 13, 30, 45, 123456)],
+        [datetime.datetime(2020, 12, 31, 23, 59, 59)],
+    ]
+
+
+def test_encode_rows_timestamptz_values() -> None:
+    import datetime
+
+    from seerdb.common.tns_consts import TNS_TYPE_TIMESTAMPTZ
+
+    # A TIMESTAMPTZ column is 13 bytes and carries the UTC offset. A naive value
+    # is assumed to be UTC (a bare wall-clock in a TZ column).
+    col = ColumnMeta(
+        name=b'TZ', data_type=TNS_TYPE_TIMESTAMPTZ, data_length=13, max_size=13
+    )
+    utc = datetime.timezone.utc
+    plus2 = datetime.timezone(datetime.timedelta(hours=2))
+    response = (
+        encode_describe([col])
+        + encode_rows(
+            [
+                (datetime.datetime(2024, 1, 15, 13, 30, 45, 123456, tzinfo=utc),),
+                (datetime.datetime(2024, 6, 1, 9, 0, 0, tzinfo=plus2),),
+                (datetime.datetime(2020, 12, 31, 23, 59, 59),),  # naive → UTC
+            ],
+            [col],
+        )
+        + bytes([TTI_STA])
+    )
+    _, rows = _decode_response(response)
+    assert rows == [
+        [datetime.datetime(2024, 1, 15, 13, 30, 45, 123456, tzinfo=utc)],
+        [datetime.datetime(2024, 6, 1, 9, 0, 0, tzinfo=plus2)],
+        [datetime.datetime(2020, 12, 31, 23, 59, 59, tzinfo=utc)],
+    ]
+
+
 def test_parse_exec_extracts_bind_values() -> None:
     from seerdb.common.tns import encode_dictionary_exec
 
