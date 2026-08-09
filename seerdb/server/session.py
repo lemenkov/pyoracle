@@ -46,6 +46,7 @@ from seerdb.server.query import (
     ExecRequest,
     encode_error,
     encode_query_response,
+    encode_status,
     parse_exec,
 )
 
@@ -145,5 +146,11 @@ def _answer_query(stream: PacketStream, backend: Backend, request: ExecRequest) 
         logger.warning('backend raised a non-ORA error: %s', exc)
         response = encode_error(_INTERNAL_ERROR, f'ORA-00600: backend error: {exc}')
     else:
-        response = encode_query_response(result.columns, result.rows)
+        # A query carries result columns (even with zero rows); a DDL/DML
+        # statement carries none and gets a bare success status instead of a
+        # describe — the client expects one or the other, not both.
+        if result.columns:
+            response = encode_query_response(result.columns, result.rows)
+        else:
+            response = encode_status(result.rowcount)
     stream.write_packet(TNS_DATA, response)

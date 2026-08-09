@@ -138,7 +138,7 @@ def test_row_width_mismatch_raises() -> None:
 def test_unsupported_value_type_raises() -> None:
     col = ColumnMeta(name=b'N', data_type=TNS_TYPE_NUMBER, data_length=22, max_size=22)
     with pytest.raises(InterfaceError):
-        encode_rows([(42,)], [col])
+        encode_rows([(object(),)], [col])
 
 
 def test_encode_error_reports_the_ora_code_and_message() -> None:
@@ -151,3 +151,16 @@ def test_encode_error_reports_the_ora_code_and_message() -> None:
     )
     assert result[1] == 942  # ErrCode
     assert 'ORA-00942' in result[5]  # Message
+
+
+def test_encode_rows_number_values() -> None:
+    from decimal import Decimal
+
+    col = ColumnMeta(name=b'N', data_type=TNS_TYPE_NUMBER, data_length=22, max_size=22)
+    response = (
+        encode_describe([col])
+        + encode_rows([(1,), (-7,), (0,), (3.14,), (1000000,)], [col])
+        + bytes([TTI_STA])
+    )
+    _, rows = _decode_response(response)
+    assert rows == [[1], [-7], [0], [Decimal('3.14')], [1000000]]

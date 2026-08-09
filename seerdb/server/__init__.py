@@ -46,6 +46,7 @@ from seerdb.server.query import (
     encode_error,
     encode_query_response,
     encode_rows,
+    encode_status,
     parse_exec,
 )
 from seerdb.server.session import Credentials, handle_login, serve_session
@@ -69,6 +70,7 @@ __all__ = [
     'encode_pro_reply',
     'encode_query_response',
     'encode_rows',
+    'encode_status',
     'handle_login',
     'parse_connect',
     'parse_exec',
