@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 from seerdb.exceptions import InterfaceError
 from seerdb.tns import _bytes_with_length, decode_ub4, encode_sb4
-from seerdb.tns_consts import TTI_ALL8, TTI_DCB, TTI_FUN
+from seerdb.tns_consts import TTI_ALL8, TTI_DCB, TTI_FUN, TTI_RXD, TTI_RXH
 
 # AL32UTF8 — what seerdb advertises and what an 11g DUAL column reports.
 _CHARSET_AL32UTF8 = 873
@@ -135,3 +135,42 @@ def encode_describe(columns: list[ColumnMeta]) -> bytes:
     body += _bytes_with_length(b'')  # dcbqcky query-cache key (11g)
     preamble = _bytes_with_length(b'')  # cursor uuid / timestamp (skipped)
     return bytes([TTI_DCB]) + preamble + body
+
+
+def _encode_value(value: object) -> bytes:
+    # A scalar column value as a DALC (1-byte length + data). NULL is the empty
+    # DALC. Only text values are supported here — NUMBER and the rest carry
+    # their own wire formats and land with later tickets.
+    if value is None:
+        return bytes([0])
+    if isinstance(value, str):
+        return _bytes_with_length(value.encode('utf-8'))
+    if isinstance(value, bytes):
+        return _bytes_with_length(value)
+    raise InterfaceError(f'unsupported column value type: {type(value).__name__}')
+
+
+def encode_rows(
+    rows: list[tuple], columns: list[ColumnMeta], *, fetch: int = 15
+) -> bytes:
+    """Build the row-transfer tokens for a fetch — §6.2 (11g).
+
+    One row-header (TTI_RXH) followed by one TTI_RXD per row, each carrying the
+    columns' values as DALC blobs. The caller frames these after the describe
+    and before the fetch terminator. ``columns`` fixes the value order.
+    """
+    header = (
+        bytes([TTI_RXH, 0])  # token + (skipped) flags
+        + encode_sb4(1)  # num requests
+        + encode_sb4(0)  # iteration number
+        + encode_sb4(fetch)  # num iterations
+        + encode_sb4(0)  # buffer length
+        + encode_sb4(0)  # bit-vector length (no column compression)
+        + _bytes_with_length(b'')  # rxhrid
+    )
+    body = b''
+    for row in rows:
+        if len(row) != len(columns):
+            raise InterfaceError('row width does not match the column count')
+        body += bytes([TTI_RXD]) + b''.join(_encode_value(v) for v in row)
+    return header + body
