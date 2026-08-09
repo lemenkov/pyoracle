@@ -29,9 +29,10 @@ import socket
 import struct
 
 from seerdb.tns import encode_packet
-from seerdb.tns_consts import TNS_DATA
+from seerdb.tns_consts import DEFAULT_SDU, TNS_DATA
 
-DEFAULT_SDU = 8192
+# Re-exported for the server modules that frame at the default SDU.
+__all__ = ['DEFAULT_SDU', 'PacketStream']
 
 # Non-final DATA fragment marker in the 2-byte data-flags that follow the
 # header (PROTOCOL.md §1.3). encode_packet stamps this on every fragment but

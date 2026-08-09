@@ -331,6 +331,9 @@ CharsetDict = {
 DEFAULT_HOST = ''
 DEFAULT_PORT = 1521
 DEFAULT_SID = ''
+# Default Session Data Unit (0x2000). The negotiated packet payload size; both
+# the client connect defaults and the server (Mirror) framing start here.
+DEFAULT_SDU = 8192
 
 CONN_STATE_DISCONNECTED = 0
 CONN_STATE_CONNECTED = 1
