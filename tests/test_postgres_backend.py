@@ -162,6 +162,35 @@ def test_date_and_timestamp_columns() -> None:
     )
 
 
+def test_high_precision_numeric() -> None:
+    # PostgreSQL numeric returns a Decimal; the Mirror's exact base-100 encoder
+    # carries all of it, well past float's ~15 significant digits.
+    listen, server, result = _start_mirror()
+    conn = _connect(listen.getsockname()[1])
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            'select 1.234567890123456789::numeric as a,'
+            ' 123456789012345678901234567890::numeric as b,'
+            ' (-9999999999.9999999999)::numeric as c'
+        )
+        row = cur.fetchone()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert row == (
+        Decimal('1.234567890123456789'),
+        Decimal('123456789012345678901234567890'),
+        Decimal('-9999999999.9999999999'),
+    )
+
+
 def test_bind_variables_postgres() -> None:
     listen, server, result = _start_mirror()
     conn = _connect(listen.getsockname()[1])

@@ -4660,13 +4660,58 @@ def encode_token_oac(Token: object) -> bytes:
 
 
 def encode_token_decimal(Value: Decimal) -> bytes:
-    # The base-100 NUMBER encoder works on int and float; route Decimal through
-    # the right one based on whether it has a fractional component. This keeps
-    # exact-integer Decimals exact and accepts the usual float lossy path for
-    # the rest.
+    # Exact base-100 Oracle NUMBER encoding for a Decimal — no float detour, so a
+    # value with more than ~15 significant digits round-trips unchanged (up to
+    # Oracle's ~38-digit / 20 base-100 group limit). Zero and integral values
+    # keep the fast paths; a non-finite Decimal (NaN / Inf) has no NUMBER form.
+    if not Value.is_finite():
+        raise DataError(f'cannot encode a non-finite NUMBER: {Value}')
+    if Value == 0:
+        return bytes([128])
     if Value == Value.to_integral_value():
         return encode_token_num(int(Value))
-    return encode_token_num(float(Value))
+
+    Sign, Digits, Exp10 = Value.as_tuple()
+    # is_finite() above rules out the 'n'/'N'/'F' exponent forms as_tuple() uses
+    # for NaN / Infinity, so Exp10 is a plain int here.
+    assert isinstance(Exp10, int)
+    DigitStr = ''.join(map(str, Digits))
+    # Decimal power of the most-significant digit, and the base-100 exponent of
+    # the leading group (each group spans decimal powers 10**2N .. 10**(2N+1)).
+    MsdPower = Exp10 + len(Digits) - 1
+    Exponent = MsdPower // 2
+    # The leading group's high decimal digit sits at power 2*Exponent+1; pad one
+    # leading zero when the MSD is instead the low digit of its group.
+    LeadPad = (2 * Exponent + 1) - MsdPower  # 0 or 1
+    Aligned = '0' * LeadPad + DigitStr
+    if len(Aligned) % 2:
+        Aligned += '0'
+    Pairs = [int(Aligned[I : I + 2]) for I in range(0, len(Aligned), 2)]
+
+    # Oracle NUMBER holds at most 20 base-100 groups; round half-up on the 21st.
+    MaxGroups = 20
+    if len(Pairs) > MaxGroups:
+        RoundUp = Pairs[MaxGroups] >= 50
+        Pairs = Pairs[:MaxGroups]
+        if RoundUp:
+            I = MaxGroups - 1
+            while I >= 0:
+                Pairs[I] += 1
+                if Pairs[I] < 100:
+                    break
+                Pairs[I] = 0
+                I -= 1
+            else:
+                # Carried past the most-significant group (999… → 100…).
+                Pairs = [1] + Pairs[: MaxGroups - 1]
+                Exponent += 1
+    # Trailing all-zero groups carry no value.
+    while len(Pairs) > 1 and Pairs[-1] == 0:
+        Pairs.pop()
+
+    if Sign == 0:
+        return bytes([Exponent + 193] + [P + 1 for P in Pairs])
+    return bytes([(Exponent + 193) ^ 0xFF] + [101 - P for P in Pairs] + [102])
 
 
 # --- SQL OBJECT (ADT) bind encode (#116) — the inverse of _read_object_column

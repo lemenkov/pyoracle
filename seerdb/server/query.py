@@ -24,6 +24,7 @@ from seerdb.common.tns import (
     decode_ub4,
     encode_sb4,
     encode_token_datetime,
+    encode_token_decimal,
     encode_token_num,
 )
 from seerdb.common.tns_consts import (
@@ -238,13 +239,9 @@ def _encode_value(value: object, data_type: int) -> bytes:
     if isinstance(value, (int, float)):
         return _bytes_with_length(encode_token_num(value))
     if isinstance(value, Decimal):
-        # NUMBER: integral Decimals stay exact; fractional ones go through the
-        # float path (fine for typical values; >15 significant digits lose
-        # precision until a Decimal-native encoder lands).
-        integral = value == value.to_integral_value()
-        return _bytes_with_length(
-            encode_token_num(int(value) if integral else float(value))
-        )
+        # NUMBER via the exact base-100 Decimal encoder: high-precision values
+        # (beyond float's ~15 significant digits) round-trip unchanged.
+        return _bytes_with_length(encode_token_decimal(value))
     if isinstance(value, datetime.date):
         # datetime is a date subclass, so this one branch covers both; the
         # column's data_type decides DATE / TIMESTAMP / TIMESTAMPTZ width.

@@ -166,6 +166,27 @@ def test_encode_rows_number_values() -> None:
     assert rows == [[1], [-7], [0], [Decimal('3.14')], [1000000]]
 
 
+def test_encode_rows_high_precision_decimal() -> None:
+    from decimal import Decimal
+
+    # A NUMBER column carrying Decimals beyond float precision: the exact
+    # base-100 encoder round-trips every significant digit.
+    col = ColumnMeta(name=b'N', data_type=TNS_TYPE_NUMBER, data_length=22, max_size=22)
+    values = [
+        Decimal('1.234567890123456789'),
+        Decimal('-1.234567890123456789'),
+        Decimal('123456789012345678901234567890'),
+        Decimal('0.00000000000000000001'),
+    ]
+    response = (
+        encode_describe([col])
+        + encode_rows([(v,) for v in values], [col])
+        + bytes([TTI_STA])
+    )
+    _, rows = _decode_response(response)
+    assert rows == [[v] for v in values]
+
+
 def test_encode_rows_date_values() -> None:
     import datetime
 
