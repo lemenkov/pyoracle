@@ -10,12 +10,22 @@ on:
       - '**.md'
       - 'docs/**'
       - 'LICENSES/**'
+      - 'NOTICE'
+      - 'REUSE.toml'
+      - '.gitignore'
+      - '.git-blame-ignore-revs'
+      - '.github/dependabot.yml'
   pull_request:
     branches: [master]
     paths-ignore:
       - '**.md'
       - 'docs/**'
       - 'LICENSES/**'
+      - 'NOTICE'
+      - 'REUSE.toml'
+      - '.gitignore'
+      - '.git-blame-ignore-revs'
+      - '.github/dependabot.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
