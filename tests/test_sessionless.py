@@ -10,13 +10,13 @@
 
 import unittest
 
-from seerdb.connection import Xid, _normalize_sessionless_txn_id
-from seerdb.tns import (
+from seerdb.client.connection import Xid, _normalize_sessionless_txn_id
+from seerdb.common.tns import (
     _ENCODE_FIELD_VERSION,
     decode_token_server_piggyback,
     encode_tpc_switch,
 )
-from seerdb.tns_consts import (
+from seerdb.common.tns_consts import (
     TNS_FUNC_TPC_TXN_SWITCH,
     TNS_TPC_SESSIONLESS_FORMAT_ID,
     TNS_TPC_TXN_DETACH,

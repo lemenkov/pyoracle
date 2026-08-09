@@ -8,9 +8,9 @@ client-side logic without a live server."""
 import types
 import unittest
 
-from seerdb.connection import OracleConnect
-from seerdb.cursor import Cursor
-from seerdb.exceptions import InterfaceError, ProgrammingError
+from seerdb.client.connection import OracleConnect
+from seerdb.client.cursor import Cursor
+from seerdb.common.exceptions import InterfaceError, ProgrammingError
 
 
 def _stub_cursor(rows, description=None):

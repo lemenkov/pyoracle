@@ -29,7 +29,7 @@ records the bytes. changepassword changes the password and changes it back.
 
 import argparse
 
-import oracledb   # python-oracledb; thin mode is the default
+import oracledb  # python-oracledb; thin mode is the default
 
 
 def _table(cur, name, ddl):

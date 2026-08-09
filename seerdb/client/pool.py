@@ -27,8 +27,8 @@ import threading
 import time
 from collections import deque
 
-from seerdb.connection import OracleConnect
-from seerdb.exceptions import InterfaceError
+from seerdb.client.connection import OracleConnect
+from seerdb.common.exceptions import InterfaceError
 
 
 class _PoolEntry:

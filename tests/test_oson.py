@@ -13,8 +13,8 @@ import json
 import unittest
 from decimal import Decimal
 
-from seerdb.datatypes import IntervalYM
-from seerdb.oson import OsonError, decode_oson, encode_oson, json_to_text
+from seerdb.common.datatypes import IntervalYM
+from seerdb.common.oson import OsonError, decode_oson, encode_oson, json_to_text
 
 # (label, JSON document, captured OSON image as hex)
 FIXTURES = [

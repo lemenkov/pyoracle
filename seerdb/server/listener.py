@@ -19,8 +19,7 @@ import logging
 import socket
 from collections.abc import Callable
 
-from seerdb.server.framing import DEFAULT_SDU, PacketStream
-from seerdb.tns_consts import (
+from seerdb.common.tns_consts import (
     TNS_ABORT,
     TNS_ACCEPT,
     TNS_ACK,
@@ -32,6 +31,7 @@ from seerdb.tns_consts import (
     TNS_REFUSE,
     TNS_RESEND,
 )
+from seerdb.server.framing import DEFAULT_SDU, PacketStream
 
 logger = logging.getLogger('seerdb.server')
 

@@ -13,9 +13,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from seerdb.exceptions import InterfaceError
-from seerdb.tns import _bytes_with_length, decode_ub4, encode_sb4
-from seerdb.tns_consts import TTI_ALL8, TTI_DCB, TTI_FUN, TTI_RXD, TTI_RXH
+from seerdb.common.exceptions import InterfaceError
+from seerdb.common.tns import _bytes_with_length, decode_ub4, encode_sb4
+from seerdb.common.tns_consts import TTI_ALL8, TTI_DCB, TTI_FUN, TTI_RXD, TTI_RXH
 
 # AL32UTF8 — what seerdb advertises and what an 11g DUAL column reports.
 _CHARSET_AL32UTF8 = 873

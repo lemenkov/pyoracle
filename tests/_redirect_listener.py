@@ -14,7 +14,7 @@ import socket
 import struct
 import threading
 
-from seerdb.tns_consts import TNS_REDIRECT
+from seerdb.common.tns_consts import TNS_REDIRECT
 
 
 class RedirectListener:

@@ -21,7 +21,7 @@ import unittest
 from decimal import Decimal
 
 import seerdb
-from seerdb.tns_consts import FIELD_VERSION_10_2, FIELD_VERSION_12_1
+from seerdb.common.tns_consts import FIELD_VERSION_10_2, FIELD_VERSION_12_1
 
 # Features the Oracle 9i (fv2) server genuinely lacks, keyed by a substring of
 # the test method name. A 9i (field_version < 10.2) connection skips these with
@@ -741,10 +741,10 @@ class CursorIntegration(_IntegrationBase):
         # Count only TNS_DATA sends: under XE's logon-storm throttle the server
         # can inject a break/marker mid-response, and the driver's marker ack is
         # an extra (non-data) send that would otherwise make this flake.
-        from seerdb.tns_consts import TNS_DATA
+        from seerdb.common.tns_consts import TNS_DATA
 
         self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER)')
-        import seerdb.connection as _c
+        import seerdb.client.connection as _c
 
         orig = _c.OracleConnect.send
         sends = [0]
@@ -817,7 +817,7 @@ class CursorIntegration(_IntegrationBase):
     def _require_12c(self):
         # arraydmlrowcounts is a 12.1+ server feature (it rides the 12c+ OALL8
         # al8pidmlrc block); skip the positive tests on an 11g server.
-        from seerdb.tns import FIELD_VERSION_12_1
+        from seerdb.common.tns import FIELD_VERSION_12_1
 
         if self.conn.field_version < FIELD_VERSION_12_1:
             self.skipTest('arraydmlrowcounts needs a 12.1+ server')
@@ -865,7 +865,7 @@ class CursorIntegration(_IntegrationBase):
 
     def test_arraydmlrowcounts_unsupported_on_11g(self):
         # On an 11g server the feature is rejected up front (oracledb-compatible).
-        from seerdb.tns import FIELD_VERSION_12_1
+        from seerdb.common.tns import FIELD_VERSION_12_1
 
         if self.conn.field_version >= FIELD_VERSION_12_1:
             self.skipTest('server supports arraydmlrowcounts')
@@ -1913,7 +1913,7 @@ class LOBIntegration(_IntegrationBase):
         # discards the next response's data, so a large CLOB read right after a
         # few errors came back empty. Interleave errored SELECTs with a 50 KB
         # CLOB read and assert the content is intact and the connection usable.
-        from seerdb.exceptions import DatabaseError
+        from seerdb.common.exceptions import DatabaseError
 
         self._setup()
         Big = 'A' * 50000
@@ -1934,7 +1934,7 @@ class BooleanIntegration(_IntegrationBase):
     # Native SQL BOOLEAN columns, 23ai+ (#54, TNS type 252). Skipped on servers
     # without the type (21c/11g reject the column with ORA-00902).
     def _setup_bool(self):
-        from seerdb.exceptions import DatabaseError
+        from seerdb.common.exceptions import DatabaseError
 
         try:
             self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, flag BOOLEAN)')
@@ -1970,7 +1970,7 @@ class VectorIntegration(_IntegrationBase):
     # vector as a LOB locator; seerdb reads the binary image over TTI_LOBOPS
     # and decodes it to a list. Skipped on servers without the type.
     def _setup_vec(self, coltype):
-        from seerdb.exceptions import DatabaseError
+        from seerdb.common.exceptions import DatabaseError
 
         try:
             self.cur.execute(f'CREATE TABLE {self.TABLE} (v {coltype})')
@@ -2067,7 +2067,7 @@ class VectorIntegration(_IntegrationBase):
 
     def test_sparse_roundtrip(self):
         # SPARSE vectors (#68): bind a SparseVector and read it back.
-        from seerdb.vector import SparseVector
+        from seerdb.common.vector import SparseVector
 
         sv = SparseVector(8, [2, 5], [1.5, 2.5])
         self.assertEqual(self._bind_roundtrip('VECTOR(8, FLOAT32, SPARSE)', sv), sv)
@@ -2079,7 +2079,7 @@ class JSONIntegration(_IntegrationBase):
     # value as a LOB locator; seerdb reads the OSON image over TTI_LOBOPS and
     # decodes it to a Python value. Skipped on servers without the JSON type.
     def _setup_json(self):
-        from seerdb.exceptions import DatabaseError
+        from seerdb.common.exceptions import DatabaseError
 
         try:
             self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, doc JSON)')
@@ -2327,7 +2327,7 @@ class SodaIntegration(_IntegrationBase):
         col = self.soda.createCollection('it_over')
         for i in range(5):
             col.insertOne({'i': i})
-        import seerdb.soda as _soda
+        import seerdb.client.soda as _soda
 
         saved = _soda._DEFAULT_FETCH_CAP
         _soda._DEFAULT_FETCH_CAP = 2  # force overflow without a .limit()
@@ -2439,7 +2439,7 @@ class SqlDomainIntegration(_IntegrationBase):
     DOMAIN = 'PYO_DOM_T'
 
     def _setup_domain(self):
-        from seerdb.exceptions import DatabaseError
+        from seerdb.common.exceptions import DatabaseError
 
         try:
             self.cur.execute(f'DROP DOMAIN {self.DOMAIN} FORCE')
@@ -2677,7 +2677,7 @@ class RefBindIntegration(_IntegrationBase):
     REFS = 'PYORACLE_REF_REFS'
 
     def _setup_schema(self):
-        from seerdb.exceptions import DatabaseError
+        from seerdb.common.exceptions import DatabaseError
 
         for s in (
             f'DROP TABLE {self.REFS}',
@@ -2787,7 +2787,7 @@ class SessionlessTransactionIntegration(unittest.TestCase):
         return c
 
     def setUp(self):
-        from seerdb.exceptions import NotSupportedError
+        from seerdb.common.exceptions import NotSupportedError
 
         self.conns = []
         setup = self._conn()
@@ -2998,7 +2998,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_sparse_vector_bind_roundtrip(self):
         # Async parity for SPARSE vectors (#68).
-        from seerdb.vector import SparseVector
+        from seerdb.common.vector import SparseVector
 
         sv = SparseVector(8, [2, 5], [1.5, 2.5])
         async with await seerdb.connect_async(**self._kwargs()) as Conn:
@@ -3152,7 +3152,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
     async def test_error_then_large_lob_stays_synced(self):
         # #45 (async parity): errored calls leave break/reset markers; a few of
         # them followed by a large CLOB read must not desync the stream.
-        from seerdb.exceptions import DatabaseError
+        from seerdb.common.exceptions import DatabaseError
 
         async with await seerdb.connect_async(**self._kwargs()) as Conn:
             if Conn.field_version < FIELD_VERSION_10_2:
@@ -3478,7 +3478,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_async_executemany_arraydmlrowcounts(self):
         # Async mirror of test_executemany_arraydmlrowcounts_update (#18).
-        from seerdb.tns import FIELD_VERSION_12_1
+        from seerdb.common.tns import FIELD_VERSION_12_1
 
         async with await seerdb.connect_async(**self._kwargs()) as Conn:
             if Conn.field_version < FIELD_VERSION_12_1:
@@ -3514,7 +3514,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_async_arraydmlrowcounts_unsupported_on_11g(self):
         # On an 11g server the async feature is rejected up front, same as sync.
-        from seerdb.tns import FIELD_VERSION_12_1
+        from seerdb.common.tns import FIELD_VERSION_12_1
 
         async with await seerdb.connect_async(**self._kwargs()) as Conn:
             if Conn.field_version >= FIELD_VERSION_12_1:
@@ -3587,7 +3587,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_async_ref_bind(self):
         # Async mirror of RefBindIntegration (#139): fetch a REF, bind it back.
-        from seerdb.tns_consts import FIELD_VERSION_12_1 as _FV12
+        from seerdb.common.tns_consts import FIELD_VERSION_12_1 as _FV12
 
         TYPE, PEOPLE, REFS = (
             'PYORACLE_AREF_T',
@@ -3636,7 +3636,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
     async def test_async_sessionless_suspend_resume(self):
         # Async mirror of SessionlessTransactionIntegration (#133): suspend on
         # one async connection, resume + commit on another. Skips below 23ai.
-        from seerdb.exceptions import NotSupportedError
+        from seerdb.common.exceptions import NotSupportedError
 
         Kw = dict(self._kwargs())
         Kw['autocommit'] = False
@@ -3720,7 +3720,7 @@ class BFILEIntegration(unittest.TestCase):
         # The LOB-object surface: directory_name / filename / is_file
         # attributes from the locator bytes. Auto-resolve has to be off
         # to see the LOB object before it's read.
-        import seerdb.cursor as _cm
+        import seerdb.client.cursor as _cm
 
         Saved = _cm._resolve_lobs
         _cm._resolve_lobs = lambda c, r: r

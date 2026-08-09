@@ -27,7 +27,7 @@ import sys
 import time
 
 sys.path.insert(0, ".")
-import seerdb                                              # noqa: E402
+import seerdb  # noqa: E402
 
 _KW = dict(
     host=os.environ.get("SEERDB_TEST_HOST", "localhost"),

@@ -19,7 +19,7 @@
 # FILE_CLOSE (#46, OracleConnect.bfile_read_native) — using the open-flagged
 # locator the server returns from FILE_OPEN.
 
-from seerdb.tns_consts import (
+from seerdb.common.tns_consts import (
     TNS_TYPE_BFILE,
     TNS_TYPE_BLOB,
     TNS_TYPE_CLOB,
@@ -122,7 +122,7 @@ class LOB:
         if len(self.raw) == _LOCATOR_OVERHEAD:
             return '' if self.is_character else b''
         if self._connection is None:
-            from seerdb.exceptions import InterfaceError
+            from seerdb.common.exceptions import InterfaceError
 
             raise InterfaceError('LOB has no connection to read from')
         if self.is_file:
@@ -133,7 +133,7 @@ class LOB:
         # Fetch the raw locator content over TTI_LOBOPS (the OSON image for a
         # JSON column). Shared by the sync read() path.
         if self._connection is None:
-            from seerdb.exceptions import InterfaceError
+            from seerdb.common.exceptions import InterfaceError
 
             raise InterfaceError('LOB has no connection to read from')
         return self._connection.lob_read(self.raw, self.data_type)
@@ -143,10 +143,10 @@ class LOB:
         # image over the LOB locator path; decode it to a Python value.
         # lob_read returns bytes for these non-CLOB types.
         if self.data_type == TNS_TYPE_JSON:
-            from seerdb.oson import decode_oson
+            from seerdb.common.oson import decode_oson
 
             return decode_oson(content)
-        from seerdb.vector import decode_vector
+        from seerdb.common.vector import decode_vector
 
         return decode_vector(content)
 
@@ -157,7 +157,7 @@ class LOB:
         coroutines."""
         if self.data_type in _DECODED_IMAGE_TYPES:
             if self._connection is None:
-                from seerdb.exceptions import InterfaceError
+                from seerdb.common.exceptions import InterfaceError
 
                 raise InterfaceError('LOB has no connection to read from')
             content = await self._connection.lob_read(self.raw, self.data_type)
@@ -165,7 +165,7 @@ class LOB:
         if len(self.raw) == _LOCATOR_OVERHEAD:
             return '' if self.is_character else b''
         if self._connection is None:
-            from seerdb.exceptions import InterfaceError
+            from seerdb.common.exceptions import InterfaceError
 
             raise InterfaceError('LOB has no connection to read from')
         if self.is_file:

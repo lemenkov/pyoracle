@@ -12,7 +12,7 @@
 
 import unittest
 
-from seerdb.dbobject import (
+from seerdb.common.dbobject import (
     COLLECTION_NESTED_TABLE,
     COLLECTION_VARRAY,
     DbObject,
@@ -24,8 +24,8 @@ from seerdb.dbobject import (
     decode_xmltype,
     type_name_to_tns,
 )
-from seerdb.exceptions import NotSupportedError
-from seerdb.tns import (
+from seerdb.common.exceptions import NotSupportedError
+from seerdb.common.tns import (
     _ENCODE_FIELD_VERSION,
     _encode_object_bind_value,
     _encode_ref_bind_value,
@@ -33,7 +33,7 @@ from seerdb.tns import (
     _read_object_column,
     encode_object_image,
 )
-from seerdb.tns_consts import (
+from seerdb.common.tns_consts import (
     AL32UTF8_CHARSET,
     TNS_TYPE_CHAR,
     TNS_TYPE_NUMBER,
@@ -41,7 +41,7 @@ from seerdb.tns_consts import (
     TNS_TYPE_TIMESTAMP,
     TNS_TYPE_VARCHAR,
 )
-from seerdb.types import decode_value
+from seerdb.common.types import decode_value
 
 # The full on-wire object column value for ('Main St', 12345, 'US') plus four
 # trailing bytes (the start of the next row) used as a desync sentinel.

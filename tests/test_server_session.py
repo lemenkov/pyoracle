@@ -14,10 +14,10 @@ import socket
 import threading
 
 import seerdb
+from seerdb.common.tns_consts import TNS_TYPE_VARCHAR
 from seerdb.server.framing import PacketStream
 from seerdb.server.query import ColumnMeta
 from seerdb.server.session import handle_login, serve_session
-from seerdb.tns_consts import TNS_TYPE_VARCHAR
 
 _CREDS = {'PYO': 'pyo123'}
 

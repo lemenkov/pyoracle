@@ -9,7 +9,7 @@
 import datetime
 from decimal import Decimal
 
-from seerdb.tns_consts import (
+from seerdb.common.tns_consts import (
     TNS_TYPE_BDOUBLE,
     TNS_TYPE_BFLOAT,
     TNS_TYPE_CHAR,

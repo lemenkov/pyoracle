@@ -5,7 +5,7 @@ import unittest
 from functools import reduce
 from unittest.mock import patch
 
-from seerdb.tns import (
+from seerdb.common.tns import (
     capability_arrays,
     encode_dictionary,
     encode_dictionary_auth,
@@ -19,7 +19,7 @@ from seerdb.tns import (
     encode_dictionary_tran,
     encode_packet,
 )
-from seerdb.tns_consts import TNS_CONNECT, TNS_DATA, DictionaryType
+from seerdb.common.tns_consts import TNS_CONNECT, TNS_DATA, DictionaryType
 
 
 class TestTnsCommandEncoders(unittest.TestCase):
@@ -2613,7 +2613,7 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
     def test_capability_arrays_11_2(self):
         # The default (11.2) capability vectors must stay byte-identical to the
         # historical seerdb 11g handshake (this is what test_tns_dty_* pin).
-        from seerdb.tns import FIELD_VERSION_11_2
+        from seerdb.common.tns import FIELD_VERSION_11_2
 
         cc, rc = capability_arrays()
         self.assertEqual(
@@ -2667,7 +2667,7 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
     def test_capability_arrays_21_1(self):
         # The 21.1 vectors must match python-oracledb 4.0.1 captured against
         # Oracle 21c XE (issue #27 Phase 0 reference bytes).
-        from seerdb.tns import FIELD_VERSION_21_1
+        from seerdb.common.tns import FIELD_VERSION_21_1
 
         cc, rc = capability_arrays(FIELD_VERSION_21_1)
         self.assertEqual(
@@ -2683,7 +2683,7 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
         # An intermediate 12c+ version (e.g. 19.1 = 12) renders the 21.1 base
         # vector with the field-version byte patched in, so the client can
         # negotiate down to any 12c+ server.
-        from seerdb.tns import FIELD_VERSION_19_1, FIELD_VERSION_21_1
+        from seerdb.common.tns import FIELD_VERSION_19_1, FIELD_VERSION_21_1
 
         cc19, _ = capability_arrays(FIELD_VERSION_19_1)
         cc21, _ = capability_arrays(FIELD_VERSION_21_1)
@@ -2699,7 +2699,7 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
     def test_tns_sess_12c(self, mock_gethostname, mock_getpid):
         # 12c+ OSESSKEY: 5 key/value pairs led by AUTH_TERMINAL, and the
         # username is length-prefixed (3, "pyo") rather than raw.
-        from seerdb.tns import FIELD_VERSION_21_1
+        from seerdb.common.tns import FIELD_VERSION_21_1
 
         mock_getpid.return_value = 18967
         mock_gethostname.return_value = 'ExampleHost'
@@ -2872,13 +2872,13 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
         # a copied context so the encode field-version ContextVar doesn't leak.
         import contextvars
 
-        from seerdb.tns import (
+        from seerdb.common.tns import (
             _ENCODE_FIELD_VERSION,
             FIELD_VERSION_11_2,
             FIELD_VERSION_21_1,
             encode_token_raw,
         )
-        from seerdb.tns_consts import TNS_TYPE_NUMBER, TNS_TYPE_VARCHAR
+        from seerdb.common.tns_consts import TNS_TYPE_NUMBER, TNS_TYPE_VARCHAR
 
         UTF8 = 871
 
@@ -2913,7 +2913,7 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
         import hashlib
         import struct
 
-        from seerdb.tns import _datatype_table_12c
+        from seerdb.common.tns import _datatype_table_12c
 
         Table = _datatype_table_12c()
         self.assertEqual(len(Table), 2570)
@@ -2928,7 +2928,7 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
     def test_dty_12c_message_shape(self):
         # field_version 21.1 selects the 2-byte table and encoding flag 3
         # (oracledb's MULTI_BYTE|CONV_LENGTH); 11.2 keeps flag 1.
-        from seerdb.tns import FIELD_VERSION_21_1
+        from seerdb.common.tns import FIELD_VERSION_21_1
 
         Dict = {'type': DictionaryType.dty, 'req': 'utf-8'}
         self.assertEqual(encode_dictionary_dty(Dict)[5], 1)
@@ -2942,7 +2942,7 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
         # fv24 spots (#89): the extra pointer byte after the seq, options
         # 0x8021->0x8061, the prefetch-buffer-size 0xffffffff->0, and
         # al8i4[9] 0->0x8000.
-        from seerdb.tns_consts import FIELD_VERSION_21_1, FIELD_VERSION_23_4
+        from seerdb.common.tns_consts import FIELD_VERSION_21_1, FIELD_VERSION_23_4
 
         def gen(fv):
             Dict = {
@@ -2978,13 +2978,13 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
     def test_fun_header_fv24_extra_pointer(self):
         # 23ai (fv > 17, #89) appends one extra pointer byte after the sequence
         # number on every function message; the legacy form (fv <= 17) does not.
-        from seerdb.tns import (
+        from seerdb.common.tns import (
             FIELD_VERSION_11_2,
             FIELD_VERSION_23_1,
             TTI_FUN,
             _fun_header,
         )
-        from seerdb.tns_consts import (
+        from seerdb.common.tns_consts import (
             FIELD_VERSION_23_4,
             TTI_ALL8,
             TTI_COMMIT,
@@ -3023,7 +3023,7 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
         return Q
 
     def _scroll_exec(self, query, seq=7):
-        from seerdb.tns_consts import FIELD_VERSION_23_4
+        from seerdb.common.tns_consts import FIELD_VERSION_23_4
 
         return encode_dictionary(
             {
@@ -3042,7 +3042,7 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
         # (0x8000 fv24 flag | NO_CANCEL_ON_EOF 0x80 | SCROLLABLE 0x02),
         # al8i4[10]=orientation CURRENT (0x01), al8i4[11]=position 1. Byte-for-byte
         # against a live 23ai oracledb-thin capture.
-        from seerdb.tns_consts import TNS_FETCH_ORIENTATION_CURRENT
+        from seerdb.common.tns_consts import TNS_FETCH_ORIENTATION_CURRENT
 
         Hex = self._scroll_exec(
             self._scroll_query(
@@ -3069,7 +3069,7 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
         # length-prefixed SQL byte (a stray 0x00 there shifts the al8i4 array and
         # the server rejects the call as malformed, ORA-03137 [12316]). al8i4 tail
         # is ABSOLUTE (0x20) / position 5. Byte-for-byte against a 23ai capture.
-        from seerdb.tns_consts import TNS_FETCH_ORIENTATION_ABSOLUTE
+        from seerdb.common.tns_consts import TNS_FETCH_ORIENTATION_ABSOLUTE
 
         Hex = self._scroll_exec(
             self._scroll_query(
@@ -3096,7 +3096,7 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
         # re-execute path is not possible (12c+ never sends an empty query
         # elsewhere), so assert the al8i4 array butts directly against the 12c
         # middle block (…000101000280820120010500, no 00 before 028082's run).
-        from seerdb.tns_consts import TNS_FETCH_ORIENTATION_ABSOLUTE
+        from seerdb.common.tns_consts import TNS_FETCH_ORIENTATION_ABSOLUTE
 
         Hex = self._scroll_exec(
             self._scroll_query(
@@ -3878,7 +3878,7 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
         )
         self.assertEqual(encode_dictionary_login(Dict), Ret)
 
-    @patch('seerdb.crypto.token_bytes')
+    @patch('seerdb.common.crypto.token_bytes')
     def test_tns_auth_0(self, mock_token_bytes):
         mock_token_bytes.return_value = bytes(
             [
@@ -4202,7 +4202,7 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
         )
         self.assertEqual(encode_dictionary_auth(Dict), (Ret, ConnKey))
 
-    @patch('seerdb.crypto.token_bytes')
+    @patch('seerdb.common.crypto.token_bytes')
     def test_tns_auth_1(self, mock_token_bytes):
         mock_token_bytes.return_value = bytes(
             [
@@ -5383,9 +5383,9 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
         self.assertEqual(encode_dictionary_exec(Dict), Ret)
 
 
-from seerdb.cursor import cursor
-from seerdb.date import date
-from seerdb.tns import (
+from seerdb.client.cursor import cursor
+from seerdb.common.date import date
+from seerdb.common.tns import (
     encode_chr,
     encode_kv,
     encode_sb4,
@@ -6211,7 +6211,11 @@ if __name__ == '__main__':
     unittest.main()
 
 
-from seerdb.tns import FIELD_VERSION_9_2, encode_o3logon_phase1, encode_o3logon_phase2
+from seerdb.common.tns import (
+    FIELD_VERSION_9_2,
+    encode_o3logon_phase1,
+    encode_o3logon_phase2,
+)
 
 
 class TestO3logonMessages(unittest.TestCase):
@@ -6247,7 +6251,7 @@ class TestO3logonMessages(unittest.TestCase):
     def test_9i_parse_no_binds(self):
         # fv2 TTI_ALL7 parse, no binds: option word 0x21, no bind section.
         # Exact bytes from a live 9.2.0.4 JDBC-thin capture.
-        from seerdb.tns import encode_o7_parse
+        from seerdb.common.tns import encode_o7_parse
 
         self.assertEqual(
             encode_o7_parse(0, 'select 42 as n from dual').hex(),
@@ -6263,7 +6267,7 @@ class TestO3logonMessages(unittest.TestCase):
         # str bind's OAC declares our AL32UTF8 session charset (02 0369) where
         # JDBC declared its DB charset (01 1f); the number bind's charset field
         # is unused and keeps 01 1f (#174).
-        from seerdb.tns import encode_o7_parse
+        from seerdb.common.tns import encode_o7_parse
 
         self.assertEqual(
             encode_o7_parse(
@@ -6281,8 +6285,8 @@ class TestO3logonMessages(unittest.TestCase):
         # AL32UTF8 session charset (02 0369, csfrm 1) and its value rides as
         # UTF-8; a national Var (DB_TYPE_NVARCHAR) declares AL16UTF16 (02 07d0,
         # csfrm 2) and its value rides as UTF-16BE.
-        import seerdb.datatypes as dt
-        from seerdb.tns import _o7_bind_oac, encode_token_rxd
+        import seerdb.common.datatypes as dt
+        from seerdb.common.tns import _o7_bind_oac, encode_token_rxd
 
         # ordinary str -> AL32UTF8 / csfrm 1, value UTF-8
         Oac = _o7_bind_oac('café')
@@ -6302,7 +6306,7 @@ class TestEndToEndPiggyback(unittest.TestCase):
     # oracledb-thin capture on 23ai (fv24); the action/client-identifier cases
     # below are the exact piggyback portions of that capture.
     def test_action_matches_capture(self):
-        from seerdb.tns import encode_end_to_end_piggyback
+        from seerdb.common.tns import encode_end_to_end_piggyback
 
         self.assertEqual(
             encode_end_to_end_piggyback(6, 24, {'action': 'MYACT'}).hex(),
@@ -6310,7 +6314,7 @@ class TestEndToEndPiggyback(unittest.TestCase):
         )
 
     def test_client_identifier_matches_capture(self):
-        from seerdb.tns import encode_end_to_end_piggyback
+        from seerdb.common.tns import encode_end_to_end_piggyback
 
         self.assertEqual(
             encode_end_to_end_piggyback(8, 24, {'client_identifier': 'MYCLID'}).hex(),
@@ -6320,7 +6324,7 @@ class TestEndToEndPiggyback(unittest.TestCase):
     def test_pre_23ai_omits_token(self):
         # On a < 23ai (fv <= 17) server the piggyback carries no ub8 token,
         # exactly like _fun_header.
-        from seerdb.tns import encode_end_to_end_piggyback
+        from seerdb.common.tns import encode_end_to_end_piggyback
 
         fv16 = encode_end_to_end_piggyback(6, 16, {'action': 'MYACT'}).hex()
         fv24 = encode_end_to_end_piggyback(6, 24, {'action': 'MYACT'}).hex()
@@ -6331,7 +6335,7 @@ class TestEndToEndPiggyback(unittest.TestCase):
         self.assertEqual(len(fv24), len(fv16) + 2)
 
     def test_combined_flags(self):
-        from seerdb.tns import encode_end_to_end_piggyback
+        from seerdb.common.tns import encode_end_to_end_piggyback
 
         out = encode_end_to_end_piggyback(
             7, 24, {'module': 'M', 'action': 'A', 'client_identifier': 'C'}
@@ -6344,7 +6348,7 @@ class TestEndToEndPiggyback(unittest.TestCase):
 class TestEndToEndClientInfoDbop(unittest.TestCase):
     # client_info / dbop on the same piggyback (#184).
     def test_client_info_and_dbop(self):
-        from seerdb.tns import encode_end_to_end_piggyback
+        from seerdb.common.tns import encode_end_to_end_piggyback
 
         out = encode_end_to_end_piggyback(
             99, 24, {'client_info': 'PYOINFO', 'dbop': 'PYODBOP'}
@@ -6359,7 +6363,7 @@ class TestEndToEndClientInfoDbop(unittest.TestCase):
         )
 
     def test_dbop_alone_flag(self):
-        from seerdb.tns import encode_end_to_end_piggyback
+        from seerdb.common.tns import encode_end_to_end_piggyback
 
         out = encode_end_to_end_piggyback(99, 24, {'dbop': 'OP'})
         self.assertIn('0200', out.hex())  # DBOP flag
@@ -6376,7 +6380,7 @@ class TestScrollableExecEncoding(unittest.TestCase):
         # _ENCODE_FIELD_VERSION.set() doesn't leak into other encoder tests.
         import contextvars
 
-        from seerdb.tns import encode_dictionary_exec
+        from seerdb.common.tns import encode_dictionary_exec
 
         d = {
             'seq': 0x0A,
@@ -6401,7 +6405,7 @@ class TestScrollableExecEncoding(unittest.TestCase):
         return contextvars.copy_context().run(encode_dictionary_exec, d)
 
     def test_absolute_matches_capture(self):
-        from seerdb.tns_consts import TNS_FETCH_ORIENTATION_ABSOLUTE
+        from seerdb.common.tns_consts import TNS_FETCH_ORIENTATION_ABSOLUTE
 
         self.assertIn(
             '0280820120010500',
@@ -6409,7 +6413,7 @@ class TestScrollableExecEncoding(unittest.TestCase):
         )
 
     def test_open_current_matches_capture(self):
-        from seerdb.tns_consts import TNS_FETCH_ORIENTATION_CURRENT
+        from seerdb.common.tns_consts import TNS_FETCH_ORIENTATION_CURRENT
 
         self.assertIn(
             '0280820101010100',

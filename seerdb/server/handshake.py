@@ -14,11 +14,11 @@ import re
 import struct
 from dataclasses import dataclass
 
-from seerdb.exceptions import InterfaceError
+from seerdb.common.exceptions import InterfaceError
+from seerdb.common.tns import encode_packet
+from seerdb.common.tns_consts import TNS_ACCEPT, TNS_DATA
 from seerdb.server._handshake_11g import DTY_REPLY, PRO_REPLY
 from seerdb.server.framing import DEFAULT_SDU
-from seerdb.tns import encode_packet
-from seerdb.tns_consts import TNS_ACCEPT, TNS_DATA
 
 # The connect-data OFFSET field is measured from the start of the whole packet
 # (it includes the 8-byte TNS header), while parse_connect receives the CONNECT

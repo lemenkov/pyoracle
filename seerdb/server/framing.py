@@ -4,10 +4,10 @@
 """Server-side TNS packet framing.
 
 This is the read/write counterpart of the client's ``Connection.recv()`` /
-``Connection.send()``. Writing reuses :func:`seerdb.tns.encode_packet` verbatim
+``Connection.send()``. Writing reuses :func:`seerdb.common.tns.encode_packet` verbatim
 — the on-wire packet is identical whichever end emits it.
 
-Reading, however, is *not* a straight reuse of :func:`seerdb.tns.assemble_packet`.
+Reading, however, is *not* a straight reuse of :func:`seerdb.common.tns.assemble_packet`.
 That routine reassembles multi-fragment ``DATA`` the way the **real Oracle
 server** fragments it — keyed on an SDU-boundary heuristic
 (``PacketSize == Length - 37`` / ``- 81``). A *client* fragments the other way:
@@ -28,8 +28,8 @@ from __future__ import annotations
 import socket
 import struct
 
-from seerdb.tns import encode_packet
-from seerdb.tns_consts import DEFAULT_SDU, TNS_DATA
+from seerdb.common.tns import encode_packet
+from seerdb.common.tns_consts import DEFAULT_SDU, TNS_DATA
 
 # Re-exported for the server modules that frame at the default SDU.
 __all__ = ['DEFAULT_SDU', 'PacketStream']

@@ -18,7 +18,14 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping
 
-from seerdb.exceptions import InterfaceError
+from seerdb.common.exceptions import InterfaceError
+from seerdb.common.tns_consts import (
+    TNS_CONNECT,
+    TNS_DATA,
+    TTI_ALL8,
+    TTI_FUN,
+    TTI_LOGOFF,
+)
 from seerdb.server.auth import (
     derive_conn_key,
     encode_challenge,
@@ -35,7 +42,6 @@ from seerdb.server.handshake import (
     parse_connect,
 )
 from seerdb.server.query import ColumnMeta, encode_query_response, parse_exec
-from seerdb.tns_consts import TNS_CONNECT, TNS_DATA, TTI_ALL8, TTI_FUN, TTI_LOGOFF
 
 logger = logging.getLogger('seerdb.server')
 

@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2019 Peter Lemenkov <lemenkov@gmail.com>
 # SPDX-License-Identifier: MIT
 
-"""Async-native counterpart to `seerdb.connection.OracleConnect`.
+"""Async-native counterpart to `seerdb.client.connection.OracleConnect`.
 
-Shares the pure protocol code in `seerdb.tns` (encode_packet,
+Shares the pure protocol code in `seerdb.common.tns` (encode_packet,
 assemble_packet, decode_packet, the encoders/decoders for every
 TTI token) — those are byte-in / decoded-out and don't care which
 transport drives them. The duplication here is just the I/O layer
@@ -26,9 +26,9 @@ import struct
 from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
-    from seerdb.dbobject import DbObjectType
+    from seerdb.common.dbobject import DbObjectType
 
-from seerdb.connection import (
+from seerdb.client.connection import (
     _MAX_REDIRECTS,
     Xid,
     _decode_tpc_context,
@@ -38,9 +38,9 @@ from seerdb.connection import (
     _parse_accept_eor,
     _parse_accept_sdu,
 )
-from seerdb.crypto import validate
-from seerdb.exceptions import DatabaseError, InterfaceError, OperationalError
-from seerdb.tns import (
+from seerdb.common.crypto import validate
+from seerdb.common.exceptions import DatabaseError, InterfaceError, OperationalError
+from seerdb.common.tns import (
     CCAP_FIELD_VERSION,
     FIELD_VERSION_10_2,
     FIELD_VERSION_12_1,
@@ -84,7 +84,7 @@ from seerdb.tns import (
     set_decode_prev_row,
     set_decode_return_binds,
 )
-from seerdb.tns_consts import (
+from seerdb.common.tns_consts import (
     CONN_STATE_AUTH_NEGOTIATE,
     CONN_STATE_AUTHENTICATED,
     CONN_STATE_CONNECTED,
@@ -164,7 +164,7 @@ class AsyncOracleConnect:
         self.host = host
         self.port = port
         # Proxy auth (#126): split proxy_user[schema] (see OracleConnect).
-        from seerdb.connection import _split_proxy_user
+        from seerdb.client.connection import _split_proxy_user
 
         (self.user, self.proxy_user) = _split_proxy_user(user)
         self.cclass = cclass  # DRCP (#130)
@@ -245,7 +245,7 @@ class AsyncOracleConnect:
     # (timeouts, async-only fields) should stay local to each side.
 
     def _next_seq(self) -> int:
-        from seerdb.tns_consts import MAX_SEQ_NUM
+        from seerdb.common.tns_consts import MAX_SEQ_NUM
 
         seq = self.seq
         self.seq = self.seq % MAX_SEQ_NUM + 1
@@ -253,7 +253,7 @@ class AsyncOracleConnect:
 
     def _make_dict(self, Type: DictionaryType, **extra) -> dict:
         # Same shape as `OracleConnect._make_dict`. Kept verbatim so the
-        # pure encoders in `seerdb.tns` work unchanged across both APIs.
+        # pure encoders in `seerdb.common.tns` work unchanged across both APIs.
         d = {
             'env': {
                 'host': self.host,
@@ -411,7 +411,7 @@ class AsyncOracleConnect:
             except asyncio.IncompleteReadError:
                 return False
             except (asyncio.TimeoutError, TimeoutError) as exc:
-                from seerdb.exceptions import OperationalError
+                from seerdb.common.exceptions import OperationalError
 
                 raise OperationalError(
                     f'network read timed out after {self.timeout} ms '
@@ -483,7 +483,7 @@ class AsyncOracleConnect:
                             if self.field_version < FIELD_VERSION_10_2:
                                 # Pre-10g (9i): O3LOGON thin auth (#90). Async
                                 # port of OracleConnect's branch.
-                                from seerdb.tns import encode_o3logon_phase1
+                                from seerdb.common.tns import encode_o3logon_phase1
 
                                 self._o3_phase = 1
                                 await self.send(
@@ -505,8 +505,11 @@ class AsyncOracleConnect:
                         case p if p == TTI_WRN:
                             logger.debug('handle_login: recv WRN %s', Packet[1:])
                         case p if p == TTI_OER:
-                            from seerdb.exceptions import DatabaseError, from_ora_code
-                            from seerdb.tns import decode_packet, decode_ub4
+                            from seerdb.common.exceptions import (
+                                DatabaseError,
+                                from_ora_code,
+                            )
+                            from seerdb.common.tns import decode_packet, decode_ub4
 
                             if getattr(self, '_o3_phase', 0) == 2:
                                 # 9i's OER is the short pre-10g form: skip
@@ -543,14 +546,14 @@ class AsyncOracleConnect:
                         self._in_break = True
                     continue
                 case t if t == TNS_REDIRECT:
-                    from seerdb.tns import parse_redirect_address
+                    from seerdb.common.tns import parse_redirect_address
 
                     (NewHost, NewPort) = parse_redirect_address(Packet)
                     if NewHost is None or NewPort is None:
                         return 1
                     self._redirects = getattr(self, '_redirects', 0) + 1
                     if self._redirects > _MAX_REDIRECTS:
-                        from seerdb.exceptions import OperationalError
+                        from seerdb.common.exceptions import OperationalError
 
                         raise OperationalError(
                             f'too many TNS redirects (> {_MAX_REDIRECTS})'
@@ -586,7 +589,7 @@ class AsyncOracleConnect:
         (Type, Packet) = Received
         Off = find_fast_auth_rpa(Packet) if Type == TNS_DATA else -1
         if Off < 0:
-            from seerdb.exceptions import OperationalError
+            from seerdb.common.exceptions import OperationalError
 
             logger.error('fast_auth (async): no auth challenge in bundled reply')
             raise OperationalError('fast-auth handshake failed')
@@ -611,7 +614,7 @@ class AsyncOracleConnect:
             logger.debug('handle_login: could not parse PRO caps', exc_info=True)
 
     async def _handle_rpa(self, Data: bytes) -> int | None:
-        from seerdb.tns_consts import TTI_AUTH
+        from seerdb.common.tns_consts import TTI_AUTH
 
         Result = decode_token_rpa(Data, ())
         if Result[0] == TTI_SESS:
@@ -687,11 +690,11 @@ class AsyncOracleConnect:
         # Oracle 9i (field version < 10g) speaks the old TTI_ALL7 query dialect
         # (#97, PROTOCOL.md §19); route SELECTs through the fv2 path.
         if self.field_version < FIELD_VERSION_10_2:
-            from seerdb.connection import _check_fv2_bind_sizes
+            from seerdb.client.connection import _check_fv2_bind_sizes
 
             _check_fv2_bind_sizes(Bind, Batch)
             if Batch:  # array DML unsupported on fv2 (#168)
-                from seerdb.exceptions import NotSupportedError
+                from seerdb.common.exceptions import NotSupportedError
 
                 raise NotSupportedError(
                     'executemany (array DML) is not supported on Oracle 9i'
@@ -825,8 +828,8 @@ class AsyncOracleConnect:
         # DES-encrypt the zero-padded password, send TTI_3LOGON.
         from binascii import hexlify, unhexlify
 
-        from seerdb.crypto import des_verifier, o3logon
-        from seerdb.tns import encode_o3logon_phase2
+        from seerdb.common.crypto import des_verifier, o3logon
+        from seerdb.common.tns import encode_o3logon_phase2
 
         Length = Packet[2]
         SessKey = unhexlify(Packet[3 : 3 + Length])
@@ -848,7 +851,7 @@ class AsyncOracleConnect:
         # (mirror of OracleConnect._fv2_raise_for_error, #102).
         (ErrCode, Message) = decode_fv2_oer_error(Packet)
         if ErrCode and ErrCode not in (0, 1403):
-            from seerdb.exceptions import from_ora_code
+            from seerdb.common.exceptions import from_ora_code
 
             raise from_ora_code(ErrCode)(Message or f'ORA-{ErrCode:05d}', code=ErrCode)
 
@@ -866,7 +869,7 @@ class AsyncOracleConnect:
         await self.send(TNS_DATA, encode_o7_close(0))
         await self._next_data_packet()
         if ErrCode and ErrCode not in (0, 1403):
-            from seerdb.exceptions import from_ora_code
+            from seerdb.common.exceptions import from_ora_code
 
             raise from_ora_code(ErrCode)(f'ORA-{ErrCode:05d}', code=ErrCode)
         if self.autocommit:
@@ -880,7 +883,7 @@ class AsyncOracleConnect:
         # RXD, and the reply carries any OUT / IN OUT return values before the
         # RPA + OER. OUT values come back as an {out_positions, out_values}
         # record the cursor decodes into the Var objects.
-        from seerdb.datatypes import Var
+        from seerdb.common.datatypes import Var
 
         Bind = Bind or []
         InputValues = [
@@ -908,7 +911,7 @@ class AsyncOracleConnect:
         await self.send(TNS_DATA, encode_o7_close(0))
         await self._next_data_packet()  # close STA
         if ErrCode and ErrCode not in (0, 1403):
-            from seerdb.exceptions import from_ora_code
+            from seerdb.common.exceptions import from_ora_code
 
             raise from_ora_code(ErrCode)(f'ORA-{ErrCode:05d}', code=ErrCode)
         if self.autocommit:
@@ -954,7 +957,7 @@ class AsyncOracleConnect:
         await self.send(TNS_DATA, encode_o7_close(0))
         await self._next_data_packet()  # close STA
         if ErrCode and ErrCode not in (0, 1403):
-            from seerdb.exceptions import from_ora_code
+            from seerdb.common.exceptions import from_ora_code
 
             raise from_ora_code(ErrCode)(f'ORA-{ErrCode:05d}', code=ErrCode)
         return (0, 0, 0, (len(AllRows), Columns), AllRows, None, None, [], None)
@@ -1014,8 +1017,8 @@ class AsyncOracleConnect:
 
     async def _resolve_fv2_lobs(self, Rows: list, Columns: list) -> None:
         # Async port of the sync `_resolve_fv2_lobs` (#102).
-        from seerdb.lob import LOB
-        from seerdb.types import decode_fv2_lob
+        from seerdb.common.lob import LOB
+        from seerdb.common.types import decode_fv2_lob
 
         for Row in Rows:
             for I, Val in enumerate(Row):
@@ -1139,7 +1142,7 @@ class AsyncOracleConnect:
         """Async port of the sync `lob_read`. See its docstring for
         the wire format we walk through. `prefixed` opts into the
         ub2-length-prefixed locator form required for temp LOBs (#91)."""
-        from seerdb.tns_consts import TNS_TYPE_CLOB
+        from seerdb.common.tns_consts import TNS_TYPE_CLOB
 
         Data = encode_dictionary(
             self._make_dict(
@@ -1163,7 +1166,7 @@ class AsyncOracleConnect:
         TypeName = TypeName.strip('"') if '"' in TypeName else TypeName.upper()
         Typ = await self._describe_object_type(Schema, TypeName)
         if Typ is None or (not Typ.attrs and not Typ.is_collection):
-            from seerdb.exceptions import DatabaseError
+            from seerdb.common.exceptions import DatabaseError
 
             raise DatabaseError(f'object type {name!r} not found')
         return Typ
@@ -1175,7 +1178,7 @@ class AsyncOracleConnect:
         the type's 16-byte OID + version + ordered attribute layout, cached."""
         if not name:
             return None
-        from seerdb.dbobject import DbObjectType, type_name_to_tns
+        from seerdb.common.dbobject import DbObjectType, type_name_to_tns
 
         Owner = schema
         if Owner is None:
@@ -1223,7 +1226,7 @@ class AsyncOracleConnect:
         """Async port of `OracleConnect._collection_describe` (#117/#118)."""
         if typecode != 'COLLECTION':
             return {}
-        from seerdb.dbobject import (
+        from seerdb.common.dbobject import (
             COLLECTION_NESTED_TABLE,
             COLLECTION_VARRAY,
             type_name_to_tns,
@@ -1262,7 +1265,7 @@ class AsyncOracleConnect:
     async def create_temp_lob(self, is_blob: bool = False) -> bytes:
         """Async port of the sync `create_temp_lob` (#91). Allocates a
         session-duration temporary LOB and returns its locator. 12c+ only."""
-        from seerdb.tns_consts import TTI_RPA
+        from seerdb.common.tns_consts import TTI_RPA
 
         Data = encode_dictionary(
             self._make_dict(DictionaryType.lobops, create_temp=True, is_blob=is_blob)
@@ -1283,7 +1286,7 @@ class AsyncOracleConnect:
         self, Locator: bytes, Data: str | bytes, is_blob: bool = False
     ) -> None:
         """Async port of the sync `write_temp_lob` (#91)."""
-        from seerdb.tns_consts import TNS_LOB_OP_WRITE
+        from seerdb.common.tns_consts import TNS_LOB_OP_WRITE
 
         Payload = Data if is_blob else cast(str, Data).encode('utf-16-be')
         Dict = self._make_dict(
@@ -1307,8 +1310,8 @@ class AsyncOracleConnect:
     def _raise_lobops_error(self, Packet: bytes) -> None:
         """Decode the OER trailing a content-free LOBOPS response and raise on a
         real ORA error (call status agnostic — see the sync docstring)."""
-        from seerdb.exceptions import from_ora_code
-        from seerdb.tns import decode_lobops_oer
+        from seerdb.common.exceptions import from_ora_code
+        from seerdb.common.tns import decode_lobops_oer
 
         (ErrCode, Message) = decode_lobops_oer(Packet, self.field_version)
         if ErrCode and ErrCode not in (0, 1403):
@@ -1318,7 +1321,7 @@ class AsyncOracleConnect:
         """Async port of the sync `bfile_read_native` (#46): FILE_OPEN ->
         READ -> FILE_CLOSE over TTI_LOBOPS, using the open-flagged locator the
         server returns from FILE_OPEN."""
-        from seerdb.tns_consts import (
+        from seerdb.common.tns_consts import (
             TNS_LOB_OP_FILE_CLOSE,
             TNS_LOB_OP_FILE_OPEN,
             TTI_RPA,
@@ -1388,7 +1391,7 @@ class AsyncOracleConnect:
         """Async port of the sync `_read_lob_response`. Same token
         walk; everything between TTI_LOB content and TTI_OER is RPA
         metadata we don't decode."""
-        from seerdb.tns_consts import TTI_LOB, TTI_OER
+        from seerdb.common.tns_consts import TTI_LOB, TTI_OER
 
         Buffer = b''
         while True:
@@ -1466,7 +1469,7 @@ class AsyncOracleConnect:
     # ----- transaction control -----
 
     async def commit(self) -> None:
-        from seerdb.tns_consts import TTI_COMMIT
+        from seerdb.common.tns_consts import TTI_COMMIT
 
         Data = encode_dictionary(self._make_dict(DictionaryType.tran, req=TTI_COMMIT))
         await self.send(TNS_DATA, Data)
@@ -1475,7 +1478,7 @@ class AsyncOracleConnect:
         self._sessionless_txn_active = False
 
     async def rollback(self) -> None:
-        from seerdb.tns_consts import TTI_ROLLBACK
+        from seerdb.common.tns_consts import TTI_ROLLBACK
 
         Data = encode_dictionary(self._make_dict(DictionaryType.tran, req=TTI_ROLLBACK))
         await self.send(TNS_DATA, Data)
@@ -1487,7 +1490,7 @@ class AsyncOracleConnect:
             # 9i lacks TTI_PING (func 147); use a trivial round trip (#168).
             await self.execute("SELECT 'X' FROM dual")
             return
-        from seerdb.tns_consts import TTI_PING
+        from seerdb.common.tns_consts import TTI_PING
 
         Data = encode_dictionary(self._make_dict(DictionaryType.tran, req=TTI_PING))
         await self.send(TNS_DATA, Data)
@@ -1497,7 +1500,7 @@ class AsyncOracleConnect:
         """Change the connected user's password (#21). Async mirror of
         `OracleConnect.changepassword` — same single TTI_AUTH password-change
         call reusing the login session key, same error behaviour."""
-        from seerdb.exceptions import NotSupportedError, from_ora_code
+        from seerdb.common.exceptions import NotSupportedError, from_ora_code
 
         if self.field_version < FIELD_VERSION_10_2:
             raise NotSupportedError(
@@ -1588,7 +1591,7 @@ class AsyncOracleConnect:
         self, xid: Xid, flags: int = TPC_BEGIN_NEW, timeout: int = 0
     ) -> None:
         if self.field_version < FIELD_VERSION_12_1:
-            from seerdb.exceptions import NotSupportedError
+            from seerdb.common.exceptions import NotSupportedError
 
             raise NotSupportedError(
                 'two-phase commit (TPC/XA) requires an Oracle 12.1+ server'
@@ -1676,7 +1679,7 @@ class AsyncOracleConnect:
 
     def _check_sessionless_support(self) -> None:
         if self.field_version < FIELD_VERSION_23_1:
-            from seerdb.exceptions import NotSupportedError
+            from seerdb.common.exceptions import NotSupportedError
 
             raise NotSupportedError(
                 'sessionless transactions require an Oracle 23ai+ server'
@@ -1743,7 +1746,7 @@ class AsyncOracleConnect:
     def _pipeline_wire_eligible(self, pipeline) -> bool:
         # See OracleConnect._pipeline_wire_eligible (#158): the single-round-trip
         # wire path needs EOR framing (23ai) and covers only the exec-family ops.
-        from seerdb.pipeline import PipelineOpType as T
+        from seerdb.client.pipeline import PipelineOpType as T
 
         WireOps = (T.EXECUTE, T.EXECUTE_MANY, T.FETCH_ONE, T.FETCH_MANY, T.FETCH_ALL)
         if not self._supports_eor or not pipeline.operations:
@@ -1752,9 +1755,9 @@ class AsyncOracleConnect:
 
     def _encode_pipeline_op(self, Op, TokenNum: int):
         # Async copy of OracleConnect._encode_pipeline_op (#158).
-        from seerdb.connection import _PIPELINE_FETCH_ALL_PREFETCH
-        from seerdb.cursor import _resolve_parameters
-        from seerdb.pipeline import PipelineOpType as T
+        from seerdb.client.connection import _PIPELINE_FETCH_ALL_PREFETCH
+        from seerdb.client.cursor import _resolve_parameters
+        from seerdb.client.pipeline import PipelineOpType as T
 
         Bind = _resolve_parameters(Op.statement, Op.parameters)
         Batch = []
@@ -1832,16 +1835,16 @@ class AsyncOracleConnect:
                     continue
             More = await self._rd.read(self.sdu)
             if not More:
-                from seerdb.exceptions import OperationalError
+                from seerdb.common.exceptions import OperationalError
 
                 raise OperationalError('connection closed during pipeline read')
             self._pending = self._pending + More
 
     async def _run_pipeline_pipelined(self, pipeline, continue_on_error: bool) -> list:
         # Async copy of OracleConnect._run_pipeline_pipelined (#158).
-        from seerdb.connection import _apply_rowfactory
-        from seerdb.pipeline import PipelineOpResult
-        from seerdb.pipeline import PipelineOpType as T
+        from seerdb.client.connection import _apply_rowfactory
+        from seerdb.client.pipeline import PipelineOpResult
+        from seerdb.client.pipeline import PipelineOpType as T
 
         Ops = pipeline.operations
         BeginSeq = self._next_seq()
@@ -1905,9 +1908,9 @@ class AsyncOracleConnect:
         otherwise each op runs serially with identical results."""
         if self._pipeline_wire_eligible(pipeline):
             return await self._run_pipeline_pipelined(pipeline, continue_on_error)
-        from seerdb.connection import _apply_rowfactory
-        from seerdb.pipeline import PipelineOpResult
-        from seerdb.pipeline import PipelineOpType as T
+        from seerdb.client.connection import _apply_rowfactory
+        from seerdb.client.pipeline import PipelineOpResult
+        from seerdb.client.pipeline import PipelineOpType as T
 
         results = []
         Cur = self.cursor()
@@ -1954,9 +1957,9 @@ class AsyncOracleConnect:
     # --- Advanced Queuing (#128), async port ---
 
     def queue(self, name: str, payload_type=None):
-        from seerdb.aq import AsyncQueue
-        from seerdb.datatypes import JSON as _JSON
-        from seerdb.exceptions import NotSupportedError
+        from seerdb.client.aq import AsyncQueue
+        from seerdb.common.datatypes import JSON as _JSON
+        from seerdb.common.exceptions import NotSupportedError
 
         if self.field_version < FIELD_VERSION_12_1:
             raise NotSupportedError('Advanced Queuing requires an Oracle 12.1+ server')
@@ -1974,7 +1977,7 @@ class AsyncOracleConnect:
         exceptionq=None,
         recipients=None,
     ):
-        from seerdb.aq import MessageProperties
+        from seerdb.client.aq import MessageProperties
 
         return MessageProperties(
             payload=payload,
@@ -1995,23 +1998,23 @@ class AsyncOracleConnect:
         return Packet
 
     async def _aq_enq_one(self, queue, props) -> None:
-        from seerdb.connection import _decode_aq_enq
-        from seerdb.tns import encode_aq_enq
+        from seerdb.client.connection import _decode_aq_enq
+        from seerdb.common.tns import encode_aq_enq
 
         Data = encode_aq_enq(self._next_seq(), self.field_version, queue, props)
         props.msgid = _decode_aq_enq(await self._aq_request(Data))
 
     async def _aq_deq_one(self, queue):
-        from seerdb.connection import _decode_aq_deq
-        from seerdb.tns import encode_aq_deq
+        from seerdb.client.connection import _decode_aq_deq
+        from seerdb.common.tns import encode_aq_deq
 
         Data = encode_aq_deq(self._next_seq(), self.field_version, queue)
         return _decode_aq_deq(await self._aq_request(Data), queue)
 
     async def _aq_enq_many(self, queue, props_list) -> None:
-        from seerdb.connection import _decode_aq_array
-        from seerdb.tns import encode_aq_array
-        from seerdb.tns_consts import TNS_AQ_ARRAY_ENQ
+        from seerdb.client.connection import _decode_aq_array
+        from seerdb.common.tns import encode_aq_array
+        from seerdb.common.tns_consts import TNS_AQ_ARRAY_ENQ
 
         Data = encode_aq_array(
             self._next_seq(),
@@ -2026,10 +2029,10 @@ class AsyncOracleConnect:
         )
 
     async def _aq_deq_many(self, queue, max_messages):
-        from seerdb.aq import MessageProperties
-        from seerdb.connection import _decode_aq_array
-        from seerdb.tns import encode_aq_array
-        from seerdb.tns_consts import TNS_AQ_ARRAY_DEQ
+        from seerdb.client.aq import MessageProperties
+        from seerdb.client.connection import _decode_aq_array
+        from seerdb.common.tns import encode_aq_array
+        from seerdb.common.tns_consts import TNS_AQ_ARRAY_DEQ
 
         Placeholders = [MessageProperties() for _ in range(max_messages)]
         Data = encode_aq_array(
@@ -2083,7 +2086,7 @@ class AsyncOracleConnect:
         (oracledb parity, #161) is accepted and surfaced; scroll() works
         regardless since seerdb buffers the result set."""
         # Lazy import to avoid a circular dep with acursor importing us.
-        from seerdb.acursor import AsyncCursor
+        from seerdb.client.acursor import AsyncCursor
 
         return AsyncCursor(self, scrollable=scrollable)
 
@@ -2091,7 +2094,7 @@ class AsyncOracleConnect:
         """Return an `AsyncSodaDatabase` for document-store (SODA) access (#163).
         Raises NotSupportedError on a pre-18c server. The factory is synchronous
         (like oracledb); the collection/document operations are coroutines."""
-        from seerdb.soda import AsyncSodaDatabase, _check_soda_supported
+        from seerdb.client.soda import AsyncSodaDatabase, _check_soda_supported
 
         _check_soda_supported(self)
         return AsyncSodaDatabase(self)
@@ -2100,7 +2103,7 @@ class AsyncOracleConnect:
 
     def _set_e2e(self, name: str, value) -> None:
         if self.field_version < FIELD_VERSION_12_1:
-            from seerdb.exceptions import NotSupportedError
+            from seerdb.common.exceptions import NotSupportedError
 
             raise NotSupportedError(
                 'end-to-end tracing attributes require an Oracle 12.1+ server'

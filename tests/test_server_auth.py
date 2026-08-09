@@ -3,7 +3,7 @@
 
 """Server-side O5LOGON crypto, checked against seerdb's own client crypto.
 
-seerdb.crypto.o5logon / validate are validated against real Oracle, so a
+seerdb.common.crypto.o5logon / validate are validated against real Oracle, so a
 round-trip agreement between them and the server side is a strong conformance
 signal without needing a live server.
 """
@@ -12,7 +12,13 @@ from __future__ import annotations
 
 from binascii import unhexlify
 
-from seerdb.crypto import o5logon, validate
+from seerdb.common.crypto import o5logon, validate
+from seerdb.common.tns import (
+    decode_token_rpa,
+    encode_dictionary_auth,
+    encode_dictionary_sess,
+)
+from seerdb.common.tns_consts import TTI_AUTH, TTI_SESS
 from seerdb.server.auth import (
     derive_conn_key,
     encode_challenge,
@@ -22,12 +28,6 @@ from seerdb.server.auth import (
     parse_osesskey,
     server_proof,
 )
-from seerdb.tns import (
-    decode_token_rpa,
-    encode_dictionary_auth,
-    encode_dictionary_sess,
-)
-from seerdb.tns_consts import TTI_AUTH, TTI_SESS
 
 
 def _client_login(challenge, user: bytes, password: bytes):

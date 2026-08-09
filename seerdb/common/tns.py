@@ -6,15 +6,22 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
-    from seerdb.dbobject import DbObject, DbRef
+    from seerdb.common.dbobject import DbObject, DbRef
 from functools import reduce
 
-from seerdb.crypto import encrypt_password, o5logon
-from seerdb.cursor import cursor
-from seerdb.datatypes import JSON, BinaryDouble, BinaryFloat, IntervalYM, TempLob, Var
-from seerdb.date import date
-from seerdb.exceptions import DataError
-from seerdb.vector import (
+from seerdb.client.cursor import cursor
+from seerdb.common.crypto import encrypt_password, o5logon
+from seerdb.common.datatypes import (
+    JSON,
+    BinaryDouble,
+    BinaryFloat,
+    IntervalYM,
+    TempLob,
+    Var,
+)
+from seerdb.common.date import date
+from seerdb.common.exceptions import DataError
+from seerdb.common.vector import (
     VECTOR_BIND_DESCRIPTOR,
     VECTOR_BIND_OAC,
     encode_vector,
@@ -26,7 +33,7 @@ def _json_bind_text(Token: object) -> str:
     # A dict (auto-detected) or a JSON() wrapper binds into a native JSON column
     # (#50): serialise to JSON text and bind it as a string; the server casts
     # VARCHAR -> JSON. Lazy import keeps oson off the tns import chain.
-    from seerdb.oson import json_to_text
+    from seerdb.common.oson import json_to_text
 
     return json_to_text(Token.value if isinstance(Token, JSON) else Token)
 
@@ -47,7 +54,7 @@ def _json_oson_image(Token: object):
     # The OSON image for a dict / JSON() bind (#70), or None when the value is
     # too large/complex for the native encoder so the caller falls back to the
     # text cast (#50/#64) — which the server parses just as well.
-    from seerdb.oson import OsonError, encode_oson
+    from seerdb.common.oson import OsonError, encode_oson
 
     value = Token.value if isinstance(Token, JSON) else Token
     try:
@@ -64,7 +71,7 @@ import re
 import socket
 import struct
 
-from seerdb.tns_consts import (
+from seerdb.common.tns_consts import (
     AL16UTF16_CHARSET,
     AL32UTF8_CHARSET,
     DEFAULT_HOST,
@@ -190,10 +197,10 @@ from seerdb.tns_consts import (
     CharsetDict,
     DictionaryType,
 )
-from seerdb.tns_consts import (
+from seerdb.common.tns_consts import (
     FIELD_VERSION_9_2 as FIELD_VERSION_9_2,
 )
-from seerdb.tns_consts import (
+from seerdb.common.tns_consts import (
     FIELD_VERSION_19_1 as FIELD_VERSION_19_1,
 )
 
@@ -924,7 +931,7 @@ def decode_token_oer(Data: bytes, Acc: tuple) -> tuple:
     # row — so treat it as "no rowid", e.g. SELECT / DDL).
     Rowid = None
     if RowidBlock:
-        from seerdb.types import rowid_to_string
+        from seerdb.common.types import rowid_to_string
 
         Rowid = rowid_to_string(RowidObj, RowidFile, RowidBlock, RowidSlot)
     RetFormat = (RowCount, RowFormat)
@@ -1203,20 +1210,20 @@ _LONG_DATA_TYPES = frozenset((TNS_TYPE_LONG, TNS_TYPE_LONGRAW))
 def decode_token_rxd(Data: bytes, Acc: tuple) -> tuple:
     Val: Any  # reused per column, heterogeneous
     # Row data (section 6.2). Each column value is normally a DALC blob whose
-    # raw bytes we hand to seerdb.types.decode_value, which dispatches on the
+    # raw bytes we hand to seerdb.common.types.decode_value, which dispatches on the
     # column's TNS data type from the describe-info block.
     #
     # LOB columns are special: instead of a single DALC they carry a small
     # length-prefixed locator block (`_read_lob_column`). The locator and
     # any inline content stay opaque for now — surfaced to the caller as an
-    # seerdb.lob.LOB object — until the LOB-content extraction work lands.
+    # seerdb.common.lob.LOB object — until the LOB-content extraction work lands.
     #
     # If a BVC token preceded this RXD, Acc carries a bit vector: a set bit
     # means "this column is in the RXD"; an unset bit means "reuse the
     # previous row's value". The bit vector applies to a single RXD and is
     # cleared from Acc on the way out.
-    from seerdb.lob import LOB
-    from seerdb.types import decode_value
+    from seerdb.common.lob import LOB
+    from seerdb.common.types import decode_value
 
     (Cursor, RowFormat, Rows, *Extra) = Acc
     BitVec = Extra[0] if Extra else None
@@ -1319,7 +1326,7 @@ def _read_rowid_column(Rest: bytes) -> tuple[str | None, bytes]:
     # rowid -- data object (ub4), relative file (ub2), an unused ub1, block
     # (ub4) and slot (ub2). Mirrors oracledb's read_rowid; the byte counts and
     # the base64 rendering were verified against ROWIDTOCHAR on a live XE row.
-    from seerdb.types import rowid_to_string
+    from seerdb.common.types import rowid_to_string
 
     if not Rest:
         return (None, Rest)
@@ -1341,7 +1348,7 @@ def _read_urowid_column(Rest: bytes) -> tuple[str | None, bytes]:
     # length echo, then num_bytes raw rowid bytes (a leading type tag + the
     # rowid body). Rendered as the "*"-prefixed base64 form. Verified against a
     # live XE IOT row vs the SELECT ROWID text.
-    from seerdb.types import urowid_to_string
+    from seerdb.common.types import urowid_to_string
 
     if not Rest:
         return (None, Rest)
@@ -1419,7 +1426,7 @@ def _read_object_column(Rest: bytes, Col: dict) -> tuple[object, bytes]:
     # ObjectImage placeholder; the cursor decodes the image into a DbObject
     # once it has fetched the layout (#115). XMLType (type 109 with no object
     # type) is a separate path (#124).
-    from seerdb.dbobject import ObjectImage
+    from seerdb.common.dbobject import ObjectImage
 
     (TypeOid, Rest) = _read_str_with_length(Rest)  # type OID
     (_, Rest) = _read_str_with_length(Rest)  # object OID
@@ -2141,10 +2148,10 @@ CCAP_FEATURE_BACKPORT2 = 45
 CCAP_VECTOR_FEATURES = 52
 
 # TNS_CCAP_FIELD_VERSION_* values (the byte written at CCAP_FIELD_VERSION) now
-# live in seerdb.tns_consts and are imported at the top of this module — kept
-# importable as `from seerdb.tns import FIELD_VERSION_*` for existing callers.
-# They moved to the leaf constants module so seerdb.cursor can import the 12.1
-# threshold without an import cycle (seerdb.tns imports seerdb.cursor).
+# live in seerdb.common.tns_consts and are imported at the top of this module — kept
+# importable as `from seerdb.common.tns import FIELD_VERSION_*` for existing callers.
+# They moved to the leaf constants module so seerdb.client.cursor can import the 12.1
+# threshold without an import cycle (seerdb.common.tns imports seerdb.client.cursor).
 
 # Runtime capability indices + the flag bits we set:
 RCAP_COMPAT = 0
@@ -2716,7 +2723,7 @@ def encode_dictionary_dty(Dictionary: dict) -> bytes:
     # Override table. Each entry is `(client_type, server_repr, format,
     # flags)` — when this client encounters data of type `client_type`,
     # negotiate `server_repr` as the wire representation with the given
-    # format. Terminated by `0, 0`. Annotated against seerdb.tns_consts:
+    # format. Terminated by `0, 0`. Annotated against seerdb.common.tns_consts:
     #
     #   (2,  2, 10)   NUMBER   → NUMBER (extended precision format 10)
     #   (3,  2, 10)   INTEGER  → NUMBER
@@ -3202,7 +3209,7 @@ def _o7_bind_oac(Value: object) -> bytes:
     # defaults to 32767, matching JDBC). The mode (IN/OUT/IN OUT) is NOT in the
     # OAC — the server infers it from the block and signals it in the bind
     # prompt; see decode_fv2_block_out.
-    from seerdb.datatypes import Var
+    from seerdb.common.datatypes import Var
 
     # Char binds declare AL32UTF8 (csfrm 1) — the driver negotiates an AL32UTF8
     # session and sends UTF-8, which the 9i server converts to its DB charset —
@@ -3629,8 +3636,8 @@ def decode_fv2_exec_response(Data: bytes, Columns: list) -> tuple[list, int]:
     # each column value is a DALC blob followed by a 1-byte indicator. Row
     # values themselves use the version-independent §11 decoders. Returns
     # (rows, ora_code) where ora_code 1403 == end-of-fetch (PROTOCOL.md §19.2).
-    from seerdb.lob import LOB
-    from seerdb.types import decode_value
+    from seerdb.common.lob import LOB
+    from seerdb.common.types import decode_value
 
     Rows: list = []
     ErrCode = 0
@@ -4415,7 +4422,7 @@ def encode_token_rxd(Token: object) -> bytes:
         )
     if Token is None:
         return bytes([0])
-    from seerdb.dbobject import DbObject, DbRef
+    from seerdb.common.dbobject import DbObject, DbRef
 
     if isinstance(Token, DbObject):
         # SQL OBJECT (ADT) bind (#116): the write_dbobject framing + image.
@@ -4483,7 +4490,7 @@ def encode_token_rxd(Token: object) -> bytes:
     if isinstance(Token, cursor):
         return bytes([1, 0])
     if isinstance(Token, date):
-        # Legacy seerdb.date.date with has_timestamp / timestamptz flags;
+        # Legacy seerdb.common.date.date with has_timestamp / timestamptz flags;
         # keep it on its own path so callers who built one explicitly still
         # get the bytes they expected.
         Bytes = encode_token_date(Token)
@@ -4571,7 +4578,7 @@ def encode_token_oac(Token: object) -> bytes:
         # NULL value (0 bytes): a minimal VARCHAR OAC, again avoiding the
         # 32767 LONG-reorder swap when a NULL bind precedes another bind.
         return encode_token_raw(TNS_TYPE_VARCHAR, 1, 16, AL32UTF8_CHARSET, 0)
-    from seerdb.dbobject import DbObject, DbRef
+    from seerdb.common.dbobject import DbObject, DbRef
 
     if isinstance(Token, DbObject):
         # SQL OBJECT (ADT) bind OAC (#116): type 109 + the type's OID + version.
@@ -4584,7 +4591,7 @@ def encode_token_oac(Token: object) -> bytes:
         # else the VARCHAR OAC for the text cast (#50). Must match the choice in
         # encode_token_rxd.
         if _json_oson_image(Token) is not None:
-            from seerdb.oson import JSON_BIND_OAC
+            from seerdb.common.oson import JSON_BIND_OAC
 
             return JSON_BIND_OAC
         Token = _json_bind_text(Token)
@@ -4834,7 +4841,7 @@ def _encode_ref_oac(Ref: 'DbRef') -> bytes:
     # has no REF type, so JDBC is the only reference). The type OID is carried on
     # the DbRef from its describe (#119); without it we cannot build the OAC.
     if Ref.type_oid is None:
-        from seerdb.exceptions import NotSupportedError
+        from seerdb.common.exceptions import NotSupportedError
 
         raise NotSupportedError(
             'cannot bind a REF without its referenced type OID; the value must '
@@ -4933,7 +4940,7 @@ def _aq_write_payload(Queue, Props) -> bytes:
         # framed like RAW via encode_chr). RE'd from an oracledb-thin capture --
         # it's the native-LOB value form (#70) but with a slightly different
         # descriptor than VECTOR_BIND_DESCRIPTOR (no second 0x28 byte).
-        from seerdb.oson import encode_oson
+        from seerdb.common.oson import encode_oson
 
         Oson = encode_oson(Props.payload)
         # _bytes_with_length (the 12c+ single-byte/0xFE-chunked form) -- NOT
@@ -5190,7 +5197,7 @@ def _encode_date_prefix(DT: datetime.datetime) -> bytes:
 
 
 def encode_token_date(Token: date) -> bytes:
-    # Retained for any caller that still constructs the legacy seerdb.date.date
+    # Retained for any caller that still constructs the legacy seerdb.common.date.date
     # subclass. New code should pass a stdlib datetime.datetime instead.
     if Token.has_timestamp and Token.timestamptz:
         T = Token.set_timestamptz(Token.timestamptz)

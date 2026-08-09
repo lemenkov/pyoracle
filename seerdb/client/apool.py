@@ -3,7 +3,7 @@
 
 """Async connection pool.
 
-Async-native counterpart to `seerdb.pool.Pool`. Same shape — pre-warm
+Async-native counterpart to `seerdb.client.pool.Pool`. Same shape — pre-warm
 to `min`, grow lazily to `max`, optional health-check on idle reacquire
 — but the synchronisation primitives are `asyncio.Lock` and
 `asyncio.Condition` so concurrent coroutines wait on a free entry
@@ -25,8 +25,8 @@ import asyncio
 import time
 from collections import deque
 
-from seerdb.aconnection import AsyncOracleConnect
-from seerdb.exceptions import InterfaceError
+from seerdb.client.aconnection import AsyncOracleConnect
+from seerdb.common.exceptions import InterfaceError
 
 
 class _AsyncPoolEntry:
