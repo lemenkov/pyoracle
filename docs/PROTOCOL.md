@@ -365,6 +365,31 @@ it back in its own DTY; against 11g both sides are `6` (11.2). `server_version`
 is the TTC protocol byte (`6` = 8.1+), distinct from the product release that
 arrives later in the auth result (`AUTH_VERSION_NO`).
 
+#### 4.1.1 PRO dialects — the server mirrors the client (server-side / the Mirror)
+
+The layout above is the **oracledb / seerdb dialect**: the request leads with
+the `TTI_PRO` (`0x01`) token. **Old clients (sqlplus 11.2) speak a different
+PRO dialect** whose request leads with a `DE AD BE EF` magic. Verified by
+capturing both against the same 11g XE listener:
+
+| Client PRO request | Server PRO reply | Server DTY reply |
+|--------------------|------------------|------------------|
+| `TTI_PRO 0x01 …` (oracledb, seerdb) | `TTI_PRO`-form, **238 B** | **924 B** |
+| `DE AD BE EF …` (sqlplus 11.2)      | `DEADBEEF`-form, **127 B** | 238 B |
+
+**The server replies in the client's dialect** — a `0x01` request gets a
+`TTI_PRO` reply, a `deadbeef` request gets a `deadbeef` reply. Both negotiate
+the same field version (`6` for 11g), but the two reply shapes are not
+interchangeable: `decode_token_pro` only understands the `TTI_PRO` form, so
+replaying a `deadbeef` reply to seerdb (or vice-versa) fails to parse. A server
+(the Mirror, `seerdb/server/`) must therefore answer in whichever dialect the
+client's PRO request used.
+
+seerdb's server currently serves the **oracledb/seerdb (`TTI_PRO`) dialect**
+(`encode_pro_reply` / `encode_dty_reply`, replaying the captured 11g reply so a
+client negotiates field version 6). The sqlplus `deadbeef` dialect is a
+separate reply shape, not served yet.
+
 ### 4.2 Data Type Negotiation (TTI_DTY)
 
 TTI_DTY (message type `2`, `TNS_MSG_TYPE_DATA_TYPES`) advertises the client's

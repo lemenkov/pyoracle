@@ -12,7 +12,15 @@ import handshake_11g as fx
 import pytest
 
 from seerdb.exceptions import InterfaceError
-from seerdb.server.handshake import encode_accept, parse_connect
+from seerdb.server._handshake_11g import DTY_REPLY, PRO_REPLY
+from seerdb.server.handshake import (
+    encode_accept,
+    encode_dty_reply,
+    encode_pro_reply,
+    parse_connect,
+)
+from seerdb.tns import CCAP_FIELD_VERSION, decode_token_pro
+from seerdb.tns_consts import FIELD_VERSION_11_2, TNS_DATA, TTI_DTY, TTI_PRO
 
 
 def test_parse_real_11g_connect() -> None:
@@ -55,6 +63,33 @@ def test_accept_settles_sdu_to_the_smaller_side() -> None:
     req = replace(parse_connect(fx.CONNECT[8:]), sdu=65535)
     accept = encode_accept(req, sdu=8192)
     assert struct.unpack('>H', accept[12:14])[0] == 8192  # body[4:6] = SDU
+
+
+def test_pro_reply_reproduces_the_captured_packet() -> None:
+    # Re-wrapping the stored payload must reproduce the real server packet —
+    # proves both the payload and our DATA framing match the wire.
+    assert encode_pro_reply() == PRO_REPLY
+
+
+def test_dty_reply_reproduces_the_captured_packet() -> None:
+    assert encode_dty_reply() == DTY_REPLY
+
+
+def test_pro_reply_is_a_data_packet_leading_tti_pro() -> None:
+    packet = encode_pro_reply()
+    assert packet[4] == TNS_DATA
+    assert packet[10] == TTI_PRO
+
+
+def test_dty_reply_leads_tti_dty() -> None:
+    assert encode_dty_reply()[10] == TTI_DTY
+
+
+def test_pro_reply_pins_field_version_11g() -> None:
+    # The conformance check: seerdb's own PRO decoder reads field version 6
+    # out of the reply's capability array — so a client negotiates 11g.
+    caps = decode_token_pro(encode_pro_reply()[10:])['compile_caps']
+    assert caps[CCAP_FIELD_VERSION] == FIELD_VERSION_11_2
 
 
 def test_too_short_raises() -> None:
