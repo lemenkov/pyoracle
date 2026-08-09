@@ -39,7 +39,7 @@ offsets (oracledb-produced and large documents) and ub2 field-ids (>255 distinct
 keys) — both tracked under #69.
 """
 
-from oracle.types import (
+from seerdb.types import (
     decode_binary_double,
     decode_binary_float,
     decode_date,
@@ -93,12 +93,12 @@ class OsonError(Exception):
 def json_to_text(value: object) -> str:
     """Serialise a Python value to JSON text for a JSON bind (#50).
 
-    pyoracle binds this text as a string and the server casts it to the
+    seerdb binds this text as a string and the server casts it to the
     column's JSON type — the native binary OSON encoder is future work (the
     decoder is the inverse). ``Decimal`` is emitted as a JSON number (integral
     values stay exact; others go through ``float``); other unsupported types
     raise ``TypeError`` from :func:`json.dumps`. ``ensure_ascii=False`` keeps
-    UTF-8 text natural (pyoracle advertises AL32UTF8)."""
+    UTF-8 text natural (seerdb advertises AL32UTF8)."""
     import json
     from decimal import Decimal
 
@@ -113,7 +113,7 @@ def json_to_text(value: object) -> str:
 def _oson_scalar_node(value) -> bytes:
     from decimal import Decimal
 
-    from oracle.tns import encode_token_decimal, encode_token_num
+    from seerdb.tns import encode_token_decimal, encode_token_num
 
     if value is None:
         return b'\x30'

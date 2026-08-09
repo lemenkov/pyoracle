@@ -3,7 +3,7 @@
 
 import unittest
 
-from oracle.tns import (
+from seerdb.tns import (
     assemble_packet,
     decode_packet,
     decode_token_oac,
@@ -13,7 +13,7 @@ from oracle.tns import (
     decode_ub4,
     parse_redirect_address,
 )
-from oracle.tns_consts import (
+from seerdb.tns_consts import (
     TNS_ACCEPT,
     TNS_DATA,
     TNS_RESEND,
@@ -405,7 +405,7 @@ class TestTnsCommandDecoders(unittest.TestCase):
         # would mis-parse, so it guards the version-gated decode path.
         import contextvars
 
-        from oracle.tns import FIELD_VERSION_21_1, decode_packet
+        from seerdb.tns import FIELD_VERSION_21_1, decode_packet
 
         Resp = bytes.fromhex(
             '101735ebcd3cc510be7fdf53b18448bb2dda787e0608123633010201015c0200'
@@ -438,7 +438,7 @@ class TestTnsCommandDecoders(unittest.TestCase):
         import datetime
         from decimal import Decimal
 
-        from oracle.tns import decode_packet
+        from seerdb.tns import decode_packet
 
         Resp = bytes.fromhex(
             '101736595fbfc8d361f990557c35c1301c42787e061008050c016b01064d02000a000116000000000000000102010202494400000001800000011e0000000002036901011e01040104044e414d4500000101020008010201160000000000000001050105055052494345000001020c00000001010000000000000001070107074352454154454400000103608000000104000000000203690101040104010404434f444500000104020001000116000000000000000104010404464c414700000105010707787e061008050c0101021fe8010a010a0602010600010f0000000702c10205616c70686103c11464077878010f010101044142303102c1020702c103046265746104c2020133077879061e010101044344303201801501063f0702c1040567616d6d6102c00207787a0c19010101044546303302c10208010603028e6a0001030000000000000401010106010302057b00000103013803000120000000000000000000000900010100000000194f52412d30313430333a206e6f206461746120666f756e640a'
@@ -491,8 +491,8 @@ class TestTnsCommandDecoders(unittest.TestCase):
         # falls back to the seeded previous-fetch row (_DECODE_PREV_ROW).
         import contextvars
 
-        from oracle.tns import decode_packet, set_decode_prev_row
-        from oracle.tns_consts import FIELD_VERSION_23_4
+        from seerdb.tns import decode_packet, set_decode_prev_row
+        from seerdb.tns_consts import FIELD_VERSION_23_4
 
         RowFormat = [
             {
@@ -542,14 +542,14 @@ class TestTnsCommandDecoders(unittest.TestCase):
         # version 4 — skipping a phantom one consumes the cursor id and desyncs.
         import contextvars
 
-        import oracle
-        from oracle.cursor import Var
-        from oracle.tns import decode_packet
+        import seerdb
+        from seerdb.cursor import Var
+        from seerdb.tns import decode_packet
 
         Resp = bytes.fromhex(
             '00000b05010100010100000010073c010301024d020000817f0102000000000000000101010101410000006080000001010000000002036901010101010101014200000101010707787e0610081b26000000000102000801060302ac6900010101020000000000040105010401010000000101002f0000000000000000000000000700010100000000'
         )
-        Bind = Var(oracle.CURSOR)
+        Bind = Var(seerdb.CURSOR)
         Result = contextvars.copy_context().run(
             decode_packet, Resp[2:], (None, None, [], [Bind]), 4
         )  # fv4 = 10g
@@ -1978,8 +1978,8 @@ class TestTnsCommandDecoders(unittest.TestCase):
     def test_tns_decode_token_oer_rowid(self):
         # Same OER frame as _04 but with a real (non-zero) rowid in the
         # rowid slot, so the decoder must render it as the trailing lastrowid.
-        from oracle.tns import encode_sb4
-        from oracle.types import rowid_to_string
+        from seerdb.tns import encode_sb4
+        from seerdb.types import rowid_to_string
 
         Obj, File, Block, Slot = 4, 2, 300, 7
         RowidBytes = (
@@ -3692,7 +3692,7 @@ class TestTnsCommandDecoders(unittest.TestCase):
         self.assertEqual(decode_token_rpa(Data, None), (TTI_AUTH, Resp, Ver, SessId))
 
 
-from oracle.tns import decode_chr, decode_kv
+from seerdb.tns import decode_chr, decode_kv
 
 
 class TestTnsBaseDecoders(unittest.TestCase):
@@ -5771,7 +5771,7 @@ class TestDcbColumnFv17Domain(unittest.TestCase):
     )
 
     def _decode_at_fv17(self, data):
-        from oracle.tns import _DECODE_FIELD_VERSION, _decode_dcb_column
+        from seerdb.tns import _DECODE_FIELD_VERSION, _decode_dcb_column
 
         tok = _DECODE_FIELD_VERSION.set(17)
         try:
@@ -5807,7 +5807,7 @@ class TestDcbColumnFv24Annotations(unittest.TestCase):
     )
 
     def _decode_at_fv24(self, data):
-        from oracle.tns import _DECODE_FIELD_VERSION, _decode_dcb_column
+        from seerdb.tns import _DECODE_FIELD_VERSION, _decode_dcb_column
 
         tok = _DECODE_FIELD_VERSION.set(24)
         try:
@@ -5851,7 +5851,7 @@ class TestFv2Describe(unittest.TestCase):
     )
 
     def test_decode_columns(self):
-        from oracle.tns import decode_fv2_describe
+        from seerdb.tns import decode_fv2_describe
 
         cols = decode_fv2_describe(self.DESCRIBE)
         got = [(c['column_name'], c['data_type']) for c in cols]
@@ -5872,7 +5872,7 @@ class TestFv2Describe(unittest.TestCase):
     def test_decode_notnull_columns(self):
         # Regression: a NOT-NULL column (null_ok byte 0x00) must not slip the
         # stream, and null_ok must be reported per column.
-        from oracle.tns import decode_fv2_describe
+        from seerdb.tns import decode_fv2_describe
 
         cols = decode_fv2_describe(self.DESCRIBE_NOTNULL)
         self.assertEqual(
@@ -5902,7 +5902,7 @@ class TestFv2ExecResponse(unittest.TestCase):
     )
 
     def test_single_number_row(self):
-        from oracle.tns import decode_fv2_exec_response
+        from seerdb.tns import decode_fv2_exec_response
 
         cols = [{'data_type': 2}]
         rows, err = decode_fv2_exec_response(self.NUM, cols)
@@ -5910,7 +5910,7 @@ class TestFv2ExecResponse(unittest.TestCase):
         self.assertEqual(rows, [[42]])
 
     def test_nulls_do_not_desync_rows(self):
-        from oracle.tns import decode_fv2_exec_response
+        from seerdb.tns import decode_fv2_exec_response
 
         cols = [{'data_type': 2}, {'data_type': 1}, {'data_type': 12}]
         rows, err = decode_fv2_exec_response(self.NULLROWS, cols)
@@ -5938,7 +5938,7 @@ class TestFv2LongRows(unittest.TestCase):
     )
 
     def test_long_values_and_null(self):
-        from oracle.tns import decode_fv2_exec_response
+        from seerdb.tns import decode_fv2_exec_response
 
         cols = [{'data_type': 2}, {'data_type': 8, 'charset': 873}]
         rows, err = decode_fv2_exec_response(self.RESP, cols)
@@ -5993,8 +5993,8 @@ class TestFv2LobRead(unittest.TestCase):
     )
 
     def _locators(self):
-        from oracle.lob import LOB
-        from oracle.tns import decode_fv2_exec_response
+        from seerdb.lob import LOB
+        from seerdb.tns import decode_fv2_exec_response
 
         cols = [{'data_type': 112, 'charset': 31}, {'data_type': 113}]
         rows, err = decode_fv2_exec_response(self.RXD, cols)
@@ -6013,18 +6013,18 @@ class TestFv2LobRead(unittest.TestCase):
         self.assertEqual(clob.raw[:2].hex(), '0054')
 
     def test_getlen_request_matches_capture(self):
-        from oracle.tns import encode_o7_lob_getlen
+        from seerdb.tns import encode_o7_lob_getlen
 
         clob, _ = self._locators()
         self.assertEqual(encode_o7_lob_getlen(0, clob.raw), self.GETLEN_REQ)
 
     def test_getlen_response_amount(self):
-        from oracle.tns import decode_fv2_lob_getlen
+        from seerdb.tns import decode_fv2_lob_getlen
 
         self.assertEqual(decode_fv2_lob_getlen(self.GETLEN_RESP), 18)
 
     def test_read_request_matches_capture(self):
-        from oracle.tns import encode_o7_lob_read
+        from seerdb.tns import encode_o7_lob_read
 
         clob, _ = self._locators()
         self.assertEqual(encode_o7_lob_read(0, clob.raw, 18), self.READ_REQ)
@@ -6032,13 +6032,13 @@ class TestFv2LobRead(unittest.TestCase):
     def test_clob_content_decodes(self):
         # The READ response content chunk (0e fe 12 <18 bytes>) decodes to the
         # CLOB text under the column charset (single-byte, not UTF-16BE).
-        from oracle.types import decode_fv2_lob
+        from seerdb.types import decode_fv2_lob
 
         content = bytes.fromhex('68656c6c6f20636c6f6220636f6e74656e74')
         self.assertEqual(decode_fv2_lob(112, content, 31), 'hello clob content')
 
     def test_blob_content_stays_bytes(self):
-        from oracle.types import decode_fv2_lob
+        from seerdb.types import decode_fv2_lob
 
         self.assertEqual(
             decode_fv2_lob(113, bytes.fromhex('cafebabe01'), 0),
@@ -6046,7 +6046,7 @@ class TestFv2LobRead(unittest.TestCase):
         )
 
     def test_empty_lob(self):
-        from oracle.types import decode_fv2_lob
+        from seerdb.types import decode_fv2_lob
 
         self.assertEqual(decode_fv2_lob(112, b'', 31), '')
         self.assertEqual(decode_fv2_lob(113, b'', 0), b'')
@@ -6056,7 +6056,7 @@ class TestFv2LobRead(unittest.TestCase):
         # empty-value form `00 81 01` (not the locator form), and must not
         # desync the following columns. Real RXD from a live 9.2.0.4 server,
         # `SELECT id, c, b FROM lobtest WHERE id = 95` with all-NULL LOBs.
-        from oracle.tns import decode_fv2_exec_response
+        from seerdb.tns import decode_fv2_exec_response
 
         rxd = bytes.fromhex(
             '0602010100010a000702c15f0000810100810104010102057b0000010100'
@@ -6075,14 +6075,14 @@ class TestFv2LobRead(unittest.TestCase):
         # decode_fv2_lob_chunks pulls the content out of a `0e fe <chunks> 00`
         # reply and reports completion at the zero-length terminator. This
         # mirrors the multi-row READ reply, which has NO trailing OER.
-        from oracle.tns import decode_fv2_lob_chunks
+        from seerdb.tns import decode_fv2_lob_chunks
 
         content, done = decode_fv2_lob_chunks(self.READ_RESP)
         self.assertTrue(done)
         self.assertEqual(content, b'hello clob content')
 
     def test_chunk_parser_multichunk(self):
-        from oracle.tns import decode_fv2_lob_chunks
+        from seerdb.tns import decode_fv2_lob_chunks
 
         # 0e fe, two 64-byte chunks + one 2-byte chunk, then 00 terminator.
         body = (
@@ -6102,7 +6102,7 @@ class TestFv2LobRead(unittest.TestCase):
     def test_chunk_parser_incomplete_then_complete(self):
         # A chunk split across packets: the first slice is incomplete, the full
         # buffer completes. (The reader re-parses the accumulated buffer.)
-        from oracle.tns import decode_fv2_lob_chunks
+        from seerdb.tns import decode_fv2_lob_chunks
 
         part1 = b'\x0e\xfe\x40' + b'A' * 30  # 64-byte chunk, only 30 here
         content, done = decode_fv2_lob_chunks(part1)
@@ -6124,14 +6124,14 @@ class TestFv2OerError(unittest.TestCase):
     )
 
     def test_decodes_code_and_message(self):
-        from oracle.tns import decode_fv2_oer_error
+        from seerdb.tns import decode_fv2_oer_error
 
         code, msg = decode_fv2_oer_error(self.BAD_TABLE)
         self.assertEqual(code, 942)
         self.assertEqual(msg, 'ORA-00942: table or view does not exist')
 
     def test_non_oer_is_no_error(self):
-        from oracle.tns import decode_fv2_oer_error
+        from seerdb.tns import decode_fv2_oer_error
 
         # An RPA (08) token is not an error.
         self.assertEqual(decode_fv2_oer_error(bytes.fromhex('08010109')), (0, None))
@@ -6148,7 +6148,7 @@ class TestFv2DmlResponse(unittest.TestCase):
     )
 
     def test_rowcount_and_success(self):
-        from oracle.tns import decode_fv2_dml_response
+        from seerdb.tns import decode_fv2_dml_response
 
         rowcount, ora_code = decode_fv2_dml_response(self.UPDATE_2ROWS)
         self.assertEqual(rowcount, 2)
@@ -6180,18 +6180,18 @@ class TestFv2Block(unittest.TestCase):
     )
 
     def test_noarg_request_matches_capture(self):
-        from oracle.tns import encode_o7_block
+        from seerdb.tns import encode_o7_block
 
         self.assertEqual(encode_o7_block(0, 'BEGIN NULL; END;'), self.NOARG_REQ)
 
     def test_noarg_response_success(self):
-        from oracle.tns import decode_fv2_dml_response
+        from seerdb.tns import decode_fv2_dml_response
 
         _rowcount, ora_code = decode_fv2_dml_response(self.NOARG_RESP)
         self.assertEqual(ora_code, 0)
 
     def test_inbind_request_option_and_no_inline_value(self):
-        from oracle.tns import encode_o7_block
+        from seerdb.tns import encode_o7_block
 
         got = encode_o7_block(0, 'BEGIN DBMS_OUTPUT.PUT_LINE(:1); END;', ['hello9i'])
         # Block-with-binds option word, not the DML 02 80 29.
@@ -6209,12 +6209,12 @@ class TestFv2Block(unittest.TestCase):
         self.assertEqual(Normalised, self.INBIND_REQ)
 
     def test_inbind_value_frame_matches_capture(self):
-        from oracle.tns import encode_tokens_rxd
+        from seerdb.tns import encode_tokens_rxd
 
         self.assertEqual(encode_tokens_rxd(['hello9i'], b''), self.INBIND_VAL)
 
     def test_inbind_final_response_success(self):
-        from oracle.tns import decode_fv2_dml_response
+        from seerdb.tns import decode_fv2_dml_response
 
         _rowcount, ora_code = decode_fv2_dml_response(self.INBIND_RESP)
         self.assertEqual(ora_code, 0)
@@ -6249,16 +6249,16 @@ class TestFv2OutBinds(unittest.TestCase):
     )
 
     def test_var_oac_number_is_varnum(self):
-        from oracle import datatypes as dt
-        from oracle.tns import _o7_bind_oac
+        from seerdb import datatypes as dt
+        from seerdb.tns import _o7_bind_oac
 
         self.assertEqual(
             _o7_bind_oac(dt.Var(int)), bytes.fromhex('06010000011600000000011f01')
         )
 
     def test_var_oac_string_size_32767(self):
-        from oracle import datatypes as dt
-        from oracle.tns import _o7_bind_oac
+        from seerdb import datatypes as dt
+        from seerdb.tns import _o7_bind_oac
 
         # VARCHAR OUT buffer is 0x7fff (matching JDBC), not the 4000 of an
         # inline str IN bind. The OAC declares AL32UTF8 (02 0369), the driver's
@@ -6274,7 +6274,7 @@ class TestFv2OutBinds(unittest.TestCase):
         # (ORA-01858). type byte + max-size must match the value width.
         import datetime
 
-        from oracle.tns import (
+        from seerdb.tns import (
             TNS_TYPE_DATE,
             TNS_TYPE_TIMESTAMP,
             TNS_TYPE_TIMESTAMPTZ,
@@ -6298,8 +6298,8 @@ class TestFv2OutBinds(unittest.TestCase):
         # (#173); a VARCHAR OAC over the binary value gives ORA-01867.
         import datetime
 
-        from oracle.datatypes import IntervalYM
-        from oracle.tns import TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, _o7_bind_oac
+        from seerdb.datatypes import IntervalYM
+        from seerdb.tns import TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM, _o7_bind_oac
 
         ds = _o7_bind_oac(datetime.timedelta(days=2, seconds=5))
         self.assertEqual((ds[0], ds[5]), (TNS_TYPE_INTERVALDS, 11))
@@ -6307,28 +6307,28 @@ class TestFv2OutBinds(unittest.TestCase):
         self.assertEqual((ym[0], ym[5]), (TNS_TYPE_INTERVALYM, 5))
 
     def test_outnum_request_matches_capture(self):
-        from oracle import datatypes as dt
-        from oracle.tns import encode_o7_block
+        from seerdb import datatypes as dt
+        from seerdb.tns import encode_o7_block
 
         self.assertEqual(
             encode_o7_block(0, 'BEGIN :1 := 42; END;', [dt.Var(int)]), self.OUTNUM_REQ
         )
 
     def test_decode_pure_out_number(self):
-        from oracle.tns import decode_fv2_block_out
+        from seerdb.tns import decode_fv2_block_out
 
         out, _rc, err = decode_fv2_block_out(self.OUTNUM_RESP, 1)
         self.assertEqual(err, 0)
         self.assertEqual(out, [bytes.fromhex('c12b')])  # Oracle number 42
 
     def test_decode_inout(self):
-        from oracle.tns import decode_fv2_block_out
+        from seerdb.tns import decode_fv2_block_out
 
         out, _rc, err = decode_fv2_block_out(self.INOUT_RESP, 1)
         self.assertEqual(out, [b'in_o'])
 
     def test_decode_mixed_two_outs(self):
-        from oracle.tns import decode_fv2_block_out
+        from seerdb.tns import decode_fv2_block_out
 
         out, _rc, err = decode_fv2_block_out(self.MIXED_RESP, 2)
         self.assertEqual(out, [b'BA', b'B'])
@@ -6336,7 +6336,7 @@ class TestFv2OutBinds(unittest.TestCase):
     def test_strip_prompt_scans_to_rxd(self):
         # The direction section length varies (JDBC sent 1 byte/bind here, the
         # live server pads with a leading 00); the scan-based strip handles both.
-        from oracle.tns import strip_fv2_bind_prompt
+        from seerdb.tns import strip_fv2_bind_prompt
 
         jdbc = self.OUTNUM_RESP  # 9-byte prompt
         live = (
@@ -6392,15 +6392,15 @@ class TestFv2Bfile(unittest.TestCase):
     )
 
     def _locator(self):
-        from oracle.tns import _read_lob_column
+        from seerdb.tns import _read_lob_column
 
         i = self.RXD.index(0x07) + 1
         loc, _ = _read_lob_column(self.RXD[i:])
         return loc
 
     def test_rxd_yields_bfile_lob(self):
-        from oracle.lob import LOB
-        from oracle.tns import decode_fv2_exec_response
+        from seerdb.lob import LOB
+        from seerdb.tns import decode_fv2_exec_response
 
         rows, err = decode_fv2_exec_response(self.RXD, [{'data_type': 114}])
         self.assertEqual(err, 1403)
@@ -6411,12 +6411,12 @@ class TestFv2Bfile(unittest.TestCase):
         self.assertEqual(rows[0][0].filename, 'hello.bin')
 
     def test_file_open_request_matches_capture(self):
-        from oracle.tns import encode_o7_bfile_open
+        from seerdb.tns import encode_o7_bfile_open
 
         self.assertEqual(encode_o7_bfile_open(0, self._locator()), self.FOPEN_REQ)
 
     def test_opened_locator_then_getlen_read_close(self):
-        from oracle.tns import (
+        from seerdb.tns import (
             decode_fv2_lob_getlen,
             decode_fv2_opened_locator,
             encode_o7_bfile_close,
@@ -6431,7 +6431,7 @@ class TestFv2Bfile(unittest.TestCase):
         self.assertEqual(encode_o7_bfile_close(0, opened), self.FCLOSE_REQ)
 
     def test_read_response_content(self):
-        from oracle.tns import decode_fv2_lob_chunks
+        from seerdb.tns import decode_fv2_lob_chunks
 
         content, done = decode_fv2_lob_chunks(self.READ_RESP)
         self.assertTrue(done)

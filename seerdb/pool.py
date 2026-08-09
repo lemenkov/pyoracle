@@ -3,7 +3,7 @@
 
 """Connection pool.
 
-`oracle.connect()` does a full TNS / O5LOGON handshake every time, which
+`seerdb.connect()` does a full TNS / O5LOGON handshake every time, which
 takes a few hundred ms even against a local XE. Long-running applications
 that frequently acquire short-lived connections (one per request, etc.)
 end up spending more time handshaking than running queries.
@@ -15,7 +15,7 @@ the connection is still alive with a cheap round-trip first.
 
 Usage:
 
-    pool = oracle.create_pool(host=..., user=..., password=...,
+    pool = seerdb.create_pool(host=..., user=..., password=...,
                               service_name=..., min=2, max=10)
     with pool.acquire() as conn:
         with conn.cursor() as cur:
@@ -27,8 +27,8 @@ import threading
 import time
 from collections import deque
 
-from oracle.connection import OracleConnect
-from oracle.exceptions import InterfaceError
+from seerdb.connection import OracleConnect
+from seerdb.exceptions import InterfaceError
 
 
 class _PoolEntry:

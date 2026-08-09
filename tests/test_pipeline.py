@@ -8,16 +8,16 @@
 
 import unittest
 
-import oracle
-from oracle.pipeline import Pipeline, PipelineOpType, create_pipeline
-from oracle.tns import (
+import seerdb
+from seerdb.pipeline import Pipeline, PipelineOpType, create_pipeline
+from seerdb.tns import (
     _fun_header,
     encode_data_packet,
     encode_dictionary,
     encode_pipeline_begin,
     encode_pipeline_end,
 )
-from oracle.tns_consts import (
+from seerdb.tns_consts import (
     FIELD_VERSION_23_4,
     TNS_DATA,
     TNS_DATA_FLAGS_BEGIN_PIPELINE,
@@ -66,7 +66,7 @@ class TestPipelineApi(unittest.TestCase):
         p.add_fetchall('select * from t')
         p.add_commit()
         p.add_callproc('myproc', [1, 2])
-        p.add_callfunc('myfunc', oracle.NUMBER, [3])
+        p.add_callfunc('myfunc', seerdb.NUMBER, [3])
         types = [op.op_type for op in p.operations]
         self.assertEqual(
             types,
@@ -90,9 +90,9 @@ class TestPipelineApi(unittest.TestCase):
         self.assertEqual(op.num_rows, 7)
 
     def test_exported_from_package(self):
-        self.assertIs(oracle.create_pipeline, create_pipeline)
-        self.assertTrue(hasattr(oracle, 'Pipeline'))
-        self.assertTrue(hasattr(oracle, 'PipelineOpResult'))
+        self.assertIs(seerdb.create_pipeline, create_pipeline)
+        self.assertTrue(hasattr(seerdb, 'Pipeline'))
+        self.assertTrue(hasattr(seerdb, 'PipelineOpResult'))
 
 
 class TestTokenFraming(unittest.TestCase):
@@ -119,7 +119,7 @@ class TestTokenDecode(unittest.TestCase):
         # decoder consumes it and decodes the body (here STATUS + EOR). The
         # marker decode is field-version-independent, so don't perturb the
         # shared _DECODE_FIELD_VERSION context (it would leak into later tests).
-        from oracle.tns import decode_packet
+        from seerdb.tns import decode_packet
 
         data = bytes.fromhex('210101') + bytes.fromhex('0903010005024be9') + bytes([29])
         self.assertEqual(

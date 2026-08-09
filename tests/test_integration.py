@@ -4,11 +4,11 @@
 # Integration tests that talk to a real Oracle database. Disabled unless the
 # connection parameters are exported in the environment:
 #
-#   PYORACLE_TEST_USER       (required — gate; if unset, all tests skip)
-#   PYORACLE_TEST_PASSWORD   (required)
-#   PYORACLE_TEST_HOST       (default 'localhost')
-#   PYORACLE_TEST_PORT       (default 1521)
-#   PYORACLE_TEST_SERVICE    (default 'XE')
+#   SEERDB_TEST_USER       (required — gate; if unset, all tests skip)
+#   SEERDB_TEST_PASSWORD   (required)
+#   SEERDB_TEST_HOST       (default 'localhost')
+#   SEERDB_TEST_PORT       (default 1521)
+#   SEERDB_TEST_SERVICE    (default 'XE')
 #
 # The DB user only needs CREATE SESSION and CREATE TABLE privileges plus a
 # writable tablespace. Each test creates and drops its own scratch table.
@@ -20,13 +20,13 @@ import ssl
 import unittest
 from decimal import Decimal
 
-import oracle
-from oracle.tns_consts import FIELD_VERSION_10_2, FIELD_VERSION_12_1
+import seerdb
+from seerdb.tns_consts import FIELD_VERSION_10_2, FIELD_VERSION_12_1
 
 # Features the Oracle 9i (fv2) server genuinely lacks, keyed by a substring of
 # the test method name. A 9i (field_version < 10.2) connection skips these with
 # a clear reason — the same bar 10g uses for 12c+/23ai features (#171). These
-# are *server* limitations or capabilities pyoracle deliberately does not offer
+# are *server* limitations or capabilities seerdb deliberately does not offer
 # on fv2, not fixable fv2 bind gaps (those are #172 dates, #173 intervals,
 # #174 national charset).
 _FV2_UNSUPPORTED = (
@@ -94,20 +94,20 @@ _sys.path.insert(0, os.path.dirname(__file__))
 from _redirect_listener import RedirectListener  # noqa: E402
 from _tls_proxy import CERT_PATH, TLSProxy  # noqa: E402
 
-_USER = os.environ.get('PYORACLE_TEST_USER')
-_PASSWORD = os.environ.get('PYORACLE_TEST_PASSWORD', '')
-_HOST = os.environ.get('PYORACLE_TEST_HOST', 'localhost')
-_PORT = int(os.environ.get('PYORACLE_TEST_PORT', '1521'))
-_SERVICE = os.environ.get('PYORACLE_TEST_SERVICE', 'XE')
+_USER = os.environ.get('SEERDB_TEST_USER')
+_PASSWORD = os.environ.get('SEERDB_TEST_PASSWORD', '')
+_HOST = os.environ.get('SEERDB_TEST_HOST', 'localhost')
+_PORT = int(os.environ.get('SEERDB_TEST_PORT', '1521'))
+_SERVICE = os.environ.get('SEERDB_TEST_SERVICE', 'XE')
 # Advertise a 12c+ TTC field version (e.g. 16 = 21.1) to run the suite against
 # a 12c+ server; unset/0 keeps the 11g default. Lets the same suite cover both
 # testbeds (issue #27).
-_FIELD_VERSION = int(os.environ.get('PYORACLE_TEST_FIELD_VERSION', '0'))
+_FIELD_VERSION = int(os.environ.get('SEERDB_TEST_FIELD_VERSION', '0'))
 _FV_KW = {'field_version': _FIELD_VERSION} if _FIELD_VERSION else {}
 
 _SKIP_REASON = (
     'integration tests require a real DB connection; '
-    'set PYORACLE_TEST_USER (and PYORACLE_TEST_PASSWORD) to enable'
+    'set SEERDB_TEST_USER (and SEERDB_TEST_PASSWORD) to enable'
 )
 
 
@@ -115,15 +115,15 @@ _SKIP_REASON = (
 # ("logon storm" protection) and cancels early statements on the throttled
 # session with ORA-01013. The whole suite opens ~150 connections; on a busy or
 # freshly-booted XE (e.g. CI) the default 0.05 s isn't always enough, so the
-# delay is tunable via PYORACLE_TEST_CONNECT_DELAY (CI sets it higher).
-_CONNECT_DELAY = float(os.environ.get('PYORACLE_TEST_CONNECT_DELAY', '0.05'))
+# delay is tunable via SEERDB_TEST_CONNECT_DELAY (CI sets it higher).
+_CONNECT_DELAY = float(os.environ.get('SEERDB_TEST_CONNECT_DELAY', '0.05'))
 
 
 def _connect():
     import time
 
     time.sleep(_CONNECT_DELAY)
-    return oracle.connect(
+    return seerdb.connect(
         host=_HOST,
         port=_PORT,
         user=_USER,
@@ -136,8 +136,8 @@ def _connect():
 
 # Number of times to replay a whole test that tripped ORA-01013, and the pause
 # between attempts. See `_IntegrationBase.run`.
-_THROTTLE_RETRIES = int(os.environ.get('PYORACLE_TEST_THROTTLE_RETRIES', '2'))
-_THROTTLE_RETRY_DELAY = float(os.environ.get('PYORACLE_TEST_THROTTLE_DELAY', '0.5'))
+_THROTTLE_RETRIES = int(os.environ.get('SEERDB_TEST_THROTTLE_RETRIES', '2'))
+_THROTTLE_RETRY_DELAY = float(os.environ.get('SEERDB_TEST_THROTTLE_DELAY', '0.5'))
 
 
 class _CaptureResult(unittest.TestResult):
@@ -169,7 +169,7 @@ class _CaptureResult(unittest.TestResult):
             return False
         exc = payload[1]
         return (
-            isinstance(exc, oracle.OperationalError)
+            isinstance(exc, seerdb.OperationalError)
             and getattr(exc, 'code', None) == 1013
         )
 
@@ -181,19 +181,19 @@ class _IntegrationBase(unittest.TestCase):
     protection) and cancels statements on a throttled session with
     ORA-01013 ("user requested cancel of current operation"). This is
     documented server behaviour, not a driver bug — production code uses
-    connection pools (`oracle.Pool`, issue #6) and doesn't hit it. The
+    connection pools (`seerdb.Pool`, issue #6) and doesn't hit it. The
     suite defends in three layers: `_connect` paces logins
-    (PYORACLE_TEST_CONNECT_DELAY), `setUp` retries the connect / initial
+    (SEERDB_TEST_CONNECT_DELAY), `setUp` retries the connect / initial
     drop, and `run` (below) replays a whole test that still tripped
     ORA-01013 mid-body — each replay gets a fresh connection via setUp, so
     it is safe and keeps CI from flaking on the throttle.
     """
 
-    TABLE = 'PYORACLE_TEST'
+    TABLE = 'SEERDB_TEST'
 
     def __init_subclass__(cls, **kwargs):
         # Give each integration class its OWN table name (#170). All classes
-        # used to share "PYORACLE_TEST", so a single stuck lock — e.g. a 9i
+        # used to share "SEERDB_TEST", so a single stuck lock — e.g. a 9i
         # connection killed mid-DML leaving a zombie session (#168/#169) — would
         # block every later class's setUp/tearDown DROP and cascade into dozens
         # of phantom ORA-00054, especially on the slow 9i VM. A unique name per
@@ -240,7 +240,7 @@ class _IntegrationBase(unittest.TestCase):
                 self._skip_if_fv2_unsupported()
                 self._drop_silently(self.cur)
                 return
-            except oracle.OperationalError as e:
+            except seerdb.OperationalError as e:
                 if e.code != 1013:
                     raise
                 Last = e
@@ -275,7 +275,7 @@ class _IntegrationBase(unittest.TestCase):
             with self.conn.cursor() as cleanup:
                 try:
                     self._drop_silently(cleanup)
-                except oracle.OperationalError as e:
+                except seerdb.OperationalError as e:
                     # The setUp/tearDown cleanup is best-effort; ORA-01013
                     # here just means "Oracle cancelled the cleanup
                     # statement", and the next test's setUp will retry.
@@ -287,7 +287,7 @@ class _IntegrationBase(unittest.TestCase):
     def _drop_silently(self, cur):
         try:
             cur.execute(f'DROP TABLE {self.TABLE}')
-        except oracle.DatabaseError as e:
+        except seerdb.DatabaseError as e:
             # ORA-00942: table or view does not exist — expected on first run.
             if e.code != 942:
                 raise
@@ -498,14 +498,14 @@ class TypesIntegration(_IntegrationBase):
         v = self._round_trip(
             'INTERVAL YEAR(4) TO MONTH', "INTERVAL '3-7' YEAR TO MONTH"
         )
-        self.assertEqual(v, oracle.IntervalYM(3, 7))
-        self.assertIsInstance(v, oracle.IntervalYM)
+        self.assertEqual(v, seerdb.IntervalYM(3, 7))
+        self.assertIsInstance(v, seerdb.IntervalYM)
 
     def test_interval_ym_negative(self):
         v = self._round_trip(
             'INTERVAL YEAR(4) TO MONTH', "INTERVAL '-1-2' YEAR TO MONTH"
         )
-        self.assertEqual(v, oracle.IntervalYM(-1, -2))
+        self.assertEqual(v, seerdb.IntervalYM(-1, -2))
 
     # ----- ROWID -----
 
@@ -716,13 +716,13 @@ class CursorIntegration(_IntegrationBase):
         with self.conn.cursor() as cur:
             cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER)')
         # After the block the cursor must be closed.
-        with self.assertRaises(oracle.InterfaceError):
+        with self.assertRaises(seerdb.InterfaceError):
             cur.execute('SELECT 1 FROM dual')
 
     # ----- error mapping -----
 
     def test_select_from_nonexistent_raises_942(self):
-        with self.assertRaises(oracle.DatabaseError) as ctx:
+        with self.assertRaises(seerdb.DatabaseError) as ctx:
             self.cur.execute(f'SELECT * FROM nope_{os.getpid()}_xyz')
         self.assertEqual(ctx.exception.code, 942)
 
@@ -741,10 +741,10 @@ class CursorIntegration(_IntegrationBase):
         # Count only TNS_DATA sends: under XE's logon-storm throttle the server
         # can inject a break/marker mid-response, and the driver's marker ack is
         # an extra (non-data) send that would otherwise make this flake.
-        from oracle.tns_consts import TNS_DATA
+        from seerdb.tns_consts import TNS_DATA
 
         self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER)')
-        import oracle.connection as _c
+        import seerdb.connection as _c
 
         orig = _c.OracleConnect.send
         sends = [0]
@@ -802,7 +802,7 @@ class CursorIntegration(_IntegrationBase):
         # Default behaviour is unchanged: a constraint violation aborts and
         # raises rather than being collected.
         self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER PRIMARY KEY)')
-        with self.assertRaises(oracle.IntegrityError):
+        with self.assertRaises(seerdb.IntegrityError):
             self.cur.executemany(f'INSERT INTO {self.TABLE} VALUES (:1)', [(1,), (1,)])
 
     def test_getbatcherrors_empty_when_no_errors(self):
@@ -817,7 +817,7 @@ class CursorIntegration(_IntegrationBase):
     def _require_12c(self):
         # arraydmlrowcounts is a 12.1+ server feature (it rides the 12c+ OALL8
         # al8pidmlrc block); skip the positive tests on an 11g server.
-        from oracle.tns import FIELD_VERSION_12_1
+        from seerdb.tns import FIELD_VERSION_12_1
 
         if self.conn.field_version < FIELD_VERSION_12_1:
             self.skipTest('arraydmlrowcounts needs a 12.1+ server')
@@ -865,12 +865,12 @@ class CursorIntegration(_IntegrationBase):
 
     def test_arraydmlrowcounts_unsupported_on_11g(self):
         # On an 11g server the feature is rejected up front (oracledb-compatible).
-        from oracle.tns import FIELD_VERSION_12_1
+        from seerdb.tns import FIELD_VERSION_12_1
 
         if self.conn.field_version >= FIELD_VERSION_12_1:
             self.skipTest('server supports arraydmlrowcounts')
         self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER)')
-        with self.assertRaises(oracle.NotSupportedError):
+        with self.assertRaises(seerdb.NotSupportedError):
             self.cur.executemany(
                 f'INSERT INTO {self.TABLE} VALUES (:1)',
                 [(1,), (2,)],
@@ -880,12 +880,12 @@ class CursorIntegration(_IntegrationBase):
     # ----- closed-state guards -----
 
     def test_fetch_without_execute_raises(self):
-        with self.assertRaises(oracle.InterfaceError):
+        with self.assertRaises(seerdb.InterfaceError):
             self.cur.fetchone()
 
     def test_use_after_close_raises(self):
         self.cur.close()
-        with self.assertRaises(oracle.InterfaceError):
+        with self.assertRaises(seerdb.InterfaceError):
             self.cur.execute('SELECT 1 FROM dual')
 
 
@@ -932,7 +932,7 @@ class BindIntegration(_IntegrationBase):
         # characters; 10g+ get the same csfrm-2 OAC.
         self.cur.execute(f'CREATE TABLE {self.TABLE} (v NVARCHAR2(40))')
         val = 'café—Ω—日本'
-        var = self.cur.var(oracle.DB_TYPE_NVARCHAR)
+        var = self.cur.var(seerdb.DB_TYPE_NVARCHAR)
         var.setvalue(0, val)
         self.cur.execute(f'INSERT INTO {self.TABLE} VALUES (:1)', [var])
         self.cur.execute(f'SELECT v FROM {self.TABLE}')
@@ -1007,7 +1007,7 @@ class BindIntegration(_IntegrationBase):
     def test_binary_float_bind(self):
         self.cur.execute(f'CREATE TABLE {self.TABLE} (v BINARY_FLOAT)')
         self.cur.execute(
-            f'INSERT INTO {self.TABLE} VALUES (:1)', [oracle.BinaryFloat(-2.25)]
+            f'INSERT INTO {self.TABLE} VALUES (:1)', [seerdb.BinaryFloat(-2.25)]
         )
         self.cur.execute(f'SELECT v FROM {self.TABLE}')
         self.assertEqual(self.cur.fetchone(), (-2.25,))
@@ -1015,7 +1015,7 @@ class BindIntegration(_IntegrationBase):
     def test_binary_double_bind(self):
         self.cur.execute(f'CREATE TABLE {self.TABLE} (v BINARY_DOUBLE)')
         self.cur.execute(
-            f'INSERT INTO {self.TABLE} VALUES (:1)', [oracle.BinaryDouble(1234.5678)]
+            f'INSERT INTO {self.TABLE} VALUES (:1)', [seerdb.BinaryDouble(1234.5678)]
         )
         self.cur.execute(f'SELECT v FROM {self.TABLE}')
         self.assertEqual(self.cur.fetchone(), (1234.5678,))
@@ -1042,10 +1042,10 @@ class BindIntegration(_IntegrationBase):
     def test_interval_ym_bind(self):
         self.cur.execute(f'CREATE TABLE {self.TABLE} (v INTERVAL YEAR(4) TO MONTH)')
         self.cur.execute(
-            f'INSERT INTO {self.TABLE} VALUES (:1)', [oracle.IntervalYM(3, 7)]
+            f'INSERT INTO {self.TABLE} VALUES (:1)', [seerdb.IntervalYM(3, 7)]
         )
         self.cur.execute(f'SELECT v FROM {self.TABLE}')
-        self.assertEqual(self.cur.fetchone(), (oracle.IntervalYM(3, 7),))
+        self.assertEqual(self.cur.fetchone(), (seerdb.IntervalYM(3, 7),))
 
     # ----- bind ordering (str before number) -----
 
@@ -1168,7 +1168,7 @@ class BindIntegration(_IntegrationBase):
         # ProgrammingError is the right slot in the PEP 249 hierarchy for
         # "the caller supplied bad inputs".
         self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, name VARCHAR2(40))')
-        with self.assertRaises(oracle.ProgrammingError):
+        with self.assertRaises(seerdb.ProgrammingError):
             self.cur.execute(
                 f'INSERT INTO {self.TABLE} VALUES (:id, :name)',
                 {'id': 12},  # missing :name
@@ -1178,7 +1178,7 @@ class BindIntegration(_IntegrationBase):
 
     def test_bad_parameters_type_raises(self):
         self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER)')
-        with self.assertRaises(oracle.NotSupportedError):
+        with self.assertRaises(seerdb.NotSupportedError):
             self.cur.execute(f'INSERT INTO {self.TABLE} VALUES (:1)', 'not-a-sequence')
 
     # ----- SELECT with binds -----
@@ -1242,7 +1242,7 @@ class TempLobBindIntegration(_IntegrationBase):
 
     def test_large_clob_bind(self):
         for n in (40000, 100000, 500000):
-            r = self.cur.var(oracle.NUMBER)
+            r = self.cur.var(seerdb.NUMBER)
             self.cur.execute(
                 'BEGIN :r := pyo_clob_len(:p); END;', {'r': r, 'p': 'X' * n}
             )
@@ -1250,7 +1250,7 @@ class TempLobBindIntegration(_IntegrationBase):
 
     def test_large_blob_bind(self):
         for n in (40000, 100000, 300000):
-            r = self.cur.var(oracle.NUMBER)
+            r = self.cur.var(seerdb.NUMBER)
             self.cur.execute(
                 'BEGIN :r := pyo_blob_len(:p); END;', {'r': r, 'p': b'\xab' * n}
             )
@@ -1259,7 +1259,7 @@ class TempLobBindIntegration(_IntegrationBase):
     def test_small_bind_unaffected(self):
         # Values within the PL/SQL limit keep the regular streamed path.
         for n in (10, 100, 30000):
-            r = self.cur.var(oracle.NUMBER)
+            r = self.cur.var(seerdb.NUMBER)
             self.cur.execute(
                 'BEGIN :r := pyo_clob_len(:p); END;', {'r': r, 'p': 'Y' * n}
             )
@@ -1269,7 +1269,7 @@ class TempLobBindIntegration(_IntegrationBase):
         # The temp-LOB ops are interleaved with the execute; a stale OER scan
         # used to desync the next write. Exercise the alternating path.
         for n in (100, 100000, 30000, 200000, 50):
-            r = self.cur.var(oracle.NUMBER)
+            r = self.cur.var(seerdb.NUMBER)
             self.cur.execute(
                 'BEGIN :r := pyo_clob_len(:p); END;', {'r': r, 'p': 'Z' * n}
             )
@@ -1282,7 +1282,7 @@ class ErrorAndRowcountIntegration(_IntegrationBase):
     Cursor.rowcount reflects the affected-row count from the OER block."""
 
     def test_error_message_includes_ora_text(self):
-        with self.assertRaises(oracle.DatabaseError) as ctx:
+        with self.assertRaises(seerdb.DatabaseError) as ctx:
             self.cur.execute(f'SELECT * FROM nope_{os.getpid()}_xyz')
         # Exception code: the ORA number; str(): the full server message.
         self.assertEqual(ctx.exception.code, 942)
@@ -1295,7 +1295,7 @@ class ErrorAndRowcountIntegration(_IntegrationBase):
 
     def test_error_message_for_invalid_number(self):
         self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER)')
-        with self.assertRaises(oracle.DatabaseError) as ctx:
+        with self.assertRaises(seerdb.DatabaseError) as ctx:
             self.cur.execute(f"INSERT INTO {self.TABLE} VALUES ('not-a-number')")
         # The ORA-01722 code is the stable contract; the English text varies by
         # version (11g/21c: "invalid number"; 23ai: "unable to convert string
@@ -1306,7 +1306,7 @@ class ErrorAndRowcountIntegration(_IntegrationBase):
     def test_error_message_for_unique_constraint(self):
         self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER PRIMARY KEY)')
         self.cur.execute(f'INSERT INTO {self.TABLE} VALUES (1)')
-        with self.assertRaises(oracle.DatabaseError) as ctx:
+        with self.assertRaises(seerdb.DatabaseError) as ctx:
             self.cur.execute(f'INSERT INTO {self.TABLE} VALUES (1)')
         self.assertEqual(ctx.exception.code, 1)
         self.assertIn('ORA-00001', str(ctx.exception))
@@ -1317,23 +1317,23 @@ class ErrorAndRowcountIntegration(_IntegrationBase):
     def test_unique_constraint_raises_integrity_error(self):
         self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER PRIMARY KEY)')
         self.cur.execute(f'INSERT INTO {self.TABLE} VALUES (1)')
-        with self.assertRaises(oracle.IntegrityError):
+        with self.assertRaises(seerdb.IntegrityError):
             self.cur.execute(f'INSERT INTO {self.TABLE} VALUES (1)')
 
     def test_invalid_number_raises_data_error(self):
         self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER)')
-        with self.assertRaises(oracle.DataError):
+        with self.assertRaises(seerdb.DataError):
             self.cur.execute(f"INSERT INTO {self.TABLE} VALUES ('not-a-number')")
 
     def test_missing_table_raises_programming_error(self):
-        with self.assertRaises(oracle.ProgrammingError):
+        with self.assertRaises(seerdb.ProgrammingError):
             self.cur.execute(f'SELECT * FROM nope_{os.getpid()}_xyz')
 
     def test_subclass_still_catchable_as_database_error(self):
         # All the subclasses inherit from DatabaseError, so existing
         # callers that catch the base class keep working.
         self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER)')
-        with self.assertRaises(oracle.DatabaseError):
+        with self.assertRaises(seerdb.DatabaseError):
             self.cur.execute(f"INSERT INTO {self.TABLE} VALUES ('not-a-number')")
 
     def test_rowcount_insert_single(self):
@@ -1380,7 +1380,7 @@ class CursorCacheIntegration(_IntegrationBase):
     def test_repeated_dml_reuses_cursor(self):
         if self.conn.field_version >= FIELD_VERSION_12_1:
             # The cache is disabled on the *negotiated* 12c+ connection, so gate
-            # on that — not on PYORACLE_TEST_FIELD_VERSION, which is unset when
+            # on that — not on SEERDB_TEST_FIELD_VERSION, which is unset when
             # the suite simply points at a 21c server (#81).
             self.skipTest('cursor cache is disabled on 12c+ (re-parse each execute)')
         self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, v VARCHAR2(10))')
@@ -1608,7 +1608,7 @@ class FetchFlowIntegration(_IntegrationBase):
         # up in SYS_CONTEXT('USERENV', ...). 12c+ only (the piggyback closes a
         # pre-12c connection), so pre-12c must raise NotSupportedError instead.
         if self.conn.field_version < FIELD_VERSION_12_1:
-            with self.assertRaises(oracle.NotSupportedError):
+            with self.assertRaises(seerdb.NotSupportedError):
                 self.conn.module = 'M'
             return
         self.conn.module = 'PYOMOD'
@@ -1661,7 +1661,7 @@ class FetchFlowIntegration(_IntegrationBase):
         t = 'PYO_LEAK191'
         try:
             self.cur.execute(f'DROP TABLE {t}')
-        except oracle.DatabaseError:
+        except seerdb.DatabaseError:
             # table may not exist; drop is best-effort cleanup
             pass
         self.cur.execute(f'CREATE TABLE {t} (id NUMBER)')
@@ -1913,7 +1913,7 @@ class LOBIntegration(_IntegrationBase):
         # discards the next response's data, so a large CLOB read right after a
         # few errors came back empty. Interleave errored SELECTs with a 50 KB
         # CLOB read and assert the content is intact and the connection usable.
-        from oracle.exceptions import DatabaseError
+        from seerdb.exceptions import DatabaseError
 
         self._setup()
         Big = 'A' * 50000
@@ -1934,7 +1934,7 @@ class BooleanIntegration(_IntegrationBase):
     # Native SQL BOOLEAN columns, 23ai+ (#54, TNS type 252). Skipped on servers
     # without the type (21c/11g reject the column with ORA-00902).
     def _setup_bool(self):
-        from oracle.exceptions import DatabaseError
+        from seerdb.exceptions import DatabaseError
 
         try:
             self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, flag BOOLEAN)')
@@ -1967,10 +1967,10 @@ class BooleanIntegration(_IntegrationBase):
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class VectorIntegration(_IntegrationBase):
     # Native VECTOR columns, 23ai+ (#55, TNS type 127). The server delivers the
-    # vector as a LOB locator; pyoracle reads the binary image over TTI_LOBOPS
+    # vector as a LOB locator; seerdb reads the binary image over TTI_LOBOPS
     # and decodes it to a list. Skipped on servers without the type.
     def _setup_vec(self, coltype):
-        from oracle.exceptions import DatabaseError
+        from seerdb.exceptions import DatabaseError
 
         try:
             self.cur.execute(f'CREATE TABLE {self.TABLE} (v {coltype})')
@@ -2016,12 +2016,12 @@ class VectorIntegration(_IntegrationBase):
 
     def test_binary(self):
         # BINARY (bit) vectors (#60): the literal gives one packed byte per 8
-        # dimensions; pyoracle surfaces those packed bytes verbatim.
+        # dimensions; seerdb surfaces those packed bytes verbatim.
         got = self._roundtrip('VECTOR(16, BINARY)', '[170, 1]')
         self.assertEqual(got, [170, 1])
         self.assertTrue(all(isinstance(v, int) for v in got))
 
-    # Binds (#62): pyoracle sends the native binary VECTOR image; covers plain
+    # Binds (#62): seerdb sends the native binary VECTOR image; covers plain
     # lists and typed array.array values.
     def test_bind_float32_list(self):
         self.assertEqual(
@@ -2067,7 +2067,7 @@ class VectorIntegration(_IntegrationBase):
 
     def test_sparse_roundtrip(self):
         # SPARSE vectors (#68): bind a SparseVector and read it back.
-        from oracle.vector import SparseVector
+        from seerdb.vector import SparseVector
 
         sv = SparseVector(8, [2, 5], [1.5, 2.5])
         self.assertEqual(self._bind_roundtrip('VECTOR(8, FLOAT32, SPARSE)', sv), sv)
@@ -2076,10 +2076,10 @@ class VectorIntegration(_IntegrationBase):
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class JSONIntegration(_IntegrationBase):
     # Native JSON (OSON) columns, 21c+ (#30). The server delivers the JSON
-    # value as a LOB locator; pyoracle reads the OSON image over TTI_LOBOPS and
+    # value as a LOB locator; seerdb reads the OSON image over TTI_LOBOPS and
     # decodes it to a Python value. Skipped on servers without the JSON type.
     def _setup_json(self):
-        from oracle.exceptions import DatabaseError
+        from seerdb.exceptions import DatabaseError
 
         try:
             self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, doc JSON)')
@@ -2138,8 +2138,8 @@ class JSONIntegration(_IntegrationBase):
         self.assertEqual(got['key000'], 0)
         self.assertEqual(got['key299'], 299)
 
-    # Binds (#50): a bare dict binds as JSON; oracle.JSON(value) forces JSON on
-    # lists / scalars. pyoracle serialises to JSON text and the server casts it.
+    # Binds (#50): a bare dict binds as JSON; seerdb.JSON(value) forces JSON on
+    # lists / scalars. seerdb serialises to JSON text and the server casts it.
     def _bind_roundtrip(self, value):
         self.cur.execute(f'DELETE FROM {self.TABLE}')
         self.cur.execute(f'INSERT INTO {self.TABLE} VALUES (1, :doc)', [value])
@@ -2164,14 +2164,14 @@ class JSONIntegration(_IntegrationBase):
     def test_bind_json_wrapper_list(self):
         self._setup_json()
         self.assertEqual(
-            self._bind_roundtrip(oracle.JSON([1, 2, 3, 'four', True])),
+            self._bind_roundtrip(seerdb.JSON([1, 2, 3, 'four', True])),
             [1, 2, 3, 'four', True],
         )
 
     def test_bind_json_wrapper_scalar(self):
         self._setup_json()
         self.assertEqual(
-            self._bind_roundtrip(oracle.JSON('just a string')), 'just a string'
+            self._bind_roundtrip(seerdb.JSON('just a string')), 'just a string'
         )
 
     def test_bind_decimal_stays_exact(self):
@@ -2196,7 +2196,7 @@ class JSONIntegration(_IntegrationBase):
             {'a': {'b': {'c': 'z' * 1000}}, 'l': ['s' * 400, 't' * 60000]},
         ]
         for n, v in enumerate(cases):
-            wrapped = v if isinstance(v, dict) else oracle.JSON(v)
+            wrapped = v if isinstance(v, dict) else seerdb.JSON(v)
             got = self._bind_roundtrip(wrapped)
             self.assertEqual(got, v, f'case {n}')
 
@@ -2251,7 +2251,7 @@ class SodaIntegration(_IntegrationBase):
             'n := c.insert_one(d); END;'
         )
         col.truncate()
-        v = self.cur.var(oracle.NUMBER)
+        v = self.cur.var(seerdb.NUMBER)
         self.cur.execute(
             'DECLARE c SODA_COLLECTION_T; BEGIN '
             "c := DBMS_SODA.open_collection('it_trunc'); "
@@ -2327,12 +2327,12 @@ class SodaIntegration(_IntegrationBase):
         col = self.soda.createCollection('it_over')
         for i in range(5):
             col.insertOne({'i': i})
-        import oracle.soda as _soda
+        import seerdb.soda as _soda
 
         saved = _soda._DEFAULT_FETCH_CAP
         _soda._DEFAULT_FETCH_CAP = 2  # force overflow without a .limit()
         try:
-            with self.assertRaises(oracle.NotSupportedError):
+            with self.assertRaises(seerdb.NotSupportedError):
                 col.find().getDocuments()
         finally:
             _soda._DEFAULT_FETCH_CAP = saved
@@ -2420,7 +2420,7 @@ class SodaIntegration(_IntegrationBase):
             col.createIndex(
                 {'name': 'IT_SIDX', 'dataguide': 'on', 'search_on': 'text_value'}
             )
-        except oracle.DatabaseError as exc:
+        except seerdb.DatabaseError as exc:
             if getattr(exc, 'code', None) == 29833:
                 self.skipTest('JSON search index needs Oracle Text (absent on 21c XE)')
             raise
@@ -2435,11 +2435,11 @@ class SqlDomainIntegration(_IntegrationBase):
     # domain carries its schema+name in the per-column describe; before the fix
     # that non-empty layout desynced the row decode. Needs a 23ai server AND the
     # CREATE DOMAIN privilege; skips otherwise (incl. pre-23ai, which lacks the
-    # syntax). Run with PYORACLE_TEST_FIELD_VERSION=17 to exercise the fv17 path.
+    # syntax). Run with SEERDB_TEST_FIELD_VERSION=17 to exercise the fv17 path.
     DOMAIN = 'PYO_DOM_T'
 
     def _setup_domain(self):
-        from oracle.exceptions import DatabaseError
+        from seerdb.exceptions import DatabaseError
 
         try:
             self.cur.execute(f'DROP DOMAIN {self.DOMAIN} FORCE')
@@ -2499,13 +2499,13 @@ class ChangePasswordIntegration(unittest.TestCase):
     def setUp(self):
         # changepassword is gated on Oracle 9i (its O3LOGON password change
         # differs); skip the live tests there (#168).
-        with oracle.connect(**self._kwargs(_PASSWORD)) as conn:
+        with seerdb.connect(**self._kwargs(_PASSWORD)) as conn:
             if conn.field_version < FIELD_VERSION_10_2:
                 self.skipTest('changepassword is not supported on Oracle 9i')
 
     def test_changepassword_roundtrip(self):
         new = _PASSWORD + '_chg9'
-        with oracle.connect(**self._kwargs(_PASSWORD)) as conn:
+        with seerdb.connect(**self._kwargs(_PASSWORD)) as conn:
             conn.changepassword(_PASSWORD, new)
             try:
                 # The session that changed the password stays usable.
@@ -2513,30 +2513,30 @@ class ChangePasswordIntegration(unittest.TestCase):
                 cur.execute('SELECT 1 FROM dual')
                 self.assertEqual(cur.fetchone(), (1,))
                 # The new password authenticates a fresh connection.
-                with oracle.connect(**self._kwargs(new)) as v:
+                with seerdb.connect(**self._kwargs(new)) as v:
                     vc = v.cursor()
                     vc.execute('SELECT 1 FROM dual')
                     self.assertEqual(vc.fetchone(), (1,))
                 # The old password no longer works.
-                with self.assertRaises(oracle.DatabaseError):
-                    oracle.connect(**self._kwargs(_PASSWORD)).close()
+                with self.assertRaises(seerdb.DatabaseError):
+                    seerdb.connect(**self._kwargs(_PASSWORD)).close()
             finally:
                 # Restore the original password on the still-authenticated
                 # connection before the `with` closes it.
                 conn.changepassword(new, _PASSWORD)
         # The original password is restored for the rest of the suite.
-        with oracle.connect(**self._kwargs(_PASSWORD)):
+        with seerdb.connect(**self._kwargs(_PASSWORD)):
             pass
 
     def test_changepassword_wrong_old_raises(self):
         # A wrong current password is rejected (ORA-28008) and changes nothing.
-        with oracle.connect(**self._kwargs(_PASSWORD)) as conn:
-            with self.assertRaises(oracle.DatabaseError):
+        with seerdb.connect(**self._kwargs(_PASSWORD)) as conn:
+            with self.assertRaises(seerdb.DatabaseError):
                 conn.changepassword('wrong_old_pw_xyz', 'irrelevant9')
             cur = conn.cursor()
             cur.execute('SELECT 1 FROM dual')
             self.assertEqual(cur.fetchone(), (1,))
-        with oracle.connect(**self._kwargs(_PASSWORD)):
+        with seerdb.connect(**self._kwargs(_PASSWORD)):
             pass
 
 
@@ -2550,7 +2550,7 @@ class RedirectIntegration(unittest.TestCase):
     def test_sync_follows_redirect(self):
         with (
             RedirectListener(_HOST, _PORT) as listener,
-            oracle.connect(
+            seerdb.connect(
                 host=_HOST,
                 port=listener.listen_port,
                 user=_USER,
@@ -2585,7 +2585,7 @@ class PoolIntegration(unittest.TestCase):
         )
 
     def test_pre_warms_to_min_and_runs_query(self):
-        Pool = oracle.create_pool(min=2, max=3, **self._kwargs())
+        Pool = seerdb.create_pool(min=2, max=3, **self._kwargs())
         try:
             self.assertEqual(Pool.opened, 2)
             self.assertEqual(Pool.busy, 0)
@@ -2599,7 +2599,7 @@ class PoolIntegration(unittest.TestCase):
             Pool.close()
 
     def test_grows_to_max_and_releases_for_reuse(self):
-        Pool = oracle.create_pool(min=1, max=3, **self._kwargs())
+        Pool = seerdb.create_pool(min=1, max=3, **self._kwargs())
         try:
             G1 = Pool.acquire()
             G1.__enter__()
@@ -2622,12 +2622,12 @@ class PoolIntegration(unittest.TestCase):
             Pool.close()
 
     def test_acquire_times_out_when_full(self):
-        Pool = oracle.create_pool(min=1, max=1, timeout=0.5, **self._kwargs())
+        Pool = seerdb.create_pool(min=1, max=1, timeout=0.5, **self._kwargs())
         try:
             G = Pool.acquire()
             G.__enter__()
             try:
-                with self.assertRaises(oracle.InterfaceError):
+                with self.assertRaises(seerdb.InterfaceError):
                     Pool.acquire()
             finally:
                 G.__exit__(None, None, None)
@@ -2635,16 +2635,16 @@ class PoolIntegration(unittest.TestCase):
             Pool.close()
 
     def test_acquire_after_close_raises(self):
-        Pool = oracle.create_pool(min=1, max=2, **self._kwargs())
+        Pool = seerdb.create_pool(min=1, max=2, **self._kwargs())
         Pool.close()
-        with self.assertRaises(oracle.InterfaceError):
+        with self.assertRaises(seerdb.InterfaceError):
             Pool.acquire()
 
     def test_health_check_replaces_dead_connection(self):
         # idle_timeout=0 forces a health-check on every acquire. Kill
         # the underlying socket between release and acquire and verify
         # the pool transparently swaps in a fresh connection.
-        Pool = oracle.create_pool(min=1, max=2, idle_timeout=0, **self._kwargs())
+        Pool = seerdb.create_pool(min=1, max=2, idle_timeout=0, **self._kwargs())
         try:
             G = Pool.acquire()
             Conn = G.__enter__()
@@ -2677,7 +2677,7 @@ class RefBindIntegration(_IntegrationBase):
     REFS = 'PYORACLE_REF_REFS'
 
     def _setup_schema(self):
-        from oracle.exceptions import DatabaseError
+        from seerdb.exceptions import DatabaseError
 
         for s in (
             f'DROP TABLE {self.REFS}',
@@ -2735,7 +2735,7 @@ class PipelineIntegration(_IntegrationBase):
     # API, ordering and results match a single-round-trip pipelined run.
     def test_pipeline_runs_all_ops(self):
         self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, name VARCHAR2(20))')
-        p = oracle.create_pipeline()
+        p = seerdb.create_pipeline()
         p.add_execute(f"INSERT INTO {self.TABLE} VALUES (1, 'a')")
         p.add_executemany(
             f'INSERT INTO {self.TABLE} VALUES (:1, :2)', [(2, 'b'), (3, 'c')]
@@ -2750,7 +2750,7 @@ class PipelineIntegration(_IntegrationBase):
         self.assertEqual(results[4].rows, [(3,)])
 
     def test_pipeline_continue_on_error(self):
-        p = oracle.create_pipeline()
+        p = seerdb.create_pipeline()
         p.add_execute('SELECT * FROM a_table_that_does_not_exist')
         p.add_fetchone('SELECT 42 FROM dual')
         results = self.conn.run_pipeline(p, continue_on_error=True)
@@ -2758,10 +2758,10 @@ class PipelineIntegration(_IntegrationBase):
         self.assertEqual(results[1].rows, [(42,)])
 
     def test_pipeline_abort_raises(self):
-        p = oracle.create_pipeline()
+        p = seerdb.create_pipeline()
         p.add_execute('SELECT * FROM a_table_that_does_not_exist')
         p.add_fetchone('SELECT 42 FROM dual')
-        with self.assertRaises(oracle.DatabaseError):
+        with self.assertRaises(seerdb.DatabaseError):
             self.conn.run_pipeline(p)
 
 
@@ -2775,7 +2775,7 @@ class SessionlessTransactionIntegration(unittest.TestCase):
     TABLE = 'PYORACLE_SL_TEST'
 
     def _conn(self):
-        c = oracle.connect(
+        c = seerdb.connect(
             host=_HOST,
             port=_PORT,
             user=_USER,
@@ -2787,7 +2787,7 @@ class SessionlessTransactionIntegration(unittest.TestCase):
         return c
 
     def setUp(self):
-        from oracle.exceptions import NotSupportedError
+        from seerdb.exceptions import NotSupportedError
 
         self.conns = []
         setup = self._conn()
@@ -2795,7 +2795,7 @@ class SessionlessTransactionIntegration(unittest.TestCase):
         cur = setup.cursor()
         try:
             cur.execute(f'DROP TABLE {self.TABLE}')
-        except oracle.DatabaseError as e:
+        except seerdb.DatabaseError as e:
             if e.code != 942:
                 raise
         cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER)')
@@ -2855,7 +2855,7 @@ class SessionlessTransactionIntegration(unittest.TestCase):
         self.conns.append(c)
         tid = c.begin_sessionless_transaction(timeout=30)
         self.assertEqual(len(tid), 16)  # uuid4 bytes
-        with self.assertRaises(oracle.DatabaseError):
+        with self.assertRaises(seerdb.DatabaseError):
             c.begin_sessionless_transaction('other')  # already active
         c.suspend_sessionless_transaction()
 
@@ -2888,14 +2888,14 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
         Reason = _fv2_skip_reason(self._testMethodName)
         if Reason is None:
             return
-        Conn = await oracle.connect_async(**self._kwargs())
+        Conn = await seerdb.connect_async(**self._kwargs())
         Fv = Conn.field_version
         await Conn.close()
         if Fv < FIELD_VERSION_10_2:
             self.skipTest(Reason)
 
     async def test_connect_and_simple_query(self):
-        Conn = await oracle.connect_async(**self._kwargs())
+        Conn = await seerdb.connect_async(**self._kwargs())
         try:
             Cur = Conn.cursor()
             await Cur.execute('SELECT 1 FROM dual')
@@ -2910,7 +2910,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
         with RedirectListener(_HOST, _PORT) as listener:
             Kw = self._kwargs()
             Kw['port'] = listener.listen_port
-            Conn = await oracle.connect_async(**Kw)
+            Conn = await seerdb.connect_async(**Kw)
             try:
                 self.assertEqual(Conn.port, _PORT)
                 Cur = Conn.cursor()
@@ -2920,20 +2920,20 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                 await Conn.close()
 
     async def test_context_managers(self):
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             async with Conn.cursor() as Cur:
                 await Cur.execute("SELECT 'hi' FROM dual")
                 self.assertEqual(await Cur.fetchone(), ('hi',))
 
     async def test_async_iteration_yields_all_rows(self):
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             async with Conn.cursor() as Cur:
                 await Cur.execute('SELECT LEVEL FROM dual CONNECT BY LEVEL <= 5')
                 Rows = [row async for row in Cur]
                 self.assertEqual(Rows, [(1,), (2,), (3,), (4,), (5,)])
 
     async def test_fetchall_and_fetchmany(self):
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             async with Conn.cursor() as Cur:
                 await Cur.execute('SELECT LEVEL FROM dual CONNECT BY LEVEL <= 4')
                 # fetchmany(2) → first batch
@@ -2944,18 +2944,18 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(Rest, [(3,), (4,)])
 
     async def test_named_bind(self):
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             async with Conn.cursor() as Cur:
                 await Cur.execute('SELECT :v FROM dual', {'v': 42})
                 self.assertEqual(await Cur.fetchone(), (42,))
 
     async def test_ddl_dml_roundtrip(self):
         # DDL → DML → SELECT round-trip using a scratch table.
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             async with Conn.cursor() as Cur:
                 try:
                     await Cur.execute('DROP TABLE PYORACLE_ASYNC_TEST')
-                except oracle.DatabaseError as e:
+                except seerdb.DatabaseError as e:
                     if e.code != 942:
                         raise
                 await Cur.execute(
@@ -2977,14 +2977,14 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
         # Async parity for VECTOR binds (#55): bind a sequence, read it back.
         import array
 
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             async with Conn.cursor() as Cur:
                 await self._drop_async(Cur, 'PYORACLE_ASYNC_VEC')
                 try:
                     await Cur.execute(
                         'CREATE TABLE PYORACLE_ASYNC_VEC (v VECTOR(3, FLOAT32))'
                     )
-                except oracle.DatabaseError as e:
+                except seerdb.DatabaseError as e:
                     if e.code in (902, 907):
                         self.skipTest('native VECTOR type needs a 23ai+ server')
                     raise
@@ -2998,17 +2998,17 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_sparse_vector_bind_roundtrip(self):
         # Async parity for SPARSE vectors (#68).
-        from oracle.vector import SparseVector
+        from seerdb.vector import SparseVector
 
         sv = SparseVector(8, [2, 5], [1.5, 2.5])
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             async with Conn.cursor() as Cur:
                 await self._drop_async(Cur, 'PYORACLE_ASYNC_SPV')
                 try:
                     await Cur.execute(
                         'CREATE TABLE PYORACLE_ASYNC_SPV (v VECTOR(8, FLOAT32, SPARSE))'
                     )
-                except oracle.DatabaseError as e:
+                except seerdb.DatabaseError as e:
                     if e.code in (902, 907):
                         self.skipTest('native VECTOR type needs a 23ai+ server')
                     raise
@@ -3019,12 +3019,12 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_json_bind_roundtrip(self):
         # Async parity for JSON binds (#50): bind a dict, read it back.
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             async with Conn.cursor() as Cur:
                 await self._drop_async(Cur, 'PYORACLE_ASYNC_JSON')
                 try:
                     await Cur.execute('CREATE TABLE PYORACLE_ASYNC_JSON (doc JSON)')
-                except oracle.DatabaseError as e:
+                except seerdb.DatabaseError as e:
                     if e.code == 902:
                         self.skipTest('native JSON type needs a 21c+ server')
                     raise
@@ -3039,12 +3039,12 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
     async def _drop_async(self, cur, table):
         try:
             await cur.execute(f'DROP TABLE {table}')
-        except oracle.DatabaseError as e:
+        except seerdb.DatabaseError as e:
             if e.code != 942:
                 raise
 
     async def test_ping_succeeds(self):
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             # Ping completes cleanly on a freshly-authenticated session;
             # the test just verifies no exception escapes.
             await Conn.ping()
@@ -3054,28 +3054,28 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
         # user's password and always restore it on the original session.
         new = _PASSWORD + '_achg9'
         Kw = self._kwargs()
-        Conn = await oracle.connect_async(**dict(Kw, password=_PASSWORD))
+        Conn = await seerdb.connect_async(**dict(Kw, password=_PASSWORD))
         try:
             await Conn.changepassword(_PASSWORD, new)
             try:
                 Cur = Conn.cursor()
                 await Cur.execute('SELECT 1 FROM dual')
                 self.assertEqual(await Cur.fetchone(), (1,))
-                V = await oracle.connect_async(**dict(Kw, password=new))
+                V = await seerdb.connect_async(**dict(Kw, password=new))
                 await V.close()
-                with self.assertRaises(oracle.DatabaseError):
-                    Bad = await oracle.connect_async(**dict(Kw, password=_PASSWORD))
+                with self.assertRaises(seerdb.DatabaseError):
+                    Bad = await seerdb.connect_async(**dict(Kw, password=_PASSWORD))
                     await Bad.close()
             finally:
                 await Conn.changepassword(new, _PASSWORD)
         finally:
             await Conn.close()
-        Ok = await oracle.connect_async(**dict(Kw, password=_PASSWORD))
+        Ok = await seerdb.connect_async(**dict(Kw, password=_PASSWORD))
         await Ok.close()
 
     async def test_changepassword_wrong_old_raises(self):
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
-            with self.assertRaises(oracle.DatabaseError):
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
+            with self.assertRaises(seerdb.DatabaseError):
                 await Conn.changepassword('wrong_old_pw_xyz', 'irrelevant9')
             Cur = Conn.cursor()
             await Cur.execute('SELECT 1 FROM dual')
@@ -3086,7 +3086,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
         # sees the row.
         Kw = self._kwargs()
         Kw['autocommit'] = False
-        async with await oracle.connect_async(**Kw) as Conn:
+        async with await seerdb.connect_async(**Kw) as Conn:
             async with Conn.cursor() as Cur:
                 await self._drop_async(Cur, 'PYORACLE_ASYNC_TX')
                 # CREATE TABLE auto-commits server-side regardless of the
@@ -3095,7 +3095,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                 await Cur.execute('CREATE TABLE PYORACLE_ASYNC_TX (id NUMBER)')
                 await Cur.execute('INSERT INTO PYORACLE_ASYNC_TX VALUES (1)')
                 await Conn.commit()
-        async with await oracle.connect_async(**Kw) as Conn2:
+        async with await seerdb.connect_async(**Kw) as Conn2:
             async with Conn2.cursor() as Cur:
                 await Cur.execute('SELECT id FROM PYORACLE_ASYNC_TX')
                 self.assertEqual(await Cur.fetchall(), [(1,)])
@@ -3104,7 +3104,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
     async def test_rollback_discards_dml(self):
         Kw = self._kwargs()
         Kw['autocommit'] = False
-        async with await oracle.connect_async(**Kw) as Conn:
+        async with await seerdb.connect_async(**Kw) as Conn:
             async with Conn.cursor() as Cur:
                 await self._drop_async(Cur, 'PYORACLE_ASYNC_RB')
                 await Cur.execute('CREATE TABLE PYORACLE_ASYNC_RB (id NUMBER)')
@@ -3120,7 +3120,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
     async def test_lob_auto_resolve(self):
         # CLOB / BLOB / NULL / EMPTY all surface as Python str/bytes/None
         # through the auto-resolve in `AsyncCursor.execute`.
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             async with Conn.cursor() as Cur:
                 await self._drop_async(Cur, 'PYORACLE_ASYNC_LOB')
                 await Cur.execute(
@@ -3152,9 +3152,9 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
     async def test_error_then_large_lob_stays_synced(self):
         # #45 (async parity): errored calls leave break/reset markers; a few of
         # them followed by a large CLOB read must not desync the stream.
-        from oracle.exceptions import DatabaseError
+        from seerdb.exceptions import DatabaseError
 
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             if Conn.field_version < FIELD_VERSION_10_2:
                 self.skipTest('Oracle 9i has no streamed LOB/LONG bind path (#169)')
             async with Conn.cursor() as Cur:
@@ -3178,7 +3178,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                 await Cur.execute('DROP TABLE PYORACLE_ASYNC_LOB45')
 
     async def test_async_plsql_in_bind(self):
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             async with Conn.cursor() as Cur:
                 await Cur.execute('CREATE TABLE PYORACLE_ASYNC_PLSQL (v NUMBER)')
                 try:
@@ -3191,7 +3191,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                     await Cur.execute('DROP TABLE PYORACLE_ASYNC_PLSQL')
 
     async def test_async_callproc_out_and_inout(self):
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             async with Conn.cursor() as Cur:
                 await Cur.execute(
                     'CREATE OR REPLACE PROCEDURE PYORACLE_ASYNC_PROC'
@@ -3199,8 +3199,8 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                     "BEGIN p_out := p_in * 2; p_io := p_io || '!'; END;"
                 )
                 try:
-                    o = Cur.var(oracle.NUMBER)
-                    io = Cur.var(oracle.STRING)
+                    o = Cur.var(seerdb.NUMBER)
+                    io = Cur.var(seerdb.STRING)
                     io.setvalue(0, 'hi')
                     ret = await Cur.callproc('PYORACLE_ASYNC_PROC', [5, o, io])
                     self.assertEqual(ret, [5, 10, 'hi!'])
@@ -3210,15 +3210,15 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                     await Cur.execute('DROP PROCEDURE PYORACLE_ASYNC_PROC')
 
     async def test_async_execute_out_var(self):
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             async with Conn.cursor() as Cur:
-                y = Cur.var(oracle.NUMBER)
+                y = Cur.var(seerdb.NUMBER)
                 await Cur.execute('BEGIN :y := 7 * 6; END;', [y])
                 self.assertEqual(y.getvalue(), 42)
 
     async def test_async_out_extended_types(self):
         # OUT binds for the extended scalar types (issue #17), async path.
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             if Conn.field_version < FIELD_VERSION_10_2:
                 self.skipTest(
                     'BINARY_DOUBLE / INTERVAL are 10g+ types; Oracle 9i lacks them'
@@ -3235,10 +3235,10 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                     "o_iym := INTERVAL '3-7' YEAR TO MONTH; END;"
                 )
                 try:
-                    ts = Cur.var(oracle.DB_TYPE_TIMESTAMP)
-                    bd = Cur.var(oracle.DB_TYPE_BINARY_DOUBLE)
-                    ids = Cur.var(oracle.DB_TYPE_INTERVAL_DS)
-                    iym = Cur.var(oracle.DB_TYPE_INTERVAL_YM)
+                    ts = Cur.var(seerdb.DB_TYPE_TIMESTAMP)
+                    bd = Cur.var(seerdb.DB_TYPE_BINARY_DOUBLE)
+                    ids = Cur.var(seerdb.DB_TYPE_INTERVAL_DS)
+                    iym = Cur.var(seerdb.DB_TYPE_INTERVAL_YM)
                     await Cur.callproc('PYORACLE_ASYNC_OUTX', [ts, bd, ids, iym])
                     self.assertEqual(
                         ts.getvalue(), datetime.datetime(2026, 6, 7, 13, 14, 15, 500000)
@@ -3250,12 +3250,12 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                             days=1, hours=2, minutes=3, seconds=4, milliseconds=500
                         ),
                     )
-                    self.assertEqual(iym.getvalue(), oracle.IntervalYM(3, 7))
+                    self.assertEqual(iym.getvalue(), seerdb.IntervalYM(3, 7))
                 finally:
                     await Cur.execute('DROP PROCEDURE PYORACLE_ASYNC_OUTX')
 
     async def test_async_scroll(self):
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             # Scrollable cursor (#161) on the async path.
             async with Conn.cursor(scrollable=True) as Cur:
                 self.assertIs(Cur.scrollable, True)
@@ -3287,7 +3287,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
         # Server-side lazy scrollable cursor on the async path (#181), 10g+:
         # fetch-on-demand across batches + scroll modes + the LAST-after-EOF
         # duplicate-value (bit-vector reuse) case.
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             if Conn.field_version < FIELD_VERSION_10_2:
                 self.skipTest('server-side scroll needs 10g+')
             async with Conn.cursor(scrollable=True) as Cur:
@@ -3321,7 +3321,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
         import pyarrow as pa
 
         table = 'PYORACLE_ASYNC_DF'
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             async with Conn.cursor() as Cur:
                 await Cur.execute(f'CREATE TABLE {table} (id NUMBER)')
                 try:
@@ -3339,7 +3339,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_async_soda_collections(self):
         # SODA collection management (#163 / #199) on the async path; 18c+ only.
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             if (Conn.server_version >> 24) < 18:
                 self.skipTest('SODA needs an Oracle 18c+ server (DBMS_SODA)')
             soda = Conn.getSodaDatabase()
@@ -3400,9 +3400,9 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_async_end_to_end_tracing(self):
         # End-to-end tracing (#183) on the async path; 12c+ only.
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             if Conn.field_version < FIELD_VERSION_12_1:
-                with self.assertRaises(oracle.NotSupportedError):
+                with self.assertRaises(seerdb.NotSupportedError):
                     Conn.module = 'M'
                 return
             Conn.module = 'AMOD'
@@ -3418,13 +3418,13 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_async_repeated_execute_no_cursor_leak(self):
         # #191 on the async path.
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             if Conn.field_version < FIELD_VERSION_10_2:
                 return
             Cur = Conn.cursor()
             try:
                 await Cur.execute('DROP TABLE PYO_LEAK191A')
-            except oracle.DatabaseError:
+            except seerdb.DatabaseError:
                 # best-effort drop of a table that may not exist
                 pass
             await Cur.execute('CREATE TABLE PYO_LEAK191A (id NUMBER)')
@@ -3438,7 +3438,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                 await Cur.execute('DROP TABLE PYO_LEAK191A')
 
     async def test_async_executemany(self):
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             async with Conn.cursor() as Cur:
                 await Cur.execute('CREATE TABLE PYORACLE_ASYNC_EM (id NUMBER)')
                 try:
@@ -3455,7 +3455,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
     async def test_async_executemany_batcherrors(self):
         # Async mirror of test_executemany_batcherrors (#18): per-row constraint
         # violations are collected, not raised, and the good rows still apply.
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             async with Conn.cursor() as Cur:
                 await Cur.execute(
                     'CREATE TABLE PYORACLE_ASYNC_BE '
@@ -3478,9 +3478,9 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_async_executemany_arraydmlrowcounts(self):
         # Async mirror of test_executemany_arraydmlrowcounts_update (#18).
-        from oracle.tns import FIELD_VERSION_12_1
+        from seerdb.tns import FIELD_VERSION_12_1
 
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             if Conn.field_version < FIELD_VERSION_12_1:
                 self.skipTest('arraydmlrowcounts needs a 12.1+ server')
             async with Conn.cursor() as Cur:
@@ -3514,15 +3514,15 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_async_arraydmlrowcounts_unsupported_on_11g(self):
         # On an 11g server the async feature is rejected up front, same as sync.
-        from oracle.tns import FIELD_VERSION_12_1
+        from seerdb.tns import FIELD_VERSION_12_1
 
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             if Conn.field_version >= FIELD_VERSION_12_1:
                 self.skipTest('server supports arraydmlrowcounts')
             async with Conn.cursor() as Cur:
                 await Cur.execute('CREATE TABLE PYORACLE_ASYNC_NS (id NUMBER)')
                 try:
-                    with self.assertRaises(oracle.NotSupportedError):
+                    with self.assertRaises(seerdb.NotSupportedError):
                         await Cur.executemany(
                             'INSERT INTO PYORACLE_ASYNC_NS VALUES (:1)',
                             [(1,), (2,)],
@@ -3532,7 +3532,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                     await Cur.execute('DROP TABLE PYORACLE_ASYNC_NS')
 
     async def test_async_callproc_refcursor(self):
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             async with Conn.cursor() as Cur:
                 await Cur.execute(
                     'CREATE OR REPLACE PROCEDURE PYORACLE_ASYNC_RC'
@@ -3541,7 +3541,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                     "UNION ALL SELECT 2, 'y' FROM dual; END;"
                 )
                 try:
-                    rc = Cur.var(oracle.CURSOR)
+                    rc = Cur.var(seerdb.CURSOR)
                     await Cur.callproc('PYORACLE_ASYNC_RC', [rc])
                     nested = rc.getvalue()
                     self.assertEqual([d[0] for d in nested.description], ['A', 'B'])
@@ -3550,7 +3550,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                     await Cur.execute('DROP PROCEDURE PYORACLE_ASYNC_RC')
 
     async def test_async_callfunc(self):
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             async with Conn.cursor() as Cur:
                 await Cur.execute(
                     'CREATE OR REPLACE FUNCTION PYORACLE_ASYNC_FUNC'
@@ -3558,7 +3558,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                 )
                 try:
                     self.assertEqual(
-                        await Cur.callfunc('PYORACLE_ASYNC_FUNC', oracle.NUMBER, [21]),
+                        await Cur.callfunc('PYORACLE_ASYNC_FUNC', seerdb.NUMBER, [21]),
                         42,
                     )
                 finally:
@@ -3567,15 +3567,15 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
     async def test_async_pipeline(self):
         # Async mirror of PipelineIntegration (#132).
         table = 'PYORACLE_APIPE'
-        async with await oracle.connect_async(**self._kwargs()) as Conn:
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
             cur = Conn.cursor()
             try:
                 await cur.execute(f'DROP TABLE {table}')
-            except oracle.DatabaseError:
+            except seerdb.DatabaseError:
                 # best-effort drop of a table that may not exist
                 pass
             await cur.execute(f'CREATE TABLE {table} (id NUMBER)')
-            p = oracle.create_pipeline()
+            p = seerdb.create_pipeline()
             p.add_execute(f'INSERT INTO {table} VALUES (1)')
             p.add_executemany(f'INSERT INTO {table} VALUES (:1)', [(2,), (3,)])
             p.add_commit()
@@ -3587,14 +3587,14 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_async_ref_bind(self):
         # Async mirror of RefBindIntegration (#139): fetch a REF, bind it back.
-        from oracle.tns_consts import FIELD_VERSION_12_1 as _FV12
+        from seerdb.tns_consts import FIELD_VERSION_12_1 as _FV12
 
         TYPE, PEOPLE, REFS = (
             'PYORACLE_AREF_T',
             'PYORACLE_AREF_PEOPLE',
             'PYORACLE_AREF_REFS',
         )
-        Conn = await oracle.connect_async(**self._kwargs())
+        Conn = await seerdb.connect_async(**self._kwargs())
         try:
             cur = Conn.cursor()
             for s in (
@@ -3604,7 +3604,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
             ):
                 try:
                     await cur.execute(s)
-                except oracle.DatabaseError:
+                except seerdb.DatabaseError:
                     # best-effort drop of a table that may not exist
                     pass
             await cur.execute(
@@ -3627,7 +3627,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
             ):
                 try:
                     await cur.execute(s)
-                except oracle.DatabaseError:
+                except seerdb.DatabaseError:
                     # best-effort drop of a table that may not exist
                     pass
         finally:
@@ -3636,18 +3636,18 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
     async def test_async_sessionless_suspend_resume(self):
         # Async mirror of SessionlessTransactionIntegration (#133): suspend on
         # one async connection, resume + commit on another. Skips below 23ai.
-        from oracle.exceptions import NotSupportedError
+        from seerdb.exceptions import NotSupportedError
 
         Kw = dict(self._kwargs())
         Kw['autocommit'] = False
         table = 'PYORACLE_ASL_TEST'
-        setup = await oracle.connect_async(**Kw)
+        setup = await seerdb.connect_async(**Kw)
         c1 = c2 = None
         try:
             scur = setup.cursor()
             try:
                 await scur.execute(f'DROP TABLE {table}')
-            except oracle.DatabaseError as e:
+            except seerdb.DatabaseError as e:
                 if e.code != 942:
                     raise
             await scur.execute(f'CREATE TABLE {table} (id NUMBER)')
@@ -3659,12 +3659,12 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
             await setup.suspend_sessionless_transaction()
             await setup.rollback()
 
-            c1 = await oracle.connect_async(**Kw)
+            c1 = await seerdb.connect_async(**Kw)
             await c1.begin_sessionless_transaction('asl-1', timeout=120)
             await c1.cursor().execute(f'INSERT INTO {table} VALUES (10)')
             await c1.suspend_sessionless_transaction()
 
-            c2 = await oracle.connect_async(**Kw)
+            c2 = await seerdb.connect_async(**Kw)
             await c2.resume_sessionless_transaction('asl-1', timeout=120)
             await c2.cursor().execute(f'INSERT INTO {table} VALUES (20)')
             await c2.commit()
@@ -3679,8 +3679,8 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
 
 
 @unittest.skipUnless(
-    _USER and os.environ.get('PYORACLE_TEST_BFILE_DIR'),
-    'BFILE tests need PYORACLE_TEST_BFILE_DIR (Oracle DIRECTORY object '
+    _USER and os.environ.get('SEERDB_TEST_BFILE_DIR'),
+    'BFILE tests need SEERDB_TEST_BFILE_DIR (Oracle DIRECTORY object '
     'name that already exists, with READ granted to the test user, plus '
     'a file named `pyoracle_bfile_test.txt` containing the text '
     "'hello bfile from disk'). The test user also needs EXECUTE on "
@@ -3691,17 +3691,17 @@ class BFILEIntegration(unittest.TestCase):
     """Verify BFILE read round-trips."""
 
     def setUp(self):
-        self.conn = oracle.connect(
-            host=os.environ.get('PYORACLE_TEST_HOST', 'localhost'),
-            port=int(os.environ.get('PYORACLE_TEST_PORT', '1521')),
-            user=os.environ['PYORACLE_TEST_USER'],
-            password=os.environ['PYORACLE_TEST_PASSWORD'],
-            service_name=os.environ.get('PYORACLE_TEST_SERVICE', 'XE'),
+        self.conn = seerdb.connect(
+            host=os.environ.get('SEERDB_TEST_HOST', 'localhost'),
+            port=int(os.environ.get('SEERDB_TEST_PORT', '1521')),
+            user=os.environ['SEERDB_TEST_USER'],
+            password=os.environ['SEERDB_TEST_PASSWORD'],
+            service_name=os.environ.get('SEERDB_TEST_SERVICE', 'XE'),
             autocommit=True,
             **_FV_KW,
         )
         self.cur = self.conn.cursor()
-        self.dir = os.environ['PYORACLE_TEST_BFILE_DIR']
+        self.dir = os.environ['SEERDB_TEST_BFILE_DIR']
 
     def tearDown(self):
         self.conn.close()
@@ -3720,7 +3720,7 @@ class BFILEIntegration(unittest.TestCase):
         # The LOB-object surface: directory_name / filename / is_file
         # attributes from the locator bytes. Auto-resolve has to be off
         # to see the LOB object before it's read.
-        import oracle.cursor as _cm
+        import seerdb.cursor as _cm
 
         Saved = _cm._resolve_lobs
         _cm._resolve_lobs = lambda c, r: r
@@ -3740,14 +3740,14 @@ class BFILEIntegration(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    _USER and os.environ.get('PYORACLE_TEST_BFILE_DIR'),
+    _USER and os.environ.get('SEERDB_TEST_BFILE_DIR'),
     'Async BFILE tests share the same fixture requirements as the '
     'sync BFILEIntegration.',
 )
 class AsyncBFILEIntegration(unittest.IsolatedAsyncioTestCase):
     async def test_async_bfile_select_returns_file_contents(self):
-        Dir = os.environ['PYORACLE_TEST_BFILE_DIR']
-        async with await oracle.connect_async(
+        Dir = os.environ['SEERDB_TEST_BFILE_DIR']
+        async with await seerdb.connect_async(
             host=_HOST,
             port=_PORT,
             user=_USER,
@@ -3783,7 +3783,7 @@ class AsyncPoolIntegration(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_pre_warms_to_min_and_runs_query(self):
-        Pool = await oracle.create_pool_async(min=2, max=3, **self._kwargs())
+        Pool = await seerdb.create_pool_async(min=2, max=3, **self._kwargs())
         try:
             self.assertEqual(Pool.opened, 2)
             self.assertEqual(Pool.busy, 0)
@@ -3797,7 +3797,7 @@ class AsyncPoolIntegration(unittest.IsolatedAsyncioTestCase):
             await Pool.close()
 
     async def test_grows_to_max_and_releases_for_reuse(self):
-        Pool = await oracle.create_pool_async(min=1, max=3, **self._kwargs())
+        Pool = await seerdb.create_pool_async(min=1, max=3, **self._kwargs())
         try:
             G1 = Pool.acquire()
             await G1.__aenter__()
@@ -3819,7 +3819,7 @@ class AsyncPoolIntegration(unittest.IsolatedAsyncioTestCase):
             await Pool.close()
 
     async def test_acquire_times_out_when_full(self):
-        Pool = await oracle.create_pool_async(
+        Pool = await seerdb.create_pool_async(
             min=1,
             max=1,
             timeout=0.3,
@@ -3827,21 +3827,21 @@ class AsyncPoolIntegration(unittest.IsolatedAsyncioTestCase):
         )
         try:
             async with Pool.acquire():
-                with self.assertRaises(oracle.InterfaceError):
+                with self.assertRaises(seerdb.InterfaceError):
                     async with Pool.acquire():
                         pass
         finally:
             await Pool.close()
 
     async def test_acquire_after_close_raises(self):
-        Pool = await oracle.create_pool_async(min=1, max=2, **self._kwargs())
+        Pool = await seerdb.create_pool_async(min=1, max=2, **self._kwargs())
         await Pool.close()
-        with self.assertRaises(oracle.InterfaceError):
+        with self.assertRaises(seerdb.InterfaceError):
             async with Pool.acquire():
                 pass
 
     async def test_health_check_replaces_dead_connection(self):
-        Pool = await oracle.create_pool_async(
+        Pool = await seerdb.create_pool_async(
             min=1,
             max=2,
             idle_timeout=0,
@@ -3899,7 +3899,7 @@ class SSLIntegration(unittest.TestCase):
             ssl={'ca_certs': CERT_PATH, 'server_hostname': 'localhost'},
         )
         Kwargs.update(overrides)
-        return oracle.connect(**Kwargs)
+        return seerdb.connect(**Kwargs)
 
     def test_tls_select_round_trip(self):
         with self._connect_via_tls() as conn:
@@ -3951,7 +3951,7 @@ class SSLIntegration(unittest.TestCase):
         # Connecting directly to the plaintext Oracle port with ssl=None
         # should work unchanged — this guards against regressions in the
         # default code path.
-        with oracle.connect(
+        with seerdb.connect(
             host=_HOST,
             port=_PORT,
             user=_USER,
@@ -3969,14 +3969,14 @@ class SSLIntegration(unittest.TestCase):
 class CallprocIntegration(_IntegrationBase):
     """OUT / IN OUT binds via cursor.var + callproc against a real procedure."""
 
-    PROC = 'PYORACLE_TEST_PROC'
+    PROC = 'SEERDB_TEST_PROC'
 
     def tearDown(self):
         try:
             with self.conn.cursor() as c:
                 try:
                     c.execute(f'DROP PROCEDURE {self.PROC}')
-                except oracle.DatabaseError:
+                except seerdb.DatabaseError:
                     pass  # ORA-04043: procedure does not exist
         finally:
             super().tearDown()
@@ -4008,17 +4008,17 @@ class CallprocIntegration(_IntegrationBase):
             '(p_in IN NUMBER, p_out OUT NUMBER, p_io IN OUT VARCHAR2) AS '
             "BEGIN p_out := p_in * 2; p_io := p_io || '!'; END;"
         )
-        o = self.cur.var(oracle.NUMBER)
-        io = self.cur.var(oracle.STRING)
+        o = self.cur.var(seerdb.NUMBER)
+        io = self.cur.var(seerdb.STRING)
         io.setvalue(0, 'hi')
         ret = self.cur.callproc(self.PROC, [5, o, io])
         self.assertEqual(ret, [5, 10, 'hi!'])
 
     def test_callproc_string_out(self):
-        self._make("(p OUT VARCHAR2) AS BEGIN p := 'pyoracle'; END;")
+        self._make("(p OUT VARCHAR2) AS BEGIN p := 'seerdb'; END;")
         s = self.cur.var(str)
         self.cur.callproc(self.PROC, [s])
-        self.assertEqual(s.getvalue(), 'pyoracle')
+        self.assertEqual(s.getvalue(), 'seerdb')
 
     def test_null_scalar_out_bind(self):
         # A NULL scalar OUT bind: the IOV return code is a variable-length int
@@ -4033,7 +4033,7 @@ class CallprocIntegration(_IntegrationBase):
         self.assertIsNone(only.getvalue())
 
     def test_execute_out_var(self):
-        y = self.cur.var(oracle.NUMBER)
+        y = self.cur.var(seerdb.NUMBER)
         self.cur.execute('BEGIN :y := 7 * 6; END;', [y])
         self.assertEqual(y.getvalue(), 42)
 
@@ -4043,7 +4043,7 @@ class CallprocIntegration(_IntegrationBase):
             "SELECT 1 AS a, 'x' AS b FROM dual "
             "UNION ALL SELECT 2, 'y' FROM dual; END;"
         )
-        rc = self.cur.var(oracle.CURSOR)
+        rc = self.cur.var(seerdb.CURSOR)
         self.cur.callproc(self.PROC, [rc])
         nested = rc.getvalue()
         self.assertEqual([d[0] for d in nested.description], ['A', 'B'])
@@ -4056,7 +4056,7 @@ class CallprocIntegration(_IntegrationBase):
             'BEGIN RETURN p + 100; END;'
         )
         try:
-            self.assertEqual(self.cur.callfunc(fn, oracle.NUMBER, [5]), 105)
+            self.assertEqual(self.cur.callfunc(fn, seerdb.NUMBER, [5]), 105)
             self.assertEqual(self.cur.callfunc(fn, int, [0]), 100)
         finally:
             self.cur.execute(f'DROP FUNCTION {fn}')
@@ -4078,7 +4078,7 @@ class CallprocIntegration(_IntegrationBase):
         self._make(
             "(p OUT TIMESTAMP) AS BEGIN p := TIMESTAMP '2026-06-07 13:14:15.5'; END;"
         )
-        v = self.cur.var(oracle.DB_TYPE_TIMESTAMP)
+        v = self.cur.var(seerdb.DB_TYPE_TIMESTAMP)
         self.cur.callproc(self.PROC, [v])
         self.assertEqual(
             v.getvalue(), datetime.datetime(2026, 6, 7, 13, 14, 15, 500000)
@@ -4089,7 +4089,7 @@ class CallprocIntegration(_IntegrationBase):
             '(p OUT TIMESTAMP WITH TIME ZONE) AS BEGIN '
             "p := TIMESTAMP '2026-06-07 13:14:15.5 +02:00'; END;"
         )
-        v = self.cur.var(oracle.DB_TYPE_TIMESTAMP_TZ)
+        v = self.cur.var(seerdb.DB_TYPE_TIMESTAMP_TZ)
         self.cur.callproc(self.PROC, [v])
         got = v.getvalue()
         self.assertEqual(got.utcoffset(), datetime.timedelta(hours=2))
@@ -4099,13 +4099,13 @@ class CallprocIntegration(_IntegrationBase):
 
     def test_callproc_out_binary_float(self):
         self._make('(p OUT BINARY_FLOAT) AS BEGIN p := 1.5; END;')
-        v = self.cur.var(oracle.DB_TYPE_BINARY_FLOAT)
+        v = self.cur.var(seerdb.DB_TYPE_BINARY_FLOAT)
         self.cur.callproc(self.PROC, [v])
         self.assertEqual(v.getvalue(), 1.5)
 
     def test_callproc_out_binary_double(self):
         self._make('(p OUT BINARY_DOUBLE) AS BEGIN p := 2.25; END;')
-        v = self.cur.var(oracle.DB_TYPE_BINARY_DOUBLE)
+        v = self.cur.var(seerdb.DB_TYPE_BINARY_DOUBLE)
         self.cur.callproc(self.PROC, [v])
         self.assertEqual(v.getvalue(), 2.25)
 
@@ -4114,7 +4114,7 @@ class CallprocIntegration(_IntegrationBase):
             '(p OUT INTERVAL DAY TO SECOND) AS BEGIN '
             "p := INTERVAL '1 02:03:04.5' DAY TO SECOND; END;"
         )
-        v = self.cur.var(oracle.DB_TYPE_INTERVAL_DS)
+        v = self.cur.var(seerdb.DB_TYPE_INTERVAL_DS)
         self.cur.callproc(self.PROC, [v])
         self.assertEqual(
             v.getvalue(),
@@ -4126,9 +4126,9 @@ class CallprocIntegration(_IntegrationBase):
             '(p OUT INTERVAL YEAR TO MONTH) AS BEGIN '
             "p := INTERVAL '3-7' YEAR TO MONTH; END;"
         )
-        v = self.cur.var(oracle.DB_TYPE_INTERVAL_YM)
+        v = self.cur.var(seerdb.DB_TYPE_INTERVAL_YM)
         self.cur.callproc(self.PROC, [v])
-        self.assertEqual(v.getvalue(), oracle.IntervalYM(3, 7))
+        self.assertEqual(v.getvalue(), seerdb.IntervalYM(3, 7))
 
     def test_callfunc_binary_double(self):
         fn = f'{self.PROC}_F'
@@ -4137,7 +4137,7 @@ class CallprocIntegration(_IntegrationBase):
             'BEGIN RETURN 9.875; END;'
         )
         try:
-            self.assertEqual(self.cur.callfunc(fn, oracle.DB_TYPE_BINARY_DOUBLE), 9.875)
+            self.assertEqual(self.cur.callfunc(fn, seerdb.DB_TYPE_BINARY_DOUBLE), 9.875)
         finally:
             self.cur.execute(f'DROP FUNCTION {fn}')
 

@@ -4,7 +4,7 @@
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
-    from oracle.dbobject import DbObjectType
+    from seerdb.dbobject import DbObjectType
 
 import logging
 import socket
@@ -12,9 +12,9 @@ import struct
 import threading
 import uuid
 
-from oracle.crypto import validate
-from oracle.exceptions import DatabaseError, InterfaceError, OperationalError
-from oracle.tns import (
+from seerdb.crypto import validate
+from seerdb.exceptions import DatabaseError, InterfaceError, OperationalError
+from seerdb.tns import (
     CCAP_FIELD_VERSION,
     FIELD_VERSION_10_2,
     FIELD_VERSION_12_1,
@@ -62,7 +62,7 @@ from oracle.tns import (
     set_decode_prev_row,
     set_decode_return_binds,
 )
-from oracle.tns_consts import (
+from seerdb.tns_consts import (
     CONN_STATE_AUTH_NEGOTIATE,
     CONN_STATE_AUTHENTICATED,
     CONN_STATE_CONNECTED,
@@ -159,8 +159,8 @@ Xid = collections.namedtuple(
 def _raise_tpc_error(Packet: bytes) -> None:
     # A TPC op that failed comes back as a TTI_OER (not the RPA return params).
     # Pull the ORA code + message out of it and raise the matching exception.
-    from oracle.exceptions import from_ora_code
-    from oracle.tns import decode_packet
+    from seerdb.exceptions import from_ora_code
+    from seerdb.tns import decode_packet
 
     try:
         Result = decode_packet(Packet, (None, None, []))
@@ -178,7 +178,7 @@ def _decode_tpc_context(Packet: bytes) -> bytes:
     # (TTI_RPA = TNS_MSG_TYPE_PARAMETER), then an application value (ub4), a
     # context length (ub2), and the opaque transaction context bytes. RE'd from
     # a live 21c tpc_begin capture; the context is replayed on prepare/commit.
-    from oracle.tns import decode_ub4
+    from seerdb.tns import decode_ub4
 
     if not Packet:
         raise OperationalError('empty TPC response')
@@ -193,7 +193,7 @@ def _decode_tpc_context(Packet: bytes) -> bytes:
 def _decode_aq_enq(Packet: bytes) -> bytes:
     # AQ enqueue return: the RPA token then the 16-byte message id (the trailing
     # ub2 extensions length is ignored). #128.
-    from oracle.tns_consts import TNS_AQ_MESSAGE_ID_LENGTH
+    from seerdb.tns_consts import TNS_AQ_MESSAGE_ID_LENGTH
 
     if not Packet:
         raise OperationalError('empty AQ enqueue response')
@@ -222,7 +222,7 @@ def _aq_oer_code(Packet: bytes) -> int:
 
 
 def _aq_raise(Packet: bytes) -> None:
-    from oracle.exceptions import from_ora_code
+    from seerdb.exceptions import from_ora_code
 
     (Code, Msg) = _aq_error_info(Packet)
     if Code:
@@ -233,7 +233,7 @@ def _aq_raise(Packet: bytes) -> None:
 def _aq_str(Rest: bytes) -> tuple:
     # read_bytes_with_length / read_str_with_length: a ub4 count, then (if
     # non-zero) the chunked data. Empty/null normalised to b"".
-    from oracle.tns import _read_str_with_length
+    from seerdb.tns import _read_str_with_length
 
     (Value, Rest) = _read_str_with_length(Rest)
     return (b'' if isinstance(Value, list) else bytes(Value), Rest)
@@ -242,7 +242,7 @@ def _aq_str(Rest: bytes) -> tuple:
 def _aq_raw(Rest: bytes) -> tuple:
     # read_raw_bytes_and_length / read_bytes(): a single length byte then the
     # data (0xFE = chunked). Used for the enqueue-time date and the payload image.
-    from oracle.tns import decode_dalc
+    from seerdb.tns import decode_dalc
 
     (Value, Rest) = decode_dalc(Rest)
     return (b'' if isinstance(Value, list) else bytes(Value), Rest)
@@ -252,16 +252,16 @@ def _decode_aq_payload(Rest: bytes, queue):
     # Read the message payload (#128). For RAW the image is a length-prefixed
     # blob whose first 4 bytes are a header; for an object queue it's a packed
     # DbObject; for JSON it's OSON. Returns (payload, remaining_bytes).
-    from oracle.tns import decode_ub4
+    from seerdb.tns import decode_ub4
 
     if queue.payload_type is not None:
-        from oracle.dbobject import (
+        from seerdb.dbobject import (
             DbObject,
             decode_collection_image,
             decode_object_image,
         )
-        from oracle.tns import _read_object_column
-        from oracle.tns_consts import AL32UTF8_CHARSET
+        from seerdb.tns import _read_object_column
+        from seerdb.tns_consts import AL32UTF8_CHARSET
 
         (Img, Rest) = _read_object_column(Rest, {})
         if Img is None:
@@ -285,7 +285,7 @@ def _decode_aq_payload(Rest: bytes, queue):
         (Image, Rest) = _aq_raw(Rest)
         Payload = bytes(Image[4:image_length])
         if queue.is_json:
-            from oracle.oson import decode_oson
+            from seerdb.oson import decode_oson
 
             return (decode_oson(Payload), Rest)
         return (Payload, Rest)
@@ -297,8 +297,8 @@ def _decode_aq_deq(Packet: bytes, queue):
     # present, the message properties, recipients, payload, and 16-byte msgid.
     # An empty queue comes back as ORA-25228 (no messages) -> None. RE'd from a
     # live 21c capture; mirrors python-oracledb AqDeqMessage.
-    from oracle.aq import MessageProperties
-    from oracle.tns import decode_ub4
+    from seerdb.aq import MessageProperties
+    from seerdb.tns import decode_ub4
 
     if not Packet:
         return None
@@ -323,7 +323,7 @@ def _parse_aq_msg_props(Rest: bytes, Props, field_version: int) -> bytes:
     # (#128): priority/delay/expiration, correlation, attempts, exception queue,
     # state, enqueue date, txn id, the keyword extensions, and the trailing
     # user-property/cscn/dscn/flags (+ shard at fv >= 21.1).
-    from oracle.tns import decode_ub4
+    from seerdb.tns import decode_ub4
 
     (Props.priority, Rest) = decode_ub4(Rest)
     (Props.delay, Rest) = decode_ub4(Rest)
@@ -359,9 +359,9 @@ def _decode_aq_array(Packet: bytes, queue, operation: int, props_list: list):
     # block of concatenated 16-byte message ids assigned back to props_list; for
     # dequeue it carries num_iters messages (properties + payload + msgid). An
     # empty queue comes back as ORA-25228 -> []. Mirrors AqArrayMessage.
-    from oracle.aq import MessageProperties
-    from oracle.tns import decode_ub4
-    from oracle.tns_consts import TNS_AQ_ARRAY_ENQ
+    from seerdb.aq import MessageProperties
+    from seerdb.tns import decode_ub4
+    from seerdb.tns_consts import TNS_AQ_ARRAY_ENQ
 
     if not Packet:
         return []
@@ -397,7 +397,7 @@ def _decode_aq_array(Packet: bytes, queue, operation: int, props_list: list):
 
 def _decode_tpc_state(Packet: bytes) -> int:
     # TPC change-state return (#131): the RPA token then a ub4 transaction state.
-    from oracle.tns import decode_ub4
+    from seerdb.tns import decode_ub4
 
     if not Packet:
         raise OperationalError('empty TPC response')
@@ -448,7 +448,7 @@ _FV2_MAX_VARCHAR_BIND = 4000
 
 
 def _check_fv2_bind_sizes(Bind, Batch=None) -> None:
-    from oracle.exceptions import NotSupportedError
+    from seerdb.exceptions import NotSupportedError
 
     Rows = [Bind] if Bind else []
     if Batch:
@@ -475,7 +475,7 @@ def _check_fv2_bind_sizes(Bind, Batch=None) -> None:
 def _run_pipeline_op(conn, cur, op, T):
     # Run a single pipeline operation on `cur` and return its PipelineOpResult
     # (#132, sync). The async connection has its own awaiting copy of this.
-    from oracle.pipeline import PipelineOpResult
+    from seerdb.pipeline import PipelineOpResult
 
     result = PipelineOpResult(op)
     params = op.parameters or []
@@ -552,12 +552,12 @@ class OracleConnect:
         prelim: int = 0,
         sdu: int = 8192,
         charset: str = 'utf-8',
-        app_name: str = 'pyoracle',
+        app_name: str = 'seerdb',
         field_version: int = FIELD_VERSION_23_4,
         cclass: str | None = None,
         purity: int = PURITY_DEFAULT,
     ):
-        # field_version is the highest TTC field version pyoracle advertises;
+        # field_version is the highest TTC field version seerdb advertises;
         # the server negotiates it down (min(client, server)). The default is the
         # 23ai max (24), reached via fast-auth (#89) — older servers settle at
         # their own version and take the legacy handshake unchanged.
@@ -858,7 +858,7 @@ class OracleConnect:
                             if self.field_version < FIELD_VERSION_10_2:
                                 # Pre-10g (9i, field version 2): O3LOGON thin
                                 # auth — TTI_3LOGA fetches the session key (#90).
-                                from oracle.tns import encode_o3logon_phase1
+                                from seerdb.tns import encode_o3logon_phase1
 
                                 self._o3_phase = 1
                                 self.send(
@@ -887,8 +887,8 @@ class OracleConnect:
                             # Decode it and raise rather than looping forever on
                             # an empty socket.
                             logger.debug('handle_login: recv OER')
-                            from oracle.exceptions import DatabaseError, from_ora_code
-                            from oracle.tns import decode_packet, decode_ub4
+                            from seerdb.exceptions import DatabaseError, from_ora_code
+                            from seerdb.tns import decode_packet, decode_ub4
 
                             if getattr(self, '_o3_phase', 0) == 2:
                                 # 9i's OER is shorter than the 11g+ form
@@ -936,7 +936,7 @@ class OracleConnect:
                         self._in_break = True
                     continue
                 case t if t == TNS_REDIRECT:
-                    from oracle.tns import parse_redirect_address
+                    from seerdb.tns import parse_redirect_address
 
                     (NewHost, NewPort) = parse_redirect_address(Packet)
                     if NewHost is None or NewPort is None:
@@ -1064,8 +1064,8 @@ class OracleConnect:
         # = upper-hex(cipher) + decimal(pad count).
         from binascii import hexlify, unhexlify
 
-        from oracle.crypto import des_verifier, o3logon
-        from oracle.tns import encode_o3logon_phase2
+        from seerdb.crypto import des_verifier, o3logon
+        from seerdb.tns import encode_o3logon_phase2
 
         Length = Packet[2]
         SessKey = unhexlify(Packet[3 : 3 + Length])
@@ -1108,7 +1108,7 @@ class OracleConnect:
                 # Array DML (executemany) is not implemented on the fv2 / TTI_ALL7
                 # path — it would silently apply only the first row. Fail loudly
                 # instead of corrupting data (#168).
-                from oracle.exceptions import NotSupportedError
+                from seerdb.exceptions import NotSupportedError
 
                 raise NotSupportedError(
                     'executemany (array DML) is not supported on Oracle 9i'
@@ -1323,7 +1323,7 @@ class OracleConnect:
         # its true code + message instead of a downstream desync (#102).
         (ErrCode, Message) = decode_fv2_oer_error(Packet)
         if ErrCode and ErrCode not in (0, 1403):
-            from oracle.exceptions import from_ora_code
+            from seerdb.exceptions import from_ora_code
 
             raise from_ora_code(ErrCode)(Message or f'ORA-{ErrCode:05d}', code=ErrCode)
 
@@ -1371,7 +1371,7 @@ class OracleConnect:
         self.send(TNS_DATA, encode_o7_close(0))
         self._next_data_packet()  # close STA
         if ErrCode and ErrCode not in (0, 1403):
-            from oracle.exceptions import from_ora_code
+            from seerdb.exceptions import from_ora_code
 
             raise from_ora_code(ErrCode)(f'ORA-{ErrCode:05d}', code=ErrCode)
         # (call_status, ora_code, cursor_id, (rowcount, row_format), rows, ...)
@@ -1440,8 +1440,8 @@ class OracleConnect:
         # Replace LOB objects left by decode_fv2_exec_response with their
         # content, in place, by round-tripping each locator (#102). Done while
         # the 9i cursor is still open.
-        from oracle.lob import LOB
-        from oracle.types import decode_fv2_lob
+        from seerdb.lob import LOB
+        from seerdb.types import decode_fv2_lob
 
         for Row in Rows:
             for I, Val in enumerate(Row):
@@ -1473,7 +1473,7 @@ class OracleConnect:
         self.send(TNS_DATA, encode_o7_close(0))
         self._next_data_packet()  # close STA
         if ErrCode and ErrCode not in (0, 1403):
-            from oracle.exceptions import from_ora_code
+            from seerdb.exceptions import from_ora_code
 
             raise from_ora_code(ErrCode)(f'ORA-{ErrCode:05d}', code=ErrCode)
         if self.autocommit:
@@ -1492,7 +1492,7 @@ class OracleConnect:
         # expects no input; a no-bind block returns the RPA + OER directly. OUT
         # values are handed back as an {out_positions, out_values} record the
         # cursor's _assign_out_binds decodes into the Var objects.
-        from oracle.datatypes import Var
+        from seerdb.datatypes import Var
 
         Bind = Bind or []
         # IN + IN OUT binds carry an input value to send; every Var is an OUT
@@ -1524,7 +1524,7 @@ class OracleConnect:
         self.send(TNS_DATA, encode_o7_close(0))
         self._next_data_packet()  # close STA
         if ErrCode and ErrCode not in (0, 1403):
-            from oracle.exceptions import from_ora_code
+            from seerdb.exceptions import from_ora_code
 
             raise from_ora_code(ErrCode)(f'ORA-{ErrCode:05d}', code=ErrCode)
         if self.autocommit:
@@ -1616,7 +1616,7 @@ class OracleConnect:
         #
         # CLOB / NCLOB content is sent as UTF-16BE on the wire; BLOB / BFILE
         # is raw bytes. We decode CLOB to `str` and surface BLOB as `bytes`.
-        from oracle.tns_consts import TNS_TYPE_CLOB
+        from seerdb.tns_consts import TNS_TYPE_CLOB
 
         Data = encode_dictionary(
             self._make_dict(
@@ -1656,7 +1656,7 @@ class OracleConnect:
         TypeName = TypeName.strip('"') if '"' in TypeName else TypeName.upper()
         Typ = self._describe_object_type(Schema, TypeName)
         if Typ is None or (not Typ.attrs and not Typ.is_collection):
-            from oracle.exceptions import DatabaseError
+            from seerdb.exceptions import DatabaseError
 
             raise DatabaseError(f'object type {name!r} not found')
         return Typ
@@ -1672,7 +1672,7 @@ class OracleConnect:
         # empty layout (the #115 read path tolerates that).
         if not name:
             return None
-        from oracle.dbobject import DbObjectType, type_name_to_tns
+        from seerdb.dbobject import DbObjectType, type_name_to_tns
 
         Owner = schema
         if Owner is None:
@@ -1725,7 +1725,7 @@ class OracleConnect:
         # for a non-collection object type).
         if typecode != 'COLLECTION':
             return {}
-        from oracle.dbobject import (
+        from seerdb.dbobject import (
             COLLECTION_NESTED_TABLE,
             COLLECTION_VARRAY,
             type_name_to_tns,
@@ -1769,7 +1769,7 @@ class OracleConnect:
         # path fails with ORA-01460. 12c+ only — 11g rejects CREATE_TEMP — so
         # callers gate on field_version. The response is a single TTI_RPA token
         # carrying the new locator: 0x08, ub2 length, then the locator bytes.
-        from oracle.tns_consts import TTI_RPA
+        from seerdb.tns_consts import TTI_RPA
 
         Data = encode_dictionary(
             self._make_dict(DictionaryType.lobops, create_temp=True, is_blob=is_blob)
@@ -1795,7 +1795,7 @@ class OracleConnect:
         # locator + bytes written) followed by TTI_OER (call status); we walk to
         # the OER and raise on a real error. 12c+ only (paired with
         # create_temp_lob). The encoder chunks payloads > 0xFC bytes itself.
-        from oracle.tns_consts import TNS_LOB_OP_WRITE
+        from seerdb.tns_consts import TNS_LOB_OP_WRITE
 
         Payload = Data if is_blob else cast(str, Data).encode('utf-16-be')
         Dict = self._make_dict(
@@ -1822,8 +1822,8 @@ class OracleConnect:
         # matches the OER regardless of call status (which is 5, not 1,
         # immediately after a PL/SQL execute — the case that desynced the temp
         # LOB write following a temp-LOB-bind exec).
-        from oracle.exceptions import from_ora_code
-        from oracle.tns import decode_lobops_oer
+        from seerdb.exceptions import from_ora_code
+        from seerdb.tns import decode_lobops_oer
 
         (ErrCode, Message) = decode_lobops_oer(Packet, self.field_version)
         if ErrCode and ErrCode not in (0, 1403):
@@ -1836,7 +1836,7 @@ class OracleConnect:
         # a READ against the original locator returns empty bytes (the symptom
         # that originally blocked native BFILE support). The locator goes on the
         # wire ub2-length-prefixed (locator_prefixed), as for temp LOBs.
-        from oracle.tns_consts import (
+        from seerdb.tns_consts import (
             TNS_LOB_OP_FILE_CLOSE,
             TNS_LOB_OP_FILE_OPEN,
             TTI_RPA,
@@ -1912,7 +1912,7 @@ class OracleConnect:
         # (call status). We pull the content out of the LOB chunk(s) and
         # use OER as the stop signal; everything between LOB and OER is
         # RPA-shaped metadata we don't need.
-        from oracle.tns_consts import TTI_LOB, TTI_OER
+        from seerdb.tns_consts import TTI_LOB, TTI_OER
 
         Buffer = b''
         while True:
@@ -1997,7 +1997,7 @@ class OracleConnect:
             # Packet exhausted without hitting OER; loop and recv the next.
 
     def commit(self) -> None:
-        from oracle.tns_consts import TTI_COMMIT
+        from seerdb.tns_consts import TTI_COMMIT
 
         Data = encode_dictionary(self._make_dict(DictionaryType.tran, req=TTI_COMMIT))
         self.send(TNS_DATA, Data)
@@ -2007,7 +2007,7 @@ class OracleConnect:
         self._sessionless_txn_active = False
 
     def rollback(self) -> None:
-        from oracle.tns_consts import TTI_ROLLBACK
+        from seerdb.tns_consts import TTI_ROLLBACK
 
         Data = encode_dictionary(self._make_dict(DictionaryType.tran, req=TTI_ROLLBACK))
         self.send(TNS_DATA, Data)
@@ -2021,7 +2021,7 @@ class OracleConnect:
             # still validates the session (e.g. for pool health checks). (#168)
             self.execute("SELECT 'X' FROM dual")
             return
-        from oracle.tns_consts import TTI_PING
+        from seerdb.tns_consts import TTI_PING
 
         Data = encode_dictionary(self._make_dict(DictionaryType.tran, req=TTI_PING))
         self.send(TNS_DATA, Data)
@@ -2037,7 +2037,7 @@ class OracleConnect:
         `old_password` raises ORA-01017; a rejected new password (policy /
         verifier) raises e.g. ORA-28003.
         """
-        from oracle.exceptions import InterfaceError, NotSupportedError, from_ora_code
+        from seerdb.exceptions import InterfaceError, NotSupportedError, from_ora_code
 
         if self.field_version < FIELD_VERSION_10_2:
             # 9i changes a password via the O3LOGON-era exchange, not the single
@@ -2093,7 +2093,7 @@ class OracleConnect:
         # default `(None, None, [])` is right for any response that starts
         # with a DCB (which sets RowFormat for the subsequent RXDs). FETCH
         # responses skip the DCB and need the prior RowFormat passed in.
-        from oracle.tns import decode_packet
+        from seerdb.tns import decode_packet
 
         if Acc is None:
             Acc = (None, None, [])
@@ -2149,7 +2149,7 @@ class OracleConnect:
     def tpc_begin(self, xid: Xid, flags: int = TPC_BEGIN_NEW, timeout: int = 0) -> None:
         """Begin a TPC (global) transaction branch identified by `xid`."""
         if self.field_version < FIELD_VERSION_12_1:
-            from oracle.exceptions import NotSupportedError
+            from seerdb.exceptions import NotSupportedError
 
             raise NotSupportedError(
                 'two-phase commit (TPC/XA) requires an Oracle 12.1+ server'
@@ -2242,7 +2242,7 @@ class OracleConnect:
 
     def _check_sessionless_support(self) -> None:
         if self.field_version < FIELD_VERSION_23_1:
-            from oracle.exceptions import NotSupportedError
+            from seerdb.exceptions import NotSupportedError
 
             raise NotSupportedError(
                 'sessionless transactions require an Oracle 23ai+ server'
@@ -2320,7 +2320,7 @@ class OracleConnect:
         results are identical either way."""
         if self._pipeline_wire_eligible(pipeline):
             return self._run_pipeline_pipelined(pipeline, continue_on_error)
-        from oracle.pipeline import PipelineOpType as T
+        from seerdb.pipeline import PipelineOpType as T
 
         results = []
         Cur = self.cursor()
@@ -2336,7 +2336,7 @@ class OracleConnect:
         # (23ai) and covers only the exec-family ops, whose token framing is
         # verified against a capture. A pipeline with a commit / callproc /
         # callfunc op runs serially instead (correct results, no optimisation).
-        from oracle.pipeline import PipelineOpType as T
+        from seerdb.pipeline import PipelineOpType as T
 
         WireOps = (T.EXECUTE, T.EXECUTE_MANY, T.FETCH_ONE, T.FETCH_MANY, T.FETCH_ALL)
         if not self._supports_eor or not pipeline.operations:
@@ -2349,8 +2349,8 @@ class OracleConnect:
         # their rows inline in the execute response (the pipelined burst can't
         # interleave follow-up TTI_FETCH calls); any overflow is drained
         # serially after the burst.
-        from oracle.cursor import _resolve_parameters
-        from oracle.pipeline import PipelineOpType as T
+        from seerdb.cursor import _resolve_parameters
+        from seerdb.pipeline import PipelineOpType as T
 
         Bind = _resolve_parameters(Op.statement, Op.parameters)
         Batch = []
@@ -2449,8 +2449,8 @@ class OracleConnect:
         # responses back-to-back. The wire always runs in CONTINUE_ON_ERROR
         # mode so the server returns a response for every op (no partial-burst
         # desync); the caller's abort semantics are enforced client-side.
-        from oracle.pipeline import PipelineOpResult
-        from oracle.pipeline import PipelineOpType as T
+        from seerdb.pipeline import PipelineOpResult
+        from seerdb.pipeline import PipelineOpType as T
 
         Ops = pipeline.operations
         # Phase 1 — build the burst. The begin piggyback takes the first seq and
@@ -2521,10 +2521,10 @@ class OracleConnect:
 
     def queue(self, name: str, payload_type=None):
         """Return a Queue handle. payload_type is a DbObjectType (object-payload
-        queue) or oracle.JSON (JSON-payload queue); omit it for a RAW queue."""
-        from oracle.aq import Queue
-        from oracle.datatypes import JSON as _JSON
-        from oracle.exceptions import NotSupportedError
+        queue) or seerdb.JSON (JSON-payload queue); omit it for a RAW queue."""
+        from seerdb.aq import Queue
+        from seerdb.datatypes import JSON as _JSON
+        from seerdb.exceptions import NotSupportedError
 
         if self.field_version < FIELD_VERSION_12_1:
             raise NotSupportedError('Advanced Queuing requires an Oracle 12.1+ server')
@@ -2543,7 +2543,7 @@ class OracleConnect:
         recipients=None,
     ):
         """Build a MessageProperties for enqueue."""
-        from oracle.aq import MessageProperties
+        from seerdb.aq import MessageProperties
 
         return MessageProperties(
             payload=payload,
@@ -2572,7 +2572,7 @@ class OracleConnect:
         return _decode_aq_deq(self._aq_request(Data), queue)
 
     def _aq_enq_many(self, queue, props_list) -> None:
-        from oracle.tns_consts import TNS_AQ_ARRAY_ENQ
+        from seerdb.tns_consts import TNS_AQ_ARRAY_ENQ
 
         Data = encode_aq_array(
             self._next_seq(),
@@ -2585,8 +2585,8 @@ class OracleConnect:
         _decode_aq_array(self._aq_request(Data), queue, TNS_AQ_ARRAY_ENQ, props_list)
 
     def _aq_deq_many(self, queue, max_messages):
-        from oracle.aq import MessageProperties
-        from oracle.tns_consts import TNS_AQ_ARRAY_DEQ
+        from seerdb.aq import MessageProperties
+        from seerdb.tns_consts import TNS_AQ_ARRAY_DEQ
 
         Placeholders = [MessageProperties() for _ in range(max_messages)]
         Data = encode_aq_array(
@@ -2768,16 +2768,16 @@ class OracleConnect:
 
     def cursor(self, scrollable: bool = False):
         # PEP 249 cursor factory. `scrollable` (oracledb parity, #161) opens a
-        # scrollable cursor; pyoracle buffers the result set so scroll() works
+        # scrollable cursor; seerdb buffers the result set so scroll() works
         # regardless, but the flag is accepted and surfaced for compatibility.
-        from oracle.cursor import Cursor
+        from seerdb.cursor import Cursor
 
         return Cursor(self, scrollable=scrollable)
 
     def getSodaDatabase(self):
         """Return a `SodaDatabase` for document-store (SODA) access (#163).
         Raises NotSupportedError on a pre-18c server (no DBMS_SODA)."""
-        from oracle.soda import SodaDatabase, _check_soda_supported
+        from seerdb.soda import SodaDatabase, _check_soda_supported
 
         _check_soda_supported(self)
         return SodaDatabase(self)
@@ -2791,7 +2791,7 @@ class OracleConnect:
         # server closes the connection on it — so gate it (oracledb thin is
         # itself 12.1+ only). #183.
         if self.field_version < FIELD_VERSION_12_1:
-            from oracle.exceptions import NotSupportedError
+            from seerdb.exceptions import NotSupportedError
 
             raise NotSupportedError(
                 'end-to-end tracing attributes require an Oracle 12.1+ server'

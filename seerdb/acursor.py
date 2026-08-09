@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: 2019 Peter Lemenkov <lemenkov@gmail.com>
 # SPDX-License-Identifier: MIT
 
-"""Async PEP 249-style cursor. Mirrors `oracle.cursor.Cursor` but with
+"""Async PEP 249-style cursor. Mirrors `seerdb.cursor.Cursor` but with
 `async def` for every method that touches the wire."""
 
 from typing import Any
 
-from oracle.cursor import (
+from seerdb.cursor import (
     _assign_out_binds,
     _assign_return_binds,
     _check_object_bind_support,
@@ -17,19 +17,19 @@ from oracle.cursor import (
     _resolve_parameters,
     _returning_bind_positions,
 )
-from oracle.datatypes import TempLob, Var
-from oracle.exceptions import (
+from seerdb.datatypes import TempLob, Var
+from seerdb.exceptions import (
     DatabaseError,
     InterfaceError,
     NotSupportedError,
     ProgrammingError,
     from_ora_code,
 )
-from oracle.tns_consts import AL32UTF8_CHARSET, FIELD_VERSION_10_2, FIELD_VERSION_12_1
+from seerdb.tns_consts import AL32UTF8_CHARSET, FIELD_VERSION_10_2, FIELD_VERSION_12_1
 
 
 class AsyncCursor:
-    """Async equivalent of `oracle.cursor.Cursor`.
+    """Async equivalent of `seerdb.cursor.Cursor`.
 
     Result-set handling is the same: the rows the server sends back in
     the EXEC / FETCH response are buffered locally, and fetchone /
@@ -52,7 +52,7 @@ class AsyncCursor:
         self._rowfactory = None
         # Scrollable cursor: scrollable=True fetches a SELECT lazily from a
         # kept-open server cursor (#181); scrollable=False buffers the whole set
-        # and scroll() is a local reposition (#161). See oracle.cursor.Cursor.
+        # and scroll() is a local reposition (#161). See seerdb.cursor.Cursor.
         self._scrollable = bool(scrollable)
         self._scroll_active: bool = False
         self._scroll_cursor_id: int = 0
@@ -65,7 +65,7 @@ class AsyncCursor:
 
     @property
     def scrollable(self) -> bool:
-        """Whether this cursor was opened scrollable (#161). pyoracle buffers
+        """Whether this cursor was opened scrollable (#161). seerdb buffers
         the result set, so scroll() works on any cursor; exposed for oracledb
         API compatibility."""
         return self._scrollable
@@ -87,7 +87,7 @@ class AsyncCursor:
     @property
     def annotations(self) -> list[dict | None] | None:
         """Per-column SQL annotations (23ai) for the last SELECT, aligned with
-        `description`. See `oracle.cursor.Cursor.annotations`."""
+        `description`. See `seerdb.cursor.Cursor.annotations`."""
         return self._annotations
 
     @property
@@ -104,7 +104,7 @@ class AsyncCursor:
     @property
     def rowfactory(self):
         """Optional callable applied to each fetched row. See
-        `oracle.cursor.Cursor.rowfactory`."""
+        `seerdb.cursor.Cursor.rowfactory`."""
         return self._rowfactory
 
     @rowfactory.setter
@@ -114,7 +114,7 @@ class AsyncCursor:
     @property
     def lastrowid(self):
         """ROWID of the last row an INSERT / UPDATE / DELETE touched. See
-        `oracle.cursor.Cursor.lastrowid`."""
+        `seerdb.cursor.Cursor.lastrowid`."""
         return self._lastrowid
 
     async def close(self) -> None:
@@ -281,15 +281,15 @@ class AsyncCursor:
         # Async row resolution shared by execute and nextset: LOB cells via
         # await aread(), object/collection cells via the awaited type describe
         # (mirrors the sync _resolve_lobs + _resolve_objects).
-        from oracle.dbobject import (
+        from seerdb.dbobject import (
             DbObject,
             ObjectImage,
             decode_collection_image,
             decode_object_image,
             decode_xmltype,
         )
-        from oracle.lob import LOB
-        from oracle.tns_consts import TNS_TYPE_CLOB
+        from seerdb.lob import LOB
+        from seerdb.tns_consts import TNS_TYPE_CLOB
 
         ResolvedRows = []
         for Row in Rows or []:
@@ -346,7 +346,7 @@ class AsyncCursor:
     async def _build_refcursor(self, Rows, Marker) -> 'AsyncCursor':
         # Wrap an already-fetched REF CURSOR result set in a nested AsyncCursor,
         # resolving any LOB cells with await (mirrors AsyncCursor.execute).
-        from oracle.lob import LOB
+        from seerdb.lob import LOB
 
         Nested = AsyncCursor(self._connection)
         Nested._description = [_column_description(C) for C in Marker['row_format']]
@@ -366,12 +366,12 @@ class AsyncCursor:
 
     def var(self, typ, size=None) -> Var:
         """Create a bind variable for an OUT / IN OUT argument. See
-        `oracle.cursor.Cursor.var`."""
+        `seerdb.cursor.Cursor.var`."""
         return Var(typ, size)
 
     def arrayvar(self, typ, value_or_numelements, size=None) -> Var:
         """Bulk-array bind for a PL/SQL associative array (#122). See
-        `oracle.cursor.Cursor.arrayvar`."""
+        `seerdb.cursor.Cursor.arrayvar`."""
         if isinstance(value_or_numelements, int):
             num, values = value_or_numelements, []
         else:
@@ -394,7 +394,7 @@ class AsyncCursor:
 
     async def callfunc(self, name: str, return_type, parameters=None):
         """Call a stored function and return its value. See
-        `oracle.cursor.Cursor.callfunc`."""
+        `seerdb.cursor.Cursor.callfunc`."""
         self._check_open()
         Ret = Var(return_type)
         Params = list(parameters) if parameters else []
@@ -436,7 +436,7 @@ class AsyncCursor:
     def getbatcherrors(self) -> list:
         """Errors collected by the most recent
         ``executemany(batcherrors=True)``. See
-        `oracle.cursor.Cursor.getbatcherrors`."""
+        `seerdb.cursor.Cursor.getbatcherrors`."""
         Out = []
         for E in getattr(self, '_batcherrors', []):
             Code = E.get('code')
@@ -448,10 +448,10 @@ class AsyncCursor:
     def getarraydmlrowcounts(self) -> list:
         """Per-iteration row counts from the most recent
         ``executemany(arraydmlrowcounts=True)``. See
-        `oracle.cursor.Cursor.getarraydmlrowcounts`."""
+        `seerdb.cursor.Cursor.getarraydmlrowcounts`."""
         return list(getattr(self, '_arraydmlrowcounts', []))
 
-    # --- Server-side scroll window helpers (#181), see oracle.cursor.Cursor ---
+    # --- Server-side scroll window helpers (#181), see seerdb.cursor.Cursor ---
 
     def _init_scroll_window(
         self, cursor_id: int, colmeta: list, server_rowcount, batch_len: int, eof: bool
@@ -477,7 +477,7 @@ class AsyncCursor:
     async def _scroll_refill(self) -> None:
         # Continue with orient CURRENT at the next absolute row (oracledb fetches
         # every batch as a positioned scroll re-execute, not a TTI_FETCH — #181).
-        from oracle.tns_consts import TNS_FETCH_ORIENTATION_CURRENT
+        from seerdb.tns_consts import TNS_FETCH_ORIENTATION_CURRENT
 
         Conn = self._connection
         Size = max(int(self.arraysize), 1)
@@ -541,7 +541,7 @@ class AsyncCursor:
         self._check_open()
         if self._description is None:
             raise InterfaceError('no result set; call execute() with a SELECT first')
-        from oracle.dataframe import build_table
+        from seerdb.dataframe import build_table
 
         Rows = self._rows[self._row_index :]
         self._row_index = len(self._rows)
@@ -553,7 +553,7 @@ class AsyncCursor:
         self._check_open()
         if self._description is None:
             raise InterfaceError('no result set; call execute() with a SELECT first')
-        from oracle.dataframe import build_table
+        from seerdb.dataframe import build_table
 
         if size is None:
             size = self.arraysize
@@ -565,7 +565,7 @@ class AsyncCursor:
 
     async def scroll(self, value: int = 0, mode: str = 'relative') -> None:
         """Scroll the result-set cursor to a new position. See
-        `oracle.cursor.Cursor.scroll`. With scrollable=True the reposition is
+        `seerdb.cursor.Cursor.scroll`. With scrollable=True the reposition is
         server-side and rows are fetched lazily (#181); otherwise it is a local
         move over the buffered result set (#161)."""
         self._check_open()
@@ -592,7 +592,7 @@ class AsyncCursor:
         self._row_index = Target - 1
 
     async def _scroll_server(self, value: int, mode: str) -> None:
-        from oracle.tns_consts import (
+        from seerdb.tns_consts import (
             TNS_FETCH_ORIENTATION_ABSOLUTE,
             TNS_FETCH_ORIENTATION_FIRST,
             TNS_FETCH_ORIENTATION_LAST,

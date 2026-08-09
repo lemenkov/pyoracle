@@ -6,8 +6,8 @@
 
 import unittest
 
-from oracle.exceptions import NotSupportedError
-from oracle.soda import (
+from seerdb.exceptions import NotSupportedError
+from seerdb.soda import (
     SodaDocument,
     _check_soda_supported,
     _doc_to_bind,

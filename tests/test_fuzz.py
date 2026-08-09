@@ -14,7 +14,7 @@ import random
 import signal
 import unittest
 
-from oracle.tns import decode_packet
+from seerdb.tns import decode_packet
 
 # Seed corpus: real captured response packets (token byte first) covering the
 # common decoders — DCB (16), RPA (8), PRO (1), RXD (7), OER (4), STA (9), LOB

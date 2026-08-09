@@ -6,15 +6,15 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
-    from oracle.dbobject import DbObject, DbRef
+    from seerdb.dbobject import DbObject, DbRef
 from functools import reduce
 
-from oracle.crypto import encrypt_password, o5logon
-from oracle.cursor import cursor
-from oracle.datatypes import JSON, BinaryDouble, BinaryFloat, IntervalYM, TempLob, Var
-from oracle.date import date
-from oracle.exceptions import DataError
-from oracle.vector import (
+from seerdb.crypto import encrypt_password, o5logon
+from seerdb.cursor import cursor
+from seerdb.datatypes import JSON, BinaryDouble, BinaryFloat, IntervalYM, TempLob, Var
+from seerdb.date import date
+from seerdb.exceptions import DataError
+from seerdb.vector import (
     VECTOR_BIND_DESCRIPTOR,
     VECTOR_BIND_OAC,
     encode_vector,
@@ -26,7 +26,7 @@ def _json_bind_text(Token: object) -> str:
     # A dict (auto-detected) or a JSON() wrapper binds into a native JSON column
     # (#50): serialise to JSON text and bind it as a string; the server casts
     # VARCHAR -> JSON. Lazy import keeps oson off the tns import chain.
-    from oracle.oson import json_to_text
+    from seerdb.oson import json_to_text
 
     return json_to_text(Token.value if isinstance(Token, JSON) else Token)
 
@@ -47,7 +47,7 @@ def _json_oson_image(Token: object):
     # The OSON image for a dict / JSON() bind (#70), or None when the value is
     # too large/complex for the native encoder so the caller falls back to the
     # text cast (#50/#64) — which the server parses just as well.
-    from oracle.oson import OsonError, encode_oson
+    from seerdb.oson import OsonError, encode_oson
 
     value = Token.value if isinstance(Token, JSON) else Token
     try:
@@ -64,7 +64,7 @@ import re
 import socket
 import struct
 
-from oracle.tns_consts import (
+from seerdb.tns_consts import (
     AL16UTF16_CHARSET,
     AL32UTF8_CHARSET,
     DEFAULT_HOST,
@@ -190,10 +190,10 @@ from oracle.tns_consts import (
     CharsetDict,
     DictionaryType,
 )
-from oracle.tns_consts import (
+from seerdb.tns_consts import (
     FIELD_VERSION_9_2 as FIELD_VERSION_9_2,
 )
-from oracle.tns_consts import (
+from seerdb.tns_consts import (
     FIELD_VERSION_19_1 as FIELD_VERSION_19_1,
 )
 
@@ -924,7 +924,7 @@ def decode_token_oer(Data: bytes, Acc: tuple) -> tuple:
     # row — so treat it as "no rowid", e.g. SELECT / DDL).
     Rowid = None
     if RowidBlock:
-        from oracle.types import rowid_to_string
+        from seerdb.types import rowid_to_string
 
         Rowid = rowid_to_string(RowidObj, RowidFile, RowidBlock, RowidSlot)
     RetFormat = (RowCount, RowFormat)
@@ -1083,7 +1083,7 @@ def decode_token_server_piggyback(Data: bytes, Acc: tuple) -> tuple:
     elif Opcode == TNS_SERVER_PIGGYBACK_SYNC:
         # Sessionless transactions (#133): the server reports txn-id sync state
         # as keyword-value pairs (keyword 201 = transaction id) piggybacked on
-        # the next call response while a sessionless txn is active. pyoracle
+        # the next call response while a sessionless txn is active. seerdb
         # tracks the active flag client-side, so the pairs are only consumed
         # byte-for-byte here. Each pair = ub2 text-len + dalc / ub2 binary-len +
         # dalc / ub2 keyword-num, framed like the SESS_RET pair loop.
@@ -1203,20 +1203,20 @@ _LONG_DATA_TYPES = frozenset((TNS_TYPE_LONG, TNS_TYPE_LONGRAW))
 def decode_token_rxd(Data: bytes, Acc: tuple) -> tuple:
     Val: Any  # reused per column, heterogeneous
     # Row data (section 6.2). Each column value is normally a DALC blob whose
-    # raw bytes we hand to oracle.types.decode_value, which dispatches on the
+    # raw bytes we hand to seerdb.types.decode_value, which dispatches on the
     # column's TNS data type from the describe-info block.
     #
     # LOB columns are special: instead of a single DALC they carry a small
     # length-prefixed locator block (`_read_lob_column`). The locator and
     # any inline content stay opaque for now — surfaced to the caller as an
-    # oracle.lob.LOB object — until the LOB-content extraction work lands.
+    # seerdb.lob.LOB object — until the LOB-content extraction work lands.
     #
     # If a BVC token preceded this RXD, Acc carries a bit vector: a set bit
     # means "this column is in the RXD"; an unset bit means "reuse the
     # previous row's value". The bit vector applies to a single RXD and is
     # cleared from Acc on the way out.
-    from oracle.lob import LOB
-    from oracle.types import decode_value
+    from seerdb.lob import LOB
+    from seerdb.types import decode_value
 
     (Cursor, RowFormat, Rows, *Extra) = Acc
     BitVec = Extra[0] if Extra else None
@@ -1319,7 +1319,7 @@ def _read_rowid_column(Rest: bytes) -> tuple[str | None, bytes]:
     # rowid -- data object (ub4), relative file (ub2), an unused ub1, block
     # (ub4) and slot (ub2). Mirrors oracledb's read_rowid; the byte counts and
     # the base64 rendering were verified against ROWIDTOCHAR on a live XE row.
-    from oracle.types import rowid_to_string
+    from seerdb.types import rowid_to_string
 
     if not Rest:
         return (None, Rest)
@@ -1341,7 +1341,7 @@ def _read_urowid_column(Rest: bytes) -> tuple[str | None, bytes]:
     # length echo, then num_bytes raw rowid bytes (a leading type tag + the
     # rowid body). Rendered as the "*"-prefixed base64 form. Verified against a
     # live XE IOT row vs the SELECT ROWID text.
-    from oracle.types import urowid_to_string
+    from seerdb.types import urowid_to_string
 
     if not Rest:
         return (None, Rest)
@@ -1419,7 +1419,7 @@ def _read_object_column(Rest: bytes, Col: dict) -> tuple[object, bytes]:
     # ObjectImage placeholder; the cursor decodes the image into a DbObject
     # once it has fetched the layout (#115). XMLType (type 109 with no object
     # type) is a separate path (#124).
-    from oracle.dbobject import ObjectImage
+    from seerdb.dbobject import ObjectImage
 
     (TypeOid, Rest) = _read_str_with_length(Rest)  # type OID
     (_, Rest) = _read_str_with_length(Rest)  # object OID
@@ -1710,7 +1710,7 @@ def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
     return (Data, ConnKey)
 
 
-# pyoracle's advertised client version, packed the way python-oracledb encodes
+# seerdb's advertised client version, packed the way python-oracledb encodes
 # SESSION_CLIENT_VERSION: (major << 24) | (minor << 20) | (patch << 12). Keep the
 # string in sync with pyproject.toml. (4.0.1 -> 67112960 in the reference capture.)
 _CLIENT_VERSION = '1.10.1'
@@ -1743,7 +1743,7 @@ def _auth_session_kvs(Dictionary: dict) -> bytes:
         )
         + encode_kv(
             b'SESSION_CLIENT_DRIVER_NAME',
-            f'pyoracle thn : {_CLIENT_VERSION}'.encode('utf-8'),
+            f'seerdb thn : {_CLIENT_VERSION}'.encode('utf-8'),
         )
         + encode_kv(
             b'SESSION_CLIENT_VERSION',
@@ -2065,7 +2065,7 @@ def encode_dictionary_description(Dictionary: dict) -> bytes:
     Port = str(Dictionary['env'].get('port', DEFAULT_PORT)).encode('utf-8')
     SID = Dictionary['env'].get('sid', DEFAULT_SID).encode('utf-8')
     ServiceName = Dictionary['env'].get('service_name', None)
-    AppName = Dictionary['env'].get('app_name', 'pyoracle').encode('utf-8')
+    AppName = Dictionary['env'].get('app_name', 'seerdb').encode('utf-8')
     SslOpts = Dictionary['env'].get('ssl', None)
     Sn = (
         b'SID=' + SID
@@ -2111,7 +2111,7 @@ def encode_dictionary_description(Dictionary: dict) -> bytes:
 # data_types.pyx) and verified against live 11g and 21c captures (issue #27,
 # docs/PROTOCOL.md §4.2). We model them as {index: value} so the vector reads
 # as a feature list instead of an opaque blob, and so a single field-version
-# knob can switch pyoracle between the 11g-era and 12c+-era wire contracts.
+# knob can switch seerdb between the 11g-era and 12c+-era wire contracts.
 
 # Compile-time capability indices (into the compile_caps array):
 CCAP_SQL_VERSION = 0
@@ -2141,10 +2141,10 @@ CCAP_FEATURE_BACKPORT2 = 45
 CCAP_VECTOR_FEATURES = 52
 
 # TNS_CCAP_FIELD_VERSION_* values (the byte written at CCAP_FIELD_VERSION) now
-# live in oracle.tns_consts and are imported at the top of this module — kept
-# importable as `from oracle.tns import FIELD_VERSION_*` for existing callers.
-# They moved to the leaf constants module so oracle.cursor can import the 12.1
-# threshold without an import cycle (oracle.tns imports oracle.cursor).
+# live in seerdb.tns_consts and are imported at the top of this module — kept
+# importable as `from seerdb.tns import FIELD_VERSION_*` for existing callers.
+# They moved to the leaf constants module so seerdb.cursor can import the 12.1
+# threshold without an import cycle (seerdb.tns imports seerdb.cursor).
 
 # Runtime capability indices + the flag bits we set:
 RCAP_COMPAT = 0
@@ -2154,7 +2154,7 @@ RCAP_TTC_ZERO_COPY = 0x01
 RCAP_TTC_32K = 0x04
 
 # Per-field-version capability vectors as {index: byte}; unset indices are 0.
-# 11.2 reproduces pyoracle's historical 11g vector byte-for-byte (asserted by
+# 11.2 reproduces seerdb's historical 11g vector byte-for-byte (asserted by
 # tests/test_tns_encode.py); 21.1 matches python-oracledb 4.0.1 against 21c.
 _COMPILE_CAPS = {
     FIELD_VERSION_11_2: (
@@ -2177,7 +2177,7 @@ _COMPILE_CAPS = {
             CCAP_OCI2: 12,
             CCAP_CLIENT_FN: 6,
             CCAP_TTC3: 1,
-            # Slots oracledb leaves 0 but pyoracle's original 11g reference client
+            # Slots oracledb leaves 0 but seerdb's original 11g reference client
             # set; not in oracledb's named map. Kept verbatim for byte-parity.
             1: 1,
             6: 1,
@@ -2251,7 +2251,7 @@ def capability_arrays(field_version: int = FIELD_VERSION_11_2) -> tuple[bytes, b
     """Return (compile_caps, runtime_caps) for a target TTC field version.
 
     Two base vectors are modelled: the 11.2 vector for pre-12c field versions
-    (byte-identical to what pyoracle has always sent) and the 21.1 vector for
+    (byte-identical to what seerdb has always sent) and the 21.1 vector for
     12c+. The capability *contents* are stable across 12c+ releases — only the
     field-version byte differs — so for any negotiated 12c+ version we render
     the 21.1 base and patch in that version. This lets the client advertise the
@@ -2681,7 +2681,7 @@ def encode_dictionary_dty(Dictionary: dict) -> bytes:
     #
     # The capability arrays are built from named feature slots (see
     # `capability_arrays` above) and keyed on a target TTC field version; the
-    # default (11.2) reproduces what pyoracle has always sent. The datatype
+    # default (11.2) reproduces what seerdb has always sent. The datatype
     # tables don't vary with the user's query workload — python-oracledb
     # hard-codes the equivalent, and the OCI thick client builds it from a
     # static C table at link time; we emit it as a constant for the same reason.
@@ -2716,7 +2716,7 @@ def encode_dictionary_dty(Dictionary: dict) -> bytes:
     # Override table. Each entry is `(client_type, server_repr, format,
     # flags)` — when this client encounters data of type `client_type`,
     # negotiate `server_repr` as the wire representation with the given
-    # format. Terminated by `0, 0`. Annotated against oracle.tns_consts:
+    # format. Terminated by `0, 0`. Annotated against seerdb.tns_consts:
     #
     #   (2,  2, 10)   NUMBER   → NUMBER (extended precision format 10)
     #   (3,  2, 10)   INTEGER  → NUMBER
@@ -2910,7 +2910,7 @@ def encode_dictionary_dty(Dictionary: dict) -> bytes:
     )
     # Datatype table: 12c+ (UB2_DTY) uses the uniform 2-byte-per-field table;
     # 11g uses the 1-byte form built above. The encoding flag follows suit
-    # (oracledb sends 3 = MULTI_BYTE|CONV_LENGTH for 12c+, pyoracle 1 for 11g).
+    # (oracledb sends 3 = MULTI_BYTE|CONV_LENGTH for 12c+, seerdb 1 for 11g).
     if FieldVersion >= FIELD_VERSION_12_1:
         DataTypeTable = _datatype_table_12c()
         Flag = 3
@@ -3202,7 +3202,7 @@ def _o7_bind_oac(Value: object) -> bytes:
     # defaults to 32767, matching JDBC). The mode (IN/OUT/IN OUT) is NOT in the
     # OAC — the server infers it from the block and signals it in the bind
     # prompt; see decode_fv2_block_out.
-    from oracle.datatypes import Var
+    from seerdb.datatypes import Var
 
     # Char binds declare AL32UTF8 (csfrm 1) — the driver negotiates an AL32UTF8
     # session and sends UTF-8, which the 9i server converts to its DB charset —
@@ -3629,8 +3629,8 @@ def decode_fv2_exec_response(Data: bytes, Columns: list) -> tuple[list, int]:
     # each column value is a DALC blob followed by a 1-byte indicator. Row
     # values themselves use the version-independent §11 decoders. Returns
     # (rows, ora_code) where ora_code 1403 == end-of-fetch (PROTOCOL.md §19.2).
-    from oracle.lob import LOB
-    from oracle.types import decode_value
+    from seerdb.lob import LOB
+    from seerdb.types import decode_value
 
     Rows: list = []
     ErrCode = 0
@@ -3929,7 +3929,7 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
 
 def encode_dictionary_login(Dictionary: dict) -> bytes:
     # The CONNECT packet, in the protocol-version-319 ("large SDU" / end-of-
-    # response era) layout (#155). pyoracle previously sent version 313 to stay
+    # response era) layout (#155). seerdb previously sent version 313 to stay
     # below the EOR era; 319 is what a 23ai server needs to negotiate the
     # end-of-response framing that pipelining (#132) rides on. The header is
     # backward-compatible: 9i/10g/11g negotiate down (min(their_max, 319)) and
@@ -4049,7 +4049,7 @@ def encode_dictionary_sess(Dictionary: dict) -> bytes:
     LogonMode = encode_sb4((Role * 32) | (Prelim * 128) | 1)
     AppName = encode_kv(
         b'AUTH_PROGRAM_NM',
-        Dictionary['env'].get('app_name', 'pyoracle').encode('utf-8'),
+        Dictionary['env'].get('app_name', 'seerdb').encode('utf-8'),
     )
 
     FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
@@ -4415,7 +4415,7 @@ def encode_token_rxd(Token: object) -> bytes:
         )
     if Token is None:
         return bytes([0])
-    from oracle.dbobject import DbObject, DbRef
+    from seerdb.dbobject import DbObject, DbRef
 
     if isinstance(Token, DbObject):
         # SQL OBJECT (ADT) bind (#116): the write_dbobject framing + image.
@@ -4483,7 +4483,7 @@ def encode_token_rxd(Token: object) -> bytes:
     if isinstance(Token, cursor):
         return bytes([1, 0])
     if isinstance(Token, date):
-        # Legacy oracle.date.date with has_timestamp / timestamptz flags;
+        # Legacy seerdb.date.date with has_timestamp / timestamptz flags;
         # keep it on its own path so callers who built one explicitly still
         # get the bytes they expected.
         Bytes = encode_token_date(Token)
@@ -4571,7 +4571,7 @@ def encode_token_oac(Token: object) -> bytes:
         # NULL value (0 bytes): a minimal VARCHAR OAC, again avoiding the
         # 32767 LONG-reorder swap when a NULL bind precedes another bind.
         return encode_token_raw(TNS_TYPE_VARCHAR, 1, 16, AL32UTF8_CHARSET, 0)
-    from oracle.dbobject import DbObject, DbRef
+    from seerdb.dbobject import DbObject, DbRef
 
     if isinstance(Token, DbObject):
         # SQL OBJECT (ADT) bind OAC (#116): type 109 + the type's OID + version.
@@ -4584,7 +4584,7 @@ def encode_token_oac(Token: object) -> bytes:
         # else the VARCHAR OAC for the text cast (#50). Must match the choice in
         # encode_token_rxd.
         if _json_oson_image(Token) is not None:
-            from oracle.oson import JSON_BIND_OAC
+            from seerdb.oson import JSON_BIND_OAC
 
             return JSON_BIND_OAC
         Token = _json_bind_text(Token)
@@ -4834,7 +4834,7 @@ def _encode_ref_oac(Ref: 'DbRef') -> bytes:
     # has no REF type, so JDBC is the only reference). The type OID is carried on
     # the DbRef from its describe (#119); without it we cannot build the OAC.
     if Ref.type_oid is None:
-        from oracle.exceptions import NotSupportedError
+        from seerdb.exceptions import NotSupportedError
 
         raise NotSupportedError(
             'cannot bind a REF without its referenced type OID; the value must '
@@ -4933,7 +4933,7 @@ def _aq_write_payload(Queue, Props) -> bytes:
         # framed like RAW via encode_chr). RE'd from an oracledb-thin capture --
         # it's the native-LOB value form (#70) but with a slightly different
         # descriptor than VECTOR_BIND_DESCRIPTOR (no second 0x28 byte).
-        from oracle.oson import encode_oson
+        from seerdb.oson import encode_oson
 
         Oson = encode_oson(Props.payload)
         # _bytes_with_length (the 12c+ single-byte/0xFE-chunked form) -- NOT
@@ -5190,7 +5190,7 @@ def _encode_date_prefix(DT: datetime.datetime) -> bytes:
 
 
 def encode_token_date(Token: date) -> bytes:
-    # Retained for any caller that still constructs the legacy oracle.date.date
+    # Retained for any caller that still constructs the legacy seerdb.date.date
     # subclass. New code should pass a stdlib datetime.datetime instead.
     if Token.has_timestamp and Token.timestamptz:
         T = Token.set_timestamptz(Token.timestamptz)

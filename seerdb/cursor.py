@@ -4,15 +4,15 @@
 import re
 from typing import Any
 
-from oracle.datatypes import TempLob, Var
-from oracle.exceptions import (
+from seerdb.datatypes import TempLob, Var
+from seerdb.exceptions import (
     DatabaseError,
     InterfaceError,
     NotSupportedError,
     ProgrammingError,
     from_ora_code,
 )
-from oracle.tns_consts import (
+from seerdb.tns_consts import (
     AL32UTF8_CHARSET,
     FIELD_VERSION_10_2,
     FIELD_VERSION_12_1,
@@ -33,7 +33,7 @@ _NAMED_BIND_RE = re.compile(r':([A-Za-z_]\w*)')
 
 class cursor:
     # Sentinel passed as a bind value to indicate a REFCURSOR slot. Consumed by
-    # the encoder in oracle.tns (encode_token_oac / encode_token_rxd). Kept
+    # the encoder in seerdb.tns (encode_token_oac / encode_token_rxd). Kept
     # lowercase for backwards-compatibility with existing call sites.
     id: int = 0
 
@@ -84,7 +84,7 @@ class Cursor:
 
     @property
     def scrollable(self) -> bool:
-        """Whether this cursor was opened scrollable (#161). pyoracle's
+        """Whether this cursor was opened scrollable (#161). seerdb's
         result-set buffer makes scroll() available on any cursor, so this is
         primarily for oracledb API compatibility."""
         return self._scrollable
@@ -337,8 +337,8 @@ class Cursor:
         """Create a bind variable that can receive an OUT / IN OUT value.
 
         `typ` is a Python type (`int`, `str`, `bytes`, `datetime`, ...) or an
-        `oracle` type constant (`oracle.NUMBER`, `oracle.STRING`,
-        `oracle.DB_TYPE_*`). Pass the returned `Var` in a `callproc` /
+        `seerdb` type constant (`seerdb.NUMBER`, `seerdb.STRING`,
+        `seerdb.DB_TYPE_*`). Pass the returned `Var` in a `callproc` /
         `execute` parameter list and read the result with `getvalue()`.
         """
         return Var(typ, size)
@@ -377,7 +377,7 @@ class Cursor:
 
     def callfunc(self, name: str, return_type, parameters=None):
         """Call a stored function and return its value. `return_type` is a
-        Python type or `oracle` type constant (as for `var`); `parameters`
+        Python type or `seerdb` type constant (as for `var`); `parameters`
         are the function's arguments (plain values for IN, `Var` for OUT /
         IN OUT). PEP 249 / oracledb compatible.
         """
@@ -552,7 +552,7 @@ class Cursor:
         self._check_open()
         if self._description is None:
             raise InterfaceError('no result set; call execute() with a SELECT first')
-        from oracle.dataframe import build_table
+        from seerdb.dataframe import build_table
 
         Rows = self._rows[self._row_index :]
         self._row_index = len(self._rows)
@@ -565,7 +565,7 @@ class Cursor:
         self._check_open()
         if self._description is None:
             raise InterfaceError('no result set; call execute() with a SELECT first')
-        from oracle.dataframe import build_table
+        from seerdb.dataframe import build_table
 
         if size is None:
             size = self.arraysize
@@ -728,7 +728,7 @@ def _assign_out_binds(Bind, Result) -> list:
     Rows = Result[4]
     if not Rows or not isinstance(Rows[0], dict) or 'out_positions' not in Rows[0]:
         return []
-    from oracle.types import decode_value
+    from seerdb.types import decode_value
 
     Record = Rows[0]
     RefCursors = []
@@ -761,7 +761,7 @@ def _assign_return_binds(Bind, Result) -> None:
     Rows = Result[4]
     if not Rows or not isinstance(Rows[0], dict) or 'return_positions' not in Rows[0]:
         return
-    from oracle.types import decode_value
+    from seerdb.types import decode_value
 
     Record = Rows[0]
     for Pos, Values in zip(Record['return_positions'], Record['return_values']):
@@ -806,7 +806,7 @@ def _resolve_lobs(Connection, Row: list) -> list:
     # CLOB → str, BLOB → bytes, empty → "" / b"", NULL stays as None (the
     # row decoder already handed back None for NULL LOBs before they ever
     # became LOB objects).
-    from oracle.lob import LOB
+    from seerdb.lob import LOB
 
     Out = list(Row)
     for I, Val in enumerate(Out):
@@ -823,7 +823,7 @@ def _check_object_bind_support(Connection, Bind, Batch=None) -> None:
     # PL/SQL associative-array bind (#122; pre-12c mis-types it, PLS-00306).
     # Refuse both up front on pre-12c with a clear error. (Object/collection
     # *decode* works on all tiers — only these binds are 12c+.)
-    from oracle.dbobject import DbObject, DbRef
+    from seerdb.dbobject import DbObject, DbRef
 
     if getattr(Connection, 'field_version', 0) >= FIELD_VERSION_12_1:
         return
@@ -851,14 +851,14 @@ def _resolve_objects(Connection, Row: list) -> list:
     # kept the packed image without decoding it (the attribute layout isn't
     # known at decode time); fetch the layout for the type now (cached on the
     # connection) and walk the image. NULL objects already came back as None.
-    from oracle.dbobject import (
+    from seerdb.dbobject import (
         DbObject,
         ObjectImage,
         decode_collection_image,
         decode_object_image,
         decode_xmltype,
     )
-    from oracle.lob import LOB
+    from seerdb.lob import LOB
 
     Out = list(Row)
     for I, Val in enumerate(Out):

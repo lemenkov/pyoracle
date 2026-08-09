@@ -13,8 +13,8 @@ python-oracledb on 21c (docs/PROTOCOL.md §14) — no server needed.
 import struct
 import unittest
 
-from oracle.datatypes import TempLob
-from oracle.tns import (
+from seerdb.datatypes import TempLob
+from seerdb.tns import (
     _DECODE_FIELD_VERSION,
     _ENCODE_FIELD_VERSION,
     decode_lobops_oer,
@@ -22,7 +22,7 @@ from oracle.tns import (
     encode_token_oac,
     encode_token_rxd,
 )
-from oracle.tns_consts import TNS_LOB_OP_WRITE
+from seerdb.tns_consts import TNS_LOB_OP_WRITE
 
 
 class _FieldVersionIsolated(unittest.TestCase):

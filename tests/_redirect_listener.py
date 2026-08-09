@@ -7,14 +7,14 @@
 #
 # It is a test fixture, not a production component: it accepts a connection,
 # reads (and discards) the client's CONNECT packet, sends one REDIRECT packet
-# carrying a connect descriptor for the backend, and closes. pyoracle should
+# carrying a connect descriptor for the backend, and closes. seerdb should
 # then reconnect to the backend and complete the handshake there.
 
 import socket
 import struct
 import threading
 
-from oracle.tns_consts import TNS_REDIRECT
+from seerdb.tns_consts import TNS_REDIRECT
 
 
 class RedirectListener:

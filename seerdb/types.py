@@ -12,10 +12,10 @@ import struct
 import zoneinfo
 from decimal import Decimal, InvalidOperation
 
-from oracle._tzregions import TZ_REGIONS
-from oracle.datatypes import IntervalYM
-from oracle.exceptions import DataError
-from oracle.tns_consts import (
+from seerdb._tzregions import TZ_REGIONS
+from seerdb.datatypes import IntervalYM
+from seerdb.exceptions import DataError
+from seerdb.tns_consts import (
     AL16UTF16_CHARSET,
     AL32UTF8_CHARSET,
     ISO_LATIN_1_CHARSET,
@@ -362,7 +362,7 @@ def decode_value(Column: dict, Data: bytes | list | None) -> object:
         # DbRef (raw bytes + the referenced type when the describe carried it)
         # rather than bare bytes; dereference in SQL with DEREF(...) to get the
         # object. NULL was already handled above.
-        from oracle.dbobject import DbRef
+        from seerdb.dbobject import DbRef
 
         return DbRef(
             bytes(Data),

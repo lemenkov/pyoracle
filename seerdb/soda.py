@@ -5,7 +5,7 @@
 
 A thin-mode SODA layer built on the database's ``DBMS_SODA`` PL/SQL package —
 python-oracledb only offers SODA in thick mode, so there is no native thin wire
-to speak; the documented PL/SQL API is the thin path and pyoracle already drives
+to speak; the documented PL/SQL API is the thin path and seerdb already drives
 PL/SQL blocks + binds. The public surface mirrors oracledb's SODA API (camelCase,
 following the cross-language SODA spec): ``connection.getSodaDatabase()`` returns
 a `SodaDatabase`, whose collections are `SodaCollection` objects holding
@@ -17,7 +17,7 @@ documents (insert / read / upsert / bulk), query-by-example find with streaming,
 update / delete, and indexing + data guide.
 
 A document's content is bound into ``DBMS_SODA`` as bytes; a value over the
-32767-byte PL/SQL limit rides pyoracle's transparent temp-LOB bind (#91).
+32767-byte PL/SQL limit rides seerdb's transparent temp-LOB bind (#91).
 Reading content back returns the inline 32767-byte window from the batch read,
 and slices anything larger out of the BLOB in 32767-byte chunks via a follow-up
 round trip per oversized document.
@@ -25,8 +25,8 @@ round trip per oversized document.
 
 import json
 
-from oracle.datatypes import DB_TYPE_NUMBER, DB_TYPE_RAW, DB_TYPE_VARCHAR
-from oracle.exceptions import DatabaseError, NotSupportedError
+from seerdb.datatypes import DB_TYPE_NUMBER, DB_TYPE_RAW, DB_TYPE_VARCHAR
+from seerdb.exceptions import DatabaseError, NotSupportedError
 
 # get_data_guide raises this when the collection has no data-guide-enabled
 # search index; oracledb returns None in that case, so we map it.

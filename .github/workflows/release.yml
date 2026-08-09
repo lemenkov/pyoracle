@@ -36,7 +36,7 @@ jobs:
 
       - name: Run offline test suite
         # Gate the release on the offline-safe tests. The DB-backed
-        # integration tests stay opt-in via PYORACLE_TEST_USER and are
+        # integration tests stay opt-in via SEERDB_TEST_USER and are
         # not run here — they need a live Oracle and can't gate CI.
         run: python -m unittest -v
                 tests.test_crypto
@@ -65,7 +65,7 @@ jobs:
           # Changelog" comparison link. Same format as clicking
           # "Generate release notes" in the GitHub UI.
           gh release create "${GITHUB_REF_NAME}" \
-            --title "pyoracle ${GITHUB_REF_NAME}" \
+            --title "seerdb ${GITHUB_REF_NAME}" \
             --generate-notes \
             --verify-tag \
             dist/*

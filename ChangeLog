@@ -1,6 +1,10 @@
 Entries are sorted chronologically from oldest to youngest within each release,
 releases are sorted from youngest to oldest.
 
+version 2.0.0:
+- Renamed the project to **seerdb**. The import package is now `seerdb` (was `oracle`): change `import oracle` / `from oracle...` to `import seerdb` / `from seerdb...`, and `oracle.connect(...)` to `seerdb.connect(...)`. The PyPI distribution is `seerdb`. Test env vars are now `SEERDB_TEST_*`. No functional or protocol changes — purely the rename. (breaking)
+- Adopt ruff (format + lint) across the codebase, with a Lint CI gate.
+
 version 1.10.3:
 - Decoders raise domain errors (DataError / OsonError / VectorError) on malformed input instead of leaking raw ValueError / IndexError (#224, #225, #231)
 - Bound the OSON (JSON) and VECTOR image decoders so a malformed or hostile image cannot hang the client (#226, #228)

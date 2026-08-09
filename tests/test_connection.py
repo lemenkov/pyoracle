@@ -6,14 +6,14 @@ import threading
 import time
 import unittest
 
-from oracle.connection import (
+from seerdb.connection import (
     _FV2_MAX_RAW_BIND,
     _FV2_MAX_VARCHAR_BIND,
     OracleConnect,
     _check_fv2_bind_sizes,
     _split_proxy_user,
 )
-from oracle.exceptions import DatabaseError, NotSupportedError, OperationalError
+from seerdb.exceptions import DatabaseError, NotSupportedError, OperationalError
 
 
 class TestProxyUser(unittest.TestCase):

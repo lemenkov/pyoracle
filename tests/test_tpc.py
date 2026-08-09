@@ -7,13 +7,13 @@
 
 import unittest
 
-from oracle.connection import Xid, _decode_tpc_context, _decode_tpc_state
-from oracle.tns import (
+from seerdb.connection import Xid, _decode_tpc_context, _decode_tpc_state
+from seerdb.tns import (
     _ENCODE_FIELD_VERSION,
     encode_tpc_change_state,
     encode_tpc_switch,
 )
-from oracle.tns_consts import (
+from seerdb.tns_consts import (
     TNS_FUNC_TPC_TXN_CHANGE_STATE,
     TNS_FUNC_TPC_TXN_SWITCH,
     TNS_TPC_TXN_PREPARE,

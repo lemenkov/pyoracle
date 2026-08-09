@@ -6,14 +6,14 @@
 # Decoding a SQL object column is two-phase (mirrors python-oracledb's
 # base.pyx _process_column_data -> read_dbobject):
 #   1. DESCRIBE gives the column's type identity (owner + name, captured in the
-#      DCB by oracle.tns). The ordered attribute layout is fetched separately
+#      DCB by seerdb.tns). The ordered attribute layout is fetched separately
 #      from the data dictionary (ALL_TYPE_ATTRS) and cached per connection.
 #   2. ROW: the wire value carries a small framing wrapper plus a packed
 #      "image"; the image is the attributes serialised length-prefixed in
 #      declaration order behind a short header.
 #
 # This module owns the image walk (decode_object_image) and the surfaced
-# Python value (DbObject). The wire-framing wrapper is read in oracle.tns
+# Python value (DbObject). The wire-framing wrapper is read in seerdb.tns
 # (which hands us an ObjectImage placeholder); the layout fetch lives on the
 # connection. Read-only here -- binding an object is #116, and VARRAY / nested
 # table / REF are #117 / #118 / #119.
@@ -26,8 +26,8 @@ from __future__ import annotations
 
 import builtins
 
-from oracle.exceptions import NotSupportedError
-from oracle.tns_consts import (
+from seerdb.exceptions import NotSupportedError
+from seerdb.tns_consts import (
     AL32UTF8_CHARSET,
     TNS_TYPE_BDOUBLE,
     TNS_TYPE_BFLOAT,
@@ -68,7 +68,7 @@ _XML_TYPE_FLAG_SKIP_NEXT_4 = 0x100000
 _XML_TYPE_LEGACY_STORAGE = 0x01000000
 
 # Map an ALL_TYPE_ATTRS.attr_type_name to the TNS data type code that
-# oracle.types.decode_value understands. The image stores each scalar with the
+# seerdb.types.decode_value understands. The image stores each scalar with the
 # same on-wire encoding the column form uses, so the existing scalar decoders
 # apply unchanged. Timestamp variants all decode through decode_date (which
 # keys on byte length), so collapsing them onto TNS_TYPE_TIMESTAMP is safe.
@@ -184,7 +184,7 @@ class DbRef:
 
     def __repr__(self):
         Label = f' {self._type_name}' if self._type_name else ''
-        return f'<oracle.DbRef{Label} {self._locator.hex()}>'
+        return f'<seerdb.DbRef{Label} {self._locator.hex()}>'
 
 
 class DbObjectType:
@@ -255,7 +255,7 @@ class DbObjectType:
 
     def __repr__(self):
         Kind = 'collection ' if self.is_collection else ''
-        return f'<oracle.DbObjectType {Kind}{self.full_name}>'
+        return f'<seerdb.DbObjectType {Kind}{self.full_name}>'
 
 
 class DbObject:
@@ -374,9 +374,9 @@ class DbObject:
     def __repr__(self):
         Name = self._type_name or 'OBJECT'
         if self._is_collection:
-            return f'<oracle.DbObject {Name}{self._elements!r}>'
+            return f'<seerdb.DbObject {Name}{self._elements!r}>'
         Body = ', '.join(f'{N}={self._attrs[N]!r}' for N in self._order)
-        return f'<oracle.DbObject {Name}({Body})>'
+        return f'<seerdb.DbObject {Name}({Body})>'
 
 
 def _read_length(Image: bytes, Pos: int) -> tuple[int | None, int]:
@@ -416,7 +416,7 @@ def decode_object_image(
     ``Layout`` is the ordered attribute list from the data dictionary; each
     entry is ``{'name': str, 'data_type': int|None, 'charset': int|None}``.
     """
-    from oracle.types import decode_value
+    from seerdb.types import decode_value
 
     Pos = _read_image_header(Image)
     Attrs: list[tuple[str, object]] = []
@@ -480,7 +480,7 @@ def decode_collection_image(
     decoded with the single element type. A NULL element is ``None``. (PL/SQL
     associative arrays prefix each element with an int32 key -- that is #122.)
     """
-    from oracle.types import decode_value
+    from seerdb.types import decode_value
 
     Pos = _read_image_header(Image)
     Pos += 1  # collection flags (skip)

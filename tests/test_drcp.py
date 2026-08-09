@@ -8,9 +8,9 @@
 
 import unittest
 
-from oracle.connection import OracleConnect
-from oracle.tns import decode_packet, encode_dictionary_description
-from oracle.tns_consts import PURITY_SELF, TTI_STA, TTI_SVR_PIGGYBACK
+from seerdb.connection import OracleConnect
+from seerdb.tns import decode_packet, encode_dictionary_description
+from seerdb.tns_consts import PURITY_SELF, TTI_STA, TTI_SVR_PIGGYBACK
 
 
 def _env(**extra):
@@ -19,7 +19,7 @@ def _env(**extra):
         'port': 1521,
         'user': 'u',
         'service_name': 'svc',
-        'app_name': 'pyoracle',
+        'app_name': 'seerdb',
     }
     base.update(extra)
     return {'env': base}

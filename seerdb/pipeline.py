@@ -64,7 +64,7 @@ class PipelineOp:
 
     def __repr__(self):
         what = self.statement or self.name or ''
-        return f'<oracle.PipelineOp {self.op_type.name} {what!r}>'
+        return f'<seerdb.PipelineOp {self.op_type.name} {what!r}>'
 
 
 class PipelineOpResult:
@@ -82,7 +82,7 @@ class PipelineOpResult:
 
     def __repr__(self):
         state = 'error' if self.error else 'ok'
-        return f'<oracle.PipelineOpResult {self.operation.op_type.name} {state}>'
+        return f'<seerdb.PipelineOpResult {self.operation.op_type.name} {state}>'
 
 
 class Pipeline:

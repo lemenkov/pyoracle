@@ -1,4 +1,4 @@
-# pyoracle
+# seerdb
 
 A pure-Python driver for a proprietary database, implementing the
 [DB-API 2.0](https://peps.python.org/pep-0249/) interface by speaking the
@@ -8,7 +8,7 @@ No proprietary client libraries or SDKs are required.
 
 ## Status
 
-pyoracle is a functional pure-Python driver: the core DB-API 2.0 and SQL
+seerdb is a functional pure-Python driver: the core DB-API 2.0 and SQL
 surface is stable, and it already covers async connection pooling, server-side
 scrollable cursors, 23ai types (JSON / `BOOLEAN` / `VECTOR`), and the SODA
 document store. It is usable for the features listed below; the feature matrix
@@ -27,7 +27,7 @@ What works:
 - Authentication handshake (O3LOGON, O5LOGON with 128/192/256-bit keys)
 - Session setup and teardown
 - SQL statement execution, full result-set decoding (DCB / RXH / RXD / BVC)
-- DB-API 2.0 surface: `oracle.connect()`, `Connection.cursor()`,
+- DB-API 2.0 surface: `seerdb.connect()`, `Connection.cursor()`,
   `Cursor.execute / fetchone / fetchmany / fetchall / description /
   rowcount`, iteration protocol, context managers, PEP 249 exception
   hierarchy
@@ -48,9 +48,9 @@ What works:
   insensitive); accepted bind types are `int`, `float`, `Decimal`,
   `str`, `bytes`, `bool`, `datetime.date` / `datetime` (with optional
   timezone and microseconds), `datetime.timedelta` (→ INTERVAL DAY TO
-  SECOND), `oracle.IntervalYM(years, months)` (→ INTERVAL YEAR TO
+  SECOND), `seerdb.IntervalYM(years, months)` (→ INTERVAL YEAR TO
   MONTH), and `None`. A plain `float` binds as NUMBER; wrap it in
-  `oracle.BinaryFloat(x)` / `oracle.BinaryDouble(x)` to send a native
+  `seerdb.BinaryFloat(x)` / `seerdb.BinaryDouble(x)` to send a native
   32/64-bit IEEE-754 binary float (the only way to bind `inf` / `nan`,
   which a non-finite plain `float` also auto-routes to BINARY_DOUBLE).
   `str` and `bytes` binds round-trip into CLOB / BLOB columns at any
@@ -61,17 +61,17 @@ What works:
   ... :x ...; END;", [val])` runs the block server-side
 - Stored procedures and OUT / IN OUT binds: `cur.callproc(name,
   [in_val, out_var, ...])` where an OUT / IN OUT argument is a
-  `cur.var(type)` (type is a Python type or an `oracle` constant like
-  `oracle.NUMBER` / `oracle.STRING` / `oracle.DB_TYPE_TIMESTAMP` /
-  `oracle.DB_TYPE_TIMESTAMP_TZ` / `oracle.DB_TYPE_BINARY_FLOAT` /
-  `oracle.DB_TYPE_BINARY_DOUBLE` / `oracle.DB_TYPE_INTERVAL_DS` /
-  `oracle.DB_TYPE_INTERVAL_YM`). Seed an IN OUT value with
+  `cur.var(type)` (type is a Python type or an `seerdb` constant like
+  `seerdb.NUMBER` / `seerdb.STRING` / `seerdb.DB_TYPE_TIMESTAMP` /
+  `seerdb.DB_TYPE_TIMESTAMP_TZ` / `seerdb.DB_TYPE_BINARY_FLOAT` /
+  `seerdb.DB_TYPE_BINARY_DOUBLE` / `seerdb.DB_TYPE_INTERVAL_DS` /
+  `seerdb.DB_TYPE_INTERVAL_YM`). Seed an IN OUT value with
   `var.setvalue(0, v)`; read results with `var.getvalue()`. `callproc`
   returns the argument list with OUT slots replaced by their values.
   OUT binds also work through `cur.execute` directly (pass a `Var`).
   Stored functions: `cur.callfunc(name, return_type, [args...])` returns
-  the function's value (`return_type` is a Python type or `oracle`
-  constant). A REF CURSOR OUT parameter is a `cur.var(oracle.CURSOR)`;
+  the function's value (`return_type` is a Python type or `seerdb`
+  constant). A REF CURSOR OUT parameter is a `cur.var(seerdb.CURSOR)`;
   after the call `var.getvalue()` is a ready-to-fetch nested cursor.
   Available on both the sync and async cursors
 - Array DML: `cur.executemany(sql, [row1, row2, ...])` binds every row
@@ -85,11 +85,11 @@ What works:
   `US/Eastern`, resolves to the correct DST-aware offset via the stdlib
   `zoneinfo`, not a frozen Oracle offset table), BINARY_FLOAT / BINARY_DOUBLE →
   `float`, INTERVAL DAY TO SECOND → `datetime.timedelta`, INTERVAL YEAR
-  TO MONTH → `oracle.IntervalYM`, ROWID → `str` (the 18-char extended
+  TO MONTH → `seerdb.IntervalYM`, ROWID → `str` (the 18-char extended
   rowid, usable directly in a `WHERE ROWID = :r` bind), UROWID → `str`
   (the `*`-prefixed universal rowid, e.g. for index-organized tables),
   LONG → `str`, LONG RAW → `bytes`, NULL → `None`
-- TLS connections (pass `ssl=True` to `oracle.connect` for the system
+- TLS connections (pass `ssl=True` to `seerdb.connect` for the system
   trust store; or `ssl={"ca_certs": ..., "certfile": ..., ...}` for a
   custom configuration; or hand in an `ssl.SSLContext` directly)
 - DML rowcount and full server error messages: `cursor.rowcount`
@@ -126,19 +126,19 @@ What works:
   UPDATE / DELETE reuses the server-side cursor handle and skips
   the parse step. Cache size capped at 32 entries per connection
   (LRU eviction)
-- Connection pool: `oracle.create_pool(host=..., user=...,
+- Connection pool: `seerdb.create_pool(host=..., user=...,
   password=..., service_name=..., min=2, max=10)` returns a
   thread-safe pool of warm authenticated connections. `pool.acquire()`
   returns a context manager that releases on `__exit__`. Idle
   connections health-check on next acquire (configurable via
   `idle_timeout`)
-- Async (asyncio) API: `await oracle.connect_async(...)` returns
+- Async (asyncio) API: `await seerdb.connect_async(...)` returns
   an `AsyncOracleConnect`; `conn.cursor()` returns an
   `AsyncCursor` with `await cur.execute(...)`, `await cur.fetchone()`,
   `async for row in cur` iteration, and `async with` context
   managers. LOB cells (CLOB / BLOB / BFILE) auto-resolve through
   `await lob.aread()` exactly like the sync path. Async pool
-  via `await oracle.create_pool_async(...)` with the same
+  via `await seerdb.create_pool_async(...)` with the same
   `acquire/release/idle health-check` semantics as the sync `Pool`.
   Shares the protocol code with the sync APIs; the duplication is
   just the I/O layer
@@ -155,7 +155,7 @@ What works:
 
 ## Design goals & non-goals
 
-pyoracle is **pure Python by design** — no C extensions, no build step, no
+seerdb is **pure Python by design** — no C extensions, no build step, no
 compiler, and no Oracle Instant Client. It installs anywhere CPython runs
 (`pip install`, no per-platform wheels), the whole package is type-annotated and
 mypy-checked in CI, and the source stays easy to read, audit, and contribute to.
@@ -239,9 +239,9 @@ pip install .
 ## Quick start
 
 ```python
-import oracle
+import seerdb
 
-with oracle.connect(host="dbhost", port=1521, user="scott",
+with seerdb.connect(host="dbhost", port=1521, user="scott",
                     password="tiger", service_name="MYDB") as conn:
     with conn.cursor() as cur:
         cur.execute(
@@ -256,11 +256,11 @@ with oracle.connect(host="dbhost", port=1521, user="scott",
 
 ```python
 import asyncio
-import oracle
+import seerdb
 
 
 async def main():
-    async with await oracle.connect_async(
+    async with await seerdb.connect_async(
         host="dbhost", port=1521, user="scott",
         password="tiger", service_name="MYDB",
     ) as conn:
@@ -279,7 +279,7 @@ asyncio.run(main())
 A connection pool keeps authenticated sessions warm. Sync:
 
 ```python
-pool = oracle.create_pool(host="dbhost", user="scott",
+pool = seerdb.create_pool(host="dbhost", user="scott",
                           password="tiger", service_name="MYDB",
                           min=2, max=10)
 with pool.acquire() as conn:
@@ -290,7 +290,7 @@ pool.close()
 Async:
 
 ```python
-pool = await oracle.create_pool_async(host="dbhost", user="scott",
+pool = await seerdb.create_pool_async(host="dbhost", user="scott",
                                        password="tiger", service_name="MYDB",
                                        min=2, max=10)
 async with pool.acquire() as conn:
@@ -341,10 +341,18 @@ table.
 ## Contributing
 
 Pull requests are welcome. Please read
-[`CONTRIBUTING.md`](CONTRIBUTING.md) first — pyoracle's clean-room
+[`CONTRIBUTING.md`](CONTRIBUTING.md) first — seerdb's clean-room
 posture means there are a few sources you must NOT consult when
 preparing a contribution, and a few citation expectations to follow
 when you open a PR.
+
+## Trademarks
+
+Oracle and Oracle Database are trademarks or registered trademarks of Oracle
+Corporation and/or its affiliates. seerdb is an independent, unaffiliated,
+clean-room project — not endorsed by, sponsored by, or affiliated with Oracle
+Corporation. References to "Oracle" are nominative, describing the database this
+driver interoperates with. See [`NOTICE`](NOTICE).
 
 ## License
 
