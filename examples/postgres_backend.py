@@ -16,6 +16,7 @@ core; the driver dependency lives here, not in the library.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 
 import psycopg
@@ -33,6 +34,10 @@ from seerdb.server import (
     Result,
     UnsupportedFeature,
 )
+
+# Oracle numbered/named binds (:1, :name) → psycopg positional '%s'. The
+# negative lookbehind leaves any '::' cast untouched.
+_ORACLE_BIND = re.compile(r'(?<!:):\w+')
 
 # PostgreSQL type OIDs (pg_type.oid) → Oracle wire type.
 _NUMBER_OIDS = frozenset(
@@ -98,6 +103,8 @@ class PostgresBackend:
         self._conn = psycopg.connect(conninfo, autocommit=True)
 
     def execute(self, sql: str, binds: Sequence = ()) -> Result:
+        if binds:
+            sql = _ORACLE_BIND.sub('%s', sql)
         try:
             cursor = self._conn.execute(sql, tuple(binds) or None)
         except psycopg.Error as exc:

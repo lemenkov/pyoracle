@@ -12,12 +12,14 @@ encoders that answer it are layered on separately.
 from __future__ import annotations
 
 import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import (
     _bytes_with_length,
+    decode_dalc,
+    decode_token_oac,
     decode_ub4,
     encode_sb4,
     encode_token_datetime,
@@ -31,6 +33,7 @@ from seerdb.common.tns_consts import (
     TTI_RXD,
     TTI_RXH,
 )
+from seerdb.common.types import decode_value
 
 # AL32UTF8 — what seerdb advertises and what an 11g DUAL column reports.
 _CHARSET_AL32UTF8 = 873
@@ -45,20 +48,37 @@ _SERVER_VERSION_SLOT = 5
 
 @dataclass(frozen=True)
 class ExecRequest:
-    """A parsed execute: the SQL text and the surrounding execute options."""
+    """A parsed execute: the SQL text, its options, and any bind values."""
 
     sql: str
     cursor: int
     bind_count: int
     fetch: int
+    binds: list = field(default_factory=list)
+
+
+def _decode_bind_value(data_type: int, raw: bytes | list) -> object:
+    # A bind value from the RXD, decoded by its OAC type. An empty/NULL DALC
+    # (reported as a list by decode_dalc) is None.
+    if isinstance(raw, list) or not raw:
+        return None
+    column = {
+        'data_type': data_type,
+        'data_length': 0,
+        'precision': 0,
+        'data_scale': 0,
+        'charset': _CHARSET_AL32UTF8,
+        'csfrm': _CSFRM_DB,
+    }
+    return decode_value(column, bytes(raw))
 
 
 def parse_exec(payload: bytes) -> ExecRequest:
     """Parse an OALL8 execute payload (the TTC message from ``read_packet``).
 
-    Extracts the SQL text; bind *values* are not decoded yet (``bind_count``
-    reports how many there are). Raises :class:`InterfaceError` if the message
-    is not a TTI_ALL8 execute.
+    Extracts the SQL text and any bind values (positional, decoded by their OAC
+    type). Raises :class:`InterfaceError` if the message is not a TTI_ALL8
+    execute.
     """
     if len(payload) < 3 or payload[0] != TTI_FUN or payload[1] != TTI_ALL8:
         raise InterfaceError('not an OALL8 execute')
@@ -69,7 +89,7 @@ def parse_exec(payload: bytes) -> ExecRequest:
     query_flag, rest = rest[0], rest[1:]
     query_len, rest = decode_ub4(rest)
     _all8_flag, rest = rest[0], rest[1:]
-    _all8_len, rest = decode_ub4(rest)
+    all8_len, rest = decode_ub4(rest)
     rest = rest[2:]  # two reserved bytes
     _lmax, rest = decode_ub4(rest)
     fetch, rest = decode_ub4(rest)
@@ -82,7 +102,27 @@ def parse_exec(payload: bytes) -> ExecRequest:
 
     rest = rest[_MARKER_LEN + _SERVER_VERSION_SLOT :]
     sql = rest[:query_len].decode('utf-8') if query_flag else ''
-    return ExecRequest(sql=sql, cursor=cursor, bind_count=bind_count, fetch=fetch)
+
+    binds: list = []
+    if bind_count > 0:
+        # After the SQL: the al8 option array, then one OAC (type descriptor)
+        # per bind, then an RXD carrying the bind values.
+        after = rest[query_len:]
+        for _ in range(all8_len):
+            _, after = decode_ub4(after)
+        types = []
+        for _ in range(bind_count):
+            data_type, _maxlen, _scale, _charset, after = decode_token_oac(after, ())
+            types.append(data_type)
+        if after and after[0] == TTI_RXD:
+            after = after[1:]
+        for data_type in types:
+            raw, after = decode_dalc(after)
+            binds.append(_decode_bind_value(data_type, raw))
+
+    return ExecRequest(
+        sql=sql, cursor=cursor, bind_count=bind_count, fetch=fetch, binds=binds
+    )
 
 
 @dataclass(frozen=True)

@@ -163,7 +163,7 @@ def _answer_query(stream: PacketStream, backend: Backend, request: ExecRequest) 
     # connection — the Mirror must never desync, so even a backend that leaks a
     # native exception is caught and reported rather than dropping the wire.
     try:
-        result = backend.execute(request.sql)
+        result = backend.execute(request.sql, request.binds)
     except BackendError as err:
         logger.info('query refused: %s', err.ora_message)
         response = encode_error(err.ora_code, err.ora_message)
