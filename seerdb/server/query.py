@@ -12,6 +12,7 @@ encoders that answer it are layered on separately.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 
 from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import (
@@ -161,6 +162,14 @@ def _encode_value(value: object) -> bytes:
         return _bytes_with_length(encode_token_num(int(value)))
     if isinstance(value, (int, float)):
         return _bytes_with_length(encode_token_num(value))
+    if isinstance(value, Decimal):
+        # NUMBER: integral Decimals stay exact; fractional ones go through the
+        # float path (fine for typical values; >15 significant digits lose
+        # precision until a Decimal-native encoder lands).
+        integral = value == value.to_integral_value()
+        return _bytes_with_length(
+            encode_token_num(int(value) if integral else float(value))
+        )
     if isinstance(value, str):
         return _bytes_with_length(value.encode('utf-8'))
     if isinstance(value, bytes):
