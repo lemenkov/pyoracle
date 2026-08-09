@@ -191,6 +191,34 @@ def test_high_precision_numeric() -> None:
     )
 
 
+def test_executemany_array_dml_postgres() -> None:
+    listen, server, result = _start_mirror()
+    conn = _connect(listen.getsockname()[1])
+    try:
+        cur = conn.cursor()
+        cur.execute('drop table if exists t_many')
+        cur.execute('create table t_many (id integer, name varchar(20))')
+        cur.executemany(
+            'insert into t_many values (:1, :2)',
+            [(1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')],
+        )
+        rowcount = cur.rowcount
+        cur.execute('select id, name from t_many order by id')
+        rows = cur.fetchall()
+        cur.execute('drop table t_many')
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert rowcount == 4
+    assert rows == [(1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')]
+
+
 def test_fractional_number_bind_postgres() -> None:
     # psycopg maps a Decimal bind straight to numeric; the exact value survives
     # (the SQLite backend takes a lossy REAL path — this is the exact one).
