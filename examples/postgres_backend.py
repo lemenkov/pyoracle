@@ -20,7 +20,12 @@ from collections.abc import Sequence
 
 import psycopg
 
-from seerdb.common.tns_consts import TNS_TYPE_NUMBER, TNS_TYPE_RAW, TNS_TYPE_VARCHAR
+from seerdb.common.tns_consts import (
+    TNS_TYPE_DATE,
+    TNS_TYPE_NUMBER,
+    TNS_TYPE_RAW,
+    TNS_TYPE_VARCHAR,
+)
 from seerdb.server import (
     BackendError,
     Capability,
@@ -44,6 +49,7 @@ _NUMBER_OIDS = frozenset(
 )
 _TEXT_OIDS = frozenset({18, 19, 25, 1042, 1043})  # char name text bpchar varchar
 _RAW_OIDS = frozenset({17})  # bytea
+_DATE_OIDS = frozenset({1082, 1114, 1184})  # date, timestamp, timestamptz
 
 _ORA_INVALID_SQL = 900
 
@@ -53,6 +59,11 @@ def _column_meta(name: str, oid: int, values: list) -> ColumnMeta:
     if oid in _NUMBER_OIDS:
         return ColumnMeta(
             name=ident, data_type=TNS_TYPE_NUMBER, data_length=22, max_size=22
+        )
+    if oid in _DATE_OIDS:
+        # Oracle DATE (second precision); sub-second / time zone is dropped.
+        return ColumnMeta(
+            name=ident, data_type=TNS_TYPE_DATE, data_length=7, max_size=7
         )
     if oid in _RAW_OIDS:
         width = max(

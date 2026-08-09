@@ -11,6 +11,7 @@ encoders that answer it are layered on separately.
 
 from __future__ import annotations
 
+import datetime
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -19,6 +20,7 @@ from seerdb.common.tns import (
     _bytes_with_length,
     decode_ub4,
     encode_sb4,
+    encode_token_datetime,
     encode_token_num,
 )
 from seerdb.common.tns_consts import (
@@ -169,6 +171,19 @@ def _encode_value(value: object) -> bytes:
         integral = value == value.to_integral_value()
         return _bytes_with_length(
             encode_token_num(int(value) if integral else float(value))
+        )
+    if isinstance(value, datetime.datetime):
+        # Oracle DATE: date + time to the second. Sub-second precision and time
+        # zones (TIMESTAMP / TIMESTAMP WITH TIME ZONE) are dropped for now — the
+        # 7-byte DATE form keeps a fixed width for the column.
+        return _bytes_with_length(
+            encode_token_datetime(value.replace(microsecond=0, tzinfo=None))
+        )
+    if isinstance(value, datetime.date):
+        # A plain date is midnight of that day as a DATE (datetime is a date
+        # subclass, so it is matched above first).
+        return _bytes_with_length(
+            encode_token_datetime(datetime.datetime(value.year, value.month, value.day))
         )
     if isinstance(value, str):
         return _bytes_with_length(value.encode('utf-8'))
