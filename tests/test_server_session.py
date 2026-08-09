@@ -13,8 +13,11 @@ from __future__ import annotations
 import socket
 import threading
 
+import pytest
+
 import seerdb
 from seerdb.common.tns_consts import TNS_TYPE_VARCHAR
+from seerdb.server.backend import Result, UnsupportedFeature
 from seerdb.server.framing import PacketStream
 from seerdb.server.query import ColumnMeta
 from seerdb.server.session import handle_login, serve_session
@@ -22,14 +25,27 @@ from seerdb.server.session import handle_login, serve_session
 _CREDS = {'PYO': 'pyo123'}
 
 
-def _dual_backend(sql: str) -> tuple[list, list]:
-    # A trivial backend: answer any `... dual` with DUAL's single 'X' row.
-    if 'dual' in sql.lower():
-        col = ColumnMeta(
-            name=b'DUMMY', data_type=TNS_TYPE_VARCHAR, data_length=1, max_size=1
-        )
-        return [col], [('X',)]
-    return [], []
+class _DualBackend:
+    # A trivial Backend: DUAL returns 'X'; anything else is refused with a clean
+    # ORA error (so the Mirror answers, never desyncs).
+    capabilities = frozenset()
+
+    def execute(self, sql: str, binds=()) -> Result:
+        if 'dual' in sql.lower():
+            col = ColumnMeta(
+                name=b'DUMMY', data_type=TNS_TYPE_VARCHAR, data_length=1, max_size=1
+            )
+            return Result(columns=[col], rows=[('X',)])
+        raise UnsupportedFeature(f'the DUAL backend only knows DUAL: {sql!r}')
+
+    def commit(self) -> None:
+        pass
+
+    def rollback(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
 
 
 def _run_mirror(listen: socket.socket, result: dict) -> None:
@@ -85,7 +101,7 @@ def test_live_seerdb_login() -> None:
 def _run_mirror_session(listen: socket.socket, result: dict) -> None:
     conn, _ = listen.accept()
     try:
-        result['user'] = serve_session(PacketStream(conn), _CREDS, _dual_backend)
+        result['user'] = serve_session(PacketStream(conn), _CREDS, _DualBackend())
     except Exception as exc:  # noqa: BLE001 - surfaced to the test thread
         result['error'] = exc
     finally:
@@ -117,6 +133,49 @@ def test_live_seerdb_dual_query() -> None:
     )
     try:
         cursor = conn.cursor()
+        cursor.execute('select * from dual')
+        row = cursor.fetchone()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert row == ('X',)
+
+
+def test_unsupported_query_errors_but_keeps_connection() -> None:
+    # The cardinal rule: a refused query is an ORA error on a HEALTHY
+    # connection — never a desync. After the error, the connection still works.
+    listen = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listen.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listen.bind(('127.0.0.1', 0))
+    listen.listen(1)
+    port = listen.getsockname()[1]
+
+    result: dict = {}
+    server = threading.Thread(
+        target=_run_mirror_session, args=(listen, result), daemon=True
+    )
+    server.start()
+
+    conn = seerdb.connect(
+        host='127.0.0.1',
+        port=port,
+        user='PYO',
+        password='pyo123',
+        service_name='XE',
+        timeout=5000,
+    )
+    try:
+        cursor = conn.cursor()
+        with pytest.raises(seerdb.DatabaseError) as excinfo:
+            cursor.execute('select * from something_the_backend_refuses')
+        assert 'ORA-03001' in str(excinfo.value)
+        # The connection survived the error — a valid query still works.
         cursor.execute('select * from dual')
         row = cursor.fetchone()
     finally:

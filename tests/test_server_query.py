@@ -139,3 +139,15 @@ def test_unsupported_value_type_raises() -> None:
     col = ColumnMeta(name=b'N', data_type=TNS_TYPE_NUMBER, data_length=22, max_size=22)
     with pytest.raises(InterfaceError):
         encode_rows([(42,)], [col])
+
+
+def test_encode_error_reports_the_ora_code_and_message() -> None:
+    from seerdb.common.tns import decode_token_oer
+    from seerdb.server.query import encode_error
+
+    _DECODE_FIELD_VERSION.set(FIELD_VERSION_11_2)
+    result = decode_token_oer(
+        encode_error(942, 'ORA-00942: table or view does not exist'), (0, [], [])
+    )
+    assert result[1] == 942  # ErrCode
+    assert 'ORA-00942' in result[5]  # Message
