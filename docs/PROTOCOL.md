@@ -423,6 +423,49 @@ OCI. Both replay the captured 11g bytes so the client negotiates field version 6
 The `deadbeef` DTY reply (238 B) carries the same capability block the `TTI_PRO`
 dialect puts in its PRO reply, just packaged into the other message.
 
+#### 4.1.2 The deadbeef / OCI auth phase (server-side / the Mirror)
+
+Past the handshake, sqlplus / thick OCI marshals the whole O5LOGON exchange
+differently from the thin form, but over the **same mutual-auth crypto** (§4.3).
+The Mirror (`seerdb/server/`) drives it from captured 11g templates so a real
+sqlplus 11.2 logs in — verified live. The rounds:
+
+1. **Extra data-type round.** Unlike a thin client (which jumps from DTY to
+   OSESSKEY), sqlplus runs a third negotiation: a `ttc=02` request the server
+   answers with a fixed **26-byte** reply, *then* OSESSKEY.
+2. **OCI field marshalling.** The `TTI_FUN` auth messages (OSESSKEY, AUTH)
+   replace thin's `0x01` pointer bytes with an **8-byte `FE FF FF FF FF FF FF FF`
+   indicator** (`0xFFFFFFFFFFFFFFFE` LE) and use **fixed 4-byte little-endian
+   ub4** lengths (not Oracle variable-length ub4). The header up to the username
+   is constant, so the ub1-length-prefixed username sits at a **fixed offset 51**
+   (`parse_osesskey_oci` / `parse_auth_response_oci`).
+3. **Challenge** (S→C, **390 B**). A fixed template; only `AUTH_SESSKEY` (96 hex)
+   and the `AUTH_VFR_DATA` salt (20 hex — a **10-byte** salt, vs thin's 16) vary.
+   `encode_challenge_oci` substitutes those two fixed-size values in place.
+4. **AUTH** (C→S, ~906 B). Each key-value pair is `<key> <ub4 declared-len>
+   <DALC value>`: a fixed 4-byte length precedes a **DALC-chunked** (`0xFE`-marked)
+   uppercase-hex value — the same chunk encoding seerdb's client `decode_dalc`
+   reads. Un-hex gives the client's **48-byte `AUTH_SESSKEY`** (→ ConnKey via
+   `derive_conn_key`) and its **32-byte `AUTH_PASSWORD`** proof (→ `verify_password`).
+5. **Result** (S→C, **1762 B**). A fixed template carrying version/DB/NLS
+   descriptors plus `AUTH_SVR_RESPONSE`; only the proof (96 hex) and the
+   session-identity fields (session id, serial, server PID — which the client
+   does not cryptographically check) vary. `encode_result_oci` substitutes the
+   proof in place and keeps the template's identity values.
+
+**`AUTH_SVR_RESPONSE` is 48 bytes here, not thin's 16.** The real 11g listener
+sends `AES-CBC(nonce16 ‖ "SERVER_TO_CLIENT" ‖ PKCS7-pad, ConnKey)` — a 16-byte
+nonce, the marker, and a full 0x10 pad block. The client finds the marker
+substring after decrypting, so the nonce is an unchecked filler
+(`server_proof_oci`). Reconstructing it byte-for-byte from a decrypted live
+capture confirmed the structure.
+
+These captured templates are **stepping stones** — the crypto and offsets are
+understood; a proper `deadbeef` codec (encoding these packets field-by-field
+rather than replaying templates) can replace them later. Auth is only the login
+phase; the OCI **query** marshalling (post-login `ttc` calls) is the next
+frontier — a thin client's query response is not what sqlplus expects.
+
 ### 4.2 Data Type Negotiation (TTI_DTY)
 
 TTI_DTY (message type `2`, `TNS_MSG_TYPE_DATA_TYPES`) advertises the client's
