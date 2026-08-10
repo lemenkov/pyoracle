@@ -22,6 +22,7 @@ from seerdb.common.tns import (
     decode_dalc,
     decode_token_oac,
     decode_ub4,
+    encode_chr,
     encode_sb4,
     encode_token_binary_double,
     encode_token_binary_float,
@@ -281,10 +282,13 @@ def _encode_value(value: object, data_type: int) -> bytes:
         # datetime is a date subclass, so this one branch covers both; the
         # column's data_type decides DATE / TIMESTAMP / TIMESTAMPTZ width.
         return _bytes_with_length(_encode_temporal(value, data_type))
-    if isinstance(value, str):
-        return _bytes_with_length(value.encode('utf-8'))
-    if isinstance(value, bytes):
-        return _bytes_with_length(value)
+    if isinstance(value, (str, bytes)):
+        # A VARCHAR2 / RAW column value: length-prefixed data, chunked when it
+        # exceeds the single-byte length. encode_chr honours the negotiated field
+        # version (11g single-byte chunks vs 12c+ ub4 chunks) — _bytes_with_length
+        # always writes the 12c+ form, which an 11g client mis-decodes past 253
+        # bytes ("truncated DALC field").
+        return encode_chr(value)
     raise InterfaceError(f'unsupported column value type: {type(value).__name__}')
 
 

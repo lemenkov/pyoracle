@@ -147,6 +147,29 @@ def test_encode_rows_multiple_with_null() -> None:
     assert rows == [['hi', 'yo'], ['lo', None]]
 
 
+def test_encode_rows_large_values_chunk() -> None:
+    from seerdb.common.tns_consts import TNS_TYPE_RAW
+
+    # A VARCHAR2 / RAW value over the single-byte length (253) must chunk in the
+    # 11g form so the client decodes it — the regression that surfaced as
+    # "truncated DALC field" past 253 bytes.
+    big_str = 'x' * 1000
+    big_raw = bytes(range(256)) * 4  # 1024 bytes
+    cols = [
+        ColumnMeta(
+            name=b'S', data_type=TNS_TYPE_VARCHAR, data_length=4000, max_size=4000
+        ),
+        ColumnMeta(name=b'B', data_type=TNS_TYPE_RAW, data_length=2000, max_size=2000),
+    ]
+    response = (
+        encode_describe(cols)
+        + encode_rows([(big_str, big_raw)], cols)
+        + bytes([TTI_STA])
+    )
+    _, rows = _decode_response(response)
+    assert rows == [[big_str, big_raw]]
+
+
 def test_row_width_mismatch_raises() -> None:
     col = ColumnMeta(
         name=b'DUMMY', data_type=TNS_TYPE_VARCHAR, data_length=1, max_size=1

@@ -964,6 +964,13 @@ re-execute after EOF (`§5.2.1`).
 
 Contains the actual column values for one row, encoded according to each column's data type from the describe information.
 
+A character / RAW value longer than the single-byte DALC length (253 bytes) is
+**chunked**, and the chunk framing is field-version-specific (§6.4): 11g uses
+single-byte chunk lengths, 12c+ uses ub4 chunk lengths. A server must encode row
+values with the *negotiated* form — `seerdb/server/query.py` uses `encode_chr`
+(field-version-aware), not the always-12c+ `_bytes_with_length`, or an 11g client
+decodes a value past 253 bytes as a "truncated DALC field".
+
 ### 6.3 Bit Vector for Changed Columns (TTI_BVC)
 
 When the server uses differential row encoding it emits a BVC token
