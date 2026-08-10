@@ -12,7 +12,10 @@ from __future__ import annotations
 
 from binascii import unhexlify
 
+import pytest
+
 from seerdb.common.crypto import o5logon, validate
+from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import (
     decode_token_rpa,
     encode_dictionary_auth,
@@ -118,6 +121,32 @@ def test_parse_osesskey_oci_recovers_the_username() -> None:
     )
     assert parse_osesskey_oci(pyo) == b'pyo'
     assert parse_osesskey_oci(abcdefgh) == b'abcdefgh'
+
+
+def test_encode_challenge_oci_substitutes_the_crypto_values() -> None:
+    # The OCI challenge is the captured 390-byte template with AUTH_SESSKEY and
+    # the salt substituted in place (#265). Validated live: sqlplus accepts it
+    # and sends AUTH.
+    import secrets
+
+    from seerdb.server.auth import encode_challenge_oci, make_challenge
+
+    challenge = make_challenge(b'pyo123', salt=secrets.token_bytes(10))
+    packet = encode_challenge_oci(challenge)
+    assert len(packet) == 390  # fixed-size values keep the packet length
+    # the fresh crypto values are present where the template had the captured ones
+    i_sk = packet.index(b'AUTH_SESSKEY') + len(b'AUTH_SESSKEY') + 5
+    i_vfr = packet.index(b'AUTH_VFR_DATA') + len(b'AUTH_VFR_DATA') + 5
+    assert packet[i_sk : i_sk + 96] == challenge.auth_sesskey.hex().upper().encode()
+    assert packet[i_vfr : i_vfr + 20] == challenge.salt.hex().upper().encode()
+
+
+def test_encode_challenge_oci_rejects_wrong_sizes() -> None:
+    from seerdb.server.auth import encode_challenge_oci, make_challenge
+
+    # A 16-byte salt (the thin default) doesn't fit the OCI template's 20-hex slot.
+    with pytest.raises(InterfaceError):
+        encode_challenge_oci(make_challenge(b'pyo123'))
 
 
 def test_full_auth_roundtrip_through_seerdb_client_encoders() -> None:

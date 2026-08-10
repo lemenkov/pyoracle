@@ -43,6 +43,7 @@ from seerdb.common.crypto import cat_key, conn_key, pad2
 from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import decode_kv, decode_ub4, encode_kv, encode_sb4
 from seerdb.common.tns_consts import TTI_AUTH, TTI_FUN, TTI_RPA, TTI_SESS
+from seerdb.server._handshake_11g import CHALLENGE_TEMPLATE_SQLPLUS
 
 # O5LOGON uses AES-CBC with an all-zero IV throughout.
 _IV = bytes(16)
@@ -154,6 +155,40 @@ def encode_challenge(challenge: Challenge) -> bytes:
         + encode_kv(b'AUTH_SESSKEY', _hexval(challenge.auth_sesskey), 1)
         + encode_kv(b'AUTH_VFR_DATA', _hexval(challenge.salt), 1)
     )
+
+
+# AUTH_SESSKEY value = hex of the 48-byte encrypted server session (96 chars);
+# AUTH_VFR_DATA value = hex of the 10-byte salt (20 chars). Both are fixed-size,
+# so encode_challenge_oci substitutes them into the captured template in place.
+_OCI_SESSKEY_HEXLEN = 96
+_OCI_SALT_HEXLEN = 20
+
+
+def encode_challenge_oci(challenge: Challenge) -> bytes:
+    """Build the sqlplus / thick-OCI (deadbeef dialect) O5LOGON challenge (#265).
+
+    Returns the **full TNS_DATA packet** (header included), ready for
+    ``PacketStream.send_raw``. Only AUTH_SESSKEY and AUTH_VFR_DATA vary between
+    challenges, so the two fixed-size crypto values are substituted into the
+    captured 390-byte template in place. Requires an 11g-shaped challenge — a
+    48-byte encrypted server session (96 hex) and a 10-byte salt (20 hex): pass
+    ``make_challenge(secret, salt=token_bytes(10))``. Validated against live
+    sqlplus 11.2, which accepts it and proceeds to send AUTH.
+    """
+    sesskey = _hexval(challenge.auth_sesskey)
+    salt = _hexval(challenge.salt)
+    if len(sesskey) != _OCI_SESSKEY_HEXLEN or len(salt) != _OCI_SALT_HEXLEN:
+        raise InterfaceError(
+            'OCI challenge needs a 48-byte server session and a 10-byte salt, '
+            f'got {len(challenge.auth_sesskey)}/{len(challenge.salt)} bytes'
+        )
+    buf = bytearray(CHALLENGE_TEMPLATE_SQLPLUS)
+    # value offset = key end + ub4(len, LE) + ub1(len)
+    i_sk = buf.index(b'AUTH_SESSKEY') + len(b'AUTH_SESSKEY') + 5
+    i_vfr = buf.index(b'AUTH_VFR_DATA') + len(b'AUTH_VFR_DATA') + 5
+    buf[i_sk : i_sk + _OCI_SESSKEY_HEXLEN] = sesskey
+    buf[i_vfr : i_vfr + _OCI_SALT_HEXLEN] = salt
+    return bytes(buf)
 
 
 def encode_result(
