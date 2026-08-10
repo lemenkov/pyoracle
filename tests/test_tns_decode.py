@@ -2297,8 +2297,10 @@ class TestTnsCommandDecoders(unittest.TestCase):
         SessKey = b'10A73E6DA30B6CA5ADDD1EEC0B3981E152CB6CDCA6386ED6DA2B547E0EBB2D631D839CE846EC6DEF156EC12F6465161C'
         Salt = b'B03145C7EF60CA693E1D'
         DerivedSalt = None
+        # 11g challenge — no PBKDF2 count fields, so both surface as None.
         self.assertEqual(
-            decode_token_rpa(Data, None), (TTI_SESS, SessKey, Salt, DerivedSalt)
+            decode_token_rpa(Data, None),
+            (TTI_SESS, SessKey, Salt, DerivedSalt, None, None),
         )
 
     def test_tns_decode_token_rpa_01(self):
