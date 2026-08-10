@@ -40,6 +40,15 @@ PRO_REPLY_SQLPLUS = bytes.fromhex(
     '000400050b2002000001000200'
 )
 
+# S2C: the deadbeef dialect's THIRD negotiation reply (26B, #265). Unlike a thin
+# client (which does PRO then DTY, then jumps to OSESSKEY), sqlplus/thick OCI
+# runs an extra data-type round after the two above: a `ttc=02` request whose
+# capability block the server confirms with this fixed 26-byte answer, THEN the
+# client sends OSESSKEY. Captured from live sqlplus 11.2 <-> XE 11.2.
+TYPE_REPLY_SQLPLUS = bytes.fromhex(
+    '001a000006000000000002800000003c3c3c800000000000000e'
+)
+
 # S2C: server DTY reply (238B). Carries the same type-capability block the
 # TTI_PRO dialect puts in its PRO reply, packaged as the deadbeef DTY answer.
 DTY_REPLY_SQLPLUS = bytes.fromhex(

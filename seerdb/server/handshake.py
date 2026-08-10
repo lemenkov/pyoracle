@@ -22,6 +22,7 @@ from seerdb.server._handshake_11g import (
     DTY_REPLY_SQLPLUS,
     PRO_REPLY,
     PRO_REPLY_SQLPLUS,
+    TYPE_REPLY_SQLPLUS,
 )
 from seerdb.server.framing import DEFAULT_SDU
 
@@ -195,4 +196,13 @@ def encode_dty_reply(*, sqlplus: bool = False, sdu: int = DEFAULT_SDU) -> bytes:
     """
     reply = DTY_REPLY_SQLPLUS if sqlplus else DTY_REPLY
     packet, _ = encode_packet(TNS_DATA, reply[_DATA_PREFIX:], sdu)
+    return packet
+
+
+def encode_type_reply_sqlplus(*, sdu: int = DEFAULT_SDU) -> bytes:
+    """Build the deadbeef dialect's third-round data-type reply — the 26-byte
+    ``ttc=02`` confirmation sqlplus/thick OCI expects after PRO and DTY, before
+    it sends OSESSKEY (#265). Thin clients skip this round. Full TNS_DATA packet.
+    """
+    packet, _ = encode_packet(TNS_DATA, TYPE_REPLY_SQLPLUS[_DATA_PREFIX:], sdu)
     return packet
