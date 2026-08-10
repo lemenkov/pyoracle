@@ -101,12 +101,39 @@ def test_pro_reply_pins_field_version_11g() -> None:
 # --- sqlplus 'deadbeef' PRO dialect (#265) ---
 
 
+def _read_packet_body(raw: bytes) -> tuple[int, bytes]:
+    # Drive raw wire bytes through the real PacketStream.read_packet, so the body
+    # is exactly what the serve loop feeds pro_is_sqlplus (header + data-flags
+    # stripped) — not a hand-sliced approximation.
+    import socket
+
+    from seerdb.server.framing import PacketStream
+
+    a, b = socket.socketpair()
+    try:
+        a.sendall(raw)
+        a.shutdown(socket.SHUT_WR)
+        return PacketStream(b).read_packet()
+    finally:
+        a.close()
+        b.close()
+
+
 def test_pro_is_sqlplus_detects_the_deadbeef_dialect() -> None:
-    # The captured sqlplus PRO leads its TTC payload with the deadbeef magic;
-    # a thin (TTI_PRO) PRO does not. Body = packet minus the 8-byte TNS header.
-    assert pro_is_sqlplus(fx.PRO_CLIENT[8:]) is True
-    thin_pro = b'\x00\x00' + bytes([TTI_PRO, 6, 5, 4, 3, 2, 1, 0])
-    assert pro_is_sqlplus(thin_pro) is False
+    # Run the captured sqlplus PRO through read_packet — the exact path a live
+    # client exercises. read_packet strips the 8-byte header AND the 2-byte
+    # data-flags, so the deadbeef magic must be at the very start of the body.
+    # (Feeding a hand-sliced PRO_CLIENT[8:] hid an off-by-two here; a live
+    # sqlplus 11.2 caught it — #265.)
+    typ, body = _read_packet_body(fx.PRO_CLIENT)
+    assert typ == TNS_DATA
+    assert pro_is_sqlplus(body) is True
+
+    # A thin (TTI_PRO) PRO through the same path is not the sqlplus dialect.
+    thin_raw = struct.pack('>HHBBH', 8 + 2 + 8, 0, TNS_DATA, 0, 0)
+    thin_raw += b'\x00\x00' + bytes([TTI_PRO, 6, 5, 4, 3, 2, 1, 0])
+    _typ, thin_body = _read_packet_body(thin_raw)
+    assert pro_is_sqlplus(thin_body) is False
 
 
 def test_sqlplus_pro_reply_reproduces_the_captured_packet() -> None:
