@@ -16,6 +16,7 @@ usernames match case-insensitively); a backend-mapped auth API comes later.
 from __future__ import annotations
 
 import logging
+from typing import NoReturn
 
 from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import decode_ub4
@@ -38,6 +39,7 @@ from seerdb.server.auth import (
     make_challenge,
     parse_auth_response,
     parse_osesskey,
+    verify_password,
 )
 from seerdb.server.backend import Backend, BackendError, Result
 from seerdb.server.framing import PacketStream
@@ -102,24 +104,36 @@ def handle_login(stream: PacketStream, backend: Backend) -> str:
     user = parse_osesskey(_expect(stream, TNS_DATA, 'OSESSKEY')).decode('utf-8')
     secret = backend.authenticate(user)
     if secret is None:
-        # Reject the login the way Oracle does — an ORA-01017 OER in place of the
-        # challenge, which the client raises out of connect() — then drop the
-        # connection. (Without this the client would connect() cleanly and only
-        # fail on first use.)
-        stream.write_packet(
-            TNS_DATA,
-            encode_error(1017, 'ORA-01017: invalid username/password; logon denied'),
-        )
-        raise InterfaceError(f'authentication rejected for user: {user!r}')
+        _deny_login(stream, f'unknown user: {user!r}')
     challenge = make_challenge(secret.encode('utf-8'))
     stream.write_packet(TNS_DATA, encode_challenge(challenge))
 
-    _, client_sesskey = parse_auth_response(_expect(stream, TNS_DATA, 'AUTH'))
+    _, client_sesskey, auth_password = parse_auth_response(
+        _expect(stream, TNS_DATA, 'AUTH')
+    )
     conn_key = derive_conn_key(challenge, client_sesskey)
+    # Verify the client's password proof (AUTH_PASSWORD) against the account
+    # secret — the server half of O5LOGON's mutual auth. Without it the Mirror
+    # would serve any client that ignores the server proof it can't validate.
+    if not verify_password(conn_key, auth_password, secret.encode('utf-8')):
+        _deny_login(stream, f'wrong password for user: {user!r}')
     stream.write_packet(TNS_DATA, encode_result(conn_key))
 
     logger.info('login OK: %s', user)
     return user
+
+
+def _deny_login(stream: PacketStream, reason: str) -> NoReturn:
+    # Reject a login the way Oracle does — an ORA-01017 OER in place of the next
+    # auth reply, which the client raises out of connect() — then drop the
+    # connection. (Without this the client would connect() cleanly and fail
+    # later.) The message is deliberately generic (user vs password not
+    # distinguished) as Oracle's ORA-01017 is.
+    stream.write_packet(
+        TNS_DATA,
+        encode_error(1017, 'ORA-01017: invalid username/password; logon denied'),
+    )
+    raise InterfaceError(f'authentication rejected — {reason}')
 
 
 def serve_session(stream: PacketStream, backend: Backend) -> str:

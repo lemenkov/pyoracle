@@ -27,6 +27,7 @@ from seerdb.server.auth import (
     parse_auth_response,
     parse_osesskey,
     server_proof,
+    verify_password,
 )
 
 
@@ -117,10 +118,15 @@ def test_full_auth_roundtrip_through_seerdb_client_encoders() -> None:
             'env': {'user': 'PYO', 'password': password},
         }
     )
-    user, client_auth_sesskey = parse_auth_response(request)
+    user, client_auth_sesskey, auth_password = parse_auth_response(request)
     assert user == b'PYO'
     server_conn = derive_conn_key(challenge, client_auth_sesskey)
     assert server_conn == client_conn
+
+    # The server verifies the client's AUTH_PASSWORD proof against the account
+    # secret: the right password passes, a wrong one is rejected.
+    assert verify_password(server_conn, auth_password, b'pyo123')
+    assert not verify_password(server_conn, auth_password, b'wrongpass')
 
     # The result the server sends back, validated by the client's own check.
     _, resp, _, _ = decode_token_rpa(encode_result(server_conn)[1:], ())
