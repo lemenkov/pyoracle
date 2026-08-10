@@ -1437,6 +1437,13 @@ nanoseconds)`. Day biased by `2**31`; H/M/S biased by `60`; FracSec biased by
 `2**31`. All fields share the interval's sign. Maps to `datetime.timedelta`.
 Example: `5 04:03:02.123456` → `80 00 00 05 40 3f 3e 87 5b ca 00`.
 
+`timedelta` sub-microsecond precision is lost (Oracle stores nanoseconds; Python
+has microseconds), and its range is slightly narrower than Oracle's on the
+negative side: `timedelta.min` is exactly `-999_999_999 00:00:00`, whereas
+`INTERVAL DAY(9) TO SECOND` reaches `-999_999_999 23:59:59.999999`. seerdb raises
+`DataError` for such an out-of-range value rather than leaking Python's raw
+`OverflowError`. The positive extreme fits `timedelta.max`.
+
 ### 11.7 BINARY_FLOAT / BINARY_DOUBLE
 
 4-byte (float) / 8-byte (double) IEEE-754 in Oracle's **order-preserving** form
