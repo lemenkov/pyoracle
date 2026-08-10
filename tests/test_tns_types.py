@@ -462,8 +462,8 @@ class TestIntervalDS(unittest.TestCase):
             self.assertEqual(decode_interval_ds(encode_token_interval_ds(TD)), TD)
 
     def test_decode_extreme_valid_days(self):
-        # Oracle's INTERVAL DAY(9) maximum (+/-999_999_999 days) is exactly
-        # timedelta's own limit, so the legal extremes must still decode.
+        # +/-999_999_999 days at 00:00:00 sit exactly on timedelta's own limits,
+        # so these legal extremes must still decode.
         for Days in (999999999, -999999999):
             Raw = (
                 (2**31 + Days).to_bytes(4, 'big')
@@ -471,6 +471,20 @@ class TestIntervalDS(unittest.TestCase):
                 + (2**31).to_bytes(4, 'big')
             )
             self.assertEqual(decode_interval_ds(Raw), datetime.timedelta(days=Days))
+
+    def test_decode_most_negative_legal_interval_overflows(self):
+        # timedelta.min is exactly -999_999_999 00:00:00, but INTERVAL DAY(9) TO
+        # SECOND legally reaches -999_999_999 23:59:59.999999 -- a value a real
+        # server CAN send (#304). It overflows timedelta, so it must surface as a
+        # clean DataError, not a raw OverflowError. Frame: days=-999_999_999,
+        # H=M=S=-59/-23, frac=-999_999_000 ns.
+        Raw = (
+            (2**31 - 999999999).to_bytes(4, 'big')
+            + bytes([60 - 23, 60 - 59, 60 - 59])
+            + (2**31 - 999999000).to_bytes(4, 'big')
+        )
+        with self.assertRaises(DataError):
+            decode_interval_ds(Raw)
 
     def test_decode_out_of_range_raises_dataerror(self):
         # Raw day counts a real server cannot send (beyond DAY(9)) overflow

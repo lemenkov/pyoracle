@@ -260,11 +260,13 @@ def decode_interval_ds(Data: bytes) -> datetime.timedelta | None:
             microseconds=Nanos // 1000,
         )
     except OverflowError as Exc:
-        # A valid INTERVAL DAY TO SECOND always fits in timedelta -- Oracle's
-        # DAY(9) maximum of +/-999_999_999 days coincides with timedelta's own
-        # limit -- so an overflow here means the raw bytes are out of range: a
-        # corrupt or truncated frame, not a value any server can legally send.
-        # Surface it as DataError rather than leaking the raw OverflowError.
+        # Python's timedelta range is slightly narrower than Oracle's on the
+        # negative side: timedelta.min is exactly -999_999_999 days 00:00:00,
+        # whereas INTERVAL DAY(9) TO SECOND reaches -999_999_999 23:59:59.999999.
+        # So the most-negative legal Oracle intervals (and any corrupt / truncated
+        # frame) overflow timedelta. Surface a clean DataError rather than leaking
+        # the raw OverflowError (python-oracledb leaks it). The positive extreme
+        # (+999_999_999 23:59:59.999999) does fit timedelta.max.
         raise DataError(
             f'INTERVAL DAY TO SECOND value out of range (days={Days})'
         ) from Exc
