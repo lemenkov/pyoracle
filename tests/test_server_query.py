@@ -103,6 +103,26 @@ def test_multiple_columns_and_not_null_roundtrip() -> None:
     assert cols[1]['max_size'] == 30
 
 
+def test_describe_carries_number_precision_and_scale() -> None:
+    # A NUMBER(p, s) column's precision/scale must survive the describe so the
+    # client can surface them in cursor.description (fields 4 and 5).
+    payload = encode_describe(
+        [
+            ColumnMeta(
+                name=b'AMT',
+                data_type=TNS_TYPE_NUMBER,
+                data_length=22,
+                max_size=22,
+                precision=10,
+                scale=2,
+            )
+        ]
+    )
+    col = _decode_describe(payload)[0]
+    assert col['precision'] == 10
+    assert col['data_scale'] == 2
+
+
 def test_encode_rows_dual() -> None:
     col = ColumnMeta(
         name=b'DUMMY', data_type=TNS_TYPE_VARCHAR, data_length=1, max_size=1
