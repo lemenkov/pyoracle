@@ -148,6 +148,15 @@ def test_sqlplus_dty_reply_reproduces_the_captured_packet() -> None:
     assert DTY_REPLY_SQLPLUS == fx.DTY_SERVER
 
 
+def test_sqlplus_type_reply_reproduces_the_captured_packet() -> None:
+    # The deadbeef dialect's third round: re-wrapping the stored 26-byte ttc=02
+    # reply reproduces the real server packet (#265).
+    from seerdb.server._handshake_11g import TYPE_REPLY_SQLPLUS
+    from seerdb.server.handshake import encode_type_reply_sqlplus
+
+    assert encode_type_reply_sqlplus() == TYPE_REPLY_SQLPLUS
+
+
 def test_dialects_are_distinct() -> None:
     # The two dialects' replies are genuinely different shapes (238/924 vs
     # 127/238), so serving the wrong one would break the handshake.

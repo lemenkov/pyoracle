@@ -47,6 +47,7 @@ from seerdb.server.handshake import (
     encode_accept,
     encode_dty_reply,
     encode_pro_reply,
+    encode_type_reply_sqlplus,
     parse_connect,
     pro_is_sqlplus,
 )
@@ -104,6 +105,12 @@ def handle_login(stream: PacketStream, backend: Backend) -> str:
     stream.send_raw(encode_pro_reply(sqlplus=sqlplus))
     _expect(stream, TNS_DATA, 'DTY')
     stream.send_raw(encode_dty_reply(sqlplus=sqlplus))
+    if sqlplus:
+        # sqlplus / thick OCI runs a third data-type negotiation round after DTY
+        # (a `ttc=02` request) before it sends OSESSKEY; a thin client skips it
+        # (#265).
+        _expect(stream, TNS_DATA, 'TYPE')
+        stream.send_raw(encode_type_reply_sqlplus())
 
     # --- O5LOGON (§4) ---
     user = parse_osesskey(_expect(stream, TNS_DATA, 'OSESSKEY')).decode('utf-8')
