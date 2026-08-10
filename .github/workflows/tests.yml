@@ -138,6 +138,11 @@ jobs:
           SEERDB_TEST_PORT: "1521"
           SEERDB_TEST_SERVICE: ${{ matrix.db.service }}
           SEERDB_TEST_FIELD_VERSION: ${{ matrix.db.field_version }}
+          # DBA login for the pre-SHA-2 verifier login test (#311): it forges a
+          # throwaway 11g-only account. The gvenzl images set SYSTEM to
+          # ORACLE_PASSWORD. Harmless on 11g (that test skips on a pre-12c server).
+          SEERDB_TEST_ADMIN_USER: system
+          SEERDB_TEST_ADMIN_PASSWORD: oracle
           # Pace logins under XE's logon-storm throttle (ORA-01013), and retry a
           # whole test that still trips it.
           SEERDB_TEST_CONNECT_DELAY: "0.25"

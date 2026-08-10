@@ -12,6 +12,13 @@
 #
 # The DB user only needs CREATE SESSION and CREATE TABLE privileges plus a
 # writable tablespace. Each test creates and drops its own scratch table.
+#
+# Optional — only the pre-SHA-2 verifier login test (#311) uses these; it forges
+# and drops a throwaway 11g-only account, so it needs a DBA login (and skips if
+# absent):
+#
+#   SEERDB_TEST_ADMIN_USER      a DBA (e.g. 'system')
+#   SEERDB_TEST_ADMIN_PASSWORD
 
 import datetime
 import math
@@ -108,6 +115,16 @@ _FV_KW = {'field_version': _FIELD_VERSION} if _FIELD_VERSION else {}
 _SKIP_REASON = (
     'integration tests require a real DB connection; '
     'set SEERDB_TEST_USER (and SEERDB_TEST_PASSWORD) to enable'
+)
+
+# A DBA login, used only by the pre-SHA-2-verifier login test (#311) to forge an
+# 11g-only account. Kept separate from the app user so the rest of the suite
+# still runs with a least-privilege account.
+_ADMIN_USER = os.environ.get('SEERDB_TEST_ADMIN_USER')
+_ADMIN_PASSWORD = os.environ.get('SEERDB_TEST_ADMIN_PASSWORD', '')
+_ADMIN_SKIP_REASON = (
+    'set SEERDB_TEST_ADMIN_USER / SEERDB_TEST_ADMIN_PASSWORD (a DBA) to enable '
+    'the pre-SHA-2 verifier login test (#311)'
 )
 
 
@@ -4140,6 +4157,143 @@ class CallprocIntegration(_IntegrationBase):
             self.assertEqual(self.cur.callfunc(fn, seerdb.DB_TYPE_BINARY_DOUBLE), 9.875)
         finally:
             self.cur.execute(f'DROP FUNCTION {fn}')
+
+
+@unittest.skipUnless(_USER, _SKIP_REASON)
+@unittest.skipUnless(_ADMIN_USER, _ADMIN_SKIP_REASON)
+class PreSha2VerifierLoginIntegration(unittest.TestCase):
+    """#311/#312: authenticate an account whose *only* password verifier is the
+    11g SHA-1 one against a modern (12c+) server.
+
+    Such a server sends AUTH_VFR_DATA (an 11g salt, with verifier-type flag
+    6949) *and* AUTH_PBKDF2_CSK_SALT together, and the client must combine
+    SHA-1 key material with the modern PBKDF2 (192-bit) session-key derivation.
+    Before #312 this raised ORA-01017.
+
+    A stock account always also carries the SHA-2 (``T:``) verifier, so the
+    server would pick SHA-2 and never exercise this path. We forge an 11g-only
+    account with a supported ``IDENTIFIED BY VALUES 'S:<sha1||salt>'`` — no
+    SYS.USER$ surgery (that is ORA-41900 on 23ai). Needs a DBA to create the
+    account and skips on a pre-12c server, which does not send
+    AUTH_PBKDF2_CSK_SALT and so is not this path.
+    """
+
+    _ACCOUNT = 'PYO_VFR11G'
+    _PW = 'pyo123'
+    _SALT = bytes(range(1, 11))  # fixed salt → deterministic 11g verifier
+
+    @classmethod
+    def _s_verifier(cls) -> str:
+        # Oracle 11g verifier: SHA1(password_bytes || salt) || salt, stored as
+        # S:<40-hex sha1><20-hex salt>. The server hands the salt back as
+        # AUTH_VFR_DATA during O5LOGON; the client recomputes the same SHA1.
+        from hashlib import sha1
+
+        digest = sha1(cls._PW.encode() + cls._SALT).digest()
+        return 'S:' + (digest + cls._SALT).hex().upper()
+
+    def _admin_ddl(self, *statements: str) -> None:
+        cur = self._admin.cursor()
+        try:
+            for sql in statements:
+                cur.execute(sql)
+        finally:
+            cur.close()
+
+    def _drop_account(self) -> None:
+        try:
+            self._admin_ddl(f'DROP USER {self._ACCOUNT} CASCADE')
+        except seerdb.DatabaseError:
+            # First run (or a clean teardown already happened): nothing to drop.
+            pass
+
+    def setUp(self):
+        # This path only exists on a 12c+ server (it alone sends
+        # AUTH_PBKDF2_CSK_SALT). Detect the tier from a normal connection's
+        # negotiated field version and skip cleanly on 9i/10g/11g *before*
+        # provisioning, so no DBA is needed on those tiers.
+        probe = _connect()
+        modern = probe.field_version >= FIELD_VERSION_12_1
+        probe.close()
+        if not modern:
+            self.skipTest('#311 path needs a 12c+ server (sends AUTH_PBKDF2_CSK_SALT)')
+        self._admin = seerdb.connect(
+            host=_HOST,
+            port=_PORT,
+            user=_ADMIN_USER,
+            password=_ADMIN_PASSWORD,
+            service_name=_SERVICE,
+            autocommit=True,
+            **_FV_KW,
+        )
+        self._drop_account()
+        self._admin_ddl(
+            f"CREATE USER {self._ACCOUNT} IDENTIFIED BY VALUES '{self._s_verifier()}'",
+            f'GRANT CREATE SESSION TO {self._ACCOUNT}',
+        )
+
+    def tearDown(self):
+        try:
+            self._drop_account()
+        finally:
+            self._admin.close()
+
+    def _connect_capturing_challenge(self):
+        # Log in as the forged account, capturing the SESS challenge the server
+        # sent so we can assert it really is the #311 combination.
+        import seerdb.client.connection as _cm
+
+        captured = {}
+        original = _cm.decode_token_rpa
+
+        def spy(data, acc):
+            result = original(data, acc)
+            if isinstance(result, tuple) and len(result) == 7:  # SESS challenge
+                captured['sess'] = result
+            return result
+
+        _cm.decode_token_rpa = spy
+        try:
+            conn = seerdb.connect(
+                host=_HOST,
+                port=_PORT,
+                user=self._ACCOUNT,
+                password=self._PW,
+                service_name=_SERVICE,
+                autocommit=True,
+                **_FV_KW,
+            )
+        finally:
+            _cm.decode_token_rpa = original
+        return conn, captured.get('sess')
+
+    def test_pre_sha2_account_authenticates_on_modern_server(self):
+        try:
+            conn, sess = self._connect_capturing_challenge()
+        except seerdb.DatabaseError as e:
+            if getattr(e, 'code', None) == 28040:
+                # Server configured to refuse the 11g auth protocol outright.
+                self.skipTest('server rejects 11g auth protocol (ORA-28040)')
+            # ORA-01017 here would be exactly the #311 regression — let it fail.
+            raise
+        try:
+            # The challenge must carry the #311 combination: an 11g SHA-1
+            # verifier (flag 6949) with a salt, alongside the modern PBKDF2
+            # session-key salt.
+            self.assertIsNotNone(sess, 'no SESS challenge was captured')
+            (_kind, _sesskey, salt, derived, _vgen, _sder, vfr) = sess
+            self.assertEqual(vfr, 6949, 'expected the 11g SHA-1 verifier-type flag')
+            self.assertIsNotNone(salt, 'AUTH_VFR_DATA salt must be present')
+            self.assertIsNotNone(
+                derived, 'AUTH_PBKDF2_CSK_SALT must be present on a modern server'
+            )
+            # And mutual auth actually completed end-to-end.
+            cur = conn.cursor()
+            cur.execute('SELECT 1 FROM dual')
+            self.assertEqual(cur.fetchone()[0], 1)
+            cur.close()
+        finally:
+            conn.close()
 
 
 if __name__ == '__main__':
