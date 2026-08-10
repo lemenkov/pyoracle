@@ -615,10 +615,23 @@ class Cursor:
         - ``"first"`` / ``"last"``: move to the first / last row.
 
         After the call the next ``fetchone()`` returns the row at the new
-        position. ``IndexError`` is raised if the target falls outside the
-        result set. With ``scrollable=True`` the reposition happens server-side
-        and rows are fetched lazily (#181); otherwise the whole result set is
-        already buffered and the reposition is local (#161).
+        position. A target *before* the first row always raises ``IndexError``.
+
+        A target *past the last row* deliberately differs by cursor kind:
+
+        - a **buffered** cursor (``scrollable=False``, and the 9i fallback)
+          raises ``IndexError`` — the PEP 249 / oracledb behaviour;
+        - a **server-side scrollable** cursor (``scrollable=True``, 10g+) leaves
+          the cursor positioned past the end: the next ``fetchone()`` returns
+          ``None`` and a later in-range scroll repositions back into the result
+          set — like ``file.seek()`` past EOF. This is the better fit for a
+          positionable cursor: a ``relative`` scroll into an unknown position
+          returns ``None`` rather than forcing a try/except (see README
+          §Compatibility).
+
+        With ``scrollable=True`` the reposition happens server-side and rows are
+        fetched lazily (#181); otherwise the whole result set is already
+        buffered and the reposition is local (#161).
         """
         self._check_open()
         if self._description is None:
