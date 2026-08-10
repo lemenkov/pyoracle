@@ -101,6 +101,25 @@ def test_parse_osesskey_recovers_the_username() -> None:
     assert parse_osesskey(request) == b'PYO'
 
 
+def test_parse_osesskey_oci_recovers_the_username() -> None:
+    # sqlplus / thick-OCI (deadbeef dialect) OSESSKEY payloads captured from live
+    # sqlplus 11.2 — two username lengths pin the fixed-offset layout (#265).
+    from seerdb.server.auth import parse_osesskey_oci
+
+    pyo = bytes.fromhex(
+        '037602feffffffffffffff0900000001000000feffffffffffffff05000000'
+        '00000000fefffffffffffffffeffffffffffffff0370796f270000000d4155'
+        '54485f5445524d494e414c'
+    )
+    abcdefgh = bytes.fromhex(
+        '037602feffffffffffffff1800000001000000feffffffffffffff05000000'
+        '00000000fefffffffffffffffeffffffffffffff08616263646566676827'
+        '0000000d415554485f5445524d494e414c'
+    )
+    assert parse_osesskey_oci(pyo) == b'pyo'
+    assert parse_osesskey_oci(abcdefgh) == b'abcdefgh'
+
+
 def test_full_auth_roundtrip_through_seerdb_client_encoders() -> None:
     # End-to-end: our challenge -> seerdb's client AUTH message -> our parse +
     # ConnKey derivation -> our result -> the client's validate() accepts it.
