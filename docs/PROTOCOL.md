@@ -634,11 +634,21 @@ TTI_FUN | TTI_AUTH | SeqNum | 1 | UserLen | AuthMode | 1 | NumPairs | 1 | 1 |
   [KV("AUTH_NEWPASSWORD", encrypted_new_password)] |
   [KV("AUTH_PBKDF2_SPEEDY_KEY", encrypted_speedy_key)] |
   KV("AUTH_SESSKEY", encrypted_client_session_key) |
+  [KV("AUTH_ALTER_SESSION", "ALTER SESSION SET TIME_ZONE='±hh:mm'\0")] |
   KV("SESSION_CLIENT_DRIVER_NAME", "python") |
   KV("SESSION_CLIENT_VERSION", "186647296")
 ```
 
 - **AuthMode**: `256` (O5LOGON) | `1` (password) | `18` (new password) | `32` (SYSDBA) | `128` (PRELIM).
+- **`AUTH_ALTER_SESSION`** pins the session time zone to the client's UTC offset,
+  the way oracledb / OCI / sqlplus do — else `SESSIONTIMEZONE`,
+  `CURRENT_TIMESTAMP` / `LOCALTIMESTAMP`, and `TIMESTAMP WITH LOCAL TIME ZONE`
+  reflect the server default, not the client. Sent on **12c+** (`field_version
+  >= FIELD_VERSION_12_1`): that is where oracledb (thin) operates and the
+  phase-two AUTH accepts the extra pair; 10g / 11g have a stricter parse that
+  desyncs on it (and no oracledb reference to match). The fv24 fast-auth path
+  carries the same pair among its session-context KVs (§20). oracledb prefixes
+  the value with `%`; the server accepts it with or without.
 
 ### 4.6 Authentication Result (TTI_RPA from Server)
 
