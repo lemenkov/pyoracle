@@ -1324,9 +1324,29 @@ Oracle's proprietary variable-length number format:
 - Special value `0x80` represents zero.
 
 `encode_token_decimal` encodes a `Decimal` straight to this base-100 form (no
-float round-trip), so up to ~38 significant digits (20 base-100 groups) survive
-exactly; `encode_token_num` keeps the int / float fast paths. Both are the exact
-inverse of `decode_number`.
+float round-trip). Two *independent* limits apply:
+
+- **Significant digits:** the mantissa holds at most **20 base-100 groups**
+  (≈ 38 significant decimal digits); a longer value is rounded half-up.
+- **Magnitude:** the biased exponent spans roughly `1e-130` … `9.999e125`.
+
+A value can therefore sit at a huge magnitude with only a few significant
+digits — its trailing all-zero groups are **not** stored as mantissa bytes, they
+are absorbed by the exponent (e.g. `10**125` is a *single* mantissa group with a
+large exponent, not 63 zero groups).
+
+`encode_token_num` keeps the int / float fast paths, but its integer encoder
+(`lnxmin`) materialises groups least-significant-first and caps at 20, so it only
+covers `|value| < 10**40`. A larger **integral** NUMBER is routed to the exact
+base-100 encoder above, so those trailing-zero groups fold into the exponent
+instead of overflowing the 20-group buffer (previously this raised; #316). All
+paths are the exact inverse of `decode_number`.
+
+> **Sentinels.** Besides `0x80` (zero), Oracle has single-byte forms `0x00` and
+> `0xFF 0x65` — internal −∞ / +∞ markers. These are not emitted for an actual
+> `NUMBER` column (the type has no infinity), so seerdb does not special-case
+> them; `decode_number` currently reads them as large finite values (tracked as
+> an observation under #304).
 
 ### 11.2 Oracle DATE
 
