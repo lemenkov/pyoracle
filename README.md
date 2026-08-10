@@ -226,6 +226,22 @@ array DML, REF CURSOR, the cursor cache, and `changepassword`. Its DB charset
 also can't store text it doesn't cover, so use `DB_TYPE_NVARCHAR` / `NCHAR` for
 full Unicode there rather than a plain `str` bind.
 
+### Intentional differences from python-oracledb
+
+seerdb matches oracledb's **types** — `cursor.description` type codes are the
+same `DB_TYPE_*` objects, with the same `precision` / `scale` / `display_size` /
+`internal_size` semantics — but is deliberately more forgiving about bind
+**parameters**, where its behaviour is the saner default:
+
+- a **positional** list may supply a single value for a repeated placeholder —
+  `cur.execute("… :x … :x …", [v])` reuses `v` for every `:x`; oracledb requires
+  one value per textual occurrence and raises otherwise.
+- **extra keys** in a named-bind dict are ignored rather than rejected.
+
+In both cases the bind values that reach the server are identical to a strict
+call; seerdb just doesn't second-guess the count. Pass exactly the binds the
+statement uses if you want oracledb's stricter validation.
+
 ## Requirements
 
 - Python >= 3.10
