@@ -33,7 +33,7 @@ def _serve_sqlite(listen: socket.socket, result: dict) -> None:
     # which is exactly the per-session backend model (one DB session per client).
     try:
         result['user'] = serve_session(
-            PacketStream(conn), _CREDS, SqliteBackend(':memory:')
+            PacketStream(conn), SqliteBackend(':memory:', credentials=_CREDS)
         )
     except Exception as exc:  # noqa: BLE001 - surfaced to the test thread
         result['error'] = exc
@@ -61,6 +61,41 @@ def _connect(port: int):
         service_name='XE',
         timeout=5000,
     )
+
+
+def test_unknown_user_is_rejected() -> None:
+    # Auth lives with the backend: a user absent from its credentials is refused
+    # by authenticate(), so the server rejects the login and no query can run.
+    # (The rejection is currently "soft" — connect() returns but the session was
+    # never established — so the failure surfaces on first use.)
+    listen, server, result = _start_mirror()
+    port = listen.getsockname()[1]
+    conn = None
+    try:
+        conn = seerdb.connect(
+            host='127.0.0.1',
+            port=port,
+            user='NOBODY',
+            password='whatever',
+            service_name='XE',
+            timeout=3000,
+        )
+        with pytest.raises(Exception):
+            cur = conn.cursor()
+            cur.execute('select 1 from dual')
+            cur.fetchone()
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        server.join(timeout=5)
+        listen.close()
+
+    # The backend's authenticate() gated the login server-side.
+    assert isinstance(result.get('error'), Exception)
+    assert 'NOBODY' in str(result['error'])
 
 
 def test_real_sql_round_trip() -> None:

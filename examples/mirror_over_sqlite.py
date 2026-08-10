@@ -42,8 +42,7 @@ def main() -> None:
     seerdb.serve(
         '127.0.0.1',
         port,
-        credentials={'PYO': 'pyo123'},
-        backend_factory=lambda: SqliteBackend(database),
+        backend_factory=lambda: SqliteBackend(database, credentials={'PYO': 'pyo123'}),
     )
 
 

@@ -46,8 +46,9 @@ def main() -> None:
     seerdb.serve(
         '127.0.0.1',
         port,
-        credentials={'PYO': 'pyo123'},
-        backend_factory=lambda: PostgresBackend(conninfo),
+        backend_factory=lambda: PostgresBackend(
+            conninfo, credentials={'PYO': 'pyo123'}
+        ),
     )
 
 

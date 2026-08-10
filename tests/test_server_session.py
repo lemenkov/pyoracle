@@ -17,7 +17,7 @@ import pytest
 
 import seerdb
 from seerdb.common.tns_consts import TNS_TYPE_VARCHAR
-from seerdb.server.backend import Result, UnsupportedFeature
+from seerdb.server.backend import Result, UnsupportedFeature, credential_lookup
 from seerdb.server.framing import PacketStream
 from seerdb.server.query import ColumnMeta
 from seerdb.server.session import handle_login, serve_session
@@ -29,6 +29,9 @@ class _DualBackend:
     # A trivial Backend: DUAL returns 'X'; anything else is refused with a clean
     # ORA error (so the Mirror answers, never desyncs).
     capabilities = frozenset()
+
+    def authenticate(self, username: str) -> str | None:
+        return credential_lookup(_CREDS, username)
 
     def execute(self, sql: str, binds=()) -> Result:
         if 'dual' in sql.lower():
@@ -52,7 +55,7 @@ def _run_mirror(listen: socket.socket, result: dict) -> None:
     conn, _ = listen.accept()
     stream = PacketStream(conn)
     try:
-        result['user'] = handle_login(stream, _CREDS)
+        result['user'] = handle_login(stream, _DualBackend())
         # Block on the client's logoff / EOF so the socket stays open until the
         # client has read the auth result and returned from connect().
         stream.read_packet()
@@ -101,7 +104,7 @@ def test_live_seerdb_login() -> None:
 def _run_mirror_session(listen: socket.socket, result: dict) -> None:
     conn, _ = listen.accept()
     try:
-        result['user'] = serve_session(PacketStream(conn), _CREDS, _DualBackend())
+        result['user'] = serve_session(PacketStream(conn), _DualBackend())
     except Exception as exc:  # noqa: BLE001 - surfaced to the test thread
         result['error'] = exc
     finally:
