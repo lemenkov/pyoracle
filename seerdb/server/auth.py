@@ -202,6 +202,42 @@ def parse_osesskey(payload: bytes) -> bytes:
     return user
 
 
+# The classic sqlplus / thick-OCI (deadbeef dialect) OSESSKEY marshals its fixed
+# header fields very differently from the thin form: an 8-byte 0xFE indicator
+# (0xFFFFFFFFFFFFFFFE little-endian) stands in for thin's 0x01 pointer bytes, and
+# lengths are fixed 4-byte little-endian ub4s. The layout up to the username is
+# constant (confirmed against live sqlplus 11.2 for usernames of different
+# lengths), so the ub1-length-prefixed username sits at a fixed offset (#265):
+#   03(TTI_FUN) subtype seq | IND | ub4 ub4 | IND | ub4 ub4 | IND | IND | ub1+user
+_OCI_IND = b'\xfe\xff\xff\xff\xff\xff\xff\xff'
+
+
+def parse_osesskey_oci(payload: bytes) -> bytes:
+    """Return the username from a sqlplus / thick-OCI OSESSKEY (deadbeef dialect).
+
+    Verified against live sqlplus 11.2 captures (usernames ``pyo`` and
+    ``abcdefgh``). Raises :class:`InterfaceError` if the fixed indicator layout
+    is not where the OCI OSESSKEY puts it.
+    """
+    if len(payload) < 4 or payload[0] != TTI_FUN:
+        raise InterfaceError('not a TTI_FUN message')
+    if payload[1] != TTI_SESS:
+        raise InterfaceError(f'expected OSESSKEY, got subtype {payload[1]}')
+    # Consume the fixed prefix: seq(1) after TTI_FUN+subtype, then the indicator
+    # and ub4 fields. Validate every indicator so a differently-shaped message
+    # surfaces as an error rather than a garbage username.
+    # Indicators sit at these offsets; between the 1st/2nd and 3rd/4th come the
+    # two ub4 length-field pairs that make up the gaps.
+    for expected_ind_off in (3, 19, 35, 43):
+        if payload[expected_ind_off : expected_ind_off + 8] != _OCI_IND:
+            raise InterfaceError(
+                f'OCI OSESSKEY: no indicator at offset {expected_ind_off}'
+            )
+    user_off = 51  # 3 + 8 + (4+4) + 8 + (4+4) + 8 + 8
+    userlen = payload[user_off]
+    return payload[user_off + 1 : user_off + 1 + userlen]
+
+
 def parse_auth_response(payload: bytes) -> tuple[bytes, bytes, bytes | None]:
     """Return ``(username, client AUTH_SESSKEY, AUTH_PASSWORD)`` from the AUTH.
 
