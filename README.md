@@ -250,6 +250,12 @@ position return `None` instead of forcing a try/except. (A target before the
 first row still raises `IndexError`, and the buffered non-scrollable path raises
 for out-of-range in either direction, matching PEP 249 / oracledb.)
 
+**LOB** columns are fetched as their **content directly** — a `CLOB` / `NCLOB`
+comes back as `str`, a `BLOB` as `bytes` — rather than as a `LOB` object you have
+to `.read()` (oracledb's default). Simplest for typical values; note the whole
+LOB is materialised in memory. (Oracle's `'' == NULL` rule still applies, so an
+empty-string / empty-bytes bind stores — and reads back — as `None`.)
+
 ## Requirements
 
 - Python >= 3.10
