@@ -58,13 +58,17 @@ _VGEN_COUNT_DEFAULT = 4096
 _SDER_COUNT_DEFAULT = 3
 _PBKDF2_COUNT_MAX = 100_000_000
 
-# Verifier-type flags carried on the AUTH_VFR_DATA challenge pair. They name the
-# account verifier the server chose, which selects the key schedule: legacy DES,
-# 11g SHA-1, or 12c SHA-2. We otherwise infer the scheme from salt presence,
-# which is ambiguous on a modern server for a pre-SHA-2 account (#311).
-_VFR_LEGACY = 2361
-_VFR_11G_SHA1 = 6949
-_VFR_12C_SHA2 = 18453
+# Verifier-type flags carried on the AUTH_VFR_DATA challenge pair. These are
+# opaque identifiers Oracle assigns to each password-verifier generation (no
+# structure to decode — the hex forms below carry no meaning); the flag tells
+# the client which key schedule the server chose. On 10g the pair arrives with
+# an EMPTY value (no salt) yet still carries the flag — so salt presence and
+# verifier type are independent signals, which is exactly why inferring the
+# scheme from salt presence alone misfires for a pre-SHA-2 account on a modern
+# server (#311). All three confirmed live on the wire:
+_VFR_LEGACY = 2361  # 0x0939 — 10g / legacy DES  (confirmed: live 10.2.0.5, empty salt)
+_VFR_11G_SHA1 = 6949  # 0x1B25 — 11g SHA-1  (confirmed: real 11g capture + live XE 11.2)
+_VFR_12C_SHA2 = 18453  # 0x4815 — 12c SHA-2  (confirmed: live 23ai/26ai)
 
 
 def _clamp_count(value: int | None, minimum: int) -> int:
