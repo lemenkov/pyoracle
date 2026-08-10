@@ -191,6 +191,35 @@ def test_executemany_array_dml() -> None:
     assert rows == [(1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')]
 
 
+def test_large_integer_bind() -> None:
+    # An integer beyond SQLite's 64-bit INTEGER range is accepted (spilled to
+    # REAL) instead of crashing with ORA-00600; an in-range integer stays exact.
+    listen, server, result = _start_mirror()
+    conn = _connect(listen.getsockname()[1])
+    in_range = 9_000_000_000_000_000_000  # < 2**63, exact
+    huge = 10**30  # > 2**63, lossy REAL
+    try:
+        cur = conn.cursor()
+        cur.execute('create table t (id number, v number)')
+        cur.execute('insert into t values (1, :1)', [in_range])
+        cur.execute('insert into t values (2, :1)', [huge])
+        cur.execute('select v from t where id = 1')
+        exact = cur.fetchone()[0]
+        cur.execute('select v from t where id = 2')
+        big = cur.fetchone()[0]
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert exact == in_range  # in-range integer is exact
+    assert abs(float(big) - float(huge)) / float(huge) < 1e-9  # accepted, ~equal
+
+
 def test_fractional_number_bind() -> None:
     # A non-integer NUMBER bind decodes server-side to a Decimal; the SQLite
     # backend must accept it (as REAL) rather than reject it. float binds take

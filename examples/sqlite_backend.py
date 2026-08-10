@@ -39,6 +39,14 @@ from seerdb.server import BackendError, Capability, ColumnMeta, Result
 _ORA_INVALID_SQL = 900
 
 
+def _adapt_int(value: int) -> int | float:
+    # SQLite's INTEGER is 64-bit; an in-range int stays exact, a larger one (an
+    # Oracle NUMBER can hold ~38 digits) falls back to REAL.
+    if -(2**63) <= value < 2**63:
+        return value
+    return float(value)
+
+
 # SQLite stores no real temporal type, so DATE/TIMESTAMP survive a round trip
 # only if we (de)serialise them ourselves. The stdlib's built-in date/timestamp
 # adapters are deprecated (3.12) and gone in newer Python, so register explicit
@@ -60,6 +68,17 @@ def _register_codecs() -> None:
     # (float) — the same lossy-but-numeric form this backend already infers for
     # NUMBER columns. Integral NUMBERs arrive as int and need no adapter.
     sqlite3.register_adapter(Decimal, float)
+    # An Oracle NUMBER integer beyond SQLite's 64-bit INTEGER range can't be
+    # stored as one; _adapt_int keeps in-range ints exact and spills larger ones
+    # to REAL (lossy, like Decimal) rather than leaking sqlite3's "int too large"
+    # as an ORA-00600.
+    sqlite3.register_adapter(int, _adapt_int)
+
+
+def _adapt_int(value: int) -> int | float:
+    if -(2**63) <= value < 2**63:
+        return value
+    return float(value)
 
 
 _register_codecs()
