@@ -65,31 +65,22 @@ def _connect(port: int):
 
 def test_unknown_user_is_rejected() -> None:
     # Auth lives with the backend: a user absent from its credentials is refused
-    # by authenticate(), so the server rejects the login and no query can run.
-    # (The rejection is currently "soft" — connect() returns but the session was
-    # never established — so the failure surfaces on first use.)
+    # by authenticate(), and the Mirror rejects the login with ORA-01017 — so
+    # connect() itself raises, the way real Oracle denies a bad login.
     listen, server, result = _start_mirror()
     port = listen.getsockname()[1]
-    conn = None
     try:
-        conn = seerdb.connect(
-            host='127.0.0.1',
-            port=port,
-            user='NOBODY',
-            password='whatever',
-            service_name='XE',
-            timeout=3000,
-        )
-        with pytest.raises(Exception):
-            cur = conn.cursor()
-            cur.execute('select 1 from dual')
-            cur.fetchone()
+        with pytest.raises(seerdb.DatabaseError) as excinfo:
+            seerdb.connect(
+                host='127.0.0.1',
+                port=port,
+                user='NOBODY',
+                password='whatever',
+                service_name='XE',
+                timeout=3000,
+            )
+        assert 'ORA-01017' in str(excinfo.value)
     finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
         server.join(timeout=5)
         listen.close()
 

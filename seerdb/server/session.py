@@ -102,6 +102,14 @@ def handle_login(stream: PacketStream, backend: Backend) -> str:
     user = parse_osesskey(_expect(stream, TNS_DATA, 'OSESSKEY')).decode('utf-8')
     secret = backend.authenticate(user)
     if secret is None:
+        # Reject the login the way Oracle does — an ORA-01017 OER in place of the
+        # challenge, which the client raises out of connect() — then drop the
+        # connection. (Without this the client would connect() cleanly and only
+        # fail on first use.)
+        stream.write_packet(
+            TNS_DATA,
+            encode_error(1017, 'ORA-01017: invalid username/password; logon denied'),
+        )
         raise InterfaceError(f'authentication rejected for user: {user!r}')
     challenge = make_challenge(secret.encode('utf-8'))
     stream.write_packet(TNS_DATA, encode_challenge(challenge))
