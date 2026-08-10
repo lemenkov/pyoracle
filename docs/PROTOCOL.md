@@ -907,6 +907,15 @@ does this; the example backends map each source column to the matching Oracle
 type (Postgres `date`/`timestamp`/`timestamptz` OIDs 1082/1114/1184; SQLite a
 column declared `DATE`/`TIMESTAMP` via `PARSE_DECLTYPES`).
 
+**Numeric values follow the column type too.** A `NUMBER` (12) column encodes as
+base-100 (`encode_token_num` / `encode_token_decimal`), carrying its
+precision/scale in the describe; a `BINARY_FLOAT` (100) / `BINARY_DOUBLE` (101)
+column encodes the IEEE-754 value in Oracle's order-preserving form (§11.7)
+rather than converting to decimal. The example PostgreSQL backend maps `numeric`
+→ NUMBER (with `numeric(p, s)` precision/scale) and `float4` / `float8` →
+BINARY_FLOAT / BINARY_DOUBLE, so a float column stays an exact IEEE float instead
+of a base-100 approximation.
+
 **Transaction control (the Mirror).** The client drives commit / rollback two
 ways, both of which the Mirror honours. In autocommit mode it sets the
 commit-on-success bit (`0x100`) in the OALL8 options word, and the Mirror

@@ -186,6 +186,23 @@ def test_encode_rows_number_values() -> None:
     assert rows == [[1], [-7], [0], [Decimal('3.14')], [1000000]]
 
 
+def test_encode_rows_binary_float_and_double() -> None:
+    from seerdb.common.tns_consts import TNS_TYPE_BDOUBLE, TNS_TYPE_BFLOAT
+
+    # A BINARY_DOUBLE / BINARY_FLOAT column carries the IEEE-754 value (Python
+    # float), not a base-100 NUMBER — the client decodes it back to float.
+    dcol = ColumnMeta(name=b'D', data_type=TNS_TYPE_BDOUBLE, data_length=8, max_size=8)
+    fcol = ColumnMeta(name=b'F', data_type=TNS_TYPE_BFLOAT, data_length=4, max_size=4)
+    response = (
+        encode_describe([dcol, fcol])
+        + encode_rows([(3.5, 1.5), (-2.25, -0.5)], [dcol, fcol])
+        + bytes([TTI_STA])
+    )
+    cols, rows = _decode_response(response)
+    assert rows == [[3.5, 1.5], [-2.25, -0.5]]
+    assert all(isinstance(v, float) for row in rows for v in row)
+
+
 def test_encode_rows_high_precision_decimal() -> None:
     from decimal import Decimal
 
