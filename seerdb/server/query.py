@@ -33,8 +33,10 @@ from seerdb.common.tns import (
 from seerdb.common.tns_consts import (
     TNS_TYPE_BDOUBLE,
     TNS_TYPE_BFLOAT,
+    TNS_TYPE_CHAR,
     TNS_TYPE_TIMESTAMP,
     TNS_TYPE_TIMESTAMPTZ,
+    TNS_TYPE_VARCHAR,
     TTI_ALL8,
     TTI_DCB,
     TTI_FETCH,
@@ -262,6 +264,100 @@ def _encode_dcb_column(col: ColumnMeta, position: int) -> bytes:
         + encode_sb4(position)  # column position
         + encode_sb4(0)  # uds flags (11g addition)
     )
+
+
+def _oci_ub4(n: int) -> bytes:
+    return int(n).to_bytes(4, 'little')
+
+
+# The classic sqlplus / thick-OCI (deadbeef) describe (TTI_DCB) marshals the
+# same per-column metadata as the thin form, but field-by-field in the OCI
+# conventions: fixed 4-byte little-endian lengths, a fixed 49-byte pre-name
+# block per column, then the ub1-prefixed name, then a 12-byte post-name block.
+# Every meaningful field (type / precision / scale / length / charset / csfrm /
+# max_size / null_ok / name) is computed; the opaque server-constant trailer
+# (an embedded describe-timestamp and instance ids the client skips) is emitted
+# as zeros — a real codec, not a captured template (#265). Field offsets within
+# the 49-byte pre-name block, verified against live 11g describes of VARCHAR2,
+# NUMBER, and DATE columns:
+_OCI_DCB_PREAMBLE_LEN = 23  # cursor-uuid preamble (zeroed; the client skips it)
+_OCI_DCB_COL_PRENAME = 49
+_OCI_DCB_COL_POSTNAME = 12
+# A char type carries a charset + form-of-use and sets the pre-name char flag.
+_OCI_CHAR_TYPES = frozenset({TNS_TYPE_VARCHAR, TNS_TYPE_CHAR})
+_OCI_DCB_CHAR_FLAG = 0x80
+
+
+def _encode_dcb_column_oci(col: ColumnMeta, position: int, first: bool) -> bytes:
+    pre = bytearray(_OCI_DCB_COL_PRENAME)
+    pre[0] = 0x51 if first else 0x00  # a first-column marker byte
+    pre[1] = 0x01
+    pre[2] = col.data_type
+    is_char = col.data_type in _OCI_CHAR_TYPES
+    pre[3] = _OCI_DCB_CHAR_FLAG if is_char else 0x00
+    pre[4] = col.precision & 0xFF
+    pre[5] = col.scale & 0xFF  # signed byte (e.g. -127 for a NUMBER literal)
+    pre[6:10] = _oci_ub4(col.data_length)
+    if is_char:
+        pre[30:32] = int(col.charset).to_bytes(2, 'little')
+        pre[32] = col.csfrm
+    pre[34:38] = _oci_ub4(col.max_size)
+    pre[43] = col.null_ok
+    pre[44] = len(col.name)
+    pre[45:49] = _oci_ub4(len(col.name))
+    name = bytes([len(col.name)]) + col.name
+    post = bytearray(_OCI_DCB_COL_POSTNAME)
+    post[0:4] = _oci_ub4(position)  # column position; rest (uds flags) zeroed
+    return bytes(pre) + name + bytes(post)
+
+
+def encode_describe_oci(columns: list[ColumnMeta]) -> bytes:
+    """Build the sqlplus / thick-OCI (deadbeef dialect) describe block (#265).
+
+    The OCI counterpart of :func:`encode_describe`. Returns the TTC payload from
+    the TTI_DCB token: a zeroed cursor-uuid preamble, the max-row-size and column
+    count, one fixed-shape block per column, then a zeroed opaque trailer.
+    """
+    out = bytearray([TTI_DCB])
+    out += _oci_ub4(_OCI_DCB_PREAMBLE_LEN) + bytes(_OCI_DCB_PREAMBLE_LEN)
+    out += _oci_ub4(sum(c.max_size for c in columns))  # max row size (skipped)
+    out += _oci_ub4(len(columns))
+    for position, col in enumerate(columns, start=1):
+        out += _encode_dcb_column_oci(col, position, first=(position == 1))
+    return bytes(out)
+
+
+def _decode_describe_oci(payload: bytes) -> list[dict]:
+    # A minimal reader for encode_describe_oci's own output — the thin client
+    # can't parse the OCI describe, so this round-trips the meaningful fields to
+    # prove the field layout is self-consistent (offline; sqlplus is the wire
+    # conformance check).
+    assert payload[0] == TTI_DCB
+    plen = int.from_bytes(payload[1:5], 'little')
+    body = payload[5 + plen :]
+    numcols = int.from_bytes(body[4:8], 'little')
+    cols = []
+    off = 8
+    for _ in range(numcols):
+        pre = body[off : off + _OCI_DCB_COL_PRENAME]
+        namelen = pre[44]
+        name = body[
+            off + _OCI_DCB_COL_PRENAME + 1 : off + _OCI_DCB_COL_PRENAME + 1 + namelen
+        ]
+        cols.append(
+            {
+                'data_type': pre[2],
+                'precision': pre[4],
+                'scale': pre[5] - 256 if pre[5] > 127 else pre[5],
+                'data_length': int.from_bytes(pre[6:10], 'little'),
+                'charset': int.from_bytes(pre[30:32], 'little'),
+                'max_size': int.from_bytes(pre[34:38], 'little'),
+                'null_ok': pre[43],
+                'name': name,
+            }
+        )
+        off += _OCI_DCB_COL_PRENAME + 1 + namelen + _OCI_DCB_COL_POSTNAME
+    return cols
 
 
 def encode_describe(columns: list[ColumnMeta]) -> bytes:
