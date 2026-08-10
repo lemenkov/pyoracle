@@ -542,3 +542,22 @@ def test_encode_describe_oci_matches_live_field_offsets() -> None:
     # type / precision / scale / data_length / null_ok / name-length offsets
     for off in (2, 3, 4, 5, 6, 7, 8, 9, 43, 44):
         assert mine[off] == captured[off], f'field byte {off} differs'
+
+
+def test_encode_version_banner_oci_matches_the_captured_reply() -> None:
+    # The sqlplus / thick-OCI version reply (TTI_RPA + banner DALC + packed
+    # version trailer), byte-for-byte against a live 11.2 capture (#265).
+    from seerdb.server.query import encode_version_banner_oci, is_version_call_oci
+
+    banner = (
+        b'Oracle Database 11g Express Edition Release 11.2.0.2.0 - 64bit Production'
+    )
+    captured = bytes.fromhex(
+        '084900494f7261636c65204461746162617365203131672045787072657373'
+        '2045646974696f6e2052656c656173652031312e322e302e322e30202d2036'
+        '346269742050726f64756374696f6e0002200b09010000000300'
+    )
+    assert encode_version_banner_oci(banner) == captured
+    # and the request recogniser keys on the 0x11 0x6b lead
+    assert is_version_call_oci(b'\x11\x6b\x04\x3b\x00') is True
+    assert is_version_call_oci(b'\x03\x5e\x06') is False

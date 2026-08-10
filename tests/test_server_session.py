@@ -55,7 +55,7 @@ def _run_mirror(listen: socket.socket, result: dict) -> None:
     conn, _ = listen.accept()
     stream = PacketStream(conn)
     try:
-        result['user'] = handle_login(stream, _DualBackend())
+        result['user'], _sqlplus = handle_login(stream, _DualBackend())
         # Block on the client's logoff / EOF so the socket stays open until the
         # client has read the auth result and returned from connect().
         stream.read_packet()
