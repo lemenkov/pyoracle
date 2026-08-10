@@ -390,6 +390,18 @@ class TestBinaryFloat(unittest.TestCase):
         Wire = encode_token_binary_float(BinaryFloat(math.nan))
         self.assertTrue(math.isnan(decode_binary_float(Wire)))
 
+    def test_roundtrip_signed_zero(self):
+        # -0.0 must survive the order-preserving transform with its sign intact:
+        # it maps to distinct wire bytes from +0.0 (captured live on 21c:
+        # +0.0 -> 0x80000000, -0.0 -> 0x7fffffff). `==` treats -0.0 == +0.0, so
+        # the sign has to be checked with copysign.
+        PosWire = encode_token_binary_float(BinaryFloat(0.0))
+        NegWire = encode_token_binary_float(BinaryFloat(-0.0))
+        self.assertEqual(PosWire, bytes.fromhex('80000000'))
+        self.assertEqual(NegWire, bytes.fromhex('7fffffff'))
+        self.assertEqual(math.copysign(1.0, decode_binary_float(PosWire)), 1.0)
+        self.assertEqual(math.copysign(1.0, decode_binary_float(NegWire)), -1.0)
+
 
 class TestBinaryDouble(unittest.TestCase):
     def test_encode_positive(self):
@@ -422,6 +434,17 @@ class TestBinaryDouble(unittest.TestCase):
                 decode_binary_double(encode_token_binary_double(BinaryDouble(math.nan)))
             )
         )
+
+    def test_roundtrip_signed_zero(self):
+        # The == above cannot distinguish -0.0 from +0.0; assert the sign is
+        # actually preserved through the order-preserving transform. Wire bytes
+        # captured live on 21c: +0.0 -> 0x80..00, -0.0 -> 0x7f..ff.
+        PosWire = encode_token_binary_double(BinaryDouble(0.0))
+        NegWire = encode_token_binary_double(BinaryDouble(-0.0))
+        self.assertEqual(PosWire, bytes.fromhex('8000000000000000'))
+        self.assertEqual(NegWire, bytes.fromhex('7fffffffffffffff'))
+        self.assertEqual(math.copysign(1.0, decode_binary_double(PosWire)), 1.0)
+        self.assertEqual(math.copysign(1.0, decode_binary_double(NegWire)), -1.0)
 
 
 class TestIntervalDS(unittest.TestCase):
