@@ -62,11 +62,15 @@ from seerdb.server.query import (
     ColumnMeta,
     ExecRequest,
     FetchRequest,
+    encode_describe_oci,
     encode_error,
     encode_fetch_response,
     encode_query_response,
     encode_status,
+    encode_version_banner_oci,
+    is_version_call_oci,
     parse_exec,
+    parse_exec_oci,
     parse_fetch,
 )
 
@@ -92,8 +96,12 @@ def _expect(stream: PacketStream, want: int, what: str) -> bytes:
     return body
 
 
-def handle_login(stream: PacketStream, backend: Backend) -> str:
-    """Run the server side of the handshake + O5LOGON; return the username.
+def handle_login(stream: PacketStream, backend: Backend) -> tuple[str, bool]:
+    """Run the server side of the handshake + O5LOGON.
+
+    Returns ``(username, is_sqlplus)`` — the second flag says whether the client
+    speaks the classic sqlplus / thick-OCI (deadbeef) dialect, so the query loop
+    can answer it in the right marshalling (#265).
 
     The O5LOGON secret comes from ``backend.authenticate(user)`` — auth lives
     with the backend, not the Mirror. Raises :class:`InterfaceError` on a
@@ -160,7 +168,7 @@ def handle_login(stream: PacketStream, backend: Backend) -> str:
         stream.write_packet(TNS_DATA, encode_result(conn_key))
 
     logger.info('login OK: %s', user)
-    return user
+    return user, sqlplus
 
 
 def _deny_login(stream: PacketStream, reason: str) -> NoReturn:
@@ -188,7 +196,9 @@ def serve_session(stream: PacketStream, backend: Backend) -> str:
     holds the undelivered rows). A logoff (or EOF) ends the session and returns
     the authenticated username.
     """
-    user = handle_login(stream, backend)
+    user, sqlplus = handle_login(stream, backend)
+    if sqlplus:
+        return _serve_oci_session(stream, backend, user)
     cursors = _Cursors()
     while True:
         received = stream.read_packet()
@@ -210,6 +220,48 @@ def serve_session(stream: PacketStream, backend: Backend) -> str:
             _answer_txn(stream, backend, commit=False)
         elif body[1] == TTI_LOGOFF:
             return user
+
+
+# The banner sqlplus prints after "Connected to:". The Mirror emulates an 11g
+# listener, so it reports the matching version string (naming is a later
+# discussion, like the Mirror's own name).
+_OCI_BANNER = (
+    b'Oracle Database 11g Express Edition Release 11.2.0.2.0 - 64bit Production'
+)
+
+
+def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str:
+    # The sqlplus / thick-OCI query loop (#265), built up one message shape at a
+    # time. So far: the post-login version call (-> banner, which lets sqlplus
+    # print "Connected to:") and the OCI execute (-> describe). The rows/fetch
+    # response and the remaining OCI calls (piggybacks, commit) are follow-ups;
+    # an unhandled call ends the session cleanly rather than desyncing.
+    while True:
+        received = stream.read_packet()
+        if received is None:
+            return user
+        packet_type, body = received
+        if packet_type != TNS_DATA:
+            continue
+        if is_version_call_oci(body):
+            stream.write_packet(TNS_DATA, encode_version_banner_oci(_OCI_BANNER))
+            continue
+        if len(body) >= 2 and body[0] == TTI_FUN:
+            if body[1] == TTI_ALL8:
+                try:
+                    request = parse_exec_oci(body)
+                except InterfaceError:
+                    logger.info('OCI: unsupported execute shape; ending session')
+                    return user
+                result = backend.execute(request.sql, request.binds)
+                if result.columns:
+                    stream.write_packet(TNS_DATA, encode_describe_oci(result.columns))
+                    continue
+                return user  # OCI DDL/DML status is a later increment
+            if body[1] == TTI_LOGOFF:
+                return user
+        logger.info('OCI: unhandled call ttc=%s; ending session', body[:2].hex())
+        return user
 
 
 def _skip_piggybacks(body: bytes) -> bytes:

@@ -42,6 +42,7 @@ from seerdb.common.tns_consts import (
     TTI_FETCH,
     TTI_FUN,
     TTI_OER,
+    TTI_RPA,
     TTI_RXD,
     TTI_RXH,
 )
@@ -268,6 +269,38 @@ def _encode_dcb_column(col: ColumnMeta, position: int) -> bytes:
 
 def _oci_ub4(n: int) -> bytes:
     return int(n).to_bytes(4, 'little')
+
+
+# The very first thing sqlplus / thick OCI sends after login is a version call
+# (its TTC payload leads with 0x11 0x6b); the server answers with its banner, and
+# sqlplus prints "Connected to: <banner>". The reply is a TTI_RPA carrying the
+# banner as a DALC (ub2 count + ub1-chunked string) plus a fixed 10-byte packed
+# version/flags trailer (#265).
+_OCI_VERSION_CALL = b'\x11\x6b'
+# Packed 11.2 version + capability flags, as the real XE 11.2 listener returns.
+_OCI_VERSION_TRAILER = bytes.fromhex('02200b09010000000300')
+
+
+def is_version_call_oci(payload: bytes) -> bool:
+    """True if this is the sqlplus / thick-OCI post-login version request."""
+    return payload[:2] == _OCI_VERSION_CALL
+
+
+def encode_version_banner_oci(banner: bytes) -> bytes:
+    """Build the sqlplus / thick-OCI version reply — the server's banner (#265).
+
+    Returns the TTC payload from the TTI_RPA token: the banner as a DALC value
+    (ub2 count + single ub1 chunk, since the banner is well under 254 bytes) and
+    the fixed packed-version trailer.
+    """
+    return (
+        bytes([TTI_RPA])
+        + len(banner).to_bytes(2, 'little')
+        + bytes([len(banner)])
+        + banner
+        + b'\x00'  # DALC terminator
+        + _OCI_VERSION_TRAILER
+    )
 
 
 # The classic sqlplus / thick-OCI (deadbeef) describe (TTI_DCB) marshals the
