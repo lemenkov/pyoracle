@@ -149,6 +149,67 @@ def test_encode_challenge_oci_rejects_wrong_sizes() -> None:
         encode_challenge_oci(make_challenge(b'pyo123'))
 
 
+# A live sqlplus 11.2 OCI AUTH, captured in reply to a *seeded* Mirror challenge
+# (make_challenge(b'pyo123', salt=bytes(10), server_session=bytes(48))) so the
+# whole crypto round-trip can be replayed and verified offline (#265). Carries
+# the client's 48-byte AUTH_SESSKEY and its 32-byte AUTH_PASSWORD proof, both
+# DALC-chunked uppercase-hex.
+_OCI_AUTH_SEEDED = bytes.fromhex(
+    '037303feffffffffffffff0900000001010000feffffffffffffff1200000000000000'
+    'fefffffffffffffffeffffffffffffff0370796f240000000c415554485f534553534b'
+    '455920010000fe40433044343734333430333531413144314237453646323138443537'
+    '3734353246304441464139333041324232454636453146374538334446363141413434'
+    '3436204237363142443545303830443336373239423138393336393036313332463430'
+    '0001000000270000000d415554485f50415353574f5244c00000004034463144464434'
+    '4436373242383342354233354131453833363131434246344342384243344330313239'
+    '4235313735343935383134413131333344324636463500000000180000000841555448'
+    '5f5254540c000000043232373300000000270000000d415554485f434c4e545f4d454d'
+    '0c000000043430393600000000270000000d415554485f5445524d494e414c00000000'
+    '000000002d0000000f415554485f50524f4752414d5f4e4d600000002073716c706c75'
+    '73403735313036633766333964622028544e532056312d56332900000000240000000c'
+    '415554485f4d414348494e45240000000c373531303663376633396462000000001800'
+    '000008415554485f5049440c0000000433323630000000001800000008415554485f53'
+    '494412000000066f7261636c6500000000420000001653455353494f4e5f434c49454e'
+    '545f4348415253455403000000013100000000450000001753455353494f4e5f434c49'
+    '454e545f4c49425f54595045030000000131000000004e0000001a53455353494f4e5f'
+    '434c49454e545f4452495645525f4e414d451b0000000953514c2a504c555320000000'
+    '00420000001653455353494f4e5f434c49454e545f56455253494f4e1b000000093138'
+    '3636343730343000000000420000001653455353494f4e5f434c49454e545f4c4f4241'
+    '545452030000000131000000001800000008415554485f41434c0c0000000438303030'
+    '000000003600000012415554485f414c5445525f53455353494f4e6f00000025414c54'
+    '45522053455353494f4e205345542054494d455f5a4f4e453d272b30303a3030270001'
+    '0000004500000017415554485f4c4f474943414c5f53455353494f4e5f494460000000'
+    '2035384238464533453933303344453938453036304138433043303030304342430000'
+    '00003000000010415554485f4641494c4f5645525f49440000000000000000'
+)
+
+
+def test_parse_auth_response_oci_recovers_the_secrets() -> None:
+    from seerdb.server.auth import parse_auth_response_oci
+
+    user, sesskey, password = parse_auth_response_oci(_OCI_AUTH_SEEDED)
+    assert user == b'pyo'
+    assert len(sesskey) == 48  # client AUTH_SESSKEY, 96 hex on the wire
+    assert len(password) == 32  # AUTH_PASSWORD proof, 64 hex on the wire
+
+
+def test_full_oci_auth_verifies_against_live_sqlplus() -> None:
+    # The OCI counterpart of the thin round-trip below, but the AUTH is REAL
+    # sqlplus 11.2 bytes (not seerdb's own client encoder). Reconstruct the exact
+    # seeded challenge sqlplus answered, parse its AUTH, and drive the full mutual
+    # auth: the ConnKey derives, the right password verifies (a wrong one does
+    # not), and our server proof validates. End-to-end conformance, offline (#265).
+    from seerdb.server.auth import derive_conn_key, parse_auth_response_oci
+
+    challenge = make_challenge(b'pyo123', salt=bytes(10), server_session=bytes(48))
+    user, sesskey, password = parse_auth_response_oci(_OCI_AUTH_SEEDED)
+    assert user == b'pyo'
+    server_conn = derive_conn_key(challenge, sesskey)
+    assert verify_password(server_conn, password, b'pyo123')
+    assert not verify_password(server_conn, password, b'wrongpass')
+    assert validate(server_proof(server_conn), server_conn)
+
+
 def test_full_auth_roundtrip_through_seerdb_client_encoders() -> None:
     # End-to-end: our challenge -> seerdb's client AUTH message -> our parse +
     # ConnKey derivation -> our result -> the client's validate() accepts it.
