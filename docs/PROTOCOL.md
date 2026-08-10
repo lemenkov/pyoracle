@@ -905,6 +905,19 @@ the client hides that sentinel from the caller. Only the describe's column
 type/length/charset/name and the row DALC values carry meaning; the many
 skipped scalar fields are emitted as well-formed zeros.
 
+**Batched fetch (the Mirror).** A result set larger than the execute's requested
+fetch count is not inlined whole — it is returned in batches (§5.2). The execute
+response carries the describe + the first `fetch` rows and, if rows remain, ends
+with a **"more rows"** OER instead of `1403`: `call_status = 1`, error `0`, and a
+non-zero **cursor id** (`encode_more_rows`). The client then issues
+`TTI_FETCH(cursor_id, fetch)` calls, each answered with the next batch (rows +
+terminator, *no* describe — the metadata is already established), until the
+server sends `ORA-01403`. The Mirror keeps the undelivered rows per cursor id in
+`_Cursors` (its only cross-call state), dropping a cursor once drained. Batching
+matters even for a moderately large result set: the client's row decoder recurses
+once per row within a single response, so inlining thousands of rows would exhaust
+the recursion limit — fetch-sized batches keep each response shallow.
+
 **Temporal values are width-fixed by the column type, not the value.** The
 client-side encoder (§10.3) is value-driven — it picks 7/11/13 bytes from
 whether a `datetime` carries sub-second or zone parts — but a *column* must emit

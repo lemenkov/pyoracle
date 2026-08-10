@@ -25,6 +25,7 @@ from seerdb.common.tns_consts import (
     TNS_DATA,
     TTI_ALL8,
     TTI_COMMIT,
+    TTI_FETCH,
     TTI_FUN,
     TTI_LOGOFF,
     TTI_MSG_TYPE_PIGGYBACK,
@@ -48,11 +49,15 @@ from seerdb.server.handshake import (
     parse_connect,
 )
 from seerdb.server.query import (
+    ColumnMeta,
     ExecRequest,
+    FetchRequest,
     encode_error,
+    encode_fetch_response,
     encode_query_response,
     encode_status,
     parse_exec,
+    parse_fetch,
 )
 
 logger = logging.getLogger('seerdb.server')
@@ -64,6 +69,9 @@ Credentials = Mapping[str, str]
 # A generic backend failure that leaked past the Backend contract still becomes
 # a clean ORA error rather than a wire desync (ORA-00600, internal error).
 _INTERNAL_ERROR = 600
+
+# A fetch count of 0 or less means "no limit" — deliver the whole remainder.
+_ALL_ROWS = 2**31
 
 
 def _expect(stream: PacketStream, want: int, what: str) -> bytes:
@@ -121,10 +129,14 @@ def serve_session(
     After :func:`handle_login`, each OALL8 execute is parsed, handed to
     ``backend.execute``, and answered with a describe + rows response — or, if
     the backend refuses (:class:`BackendError` / :class:`UnsupportedFeature`) or
-    fails, with an ORA error that leaves the connection usable. A logoff (or
-    EOF) ends the session and returns the authenticated username.
+    fails, with an ORA error that leaves the connection usable. A result set
+    larger than the requested fetch count is returned in batches: the first on
+    the execute, the rest on follow-up ``TTI_FETCH`` calls (:class:`_Cursors`
+    holds the undelivered rows). A logoff (or EOF) ends the session and returns
+    the authenticated username.
     """
     user = handle_login(stream, credentials)
+    cursors = _Cursors()
     while True:
         received = stream.read_packet()
         if received is None:
@@ -136,7 +148,9 @@ def serve_session(
         if len(body) < 2 or body[0] != TTI_FUN:
             continue
         if body[1] == TTI_ALL8:
-            _answer_query(stream, backend, parse_exec(body))
+            _answer_query(stream, backend, parse_exec(body), cursors)
+        elif body[1] == TTI_FETCH:
+            _answer_fetch(stream, parse_fetch(body), cursors)
         elif body[1] == TTI_COMMIT:
             _answer_txn(stream, backend, commit=True)
         elif body[1] == TTI_ROLLBACK:
@@ -164,7 +178,42 @@ def _skip_piggybacks(body: bytes) -> bytes:
     return body
 
 
-def _answer_query(stream: PacketStream, backend: Backend, request: ExecRequest) -> None:
+class _Cursors:
+    # Undelivered rows for result sets not yet drained, keyed by a per-session
+    # cursor id. A query whose result exceeds the requested fetch count parks the
+    # remainder here and hands it out on later TTI_FETCH calls (the Mirror's only
+    # cross-call state). Cursor ids start at 1 — 0 means "no cursor" on the wire.
+    def __init__(self) -> None:
+        self._next = 1
+        self._open: dict[int, tuple[list[ColumnMeta], list[tuple]]] = {}
+
+    def open(self, columns: list[ColumnMeta], rows: list[tuple]) -> int:
+        cursor_id = self._next
+        self._next += 1
+        self._open[cursor_id] = (columns, rows)
+        return cursor_id
+
+    def take(self, cursor_id: int, count: int) -> tuple[list[ColumnMeta], list[tuple]]:
+        # Return (columns, next batch) and either keep the remainder or, once the
+        # cursor is drained, forget it. An unknown cursor yields an empty batch.
+        state = self._open.get(cursor_id)
+        if state is None:
+            return [], []
+        columns, remaining = state
+        batch, rest = remaining[:count], remaining[count:]
+        if rest:
+            self._open[cursor_id] = (columns, rest)
+        else:
+            del self._open[cursor_id]
+        return columns, batch
+
+    def has(self, cursor_id: int) -> bool:
+        return cursor_id in self._open
+
+
+def _answer_query(
+    stream: PacketStream, backend: Backend, request: ExecRequest, cursors: _Cursors
+) -> None:
     # Run the query and reply. Any failure becomes an ORA error on a healthy
     # connection — the Mirror must never desync, so even a backend that leaks a
     # native exception is caught and reported rather than dropping the wire.
@@ -194,9 +243,37 @@ def _answer_query(stream: PacketStream, backend: Backend, request: ExecRequest) 
         # statement carries none and gets a bare success status instead of a
         # describe — the client expects one or the other, not both.
         if result.columns:
-            response = encode_query_response(result.columns, result.rows)
+            rows = list(result.rows)
+            # Send the first `fetch` rows now; park any remainder on a cursor for
+            # the client's follow-up TTI_FETCH calls. A non-positive fetch (or a
+            # result that fits) is delivered whole, ending with ORA-01403.
+            batch_size = request.fetch if request.fetch > 0 else len(rows)
+            first, remaining = rows[:batch_size], rows[batch_size:]
+            if remaining:
+                cursor_id = cursors.open(result.columns, remaining)
+                response = encode_query_response(
+                    result.columns, first, cursor_id=cursor_id, more=True
+                )
+            else:
+                response = encode_query_response(result.columns, first)
         else:
             response = encode_status(result.rowcount)
+    stream.write_packet(TNS_DATA, response)
+
+
+def _answer_fetch(
+    stream: PacketStream, request: FetchRequest, cursors: _Cursors
+) -> None:
+    # Deliver the next batch of a parked result set. `take` hands back the
+    # columns (the wire needs their types to encode values, though no describe is
+    # sent) and the next `fetch` rows, dropping the cursor once it drains; `has`
+    # then reports whether more remain. An unknown cursor yields an empty batch
+    # terminated by ORA-01403.
+    count = request.fetch if request.fetch > 0 else _ALL_ROWS
+    columns, batch = cursors.take(request.cursor, count)
+    response = encode_fetch_response(
+        columns, batch, cursor_id=request.cursor, more=cursors.has(request.cursor)
+    )
     stream.write_packet(TNS_DATA, response)
 
 
