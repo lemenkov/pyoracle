@@ -66,20 +66,22 @@ _DATA_PREFIX = 10
 
 # The classic sqlplus / thick-OCI PRO request leads its TTC payload with this
 # magic instead of TTI_PRO (0x01); the Mirror must answer that request in the
-# matching `deadbeef` dialect (#265). The body handed to `pro_is_sqlplus` is a
-# DATA packet with the 8-byte TNS header stripped, so the payload — and the
-# magic — begins after the 2-byte data-flags field.
+# matching `deadbeef` dialect (#265).
 _SQLPLUS_PRO_MAGIC = bytes.fromhex('deadbeef')
-_DATA_FLAGS_LEN = 2
 
 
 def pro_is_sqlplus(pro_body: bytes) -> bool:
     """Whether a PRO request is the classic sqlplus/thick `deadbeef` dialect
-    (vs the oracledb/seerdb ``TTI_PRO`` dialect). ``pro_body`` is what
-    :meth:`PacketStream.read_packet` yields for the PRO ``TNS_DATA`` — the
-    packet with its 8-byte TNS header removed."""
-    payload = pro_body[_DATA_FLAGS_LEN:]
-    return payload[:4] == _SQLPLUS_PRO_MAGIC
+    (vs the oracledb/seerdb ``TTI_PRO`` dialect, which leads with the TTI_PRO
+    ``0x01`` token).
+
+    ``pro_body`` is what :meth:`PacketStream.read_packet` yields for the PRO
+    ``TNS_DATA``: the TTC payload with **both** the 8-byte TNS header and the
+    2-byte data-flags already stripped (``read_packet`` returns ``packet[10:]``
+    for a DATA packet), so the magic sits at the very start — verified against a
+    live sqlplus 11.2, which is exactly where a wrong offset misfires (#265).
+    """
+    return pro_body[:4] == _SQLPLUS_PRO_MAGIC
 
 
 _SERVICE_RE = re.compile(rb'\(SERVICE_NAME\s*=\s*([^)\s]+)', re.IGNORECASE)
