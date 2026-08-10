@@ -35,8 +35,10 @@ from seerdb.server import (
     BackendError,
     Capability,
     ColumnMeta,
+    Credentials,
     Result,
     UnsupportedFeature,
+    credential_lookup,
 )
 
 # Oracle numbered/named binds (:1, :name) → psycopg positional '%s'. The
@@ -132,8 +134,17 @@ class PostgresBackend:
 
     capabilities = frozenset({Capability.TRANSACTIONS})
 
-    def __init__(self, conninfo: str = '') -> None:
+    def __init__(
+        self, conninfo: str = '', *, credentials: Credentials | None = None
+    ) -> None:
         self._conn = psycopg.connect(conninfo)
+        self._credentials = credentials or {}
+
+    def authenticate(self, username: str) -> str | None:
+        # The login store the Mirror authenticates clients against — separate
+        # from the libpq `conninfo` the backend itself connects to PostgreSQL
+        # with. A production backend might instead consult a PG table here.
+        return credential_lookup(self._credentials, username)
 
     def execute(self, sql: str, binds: Sequence = ()) -> Result:
         if binds:

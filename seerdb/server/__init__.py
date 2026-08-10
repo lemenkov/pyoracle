@@ -27,8 +27,10 @@ from seerdb.server.backend import (
     Backend,
     BackendError,
     Capability,
+    Credentials,
     Result,
     UnsupportedFeature,
+    credential_lookup,
 )
 from seerdb.server.framing import PacketStream
 from seerdb.server.handshake import (
@@ -54,7 +56,7 @@ from seerdb.server.query import (
     parse_fetch,
 )
 from seerdb.server.service import BackendFactory, Server, serve
-from seerdb.server.session import Credentials, handle_login, serve_session
+from seerdb.server.session import handle_login, serve_session
 
 __all__ = [
     'Backend',
@@ -71,6 +73,7 @@ __all__ = [
     'Result',
     'Server',
     'UnsupportedFeature',
+    'credential_lookup',
     'encode_accept',
     'encode_describe',
     'encode_error',

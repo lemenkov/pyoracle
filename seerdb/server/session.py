@@ -16,7 +16,6 @@ usernames match case-insensitively); a backend-mapped auth API comes later.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
 
 from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import decode_ub4
@@ -62,10 +61,6 @@ from seerdb.server.query import (
 
 logger = logging.getLogger('seerdb.server')
 
-# username → password. Lookups are case-insensitive (Oracle folds unquoted
-# identifiers to upper-case).
-Credentials = Mapping[str, str]
-
 # A generic backend failure that leaked past the Backend contract still becomes
 # a clean ORA error rather than a wire desync (ORA-00600, internal error).
 _INTERNAL_ERROR = 600
@@ -86,19 +81,14 @@ def _expect(stream: PacketStream, want: int, what: str) -> bytes:
     return body
 
 
-def _password_for(credentials: Credentials, user: str) -> str:
-    for name, password in credentials.items():
-        if name.upper() == user.upper():
-            return password
-    raise InterfaceError(f'unknown user: {user!r}')
-
-
-def handle_login(stream: PacketStream, credentials: Credentials) -> str:
+def handle_login(stream: PacketStream, backend: Backend) -> str:
     """Run the server side of the handshake + O5LOGON; return the username.
 
-    Raises :class:`InterfaceError` on a protocol desync, an unknown user, or a
-    client that gives up. A wrong password is not rejected here — the client's
-    own ``validate()`` fails on the mismatched session key (mutual auth).
+    The O5LOGON secret comes from ``backend.authenticate(user)`` — auth lives
+    with the backend, not the Mirror. Raises :class:`InterfaceError` on a
+    protocol desync, an unknown/rejected user, or a client that gives up. A wrong
+    password is not rejected here — the client's own ``validate()`` fails on the
+    mismatched session key (mutual auth).
     """
     # --- Handshake (§2, §4.1/§4.2) ---
     request = parse_connect(_expect(stream, TNS_CONNECT, 'CONNECT'))
@@ -110,7 +100,10 @@ def handle_login(stream: PacketStream, credentials: Credentials) -> str:
 
     # --- O5LOGON (§4) ---
     user = parse_osesskey(_expect(stream, TNS_DATA, 'OSESSKEY')).decode('utf-8')
-    challenge = make_challenge(_password_for(credentials, user).encode('utf-8'))
+    secret = backend.authenticate(user)
+    if secret is None:
+        raise InterfaceError(f'authentication rejected for user: {user!r}')
+    challenge = make_challenge(secret.encode('utf-8'))
     stream.write_packet(TNS_DATA, encode_challenge(challenge))
 
     _, client_sesskey = parse_auth_response(_expect(stream, TNS_DATA, 'AUTH'))
@@ -121,9 +114,7 @@ def handle_login(stream: PacketStream, credentials: Credentials) -> str:
     return user
 
 
-def serve_session(
-    stream: PacketStream, credentials: Credentials, backend: Backend
-) -> str:
+def serve_session(stream: PacketStream, backend: Backend) -> str:
     """Log a client in, then answer its queries until it disconnects.
 
     After :func:`handle_login`, each OALL8 execute is parsed, handed to
@@ -135,7 +126,7 @@ def serve_session(
     holds the undelivered rows). A logoff (or EOF) ends the session and returns
     the authenticated username.
     """
-    user = handle_login(stream, credentials)
+    user = handle_login(stream, backend)
     cursors = _Cursors()
     while True:
         received = stream.read_packet()

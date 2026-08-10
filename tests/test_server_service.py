@@ -9,12 +9,20 @@ import threading
 
 import seerdb
 from seerdb.common.tns_consts import TNS_TYPE_VARCHAR
-from seerdb.server import ColumnMeta, Result, UnsupportedFeature
+from seerdb.server import (
+    ColumnMeta,
+    Result,
+    UnsupportedFeature,
+    credential_lookup,
+)
 
 
 class _DualBackend:
     # A fresh instance is created per session by the factory below.
     capabilities = frozenset()
+
+    def authenticate(self, username: str) -> str | None:
+        return credential_lookup({'PYO': 'pyo123'}, username)
 
     def execute(self, sql: str, binds=()) -> Result:
         if 'dual' in sql.lower():
@@ -39,7 +47,6 @@ def test_seerdb_server_serves_a_client() -> None:
     server = seerdb.Server(
         host='127.0.0.1',
         port=0,
-        credentials={'PYO': 'pyo123'},
         backend_factory=_DualBackend,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)

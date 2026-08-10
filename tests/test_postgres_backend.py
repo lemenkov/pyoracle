@@ -48,7 +48,7 @@ def _serve(listen: socket.socket, result: dict) -> None:
     conn, _ = listen.accept()
     try:
         result['user'] = serve_session(
-            PacketStream(conn), _CREDS, PostgresBackend(_CONNINFO)
+            PacketStream(conn), PostgresBackend(_CONNINFO, credentials=_CREDS)
         )
     except Exception as exc:  # noqa: BLE001 - surfaced to the test thread
         result['error'] = exc

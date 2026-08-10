@@ -19,11 +19,13 @@ from collections.abc import Callable
 
 from seerdb.server.backend import Backend
 from seerdb.server.framing import PacketStream
-from seerdb.server.session import Credentials, serve_session
+from seerdb.server.session import serve_session
 
 logger = logging.getLogger('seerdb.server')
 
-# Called once per client connection to open its backend session.
+# Called once per client connection to open its backend session. The backend it
+# returns owns auth too (its ``authenticate``), so the Server holds no
+# credentials of its own.
 BackendFactory = Callable[[], Backend]
 
 _BACKLOG = 16
@@ -39,10 +41,8 @@ class Server:
         host: str = '127.0.0.1',
         port: int = 1521,
         *,
-        credentials: Credentials,
         backend_factory: BackendFactory,
     ) -> None:
-        self._credentials = credentials
         self._backend_factory = backend_factory
         self._running = True
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -72,7 +72,7 @@ class Server:
         backend = None
         try:
             backend = self._backend_factory()
-            user = serve_session(PacketStream(client), self._credentials, backend)
+            user = serve_session(PacketStream(client), backend)
             logger.info('%s:%d session ended (%s)', addr[0], addr[1], user)
         except Exception:
             logger.exception('session error from %s:%d', *addr)
@@ -94,13 +94,10 @@ def serve(
     host: str = '127.0.0.1',
     port: int = 1521,
     *,
-    credentials: Credentials,
     backend_factory: BackendFactory,
 ) -> None:
     """Run a Mirror server until interrupted — the one-call convenience."""
-    server = Server(
-        host, port, credentials=credentials, backend_factory=backend_factory
-    )
+    server = Server(host, port, backend_factory=backend_factory)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

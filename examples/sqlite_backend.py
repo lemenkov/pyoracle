@@ -32,7 +32,14 @@ from seerdb.common.tns_consts import (
     TNS_TYPE_TIMESTAMP,
     TNS_TYPE_VARCHAR,
 )
-from seerdb.server import BackendError, Capability, ColumnMeta, Result
+from seerdb.server import (
+    BackendError,
+    Capability,
+    ColumnMeta,
+    Credentials,
+    Result,
+    credential_lookup,
+)
 
 # ORA-00900: invalid SQL statement — the generic code for a SQL the backend
 # rejected (syntax, unknown table, ...).
@@ -124,15 +131,22 @@ class SqliteBackend:
 
     One instance per Mirror session. Use ``:memory:`` for an isolated
     per-session database, or a file path to share and persist data across
-    sessions.
+    sessions. ``credentials`` (username → password) is the login store the
+    Mirror authenticates clients against — auth lives with the backend.
     """
 
     capabilities = frozenset({Capability.TRANSACTIONS})
 
-    def __init__(self, database: str = ':memory:') -> None:
+    def __init__(
+        self, database: str = ':memory:', *, credentials: Credentials | None = None
+    ) -> None:
         # PARSE_DECLTYPES turns a column declared DATE / TIMESTAMP back into a
         # datetime.date / datetime.datetime via the converters registered above.
         self._conn = sqlite3.connect(database, detect_types=sqlite3.PARSE_DECLTYPES)
+        self._credentials = credentials or {}
+
+    def authenticate(self, username: str) -> str | None:
+        return credential_lookup(self._credentials, username)
 
     def execute(self, sql: str, binds: Sequence = ()) -> Result:
         if binds:

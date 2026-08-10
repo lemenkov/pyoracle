@@ -257,6 +257,15 @@ exact bytes live in `tests/handshake_11g.py`. This is what the Mirror server
 
 then the O5LOGON auth rounds (§4) and the query.
 
+**Auth lives with the backend.** O5LOGON is *mutual* — the server must itself
+know the client's secret to prove itself (it never sees the client's password,
+only a key derived from it), so the Mirror needs each user's plaintext password
+to build the challenge. It holds none of its own: `handle_login` obtains the
+secret from `backend.authenticate(username)` (returns the secret, or `None` to
+reject), keeping identity a property of the data source — the same place Oracle
+stores it. The example backends authenticate against a `credentials` map passed
+in; a real backend could consult a table instead.
+
 **ACCEPT specifics for 11g.** Version **314** is `< 315` (`TNS_VERSION_MIN_LARGE_SDU`),
 so the connection uses **legacy 2-byte packet framing** — no large-SDU uint32
 trailer. It is also `< 318` (`TNS_VERSION_MIN_OOB_CHECK`), so there is **no

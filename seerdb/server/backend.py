@@ -17,12 +17,26 @@ correct, not a failure.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Protocol, runtime_checkable
 
 from seerdb.server.query import ColumnMeta
+
+# A username → secret map, the usual shape a backend authenticates against.
+Credentials = Mapping[str, str]
+
+
+def credential_lookup(credentials: Credentials, username: str) -> str | None:
+    """Case-insensitive credential match — the usual body of a backend's
+    :meth:`Backend.authenticate`. Oracle folds unquoted identifiers to
+    upper-case, so ``PYO``, ``pyo`` and ``Pyo`` all match one entry. Returns the
+    stored secret, or ``None`` when the user is unknown."""
+    for name, secret in credentials.items():
+        if name.upper() == username.upper():
+            return secret
+    return None
 
 
 class Capability(Enum):
@@ -70,6 +84,18 @@ class Backend(Protocol):
     """What the Mirror needs from an underlying database (one per session)."""
 
     capabilities: frozenset[Capability]
+
+    def authenticate(self, username: str) -> str | None:
+        """Return the O5LOGON secret (plaintext password) for ``username``, or
+        ``None`` to reject the login.
+
+        The Mirror stores no credentials of its own — auth lives with the
+        backend, mirroring how Oracle keeps it. O5LOGON is *mutual*: the Mirror
+        must know the secret to prove itself to the client (it never sees the
+        client's password), so this returns the secret rather than validating a
+        supplied one. :func:`credential_lookup` covers the common map-backed case.
+        """
+        ...
 
     def execute(self, sql: str, binds: Sequence = ()) -> Result:
         """Run ``sql`` and return its columns + rows (or a DML row count).
