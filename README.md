@@ -6,6 +6,12 @@ database's native wire protocol (TNS/TTC) directly over TCP.
 
 No proprietary client libraries or SDKs are required.
 
+> **Independent project — not affiliated with Oracle.** seerdb is a clean-room,
+> independent effort and is not affiliated with, endorsed by, or sponsored by
+> Oracle Corporation. Oracle®, Oracle Database, and related names are trademarks
+> of Oracle and/or its affiliates. seerdb reimplements the wire protocol for
+> interoperability only.
+
 ## Status
 
 seerdb is a functional pure-Python driver: the core DB-API 2.0 and SQL
@@ -311,11 +317,11 @@ Cursor API against a real database. They are skipped unless connection
 parameters are exported in the environment:
 
 ```
-export PYORACLE_TEST_USER=pyo
-export PYORACLE_TEST_PASSWORD=pyo123
-export PYORACLE_TEST_HOST=localhost          # optional, default localhost
-export PYORACLE_TEST_PORT=1521               # optional, default 1521
-export PYORACLE_TEST_SERVICE=XE              # optional, default XE
+export SEERDB_TEST_USER=pyo
+export SEERDB_TEST_PASSWORD=pyo123
+export SEERDB_TEST_HOST=localhost          # optional, default localhost
+export SEERDB_TEST_PORT=1521               # optional, default 1521
+export SEERDB_TEST_SERVICE=XE              # optional, default XE
 python3 -m unittest discover -v tests/
 ```
 
@@ -326,7 +332,7 @@ table.
 > **Connect-rate note.** Oracle XE rate-limits very rapid new connections
 > at the listener (issue #7). The suite opens a fresh connection per test,
 > so it keeps a small pre-connect pause (default 50&nbsp;ms, override with
-> `PYORACLE_TEST_CONNECT_DELAY`) to stay under that limit; the `Pool`
+> `SEERDB_TEST_CONNECT_DELAY`) to stay under that limit; the `Pool`
 > (issue #6) avoids it entirely by keeping connections warm. At the default
 > pace the suite runs clean.
 >
