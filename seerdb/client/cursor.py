@@ -935,11 +935,20 @@ def _resolve_parameters(SQL: str, Params) -> list:
     # wire protocol sends bind values positionally; named placeholders
     # (`:foo`) just give the caller a way to refer to them by name.
     #
-    # For plain SQL each `:name` occurrence is a distinct bind position
-    # — Oracle expects N values when `:name` appears N times. For PL/SQL
-    # blocks Oracle dedupes by unique placeholder name (per the OCI
-    # binding contract), so we emit each unique name once. The
-    # difference is detected on the SQL itself by `_is_plsql`.
+    # For a dict, each `:name` occurrence is expanded to its value — so a plain
+    # SQL statement gets one value per textual occurrence, while a PL/SQL block
+    # dedupes by unique placeholder name (the OCI binding contract; detected on
+    # the SQL by `_is_plsql`). A dict may carry extra keys the SQL never uses —
+    # they are ignored.
+    #
+    # A list/tuple is passed through unchanged. seerdb is DELIBERATELY more
+    # forgiving here than python-oracledb (see README §Compatibility): oracledb
+    # requires exactly one positional value
+    # per textual placeholder occurrence and rejects a short list (DPY-4009),
+    # whereas seerdb lets a short list stand — the server then reuses a value by
+    # placeholder name (`"... :x ... :x ..."`, `[v]` binds `:x` once). The bytes
+    # that reach the server are identical; seerdb simply doesn't second-guess the
+    # count. This is an intentional divergence, not an oversight.
     if Params is None:
         return []
     if isinstance(Params, (list, tuple)):
