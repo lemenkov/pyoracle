@@ -1567,17 +1567,29 @@ class OracleConnect:
         # No row format means there's nothing further to fetch (DDL / DML
         # responses), and CursorId == 0 means no cursor to fetch from.
         if RowFormat and CursorId and CallStatus == 1 and OraCode != 1403:
-            while True:
-                FetchResult = self.fetch_more(CursorId, self.fetch, RowFormat=RowFormat)
-                if not isinstance(FetchResult, tuple) or len(FetchResult) < 6:
-                    break
-                (CallStatus, OraCode, _, _, MoreRows, *_) = FetchResult
-                if MoreRows:
-                    AllRows.extend(MoreRows)
-                # ORA-01403 is the server saying "you've drained the cursor";
-                # call_status != 1 means the same thing via a different field.
-                if OraCode == 1403 or CallStatus != 1:
-                    break
+            try:
+                while True:
+                    # Bit-vector (BVC) duplicate-column detection is per fetch
+                    # response, and each continuation batch decodes with an empty
+                    # row list — so seed the last row fetched so far. Without it,
+                    # a column the server elides as "same as previous row" in the
+                    # first row of a continuation batch decodes as None instead of
+                    # the carried value (#326).
+                    set_decode_prev_row(AllRows[-1] if AllRows else None)
+                    FetchResult = self.fetch_more(
+                        CursorId, self.fetch, RowFormat=RowFormat
+                    )
+                    if not isinstance(FetchResult, tuple) or len(FetchResult) < 6:
+                        break
+                    (CallStatus, OraCode, _, _, MoreRows, *_) = FetchResult
+                    if MoreRows:
+                        AllRows.extend(MoreRows)
+                    # ORA-01403 is the server saying "you've drained the cursor";
+                    # call_status != 1 means the same thing via a different field.
+                    if OraCode == 1403 or CallStatus != 1:
+                        break
+            finally:
+                set_decode_prev_row(None)
         # Hide the ORA-01403 sentinel from callers; it was an internal
         # protocol marker, not a user-visible error.
         if OraCode == 1403:
@@ -1603,15 +1615,21 @@ class OracleConnect:
         # Drain a server cursor (e.g. a REF CURSOR returned by a procedure)
         # by issuing TTI_FETCH until the server signals end-of-fetch.
         AllRows: list = []
-        while True:
-            Result = self.fetch_more(CursorId, self.fetch, RowFormat=RowFormat)
-            if not isinstance(Result, tuple) or len(Result) < 6:
-                break
-            (CallStatus, OraCode, _, _, MoreRows, *_) = Result
-            if MoreRows:
-                AllRows.extend(MoreRows)
-            if OraCode == 1403 or CallStatus != 1:
-                break
+        try:
+            while True:
+                # Seed the last row so a BVC-reused column in the next batch's
+                # first row copies the carried value, not None (#326).
+                set_decode_prev_row(AllRows[-1] if AllRows else None)
+                Result = self.fetch_more(CursorId, self.fetch, RowFormat=RowFormat)
+                if not isinstance(Result, tuple) or len(Result) < 6:
+                    break
+                (CallStatus, OraCode, _, _, MoreRows, *_) = Result
+                if MoreRows:
+                    AllRows.extend(MoreRows)
+                if OraCode == 1403 or CallStatus != 1:
+                    break
+        finally:
+            set_decode_prev_row(None)
         return AllRows
 
     def lob_read(

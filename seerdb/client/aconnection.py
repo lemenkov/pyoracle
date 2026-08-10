@@ -1055,17 +1055,24 @@ class AsyncOracleConnect:
         ):
             RowFormat = RetFormat[1]
         if RowFormat and CursorId and CallStatus == 1 and OraCode != 1403:
-            while True:
-                FetchResult = await self.fetch_more(
-                    CursorId, self.fetch, RowFormat=RowFormat
-                )
-                if not isinstance(FetchResult, tuple) or len(FetchResult) < 6:
-                    break
-                (CallStatus, OraCode, _, _, MoreRows, *_) = FetchResult
-                if MoreRows:
-                    AllRows.extend(MoreRows)
-                if OraCode == 1403 or CallStatus != 1:
-                    break
+            try:
+                while True:
+                    # Seed the last row so a BVC-reused column in the next
+                    # continuation batch's first row copies the carried value
+                    # rather than decoding as None (#326; sync parity).
+                    set_decode_prev_row(AllRows[-1] if AllRows else None)
+                    FetchResult = await self.fetch_more(
+                        CursorId, self.fetch, RowFormat=RowFormat
+                    )
+                    if not isinstance(FetchResult, tuple) or len(FetchResult) < 6:
+                        break
+                    (CallStatus, OraCode, _, _, MoreRows, *_) = FetchResult
+                    if MoreRows:
+                        AllRows.extend(MoreRows)
+                    if OraCode == 1403 or CallStatus != 1:
+                        break
+            finally:
+                set_decode_prev_row(None)
         if OraCode == 1403:
             OraCode = 0
         return (CallStatus, OraCode, CursorId, RetFormat, AllRows) + tuple(Tail)
@@ -1130,15 +1137,23 @@ class AsyncOracleConnect:
         # Async drain of a server cursor (e.g. a REF CURSOR). Mirrors
         # OracleConnect.fetch_all_rows.
         AllRows: list = []
-        while True:
-            Result = await self.fetch_more(CursorId, self.fetch, RowFormat=RowFormat)
-            if not isinstance(Result, tuple) or len(Result) < 6:
-                break
-            (CallStatus, OraCode, _, _, MoreRows, *_) = Result
-            if MoreRows:
-                AllRows.extend(MoreRows)
-            if OraCode == 1403 or CallStatus != 1:
-                break
+        try:
+            while True:
+                # Seed the last row so a BVC-reused column in the next batch's
+                # first row copies the carried value, not None (#326; sync parity).
+                set_decode_prev_row(AllRows[-1] if AllRows else None)
+                Result = await self.fetch_more(
+                    CursorId, self.fetch, RowFormat=RowFormat
+                )
+                if not isinstance(Result, tuple) or len(Result) < 6:
+                    break
+                (CallStatus, OraCode, _, _, MoreRows, *_) = Result
+                if MoreRows:
+                    AllRows.extend(MoreRows)
+                if OraCode == 1403 or CallStatus != 1:
+                    break
+        finally:
+            set_decode_prev_row(None)
         return AllRows
 
     # ----- LOB read (async mirror of `OracleConnect.lob_read`) -----

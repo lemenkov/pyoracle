@@ -712,6 +712,20 @@ class CursorIntegration(_IntegrationBase):
         self.cur.fetchone()
         self.assertEqual(self.cur.fetchall(), [(2,), (3,), (4,), (5,)])
 
+    def test_bit_vector_reuse_across_fetch_boundary(self):
+        # #326: a column the server elides as "same as previous row" (bit-vector
+        # duplicate detection) must survive a fetch-continuation boundary. The
+        # result set (200 rows) far exceeds the ~15-row prefetch, and the two
+        # constant columns are reused every row — the first row of each
+        # continuation batch used to decode them as None.
+        self.cur.execute(
+            "SELECT 42 AS k, LEVEL AS n, 'fixed' AS s FROM dual CONNECT BY LEVEL <= 200"
+        )
+        rows = self.cur.fetchall()
+        self.assertEqual(len(rows), 200)
+        self.assertTrue(all(r[0] == 42 and r[2] == 'fixed' for r in rows))
+        self.assertEqual([r[1] for r in rows], list(range(1, 201)))
+
     # ----- iteration -----
 
     def test_iter_yields_all_rows(self):
