@@ -32,6 +32,14 @@ work from:
   your own words / code.
 - **cx_Oracle 5.x and earlier** under its old BSD-style license, same
   rules as above.
+- **Independent, third-party reimplementations of the protocol** (in any
+  language) published under a permissive open-source license (MIT, BSD,
+  Apache, and the like). Same rules as above: consult them to understand
+  a layout or to corroborate a capture-derived finding, re-express in
+  your own code, and attribute any code you do borrow per its license.
+  Treat them as a **cross-check against your own packet captures, not a
+  primary source** — the wire facts you confirm are what matter, and the
+  facts themselves are not copyrightable.
 - **Public RFCs, conference talks, blog posts, academic papers,**
   packet-protocol guides, and anything else freely available on the
   web. Cite the URL in your commit message.
