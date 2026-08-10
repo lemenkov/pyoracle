@@ -70,6 +70,59 @@ def test_large_data_fragments_reassemble() -> None:
         right.close()
 
 
+def _client_reassemble(raw: bytes, sdu: int) -> bytes:
+    # Mimic the real client's response reassembly (Connection.recv): assemble_packet
+    # keys on the SDU-37 / SDU-81 continuation sizes and ignores the 0x0020 flag.
+    from seerdb.common.tns import assemble_packet
+
+    acc, out = raw, b''
+    while len(acc) >= 8:
+        flag, _type, body, rest = assemble_packet(acc, sdu, False)
+        if body is None:
+            break
+        out += body
+        acc = rest or b''
+        if flag and not acc:
+            break
+    return out
+
+
+def test_large_response_reassembles_via_client_path() -> None:
+    # A DATA response bigger than the SDU must fragment so the *client's*
+    # assemble_packet reassembles it whole — the full-SDU form encode_packet
+    # emits is misread as complete after the first fragment. Covers sizes around
+    # the fragment boundary, including the magic continuation sizes themselves.
+    # The write runs on a thread so a big payload can't deadlock the socketpair
+    # buffer against a same-thread read.
+    import threading
+
+    sdu = 8192
+    for n in (sdu - 10, sdu - 37, sdu - 81, sdu * 3, sdu * 2 - 47, 200_000):
+        payload = bytes((i * 7) % 256 for i in range(n))
+        left, right = _pair()
+        try:
+
+            def _send(sock=left, data=payload) -> None:
+                PacketStream(sock, sdu=sdu).write_packet(TNS_DATA, data)
+                sock.shutdown(socket.SHUT_WR)
+
+            writer = threading.Thread(target=_send)
+            writer.start()
+            raw = b''
+            while True:
+                chunk = right.recv(65536)
+                if not chunk:
+                    break
+                raw += chunk
+            writer.join(timeout=5)
+            assert _client_reassemble(raw, sdu) == payload, (
+                f'size {n} did not reassemble'
+            )
+        finally:
+            left.close()
+            right.close()
+
+
 def test_two_back_to_back_packets() -> None:
     # Consecutive packets in one buffer are framed independently.
     left, right = _pair()
