@@ -520,22 +520,46 @@ TTI_FUN | TTI_SESS | SeqNum | 1 | UserLen | AuthMode | 1 | NumPairs | 1 | 1 |
 
 The server responds with TTI_RPA containing key-value pairs:
 
-| Key                    | Description                                    |
-|------------------------|------------------------------------------------|
-| `AUTH_SESSKEY`         | Server session key (hex-encoded)               |
-| `AUTH_VFR_DATA`        | Verifier data / salt (hex-encoded)             |
-| `AUTH_PBKDF2_CSK_SALT` | PBKDF2 derived salt (for AES-256 auth)        |
+| Key                      | Description                                          |
+|--------------------------|------------------------------------------------------|
+| `AUTH_SESSKEY`           | Server session key (hex-encoded)                     |
+| `AUTH_VFR_DATA`          | Verifier salt (hex-encoded); **empty on 10g**        |
+| `AUTH_PBKDF2_CSK_SALT`   | PBKDF2 ConnKey salt — present ⇔ a 12c+ server         |
+| `AUTH_PBKDF2_VGEN_COUNT` | PBKDF2 iterations for the session key (256-bit)      |
+| `AUTH_PBKDF2_SDER_COUNT` | PBKDF2 iterations for the ConnKey                    |
 
-The `AUTH_VFR_DATA` length (NbPair field) determines the authentication variant:
+The **verifier-type flag** on the `AUTH_VFR_DATA` pair — the ub4 that trails every
+key-value pair, *not* a length — names the account's password-verifier generation.
+These are opaque Oracle identifiers (the hex forms carry no structure); each is
+live-confirmed on the wire:
 
-| NbPair | Variant  | Key Size | Cipher      |
-|--------|----------|----------|-------------|
-| 2361   | O5LOGON  | 128-bit  | AES-128-CBC |
-| 6949   | O5LOGON  | 192-bit  | AES-192-CBC |
-| 18453  | O5LOGON  | 256-bit  | AES-256-CBC |
+| Flag  | Hex      | Account verifier | Confirmed                  |
+|-------|----------|------------------|----------------------------|
+| 2361  | `0x0939` | 10g / legacy DES | live 10.2.0.5              |
+| 6949  | `0x1B25` | 11g SHA-1        | 11g capture + live XE 11.2 |
+| 18453 | `0x4815` | 12c SHA-2        | live 21c / 23ai / 26ai     |
+
+The key schedule is chosen from the verifier type **and**, *independently*, from
+whether the server advertised PBKDF2 (`AUTH_PBKDF2_CSK_SALT` present ⇔ 12c+
+server). The two signals are orthogonal, so salt-presence alone is **not** a
+reliable selector:
+
+| Verifier (flag)  | Server   | `AUTH_VFR_DATA` | `CSK_SALT` | Key schedule                              |
+|------------------|----------|-----------------|------------|-------------------------------------------|
+| legacy (2361)    | 10g      | empty (+ flag)  | absent     | 128-bit, salt-less DES verifier           |
+| 11g SHA-1 (6949) | 11g      | salt            | absent     | 192-bit SHA-1 key, legacy MD5 ConnKey     |
+| 11g SHA-1 (6949) | **12c+** | salt            | **present**| 192-bit SHA-1 key, **PBKDF2 ConnKey** (#311)|
+| 12c SHA-2 (18453)| 12c+     | salt            | present    | 256-bit PBKDF2                            |
+
+The third row is the subtle case — a modern server serving a pre-SHA-2 account.
+Because it sends *both* a salt and a CSK salt, a naive "salt present ⇒ 256-bit"
+rule mis-selects the SHA-2 schedule and the login fails `ORA-01017`; the `6949`
+flag is what disambiguates it (#311 / #312, validated live in `test_integration`).
 
 **Oracle 10g (field version 4)** has no 11g/12c password verifier, so it sends
-`AUTH_SESSKEY` with an **empty** `AUTH_VFR_DATA` (no salt) and no PBKDF2 fields.
+`AUTH_SESSKEY` with an **empty** `AUTH_VFR_DATA` (no salt) and no PBKDF2 fields —
+though the `2361` verifier-type flag still rides on that empty pair, which is why
+salt-presence and verifier type are independent signals (see the table above).
 seerdb detects the absence of *both* the salt and the derived salt and takes
 the legacy **DES-verifier** path (the 128-bit case below). Note this is still an
 AES session key: **O5LOGON debuted in 10g** — 11g only *added* the salted SHA-1
@@ -559,11 +583,17 @@ The client computes the authentication response:
   the value stored in `sys.user$.password`). Then `ConnKey = MD5(XOR(SrvSess[16:32],
   CliSess[16:32]))`. Verified against a live 10.2.0.5 server (the derived verifier
   matches `sys.user$.password`; login succeeds sync + async).
-- **192-bit** (11g XE): SHA-1 hash of `PASSWORD + unhex(SALT)`, zero-padded to 24 bytes (the
-  AES-192 `KeySess`).
+- **192-bit, SHA-1** (11g verifier): `KeySess` = SHA-1(`PASSWORD + unhex(SALT)`)
+  zero-padded to 24 bytes (AES-192). The **ConnKey** then depends on the server:
+  an 11g server (no CSK salt) uses the legacy MD5-based 24-byte derivation; a
+  **modern (12c+) server** serving this account (flag `6949`, both salts present)
+  reuses the *same* SHA-1 `KeySess` but derives the ConnKey with the 256-bit path's
+  `PBKDF2-HMAC-SHA512(hexlify(CliSess || SrvSess), salt = unhex(AUTH_PBKDF2_CSK_SALT),
+  iterations = AUTH_PBKDF2_SDER_COUNT)` at **24-byte** length (#311).
 - **256-bit** (12c+, e.g. 21c XE): `Data = PBKDF2-HMAC-SHA512(PASSWORD, salt =
   unhex(AUTH_VFR_DATA) || "AUTH_PBKDF2_SPEEDY_KEY", iterations = AUTH_PBKDF2_VGEN_COUNT
-  (4096), dklen = 64)`, then `KeySess = SHA-512(Data || unhex(AUTH_VFR_DATA))[:32]` (the
+  (server-advertised, default 4096; hardcoding these broke #309), dklen = 64)`, then
+  `KeySess = SHA-512(Data || unhex(AUTH_VFR_DATA))[:32]` (the
   AES-256 key). `Data` is also carried to the server in `AUTH_PBKDF2_SPEEDY_KEY` (below).
 
 **Session key exchange**:
@@ -573,7 +603,8 @@ The client computes the authentication response:
 4. Derive the connection key `ConnKey` from the server and client session keys:
    - 128-bit: MD5 over XOR/concatenation; 192-bit: MD5-based, 24 bytes.
    - **256-bit**: `ConnKey = PBKDF2-HMAC-SHA512(hexlify(CliSess || SrvSess), salt =
-     unhex(AUTH_PBKDF2_CSK_SALT), iterations = AUTH_PBKDF2_SDER_COUNT (3), dklen = 32)`.
+     unhex(AUTH_PBKDF2_CSK_SALT), iterations = AUTH_PBKDF2_SDER_COUNT (server-advertised,
+     default 3; #309), dklen = 32)`.
      Note the order — **client session key first**, and the *unpadded* keys are concatenated.
 
 **Password encryption**: `AUTH_PASSWORD = AES-CBC(ConnKey, IV=0)` of `pad1(PASSWORD)`, where
