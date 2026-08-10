@@ -49,19 +49,44 @@ def des_verifier(User: bytes, Password: bytes) -> bytes:
     return DES.new(Inter, DES.MODE_CBC, IVec).encrypt(CliPass)[-8:]
 
 
+# Historical / minimum PBKDF2 iteration counts. The server advertises the real
+# ones as AUTH_PBKDF2_VGEN_COUNT (verifier / speedy-key derivation) and
+# AUTH_PBKDF2_SDER_COUNT (session-key derivation) in the challenge; a hardened
+# install raises them. These are the defaults when the fields are absent (10g /
+# 11g) and the floors below which a bogus value is ignored.
+_VGEN_COUNT_DEFAULT = 4096
+_SDER_COUNT_DEFAULT = 3
+_PBKDF2_COUNT_MAX = 100_000_000
+
+
+def _clamp_count(value: int | None, minimum: int) -> int:
+    # Use the server's count when it is a sane value; otherwise the default.
+    if value is None or value < minimum or value > _PBKDF2_COUNT_MAX:
+        return minimum
+    return value
+
+
 def o5logon(
     Sess: bytes,
     Salt: bytes | None,
     DerivedSalt: bytes | None,
     User: bytes,
     Password: bytes,
+    VgenCount: int | None = None,
+    SderCount: int | None = None,
 ) -> tuple[bytes, bytes, bytes, int, bytes]:
+    # VgenCount / SderCount come from the server's AUTH_PBKDF2_VGEN_COUNT /
+    # AUTH_PBKDF2_SDER_COUNT (256-bit scheme). Hardcoding them broke auth
+    # against servers with non-default counts (#309); fall back to the defaults
+    # when absent.
+    VgenCount = _clamp_count(VgenCount, _VGEN_COUNT_DEFAULT)
+    SderCount = _clamp_count(SderCount, _SDER_COUNT_DEFAULT)
     # 10g (#47): an AES session key but NO verifier salt — the account has only
     # the legacy DES verifier. The AES key is that 8-byte verifier zero-padded to
     # 16; the rest is the salt-less 128-bit path (XOR cat_key + md5 ConnKey).
     if (Salt is None) and (DerivedSalt is None):
         KeySess = des_verifier(User, Password) + bytes(8)
-        return o5logon0(Sess, KeySess, None, None, Password, 128)
+        return o5logon0(Sess, KeySess, None, None, Password, 128, SderCount)
     # 128 bits
     if (Salt is None) and (DerivedSalt is not None):
         IVec = bytes(8)
@@ -74,17 +99,21 @@ def o5logon(
         Rest2 = cipher.encrypt(CliPass)
 
         KeySess = Rest2[:-8] + bytes(8)
-        return o5logon0(Sess, KeySess, DerivedSalt, None, Password, 128)
+        return o5logon0(Sess, KeySess, DerivedSalt, None, Password, 128, SderCount)
     # 192 bits
     elif (Salt is not None) and (DerivedSalt is None):
         KeySess = sha1(Password + Salt).digest() + bytes(4)
-        return o5logon0(Sess, KeySess, DerivedSalt, None, Password, 192)
+        return o5logon0(Sess, KeySess, DerivedSalt, None, Password, 192, SderCount)
     # 256 bits
     elif (Salt is not None) and (DerivedSalt is not None):
-        Data = pbkdf2_hmac('sha512', Password, Salt + b'AUTH_PBKDF2_SPEEDY_KEY', 4096)
+        Data = pbkdf2_hmac(
+            'sha512', Password, Salt + b'AUTH_PBKDF2_SPEEDY_KEY', VgenCount
+        )
         KeySess = sha512(Data + Salt).digest()[0:32]
         DerivedKey = token_bytes(16) + Data
-        return o5logon0(Sess, KeySess, DerivedSalt, DerivedKey, Password, 256)
+        return o5logon0(
+            Sess, KeySess, DerivedSalt, DerivedKey, Password, 256, SderCount
+        )
     # something else we don't know anything about it
     else:
         raise Exception('unsupported key scheme')
@@ -97,6 +126,7 @@ def o5logon0(
     DerivedKey: bytes | None,
     Password: bytes,
     Bits: int,
+    SderCount: int = _SDER_COUNT_DEFAULT,
 ) -> tuple[bytes, bytes, bytes, int, bytes]:
     IVec = bytes(16)
 
@@ -114,7 +144,7 @@ def o5logon0(
 
     CatKey = cat_key(SrvSess, CliSess, DerivedSalt, Bits)
 
-    ConnKey = conn_key(CatKey, DerivedSalt, Bits)
+    ConnKey = conn_key(CatKey, DerivedSalt, Bits, SderCount)
 
     AuthPass = encrypt_password(ConnKey, Password)
 
@@ -203,12 +233,17 @@ def bin_xor(X: bytes, Y: bytes) -> bytes:
     return (p ^ q).to_bytes(len(X), sys.byteorder)
 
 
-def conn_key(Data: bytes, DerivedSalt: bytes | None, Bits: int) -> bytes:
+def conn_key(
+    Data: bytes,
+    DerivedSalt: bytes | None,
+    Bits: int,
+    SderCount: int = _SDER_COUNT_DEFAULT,
+) -> bytes:
     if Bits == 128:
         if DerivedSalt is None:
             return md5(Data).digest()
         else:
-            return pbkdf2_hmac('sha512', hexlify(Data), DerivedSalt, 3)
+            return pbkdf2_hmac('sha512', hexlify(Data), DerivedSalt, SderCount)
     elif Bits == 192:
         if DerivedSalt is None:
             return md5(Data[0:16]).digest() + md5(Data[16:24]).digest()[0:8]
@@ -216,13 +251,14 @@ def conn_key(Data: bytes, DerivedSalt: bytes | None, Bits: int) -> bytes:
             raise Exception('unsupported key size', 192)
     elif Bits == 256:
         # AES-256 needs a 32-byte key; pbkdf2_hmac('sha512', ...) defaults to the
-        # full 64-byte digest, so request 32 explicitly. (SDER iteration count
-        # is 3, matching the server's AUTH_PBKDF2_SDER_COUNT.) The PBKDF2
-        # password must be the UPPERCASE hex of the key material — oracledb uses
-        # temp_key.hex().upper(); lowercase hex yields a different ConnKey and
-        # the server rejects AUTH_PASSWORD with ORA-01017.
+        # full 64-byte digest, so request 32 explicitly. SderCount is the server's
+        # AUTH_PBKDF2_SDER_COUNT (default 3). The PBKDF2 password must be the
+        # UPPERCASE hex of the key material — lowercase hex yields a different
+        # ConnKey and the server rejects AUTH_PASSWORD with ORA-01017.
         if DerivedSalt is None:
             raise ValueError('AES-256 connection key requires a PBKDF2 salt')
-        return pbkdf2_hmac('sha512', hexlify(Data).upper(), DerivedSalt, 3, dklen=32)
+        return pbkdf2_hmac(
+            'sha512', hexlify(Data).upper(), DerivedSalt, SderCount, dklen=32
+        )
     else:
         raise Exception('unsupported key size', Bits)

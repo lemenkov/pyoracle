@@ -1023,8 +1023,8 @@ class OracleConnect:
     def _handle_rpa(self, Data: bytes) -> int | None:
         Result = decode_token_rpa(Data, ())
         if Result[0] == TTI_SESS:
-            # Auth challenge: (TTI_SESS, SessKey, Salt, DerivedSalt)
-            (_, SessKey, Salt, DerivedSalt) = Result
+            # Auth challenge: (TTI_SESS, SessKey, Salt, DerivedSalt, Vgen, Sder)
+            (_, SessKey, Salt, DerivedSalt, VgenCount, SderCount) = Result
             logger.debug('handle_login: auth challenge received')
             self.conn_state = CONN_STATE_AUTH_NEGOTIATE
             Auth = {
@@ -1033,6 +1033,10 @@ class OracleConnect:
                 'derived_salt': bytes.fromhex(DerivedSalt.decode('utf-8'))
                 if DerivedSalt
                 else None,
+                # Server PBKDF2 iteration counts (256-bit scheme), so the key
+                # derivation matches a server with non-default counts (#309).
+                'vgen_count': VgenCount,
+                'sder_count': SderCount,
             }
             (Data, ConnKey) = encode_dictionary_auth(
                 self._make_dict(DictionaryType.auth, auth=Auth)

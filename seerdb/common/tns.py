@@ -998,7 +998,14 @@ def decode_token_rpa(Data: bytes, Acc: tuple) -> tuple:
         SessId = dict(KVs).get(b'AUTH_SESSION_ID')
         return (TTI_AUTH, Resp, Ver, SessId)
     else:
-        return (TTI_SESS, SessKey, Salt, DerivedSalt)
+        # The 256-bit scheme carries the server's PBKDF2 iteration counts; the
+        # client must derive the key with these, not hardcoded defaults (#309).
+        # Absent (10g/11g) → None, and the crypto falls back to the defaults.
+        VgenRaw = dict(KVs).get(b'AUTH_PBKDF2_VGEN_COUNT')
+        SderRaw = dict(KVs).get(b'AUTH_PBKDF2_SDER_COUNT')
+        VgenCount = int(VgenRaw) if VgenRaw else None
+        SderCount = int(SderRaw) if SderRaw else None
+        return (TTI_SESS, SessKey, Salt, DerivedSalt, VgenCount, SderCount)
 
 
 def decode_token_pro(Data: bytes) -> dict:
@@ -1612,6 +1619,8 @@ def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
     Sess = Dictionary['auth']['sess']
     Salt = Dictionary['auth']['salt']
     DerivedSalt = Dictionary['auth']['derived_salt']
+    VgenCount = Dictionary['auth'].get('vgen_count')
+    SderCount = Dictionary['auth'].get('sder_count')
     User = Dictionary['env']['user'].encode('utf-8')
     Pass = Dictionary['env']['password'].encode('utf-8')
     Role = Dictionary['env'].get('role', 0)
@@ -1619,7 +1628,7 @@ def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
 
     LogonMode = encode_sb4((Role * 32) | (Prelim * 128) | 1 | 256)
     (AuthPass, AuthSess, SpeedyKey, SpeedyKeyInd, ConnKey) = o5logon(
-        Sess, Salt, DerivedSalt, User, Pass
+        Sess, Salt, DerivedSalt, User, Pass, VgenCount, SderCount
     )
 
     AuthPass = encode_kv(b'AUTH_PASSWORD', AuthPass.hex().upper().encode('utf-8'))

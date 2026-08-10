@@ -80,7 +80,7 @@ def test_challenge_is_deterministic_when_seeded() -> None:
 def test_encode_challenge_decodes_as_a_sess_challenge() -> None:
     challenge = make_challenge(b'pyo123')
     payload = encode_challenge(challenge)
-    kind, sesskey, salt, derived = decode_token_rpa(payload[1:], ())
+    kind, sesskey, salt, derived, _vgen, _sder = decode_token_rpa(payload[1:], ())
     assert kind == TTI_SESS
     assert unhexlify(sesskey) == challenge.auth_sesskey
     assert unhexlify(salt) == challenge.salt
