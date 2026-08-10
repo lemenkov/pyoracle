@@ -21,7 +21,13 @@ from seerdb.common.tns_consts import (
     TTI_DCB,
     TTI_STA,
 )
-from seerdb.server.query import ColumnMeta, encode_describe, encode_rows, parse_exec
+from seerdb.server.query import (
+    ColumnMeta,
+    encode_describe,
+    encode_rows,
+    parse_exec,
+    parse_exec_oci,
+)
 
 
 def _decode_describe(payload: bytes) -> list[dict]:
@@ -434,3 +440,48 @@ def test_parse_exec_extracts_array_dml_rows() -> None:
     req = parse_exec(msg)
     assert req.bind_rows == [[1, 'a'], [2, 'b'], [3, 'c']]
     assert req.binds == [1, 'a']  # first row remains the single-execute view
+
+
+# A live sqlplus 11.2 OCI (deadbeef dialect) OALL8 execute — the user's typed
+# query. Captured from sqlplus 11.2 <-> XE 11.2 (#265).
+_OCI_EXEC_USER = bytes.fromhex(
+    '035e156180000000000000feffffffffffffff3600000000000000feffffffffffffff'
+    '0d00000000000000fefffffffffffffffeffffffffffffff0000000001000000000000'
+    '0000000000000000000000000000000000000000000000000000000000feffffffffff'
+    'ffff0000000000000000fefffffffffffffffefffffffffffffff83514260000000000'
+    '00000000000000fefffffffffffffffeffffffffffffff000000000000000000000000'
+    '00000000000000000000000000000000000000001273656c65637420312066726f6d20'
+    '6475616c01000000000000000000000000000000000000000000000000000000010000'
+    '000000000000000000000000000000000000000000'
+)
+# sqlplus's own internal query (SELECT USER FROM DUAL) — NUL-terminated, unlike
+# the user's typed one; the parse must strip the trailing NUL.
+_OCI_EXEC_INTERNAL = bytes.fromhex(
+    '035e066180000000000000feffffffffffffff4200000000000000feffffffffffffff'
+    '0d00000000000000fefffffffffffffffeffffffffffffff0000000001000000000000'
+    '0000000000000000000000000000000000000000000000000000000000feffffffffff'
+    'ffff0000000000000000fefffffffffffffffefffffffffffffff83514260000000000'
+    '00000000000000fefffffffffffffffeffffffffffffff000000000000000000000000'
+    '00000000000000000000000000000000000000001653454c4543542055534552204652'
+    '4f4d204455414c00010000000000000000000000000000000000000000000000000000'
+    '00010000000000000000000000000000000000000000000000'
+)
+
+
+def test_parse_exec_oci_extracts_the_user_query() -> None:
+    req = parse_exec_oci(_OCI_EXEC_USER)
+    assert req.sql == 'select 1 from dual'
+    assert req.cursor == 0  # a new statement
+
+
+def test_parse_exec_oci_strips_the_internal_query_nul() -> None:
+    # sqlplus NUL-terminates SELECT USER FROM DUAL; the trailing NUL must not
+    # reach the backend.
+    req = parse_exec_oci(_OCI_EXEC_INTERNAL)
+    assert req.sql == 'SELECT USER FROM DUAL'
+    assert '\x00' not in req.sql
+
+
+def test_parse_exec_oci_rejects_a_non_oci_message() -> None:
+    with pytest.raises(InterfaceError):
+        parse_exec_oci(b'\x03\x5e\x06not the oci shape' + b'\x00' * 200)
