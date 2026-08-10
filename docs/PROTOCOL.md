@@ -1059,6 +1059,15 @@ of byte 0, column 8 = bit 0 of byte 1, etc.).
 Without honouring the bit vector, the RXD decoder reads too many DALCs
 and walks off the end of the packet.
 
+**"Previous row" spans fetch boundaries.** Differential encoding is relative to
+the immediately preceding row, which may sit in an *earlier* `TTI_FETCH`
+response — a large result set is drained across several fetches, and the first
+row of a continuation batch can reuse a column from the last row of the prior
+batch. The decoder resets its per-response row list each fetch, so the client
+must seed that last-fetched row before decoding the next batch (the same seeding
+a scrollable re-execute needs, §6.1). Missing it decodes the reused column as
+`None` for the first row of every continuation batch (#326).
+
 ### 6.4 Describe Information (TTI_DCB)
 
 Column metadata for result sets. The 11g layout begins with a header
