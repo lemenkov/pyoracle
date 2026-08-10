@@ -17,7 +17,12 @@ from dataclasses import dataclass
 from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import encode_packet
 from seerdb.common.tns_consts import TNS_ACCEPT, TNS_DATA
-from seerdb.server._handshake_11g import DTY_REPLY, PRO_REPLY
+from seerdb.server._handshake_11g import (
+    DTY_REPLY,
+    DTY_REPLY_SQLPLUS,
+    PRO_REPLY,
+    PRO_REPLY_SQLPLUS,
+)
 from seerdb.server.framing import DEFAULT_SDU
 
 # The connect-data OFFSET field is measured from the start of the whole packet
@@ -58,6 +63,24 @@ _DEFAULT_TDU = 0xFFFF
 # flags. The captured PRO/DTY replies are stored as full packets; re-wrapping
 # their payload reproduces the packet and proves our framing matches the wire.
 _DATA_PREFIX = 10
+
+# The classic sqlplus / thick-OCI PRO request leads its TTC payload with this
+# magic instead of TTI_PRO (0x01); the Mirror must answer that request in the
+# matching `deadbeef` dialect (#265). The body handed to `pro_is_sqlplus` is a
+# DATA packet with the 8-byte TNS header stripped, so the payload — and the
+# magic — begins after the 2-byte data-flags field.
+_SQLPLUS_PRO_MAGIC = bytes.fromhex('deadbeef')
+_DATA_FLAGS_LEN = 2
+
+
+def pro_is_sqlplus(pro_body: bytes) -> bool:
+    """Whether a PRO request is the classic sqlplus/thick `deadbeef` dialect
+    (vs the oracledb/seerdb ``TTI_PRO`` dialect). ``pro_body`` is what
+    :meth:`PacketStream.read_packet` yields for the PRO ``TNS_DATA`` — the
+    packet with its 8-byte TNS header removed."""
+    payload = pro_body[_DATA_FLAGS_LEN:]
+    return payload[:4] == _SQLPLUS_PRO_MAGIC
+
 
 _SERVICE_RE = re.compile(rb'\(SERVICE_NAME\s*=\s*([^)\s]+)', re.IGNORECASE)
 _SID_RE = re.compile(rb'\(SID\s*=\s*([^)\s]+)', re.IGNORECASE)
@@ -146,23 +169,28 @@ def encode_accept(request: ConnectRequest, *, sdu: int = DEFAULT_SDU) -> bytes:
     return packet
 
 
-def encode_pro_reply(*, sdu: int = DEFAULT_SDU) -> bytes:
+def encode_pro_reply(*, sqlplus: bool = False, sdu: int = DEFAULT_SDU) -> bytes:
     """Build the server's PRO (protocol negotiation) reply — §4.1.
 
-    Serves the oracledb/seerdb (``TTI_PRO``) dialect: replays the real 11g
-    server's PRO reply, whose capability array pins the negotiated field
-    version to 6. Returns the full TNS_DATA packet. The old sqlplus
-    ``deadbeef`` PRO dialect is a different reply shape, not served yet.
+    Replays the real 11g server's PRO reply, whose capability array pins the
+    negotiated field version to 6. ``sqlplus`` selects the classic
+    ``deadbeef`` dialect (127B) over the oracledb/seerdb ``TTI_PRO`` dialect
+    (238B); pass whatever :func:`pro_is_sqlplus` reported for the request.
+    Returns the full TNS_DATA packet.
     """
-    packet, _ = encode_packet(TNS_DATA, PRO_REPLY[_DATA_PREFIX:], sdu)
+    reply = PRO_REPLY_SQLPLUS if sqlplus else PRO_REPLY
+    packet, _ = encode_packet(TNS_DATA, reply[_DATA_PREFIX:], sdu)
     return packet
 
 
-def encode_dty_reply(*, sdu: int = DEFAULT_SDU) -> bytes:
+def encode_dty_reply(*, sqlplus: bool = False, sdu: int = DEFAULT_SDU) -> bytes:
     """Build the server's DTY (data-type negotiation) reply — §4.2.
 
-    Replays the real 11g server's DTY reply (oracledb/seerdb dialect) as a
-    full TNS_DATA packet.
+    Replays the real 11g server's DTY reply as a full TNS_DATA packet.
+    ``sqlplus`` selects the ``deadbeef`` dialect (238B) over the
+    oracledb/seerdb dialect (924B); use the same value the PRO reply used so
+    both halves of the handshake speak one dialect.
     """
-    packet, _ = encode_packet(TNS_DATA, DTY_REPLY[_DATA_PREFIX:], sdu)
+    reply = DTY_REPLY_SQLPLUS if sqlplus else DTY_REPLY
+    packet, _ = encode_packet(TNS_DATA, reply[_DATA_PREFIX:], sdu)
     return packet

@@ -1,17 +1,48 @@
 # SPDX-FileCopyrightText: 2019 Peter Lemenkov <lemenkov@gmail.com>
 # SPDX-License-Identifier: MIT
 
-"""Captured 11g server PRO/DTY reply packets (oracledb / seerdb PRO dialect).
+"""Captured 11g server PRO/DTY reply packets, both PRO dialects.
 
-The full DATA packets a real XE 11.2 listener sends in reply to a client that
-speaks the TTI_PRO (0x01) protocol dialect — python-oracledb and seerdb.
-Captured through tools/capture_proxy.py; they drive a client to negotiate
-field version 6 (11g). The old sqlplus 'deadbeef' PRO dialect (PROTOCOL.md
-§4.1) has a different reply shape and is not served yet.
+The full DATA packets a real XE 11.2 listener sends in reply to the protocol
+(PRO) and data-type (DTY) negotiation. Two dialects exist (PROTOCOL.md §4.1):
+
+- The **TTI_PRO (0x01)** dialect — python-oracledb and seerdb: PRO reply 238B,
+  DTY reply 924B (``PRO_REPLY`` / ``DTY_REPLY``).
+- The classic **sqlplus `deadbeef`** dialect (sqlplus 11.2, thick OCI): the PRO
+  request leads with a ``DE AD BE EF`` magic, and the replies are a different
+  shape — PRO reply 127B, DTY reply 238B (``PRO_REPLY_SQLPLUS`` /
+  ``DTY_REPLY_SQLPLUS``). The Mirror answers in whichever dialect the client's
+  PRO used (#265).
+
+Captured through tools/capture_proxy.py; they drive a client to negotiate field
+version 6 (11g).
 """
 
 # S2C: server PRO reply (238B, leads TTI_PRO 0x01 06)
 PRO_REPLY = bytes.fromhex(
+    '00ee00000600000000000106007838365f36342f4c696e757820322e342e7878006903010a00'
+    '6603400301400366030166034803014803660301660352030152036603016603610301610366'
+    '030166031f03081f0366030100640000006001240f050b0c030c0c0504050d06090708050505'
+    '05050f05050505050a050505050504050607080823472347081123081141b0470083036907d0'
+    '0300000000000000000000000000000000000000000000000000000000000000000000000000'
+    '27060101010f010106010101010101017fff030a030301007f017fff010601013f0103060001'
+    '03020702010001180003'
+)
+
+# --- sqlplus 'deadbeef' dialect replies (#265) ---
+
+# S2C: server PRO reply (127B). The deadbeef-dialect PRO carries the server
+# version banner; the type capabilities move to the DTY reply below.
+PRO_REPLY_SQLPLUS = bytes.fromhex(
+    '007f0000060000000000deadbeef0075000000000004000004000300000000000400050b2002'
+    '0000020006001f000e0001deadbeef000300000002000400010001000200000000000400050b'
+    '20020000020006fbff0002000200000000000400050b20020000010002000003000200000000'
+    '000400050b2002000001000200'
+)
+
+# S2C: server DTY reply (238B). Carries the same type-capability block the
+# TTI_PRO dialect puts in its PRO reply, packaged as the deadbeef DTY answer.
+DTY_REPLY_SQLPLUS = bytes.fromhex(
     '00ee00000600000000000106007838365f36342f4c696e757820322e342e7878006903010a00'
     '6603400301400366030166034803014803660301660352030152036603016603610301610366'
     '030166031f03081f0366030100640000006001240f050b0c030c0c0504050d06090708050505'

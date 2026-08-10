@@ -414,10 +414,14 @@ replaying a `deadbeef` reply to seerdb (or vice-versa) fails to parse. A server
 (the Mirror, `seerdb/server/`) must therefore answer in whichever dialect the
 client's PRO request used.
 
-seerdb's server currently serves the **oracledb/seerdb (`TTI_PRO`) dialect**
-(`encode_pro_reply` / `encode_dty_reply`, replaying the captured 11g reply so a
-client negotiates field version 6). The sqlplus `deadbeef` dialect is a
-separate reply shape, not served yet.
+seerdb's server (the Mirror) serves **both** dialects (#265). `serve_login`
+inspects the PRO request — `pro_is_sqlplus` checks whether its TTC payload leads
+with the `deadbeef` magic — and holds that verdict so both `encode_pro_reply`
+and `encode_dty_reply` answer in one dialect: the `TTI_PRO` reply (238 B / 924 B)
+for a thin client, or the `deadbeef` reply (127 B / 238 B) for sqlplus / thick
+OCI. Both replay the captured 11g bytes so the client negotiates field version 6.
+The `deadbeef` DTY reply (238 B) carries the same capability block the `TTI_PRO`
+dialect puts in its PRO reply, just packaged into the other message.
 
 ### 4.2 Data Type Negotiation (TTI_DTY)
 

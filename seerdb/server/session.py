@@ -48,6 +48,7 @@ from seerdb.server.handshake import (
     encode_dty_reply,
     encode_pro_reply,
     parse_connect,
+    pro_is_sqlplus,
 )
 from seerdb.server.query import (
     ColumnMeta,
@@ -95,10 +96,14 @@ def handle_login(stream: PacketStream, backend: Backend) -> str:
     # --- Handshake (§2, §4.1/§4.2) ---
     request = parse_connect(_expect(stream, TNS_CONNECT, 'CONNECT'))
     stream.send_raw(encode_accept(request))
-    _expect(stream, TNS_DATA, 'PRO')
-    stream.send_raw(encode_pro_reply())
+    # A thin (oracledb/seerdb) client leads its PRO with TTI_PRO; classic
+    # sqlplus / thick OCI leads with the `deadbeef` magic and needs the matching
+    # reply dialect (#265). Decide on the PRO request and hold it for the DTY
+    # reply so both halves speak one dialect.
+    sqlplus = pro_is_sqlplus(_expect(stream, TNS_DATA, 'PRO'))
+    stream.send_raw(encode_pro_reply(sqlplus=sqlplus))
     _expect(stream, TNS_DATA, 'DTY')
-    stream.send_raw(encode_dty_reply())
+    stream.send_raw(encode_dty_reply(sqlplus=sqlplus))
 
     # --- O5LOGON (§4) ---
     user = parse_osesskey(_expect(stream, TNS_DATA, 'OSESSKEY')).decode('utf-8')
