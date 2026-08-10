@@ -242,6 +242,14 @@ In both cases the bind values that reach the server are identical to a strict
 call; seerdb just doesn't second-guess the count. Pass exactly the binds the
 statement uses if you want oracledb's stricter validation.
 
+A **server-side scrollable cursor** (`conn.cursor(scrollable=True)`, 10g+) also
+treats scrolling *past the last row* like `file.seek()` past EOF — the next
+`fetchone()` returns `None` and a later in-range `scroll()` repositions back —
+rather than raising `IndexError`. That lets a `relative` scroll into an unknown
+position return `None` instead of forcing a try/except. (A target before the
+first row still raises `IndexError`, and the buffered non-scrollable path raises
+for out-of-range in either direction, matching PEP 249 / oracledb.)
+
 ## Requirements
 
 - Python >= 3.10
