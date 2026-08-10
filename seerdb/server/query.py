@@ -160,6 +160,63 @@ def parse_exec(payload: bytes) -> ExecRequest:
     )
 
 
+# The classic sqlplus / thick-OCI (deadbeef) OALL8 marshals the same execute
+# fields as the thin form above, but with the OCI conventions: an 8-byte
+# 0xFE indicator (0xFFFFFFFFFFFFFFFE LE) stands in for each thin 0x01 pointer
+# flag, and lengths are fixed 4-byte little-endian ub4s. For a single statement
+# with no binds the header up to the SQL is a **fixed 195-byte preamble** (the
+# token sequence is constant — verified across captured executes of different
+# SQL lengths), so the SQL, a ub1-length-prefixed text field, sits at a fixed
+# offset (#265). The preamble also carries 3x the SQL byte length as a ub4 (the
+# worst-case max-byte buffer for the DB charset), which cross-checks the parse.
+_OCI_ALL8_IND = b'\xfe\xff\xff\xff\xff\xff\xff\xff'
+_OCI_ALL8_CURSOR_OFF = 7  # ub4 LE; 0 = a new statement
+_OCI_ALL8_SQLLEN3_OFF = 19  # ub4 LE = 3 x the SQL byte length
+_OCI_ALL8_SQL_OFF = 196  # SQL text; the ub1 length prefix is the byte before it
+
+
+def parse_exec_oci(payload: bytes) -> ExecRequest:
+    """Parse a sqlplus / thick-OCI (deadbeef dialect) OALL8 execute (#265).
+
+    The OCI counterpart of :func:`parse_exec`. Extracts the SQL text and cursor
+    id from the fixed-shape OCI header. Scope: a single statement with no binds
+    and SQL up to 253 bytes (the ub1 length prefix) — binds and chunked/long SQL
+    are a follow-up, gated by the length cross-check below. Raises
+    :class:`InterfaceError` if the message is not an OCI OALL8 in that shape.
+    """
+    if (
+        len(payload) < _OCI_ALL8_SQL_OFF
+        or payload[0] != TTI_FUN
+        or payload[1] != TTI_ALL8
+    ):
+        raise InterfaceError('not an OCI OALL8 execute')
+    # Validate the indicators where the thin form has 0x01 flags, so a
+    # differently-shaped message errors rather than yielding a garbage SQL.
+    for ind_off in (11, 27):
+        if payload[ind_off : ind_off + 8] != _OCI_ALL8_IND:
+            raise InterfaceError(f'OCI OALL8: no indicator at offset {ind_off}')
+    cursor = int.from_bytes(
+        payload[_OCI_ALL8_CURSOR_OFF : _OCI_ALL8_CURSOR_OFF + 4], 'little'
+    )
+    sqllen = payload[_OCI_ALL8_SQL_OFF - 1]  # ub1 length prefix
+    declared3 = int.from_bytes(
+        payload[_OCI_ALL8_SQLLEN3_OFF : _OCI_ALL8_SQLLEN3_OFF + 4], 'little'
+    )
+    if declared3 != 3 * sqllen:
+        # The fixed-offset assumption only holds for a no-bind statement whose
+        # SQL fits the ub1 prefix; anything else disagrees here and is out of
+        # this increment's scope (a clean error, never a mis-parse).
+        raise InterfaceError(
+            'OCI OALL8: SQL length mismatch (binds or long SQL not yet supported)'
+        )
+    # sqlplus null-terminates its *internal* queries (the length counts the NUL);
+    # a user-typed statement has none. Strip trailing NULs so the backend sees
+    # clean SQL either way.
+    raw_sql = payload[_OCI_ALL8_SQL_OFF : _OCI_ALL8_SQL_OFF + sqllen]
+    sql = raw_sql.rstrip(b'\x00').decode('utf-8')
+    return ExecRequest(sql=sql, cursor=cursor, bind_count=0, fetch=0)
+
+
 @dataclass(frozen=True)
 class ColumnMeta:
     """One result column's metadata for the describe (11g scalar column)."""
