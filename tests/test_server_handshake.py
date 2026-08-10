@@ -14,12 +14,18 @@ import pytest
 from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import CCAP_FIELD_VERSION, decode_token_pro
 from seerdb.common.tns_consts import FIELD_VERSION_11_2, TNS_DATA, TTI_DTY, TTI_PRO
-from seerdb.server._handshake_11g import DTY_REPLY, PRO_REPLY
+from seerdb.server._handshake_11g import (
+    DTY_REPLY,
+    DTY_REPLY_SQLPLUS,
+    PRO_REPLY,
+    PRO_REPLY_SQLPLUS,
+)
 from seerdb.server.handshake import (
     encode_accept,
     encode_dty_reply,
     encode_pro_reply,
     parse_connect,
+    pro_is_sqlplus,
 )
 
 
@@ -90,6 +96,36 @@ def test_pro_reply_pins_field_version_11g() -> None:
     # out of the reply's capability array — so a client negotiates 11g.
     caps = decode_token_pro(encode_pro_reply()[10:])['compile_caps']
     assert caps[CCAP_FIELD_VERSION] == FIELD_VERSION_11_2
+
+
+# --- sqlplus 'deadbeef' PRO dialect (#265) ---
+
+
+def test_pro_is_sqlplus_detects_the_deadbeef_dialect() -> None:
+    # The captured sqlplus PRO leads its TTC payload with the deadbeef magic;
+    # a thin (TTI_PRO) PRO does not. Body = packet minus the 8-byte TNS header.
+    assert pro_is_sqlplus(fx.PRO_CLIENT[8:]) is True
+    thin_pro = b'\x00\x00' + bytes([TTI_PRO, 6, 5, 4, 3, 2, 1, 0])
+    assert pro_is_sqlplus(thin_pro) is False
+
+
+def test_sqlplus_pro_reply_reproduces_the_captured_packet() -> None:
+    # Re-wrapping the stored deadbeef payload reproduces the real sqlplus-dialect
+    # server PRO packet (127B) exactly.
+    assert encode_pro_reply(sqlplus=True) == fx.PRO_SERVER
+    assert PRO_REPLY_SQLPLUS == fx.PRO_SERVER
+
+
+def test_sqlplus_dty_reply_reproduces_the_captured_packet() -> None:
+    assert encode_dty_reply(sqlplus=True) == fx.DTY_SERVER
+    assert DTY_REPLY_SQLPLUS == fx.DTY_SERVER
+
+
+def test_dialects_are_distinct() -> None:
+    # The two dialects' replies are genuinely different shapes (238/924 vs
+    # 127/238), so serving the wrong one would break the handshake.
+    assert encode_pro_reply(sqlplus=True) != encode_pro_reply(sqlplus=False)
+    assert encode_dty_reply(sqlplus=True) != encode_dty_reply(sqlplus=False)
 
 
 def test_too_short_raises() -> None:
