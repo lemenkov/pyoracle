@@ -42,12 +42,16 @@ from seerdb.server.listener import Listener
 from seerdb.server.query import (
     ColumnMeta,
     ExecRequest,
+    FetchRequest,
     encode_describe,
     encode_error,
+    encode_fetch_response,
+    encode_more_rows,
     encode_query_response,
     encode_rows,
     encode_status,
     parse_exec,
+    parse_fetch,
 )
 from seerdb.server.service import BackendFactory, Server, serve
 from seerdb.server.session import Credentials, handle_login, serve_session
@@ -61,6 +65,7 @@ __all__ = [
     'ConnectRequest',
     'Credentials',
     'ExecRequest',
+    'FetchRequest',
     'Listener',
     'PacketStream',
     'Result',
@@ -70,6 +75,8 @@ __all__ = [
     'encode_describe',
     'encode_error',
     'encode_dty_reply',
+    'encode_fetch_response',
+    'encode_more_rows',
     'encode_pro_reply',
     'encode_query_response',
     'encode_rows',
@@ -77,6 +84,7 @@ __all__ = [
     'handle_login',
     'parse_connect',
     'parse_exec',
+    'parse_fetch',
     'serve',
     'serve_session',
 ]

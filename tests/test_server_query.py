@@ -196,6 +196,31 @@ def test_encode_error_reports_the_ora_code_and_message() -> None:
     assert 'ORA-00942' in result[5]  # Message
 
 
+def test_more_rows_terminator_carries_cursor_id() -> None:
+    from seerdb.common.tns import decode_token_oer
+    from seerdb.server.query import encode_more_rows
+
+    # The "more rows" status: call_status 1, no error, and the cursor id — what
+    # the client's _drain_cursor keys on to issue follow-up TTI_FETCH calls.
+    _DECODE_FIELD_VERSION.set(FIELD_VERSION_11_2)
+    result = decode_token_oer(encode_more_rows(9), (0, [], []))
+    assert result[0] == 1  # CallStatus
+    assert result[1] == 0  # ErrCode (not 1403 — the cursor is not drained)
+    assert result[2] == 9  # CursorId
+
+
+def test_parse_fetch_extracts_cursor_and_count() -> None:
+    from seerdb.common.tns import encode_dictionary_fetch
+    from seerdb.server.query import parse_fetch
+
+    msg = encode_dictionary_fetch(
+        {'seq': 4, 'field_version': 6, 'cursor': 7, 'fetch': 50}
+    )
+    req = parse_fetch(msg)
+    assert req.cursor == 7
+    assert req.fetch == 50
+
+
 def test_encode_rows_number_values() -> None:
     from decimal import Decimal
 

@@ -221,6 +221,34 @@ def test_binary_float_and_double_columns() -> None:
     assert types[1] == TNS_TYPE_BFLOAT
 
 
+def test_batched_fetch_large_row_count_postgres() -> None:
+    listen, server, result = _start_mirror()
+    conn = _connect(listen.getsockname()[1])
+    try:
+        cur = conn.cursor()
+        cur.execute('drop table if exists t_batch')
+        cur.execute('create table t_batch (n integer)')
+        cur.executemany('insert into t_batch values (:1)', [(i,) for i in range(500)])
+        cur.execute('select n from t_batch order by n')
+        first = cur.fetchmany(10)
+        rest = cur.fetchall()
+        cur.execute('select count(*) from t_batch')
+        count = cur.fetchone()[0]
+        cur.execute('drop table t_batch')
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert [r[0] for r in first] == list(range(10))
+    assert [r[0] for r in first] + [r[0] for r in rest] == list(range(500))
+    assert count == 500
+
+
 def test_number_precision_and_scale_in_description() -> None:
     # A PostgreSQL numeric(p, s) column surfaces its precision/scale in
     # cursor.description; an unconstrained integer reports 0/0.

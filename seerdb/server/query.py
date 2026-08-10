@@ -37,6 +37,7 @@ from seerdb.common.tns_consts import (
     TNS_TYPE_TIMESTAMPTZ,
     TTI_ALL8,
     TTI_DCB,
+    TTI_FETCH,
     TTI_FUN,
     TTI_OER,
     TTI_RXD,
@@ -332,11 +333,12 @@ _END_OF_FETCH = (
 
 
 def _encode_oer(
-    call_status: int, ora_code: int, rowcount: int, message: bytes
+    call_status: int, ora_code: int, rowcount: int, message: bytes, cursor_id: int = 0
 ) -> bytes:
     # An OER return-status token (§6.5, 11g) — the terminal of every response.
-    # All rowid / batch / cursor fields are zero here; only call status, the ORA
-    # error number, the affected-row count, and the message text carry meaning.
+    # Rowid / batch fields are zero; call status, the ORA error number, the
+    # affected-row count, the cursor id (for a mid-fetch "more rows" status), and
+    # the message text carry meaning.
     return (
         bytes([TTI_OER])
         + encode_sb4(call_status)
@@ -345,7 +347,7 @@ def _encode_oer(
         + encode_sb4(ora_code)  # the ORA error number (0 on success)
         + encode_sb4(0)  # array element error 1
         + encode_sb4(0)  # array element error 2
-        + encode_sb4(0)  # cursor id
+        + encode_sb4(cursor_id)  # current cursor id
         + encode_sb4(0)  # error position
         + bytes(6)  # sql_type, fatal, flags, user_cursor_opts, upi_param, warn
         + encode_sb4(0)  # rowid data object number
@@ -377,10 +379,63 @@ def encode_status(rowcount: int = 0) -> bytes:
     return _encode_oer(0, 0, rowcount, b'')
 
 
-def encode_query_response(columns: list[ColumnMeta], rows: list[tuple]) -> bytes:
-    """Assemble a full SELECT response: describe + rows + end-of-fetch (§6).
+def encode_more_rows(cursor_id: int) -> bytes:
+    """Terminate a batch that did NOT drain the cursor: ``call_status = 1``, no
+    error, and the cursor id — the client reads this as "more rows on cursor N"
+    and issues ``TTI_FETCH`` for the rest (§5.2). The ``1403`` end-of-fetch
+    (:data:`_END_OF_FETCH`) is sent only once the cursor is drained."""
+    return _encode_oer(1, 0, 0, b'', cursor_id=cursor_id)
 
-    The TTC payload the Mirror sends in reply to an OALL8 execute for a query
-    that returns ``rows`` over ``columns``.
+
+def _terminator(cursor_id: int, more: bool) -> bytes:
+    return encode_more_rows(cursor_id) if more else _END_OF_FETCH
+
+
+def encode_query_response(
+    columns: list[ColumnMeta],
+    rows: list[tuple],
+    *,
+    cursor_id: int = 0,
+    more: bool = False,
+) -> bytes:
+    """Assemble a SELECT execute response: describe + rows + terminator (§6).
+
+    ``more=True`` ends the batch with a "more rows on ``cursor_id``" status
+    instead of the ``ORA-01403`` end-of-fetch, so the client fetches the rest.
     """
-    return encode_describe(columns) + encode_rows(rows, columns) + _END_OF_FETCH
+    return (
+        encode_describe(columns)
+        + encode_rows(rows, columns)
+        + _terminator(cursor_id, more)
+    )
+
+
+def encode_fetch_response(
+    columns: list[ColumnMeta],
+    rows: list[tuple],
+    *,
+    cursor_id: int = 0,
+    more: bool = False,
+) -> bytes:
+    """Assemble a ``TTI_FETCH`` continuation response: rows + terminator, with
+    **no** describe (the column metadata was established on the execute)."""
+    return encode_rows(rows, columns) + _terminator(cursor_id, more)
+
+
+@dataclass(frozen=True)
+class FetchRequest:
+    """A parsed ``TTI_FETCH``: which cursor, and how many rows to return."""
+
+    cursor: int
+    fetch: int
+
+
+def parse_fetch(payload: bytes) -> FetchRequest:
+    """Parse a ``TTI_FETCH`` message: ``[TTI_FUN, TTI_FETCH, seq]`` + ub4 cursor
+    id + ub4 row count (the inverse of ``encode_dictionary_fetch``)."""
+    if len(payload) < 3 or payload[0] != TTI_FUN or payload[1] != TTI_FETCH:
+        raise InterfaceError('not a TTI_FETCH')
+    rest = payload[3:]  # skip TTI_FUN, TTI_FETCH, seq
+    cursor, rest = decode_ub4(rest)
+    fetch, _rest = decode_ub4(rest)
+    return FetchRequest(cursor=cursor, fetch=fetch)

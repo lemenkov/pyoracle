@@ -138,6 +138,35 @@ def test_bind_variables() -> None:
     assert row == ('bob',)
 
 
+def test_batched_fetch_large_row_count() -> None:
+    # A result set far larger than the fetch batch is delivered across follow-up
+    # TTI_FETCH calls: every row arrives (fetchmany then fetchall), and a second
+    # query on the same connection proves the server cursor was cleaned up.
+    listen, server, result = _start_mirror()
+    conn = _connect(listen.getsockname()[1])
+    try:
+        cur = conn.cursor()
+        cur.execute('create table t (n number)')
+        cur.executemany('insert into t values (:1)', [(i,) for i in range(500)])
+        cur.execute('select n from t order by n')
+        first = cur.fetchmany(10)
+        rest = cur.fetchall()
+        cur.execute('select count(*) from t')
+        count = cur.fetchone()[0]
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert [r[0] for r in first] == list(range(10))
+    assert [r[0] for r in first] + [r[0] for r in rest] == list(range(500))
+    assert count == 500
+
+
 def test_large_response_spans_many_packets() -> None:
     # A result set far larger than the TNS packet limit (here ~175 KB) must
     # fragment across many DATA packets and reassemble in the client — the
