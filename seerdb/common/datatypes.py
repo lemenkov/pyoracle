@@ -12,17 +12,31 @@ from decimal import Decimal
 from seerdb.common.tns_consts import (
     TNS_TYPE_BDOUBLE,
     TNS_TYPE_BFLOAT,
+    TNS_TYPE_BLOB,
+    TNS_TYPE_BOOLEAN,
     TNS_TYPE_CHAR,
+    TNS_TYPE_CLOB,
     TNS_TYPE_DATE,
     TNS_TYPE_INTERVALDS,
     TNS_TYPE_INTERVALYM,
+    TNS_TYPE_JSON,
+    TNS_TYPE_LONG,
+    TNS_TYPE_LONGRAW,
     TNS_TYPE_NUMBER,
     TNS_TYPE_RAW,
     TNS_TYPE_REFCURSOR,
     TNS_TYPE_TIMESTAMP,
+    TNS_TYPE_TIMESTAMPLTZ,
     TNS_TYPE_TIMESTAMPTZ,
+    TNS_TYPE_UROWID,
     TNS_TYPE_VARCHAR,
+    TNS_TYPE_VECTOR,
 )
+
+# ROWID is reported by the DCB describe with wire type code 11 (TNS_TYPE_ROWID
+# = 104 is Oracle's other, bind-side rowid code). Keep a local name for the
+# fetch code so the description map below is unambiguous.
+TNS_TYPE_ROWID_FETCH = 11
 
 
 class TempLob:
@@ -89,6 +103,69 @@ DB_TYPE_BINARY_FLOAT = _DbType('DB_TYPE_BINARY_FLOAT', TNS_TYPE_BFLOAT, 4)
 DB_TYPE_BINARY_DOUBLE = _DbType('DB_TYPE_BINARY_DOUBLE', TNS_TYPE_BDOUBLE, 8)
 DB_TYPE_INTERVAL_DS = _DbType('DB_TYPE_INTERVAL_DS', TNS_TYPE_INTERVALDS, 11)
 DB_TYPE_INTERVAL_YM = _DbType('DB_TYPE_INTERVAL_YM', TNS_TYPE_INTERVALYM, 5)
+# Fetch-oriented types (mostly appear in cursor.description; kept as objects so
+# description[i][1] is the same seerdb.DB_TYPE_* constant, matching oracledb).
+# tns_type is the wire code the DCB reports for a column of that type.
+DB_TYPE_CHAR = _DbType('DB_TYPE_CHAR', TNS_TYPE_CHAR, 2000)
+DB_TYPE_LONG = _DbType('DB_TYPE_LONG', TNS_TYPE_LONG, 32767)
+DB_TYPE_LONG_RAW = _DbType('DB_TYPE_LONG_RAW', TNS_TYPE_LONGRAW, 32767)
+DB_TYPE_ROWID = _DbType('DB_TYPE_ROWID', TNS_TYPE_ROWID_FETCH, 18)
+DB_TYPE_UROWID = _DbType('DB_TYPE_UROWID', TNS_TYPE_UROWID, 5267)
+DB_TYPE_CLOB = _DbType('DB_TYPE_CLOB', TNS_TYPE_CLOB, 32767)
+DB_TYPE_NCLOB = _DbType('DB_TYPE_NCLOB', TNS_TYPE_CLOB, 32767, csfrm=2)
+DB_TYPE_BLOB = _DbType('DB_TYPE_BLOB', TNS_TYPE_BLOB, 32767)
+DB_TYPE_TIMESTAMP_LTZ = _DbType('DB_TYPE_TIMESTAMP_LTZ', TNS_TYPE_TIMESTAMPLTZ, 11)
+DB_TYPE_JSON = _DbType('DB_TYPE_JSON', TNS_TYPE_JSON, 32767)
+DB_TYPE_BOOLEAN = _DbType('DB_TYPE_BOOLEAN', TNS_TYPE_BOOLEAN, 4)
+DB_TYPE_VECTOR = _DbType('DB_TYPE_VECTOR', TNS_TYPE_VECTOR, 32767)
+
+# Map the (wire type code, charset form) the server reports for a fetched column
+# (DCB data_type + csfrm) to its DbType. Keyed on the actual fetch codes so
+# cursor.description[i][1] is the seerdb.DB_TYPE_* object (oracledb parity). The
+# csfrm split distinguishes national types (VARCHAR/NVARCHAR, CHAR/NCHAR,
+# CLOB/NCLOB) that share a wire code.
+_FETCH_DBTYPE: dict[tuple[int, int], _DbType] = {
+    (TNS_TYPE_NUMBER, 1): DB_TYPE_NUMBER,
+    (TNS_TYPE_VARCHAR, 1): DB_TYPE_VARCHAR,
+    (TNS_TYPE_VARCHAR, 2): DB_TYPE_NVARCHAR,
+    (TNS_TYPE_CHAR, 1): DB_TYPE_CHAR,
+    (TNS_TYPE_CHAR, 2): DB_TYPE_NCHAR,
+    (TNS_TYPE_RAW, 1): DB_TYPE_RAW,
+    (TNS_TYPE_DATE, 1): DB_TYPE_DATE,
+    (TNS_TYPE_LONG, 1): DB_TYPE_LONG,
+    (TNS_TYPE_LONGRAW, 1): DB_TYPE_LONG_RAW,
+    (TNS_TYPE_ROWID_FETCH, 1): DB_TYPE_ROWID,
+    (TNS_TYPE_UROWID, 1): DB_TYPE_UROWID,
+    (TNS_TYPE_CLOB, 1): DB_TYPE_CLOB,
+    (TNS_TYPE_CLOB, 2): DB_TYPE_NCLOB,
+    (TNS_TYPE_BLOB, 1): DB_TYPE_BLOB,
+    (TNS_TYPE_BFLOAT, 1): DB_TYPE_BINARY_FLOAT,
+    (TNS_TYPE_BDOUBLE, 1): DB_TYPE_BINARY_DOUBLE,
+    (TNS_TYPE_TIMESTAMP, 1): DB_TYPE_TIMESTAMP,
+    (TNS_TYPE_TIMESTAMPTZ, 1): DB_TYPE_TIMESTAMP_TZ,
+    (TNS_TYPE_TIMESTAMPLTZ, 1): DB_TYPE_TIMESTAMP_LTZ,
+    (TNS_TYPE_INTERVALYM, 1): DB_TYPE_INTERVAL_YM,
+    (TNS_TYPE_INTERVALDS, 1): DB_TYPE_INTERVAL_DS,
+    (TNS_TYPE_REFCURSOR, 1): DB_TYPE_CURSOR,
+    (TNS_TYPE_JSON, 1): DB_TYPE_JSON,
+    (TNS_TYPE_BOOLEAN, 1): DB_TYPE_BOOLEAN,
+    (TNS_TYPE_VECTOR, 1): DB_TYPE_VECTOR,
+}
+
+
+def dbtype_for_oracle_type(tns_type: int, csfrm: int) -> _DbType | None:
+    # Resolve a fetched column's DbType. Fall back to the non-national (csfrm 1)
+    # entry when the server reports csfrm 0 for a non-char type.
+    return _FETCH_DBTYPE.get((tns_type, csfrm or 1)) or _FETCH_DBTYPE.get((tns_type, 1))
+
+
+# Wire type codes whose cursor.description display_size follows oracledb's
+# special rules: 23 for the DATE/TIMESTAMP family, a computed width for the
+# NUMBER family (NUMBER, BINARY_FLOAT, BINARY_DOUBLE).
+_DATE_TNS_TYPES = frozenset(
+    {TNS_TYPE_DATE, TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_TIMESTAMPLTZ}
+)
+_NUMBER_TNS_TYPES = frozenset({TNS_TYPE_NUMBER, TNS_TYPE_BFLOAT, TNS_TYPE_BDOUBLE})
 
 _PYTYPE_TO_DBTYPE = {
     int: NUMBER,

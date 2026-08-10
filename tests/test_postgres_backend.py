@@ -194,7 +194,6 @@ def test_high_precision_numeric() -> None:
 def test_binary_float_and_double_columns() -> None:
     # PostgreSQL float4 / float8 map to Oracle BINARY_FLOAT / BINARY_DOUBLE
     # (Python float, IEEE-exact), while numeric stays NUMBER (Decimal).
-    from seerdb.common.tns_consts import TNS_TYPE_BDOUBLE, TNS_TYPE_BFLOAT
 
     listen, server, result = _start_mirror()
     conn = _connect(listen.getsockname()[1])
@@ -217,8 +216,9 @@ def test_binary_float_and_double_columns() -> None:
     assert result.get('error') is None, result.get('error')
     assert row == (3.5, 1.5, -2.25, Decimal('9.9'))
     assert isinstance(row[0], float) and isinstance(row[1], float)
-    assert types[0] == TNS_TYPE_BDOUBLE
-    assert types[1] == TNS_TYPE_BFLOAT
+    # description type_code is the seerdb.DB_TYPE_* object (oracledb parity).
+    assert types[0] == seerdb.DB_TYPE_BINARY_DOUBLE
+    assert types[1] == seerdb.DB_TYPE_BINARY_FLOAT
 
 
 def test_batched_fetch_large_row_count_postgres() -> None:
@@ -251,7 +251,8 @@ def test_batched_fetch_large_row_count_postgres() -> None:
 
 def test_number_precision_and_scale_in_description() -> None:
     # A PostgreSQL numeric(p, s) column surfaces its precision/scale in
-    # cursor.description; an unconstrained integer reports 0/0.
+    # cursor.description; an unconstrained integer reports None/None (oracledb
+    # parity: precision/scale are None unless one of them is set).
     listen, server, result = _start_mirror()
     conn = _connect(listen.getsockname()[1])
     try:
@@ -271,7 +272,7 @@ def test_number_precision_and_scale_in_description() -> None:
     # description tuple: (name, type, display, internal, precision, scale, null_ok)
     amt, n = description[0], description[1]
     assert (amt[4], amt[5]) == (10, 2)
-    assert (n[4], n[5]) == (0, 0)
+    assert (n[4], n[5]) == (None, None)
 
 
 def test_executemany_array_dml_postgres() -> None:

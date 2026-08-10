@@ -4,7 +4,13 @@
 import re
 from typing import Any
 
-from seerdb.common.datatypes import TempLob, Var
+from seerdb.common.datatypes import (
+    _DATE_TNS_TYPES,
+    _NUMBER_TNS_TYPES,
+    TempLob,
+    Var,
+    dbtype_for_oracle_type,
+)
 from seerdb.common.exceptions import (
     DatabaseError,
     InterfaceError,
@@ -22,6 +28,7 @@ from seerdb.common.tns_consts import (
     TNS_FETCH_ORIENTATION_LAST,
     TNS_FETCH_ORIENTATION_RELATIVE,
     TNS_TYPE_CLOB,
+    TNS_TYPE_RAW,
     UTF8_CHARSET,
 )
 
@@ -999,19 +1006,55 @@ def _col_annotations(Col: dict) -> dict | None:
 
 
 def _column_description(Col: dict) -> tuple:
-    # PEP 249 description tuple:
+    # PEP 249 description tuple, matching python-oracledb's FetchInfo exactly:
     #   (name, type_code, display_size, internal_size, precision, scale, null_ok)
     Name = Col.get('column_name')
     if isinstance(Name, bytes):
         Name = Name.decode('utf-8', errors='replace')
-    InternalSize = Col.get('data_length')
-    DisplaySize = Col.get('max_size') or InternalSize
+    TnsType = Col.get('data_type')
+    Csfrm = Col.get('csfrm') or 1
+    # type_code is the seerdb.DB_TYPE_* object (so it compares equal to the
+    # module constants, PEP-249 §type_code); fall back to the raw wire code for
+    # a type with no DbType object yet.
+    TypeCode: object = dbtype_for_oracle_type(TnsType, Csfrm)
+    if TypeCode is None:
+        TypeCode = TnsType
+    Precision = Col.get('precision') or 0
+    Scale = Col.get('data_scale') or 0
+    MaxSize = Col.get('max_size') or 0
+    BufferSize = Col.get('data_length') or 0
+    # oracledb's "max_size" is the declared column size — the char count for
+    # char types (OACmxlc = MaxSize), but the byte length for RAW, which carries
+    # it in the buffer size (OACmxlc is 0 there).
+    DeclaredSize = BufferSize if TnsType == TNS_TYPE_RAW else MaxSize
+    # precision / scale are reported only for the NUMBER family (either set),
+    # else None (oracledb FetchInfo.precision / .scale).
+    OutPrecision = Precision if (Precision or Scale) else None
+    OutScale = Scale if (Precision or Scale) else None
+    # display_size (oracledb FetchInfo.display_size): the declared char/raw size
+    # when set; 23 for DATE/TIMESTAMP; a computed width for the NUMBER family;
+    # None otherwise.
+    if DeclaredSize > 0:
+        DisplaySize: int | None = DeclaredSize
+    elif TnsType in _DATE_TNS_TYPES:
+        DisplaySize = 23
+    elif TnsType in _NUMBER_TNS_TYPES:
+        if Precision:
+            DisplaySize = Precision + 1
+            if Scale > 0:
+                DisplaySize += Scale + 1
+        else:
+            DisplaySize = 127
+    else:
+        DisplaySize = None
+    # internal_size (oracledb): the byte buffer, only for sized char/raw types.
+    InternalSize = BufferSize if DeclaredSize > 0 else None
     return (
         Name,
-        Col.get('data_type'),
-        DisplaySize or None,
-        InternalSize or None,
-        Col.get('precision'),
-        Col.get('data_scale'),
+        TypeCode,
+        DisplaySize,
+        InternalSize,
+        OutPrecision,
+        OutScale,
         bool(Col.get('null_ok', 0)),
     )
