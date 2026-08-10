@@ -41,7 +41,7 @@ from Crypto.Cipher import AES
 
 from seerdb.common.crypto import cat_key, conn_key, pad2
 from seerdb.common.exceptions import InterfaceError
-from seerdb.common.tns import decode_kv, decode_ub4, encode_kv, encode_sb4
+from seerdb.common.tns import decode_dalc, decode_kv, decode_ub4, encode_kv, encode_sb4
 from seerdb.common.tns_consts import TTI_AUTH, TTI_FUN, TTI_RPA, TTI_SESS
 from seerdb.server._handshake_11g import CHALLENGE_TEMPLATE_SQLPLUS
 
@@ -247,6 +247,27 @@ def parse_osesskey(payload: bytes) -> bytes:
 _OCI_IND = b'\xfe\xff\xff\xff\xff\xff\xff\xff'
 
 
+def _parse_oci_fun_username(payload: bytes, subtype: int, what: str) -> bytes:
+    # OSESSKEY and AUTH share the same TTI_FUN prefix in the deadbeef dialect:
+    # only the subtype byte and the ub4 field values differ, so the username sits
+    # at the same fixed offset in both. Validate every indicator so a
+    # differently-shaped message surfaces as an error, not a garbage username.
+    if len(payload) < 4 or payload[0] != TTI_FUN:
+        raise InterfaceError('not a TTI_FUN message')
+    if payload[1] != subtype:
+        raise InterfaceError(f'expected {what}, got subtype {payload[1]}')
+    # Indicators sit at these offsets; between the 1st/2nd and 3rd/4th come the
+    # two ub4 length-field pairs that make up the gaps.
+    for expected_ind_off in (3, 19, 35, 43):
+        if payload[expected_ind_off : expected_ind_off + 8] != _OCI_IND:
+            raise InterfaceError(
+                f'OCI {what}: no indicator at offset {expected_ind_off}'
+            )
+    user_off = 51  # 3 + 8 + (4+4) + 8 + (4+4) + 8 + 8
+    userlen = payload[user_off]
+    return payload[user_off + 1 : user_off + 1 + userlen]
+
+
 def parse_osesskey_oci(payload: bytes) -> bytes:
     """Return the username from a sqlplus / thick-OCI OSESSKEY (deadbeef dialect).
 
@@ -254,23 +275,38 @@ def parse_osesskey_oci(payload: bytes) -> bytes:
     ``abcdefgh``). Raises :class:`InterfaceError` if the fixed indicator layout
     is not where the OCI OSESSKEY puts it.
     """
-    if len(payload) < 4 or payload[0] != TTI_FUN:
-        raise InterfaceError('not a TTI_FUN message')
-    if payload[1] != TTI_SESS:
-        raise InterfaceError(f'expected OSESSKEY, got subtype {payload[1]}')
-    # Consume the fixed prefix: seq(1) after TTI_FUN+subtype, then the indicator
-    # and ub4 fields. Validate every indicator so a differently-shaped message
-    # surfaces as an error rather than a garbage username.
-    # Indicators sit at these offsets; between the 1st/2nd and 3rd/4th come the
-    # two ub4 length-field pairs that make up the gaps.
-    for expected_ind_off in (3, 19, 35, 43):
-        if payload[expected_ind_off : expected_ind_off + 8] != _OCI_IND:
-            raise InterfaceError(
-                f'OCI OSESSKEY: no indicator at offset {expected_ind_off}'
-            )
-    user_off = 51  # 3 + 8 + (4+4) + 8 + (4+4) + 8 + 8
-    userlen = payload[user_off]
-    return payload[user_off + 1 : user_off + 1 + userlen]
+    return _parse_oci_fun_username(payload, TTI_SESS, 'OSESSKEY')
+
+
+def _oci_auth_value(payload: bytes, key: bytes) -> bytes:
+    # In the OCI AUTH, each key-value pair is ``<key> <ub4 declared-len> <DALC
+    # value>``: a fixed 4-byte little-endian length precedes the DALC-chunked
+    # value (0xFE-marked chunks — the same encoding seerdb's client decoder
+    # reads). The value is uppercase-hex ASCII, so unhexlify recovers the bytes.
+    i = payload.find(key)
+    if i < 0:
+        raise InterfaceError(f'OCI AUTH: missing {key.decode()}')
+    hexval, _ = decode_dalc(payload[i + len(key) + 4 :])
+    # decode_dalc reports an empty/null value as []; a real AUTH_SESSKEY /
+    # AUTH_PASSWORD is always non-empty hex bytes.
+    if not isinstance(hexval, bytes):
+        raise InterfaceError(f'OCI AUTH: empty {key.decode()}')
+    return unhexlify(hexval)
+
+
+def parse_auth_response_oci(payload: bytes) -> tuple[bytes, bytes, bytes]:
+    """Return ``(username, client AUTH_SESSKEY, AUTH_PASSWORD)`` from the OCI AUTH.
+
+    The sqlplus / thick-OCI (deadbeef dialect) counterpart of
+    :func:`parse_auth_response`. The client's session key derives the shared
+    ConnKey (:func:`derive_conn_key`); ``AUTH_PASSWORD`` is the password proof
+    that :func:`verify_password` checks. Verified against a live sqlplus 11.2
+    AUTH: a 48-byte session key and a 32-byte proof.
+    """
+    user = _parse_oci_fun_username(payload, TTI_AUTH, 'AUTH')
+    sesskey = _oci_auth_value(payload, b'AUTH_SESSKEY')
+    password = _oci_auth_value(payload, b'AUTH_PASSWORD')
+    return user, sesskey, password
 
 
 def parse_auth_response(payload: bytes) -> tuple[bytes, bytes, bytes | None]:
