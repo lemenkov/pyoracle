@@ -67,11 +67,20 @@ _TEMPORAL_OIDS = {
 _ORA_INVALID_SQL = 900
 
 
-def _column_meta(name: str, oid: int, values: list) -> ColumnMeta:
+def _column_meta(desc, values: list) -> ColumnMeta:
+    # `desc` is a psycopg Column (name / type_code / precision / scale / ...).
+    name, oid = desc.name, desc.type_code
     ident = name.upper().encode('utf-8')
     if oid in _NUMBER_OIDS:
+        # A numeric(p, s) column reports its precision/scale; int / float / bare
+        # numeric report None, which becomes Oracle's unconstrained NUMBER (0/0).
         return ColumnMeta(
-            name=ident, data_type=TNS_TYPE_NUMBER, data_length=22, max_size=22
+            name=ident,
+            data_type=TNS_TYPE_NUMBER,
+            data_length=22,
+            max_size=22,
+            precision=desc.precision or 0,
+            scale=desc.scale or 0,
         )
     if oid in _TEMPORAL_OIDS:
         data_type, width = _TEMPORAL_OIDS[oid]
@@ -131,7 +140,7 @@ class PostgresBackend:
             else:
                 rows = cursor.fetchall()
                 columns = [
-                    _column_meta(desc.name, desc.type_code, [r[i] for r in rows])
+                    _column_meta(desc, [r[i] for r in rows])
                     for i, desc in enumerate(cursor.description)
                 ]
                 result = Result(columns=columns, rows=rows)

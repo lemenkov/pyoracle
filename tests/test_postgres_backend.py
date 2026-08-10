@@ -191,6 +191,31 @@ def test_high_precision_numeric() -> None:
     )
 
 
+def test_number_precision_and_scale_in_description() -> None:
+    # A PostgreSQL numeric(p, s) column surfaces its precision/scale in
+    # cursor.description; an unconstrained integer reports 0/0.
+    listen, server, result = _start_mirror()
+    conn = _connect(listen.getsockname()[1])
+    try:
+        cur = conn.cursor()
+        cur.execute('select 123.45::numeric(10,2) as amt, 7::int as n')
+        cur.fetchall()
+        description = cur.description
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    # description tuple: (name, type, display, internal, precision, scale, null_ok)
+    amt, n = description[0], description[1]
+    assert (amt[4], amt[5]) == (10, 2)
+    assert (n[4], n[5]) == (0, 0)
+
+
 def test_executemany_array_dml_postgres() -> None:
     listen, server, result = _start_mirror()
     conn = _connect(listen.getsockname()[1])
