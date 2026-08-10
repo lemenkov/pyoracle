@@ -619,7 +619,7 @@ class AsyncOracleConnect:
         Result = decode_token_rpa(Data, ())
         if Result[0] == TTI_SESS:
             # First RPA: auth challenge from the server.
-            (_, SessKey, Salt, DerivedSalt, VgenCount, SderCount) = Result
+            (_, SessKey, Salt, DerivedSalt, VgenCount, SderCount, VerifierType) = Result
             self.conn_state = CONN_STATE_AUTH_NEGOTIATE
             Auth = {
                 'sess': bytes.fromhex(SessKey.decode('utf-8')) if SessKey else None,
@@ -631,6 +631,9 @@ class AsyncOracleConnect:
                 # derivation matches a server with non-default counts (#309).
                 'vgen_count': VgenCount,
                 'sder_count': SderCount,
+                # Verifier type (AUTH_VFR_DATA flag) — picks the key schedule for
+                # a pre-SHA-2 account on a modern server (#311).
+                'verifier_type': VerifierType,
             }
             (Data2, ConnKey) = encode_dictionary_auth(
                 self._make_dict(DictionaryType.auth, auth=Auth)

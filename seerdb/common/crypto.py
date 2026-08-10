@@ -58,6 +58,14 @@ _VGEN_COUNT_DEFAULT = 4096
 _SDER_COUNT_DEFAULT = 3
 _PBKDF2_COUNT_MAX = 100_000_000
 
+# Verifier-type flags carried on the AUTH_VFR_DATA challenge pair. They name the
+# account verifier the server chose, which selects the key schedule: legacy DES,
+# 11g SHA-1, or 12c SHA-2. We otherwise infer the scheme from salt presence,
+# which is ambiguous on a modern server for a pre-SHA-2 account (#311).
+_VFR_LEGACY = 2361
+_VFR_11G_SHA1 = 6949
+_VFR_12C_SHA2 = 18453
+
 
 def _clamp_count(value: int | None, minimum: int) -> int:
     # Use the server's count when it is a sane value; otherwise the default.
@@ -74,6 +82,7 @@ def o5logon(
     Password: bytes,
     VgenCount: int | None = None,
     SderCount: int | None = None,
+    VerifierType: int | None = None,
 ) -> tuple[bytes, bytes, bytes, int, bytes]:
     # VgenCount / SderCount come from the server's AUTH_PBKDF2_VGEN_COUNT /
     # AUTH_PBKDF2_SDER_COUNT (256-bit scheme). Hardcoding them broke auth
@@ -81,6 +90,16 @@ def o5logon(
     # when absent.
     VgenCount = _clamp_count(VgenCount, _VGEN_COUNT_DEFAULT)
     SderCount = _clamp_count(SderCount, _SDER_COUNT_DEFAULT)
+    # #311: a modern server (it sent AUTH_PBKDF2_CSK_SALT, so DerivedSalt is set)
+    # can still choose an 11g SHA-1 verifier for an account that has no SHA-2
+    # verifier. It sends both salts, so the salt-presence heuristic below would
+    # wrongly pick the 256-bit SHA-2 scheme. When the AUTH_VFR_DATA flag says
+    # SHA-1, use the SHA-1 key material with the modern PBKDF2 session-key
+    # derivation (192-bit). Only this pre-SHA-2-on-modern case is special-cased;
+    # every other path falls through unchanged.
+    if VerifierType == _VFR_11G_SHA1 and Salt is not None and DerivedSalt is not None:
+        KeySess = sha1(Password + Salt).digest() + bytes(4)
+        return o5logon0(Sess, KeySess, DerivedSalt, None, Password, 192, SderCount)
     # 10g (#47): an AES session key but NO verifier salt — the account has only
     # the legacy DES verifier. The AES key is that 8-byte verifier zero-padded to
     # 16; the rest is the salt-less 128-bit path (XOR cat_key + md5 ConnKey).
@@ -220,7 +239,10 @@ def cat_key(X: bytes, Y: bytes, DerivedSalt: bytes | None, Bits: int) -> bytes:
         if DerivedSalt is None:
             return bin_xor(X[16:40], Y[16:40])
         else:
-            raise Exception('unsupported key size', 192)
+            # #311: SHA-1 verifier on a modern server — combine the first 24
+            # bytes of each session key (client then server), like the 256-bit
+            # form but truncated to the 192-bit key length.
+            return Y[:24] + X[:24]
     elif Bits == 256:
         return Y + X
     else:
@@ -248,7 +270,11 @@ def conn_key(
         if DerivedSalt is None:
             return md5(Data[0:16]).digest() + md5(Data[16:24]).digest()[0:8]
         else:
-            raise Exception('unsupported key size', 192)
+            # #311: modern (PBKDF2) session-key derivation for a SHA-1 verifier —
+            # same transform as the 256-bit path, truncated to a 24-byte key.
+            return pbkdf2_hmac(
+                'sha512', hexlify(Data).upper(), DerivedSalt, SderCount, dklen=24
+            )
     elif Bits == 256:
         # AES-256 needs a 32-byte key; pbkdf2_hmac('sha512', ...) defaults to the
         # full 64-byte digest, so request 32 explicitly. SderCount is the server's

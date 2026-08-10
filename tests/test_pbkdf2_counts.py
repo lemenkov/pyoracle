@@ -29,7 +29,7 @@ def test_decode_surfaces_pbkdf2_counts() -> None:
         (b'AUTH_PBKDF2_VGEN_COUNT', b'8192', 0),
         (b'AUTH_PBKDF2_SDER_COUNT', b'5', 0),
     )
-    kind, _sess, _salt, _derived, vgen, sder = decode_token_rpa(data, ())
+    kind, _sess, _salt, _derived, vgen, sder, _vfr = decode_token_rpa(data, ())
     assert kind == TTI_SESS
     assert (vgen, sder) == (8192, 5)
 
@@ -39,7 +39,7 @@ def test_absent_counts_surface_as_none() -> None:
         (b'AUTH_SESSKEY', b'AABBCC', 1),
         (b'AUTH_VFR_DATA', b'DDEEFF', 1),
     )
-    _kind, _sess, _salt, _derived, vgen, sder = decode_token_rpa(data, ())
+    _kind, _sess, _salt, _derived, vgen, sder, _vfr = decode_token_rpa(data, ())
     assert vgen is None and sder is None
 
 

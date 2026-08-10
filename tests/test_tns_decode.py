@@ -2297,10 +2297,12 @@ class TestTnsCommandDecoders(unittest.TestCase):
         SessKey = b'10A73E6DA30B6CA5ADDD1EEC0B3981E152CB6CDCA6386ED6DA2B547E0EBB2D631D839CE846EC6DEF156EC12F6465161C'
         Salt = b'B03145C7EF60CA693E1D'
         DerivedSalt = None
-        # 11g challenge — no PBKDF2 count fields, so both surface as None.
+        # 11g challenge — no PBKDF2 count fields (both None); the AUTH_VFR_DATA
+        # flag is 6949, the SHA-1 verifier type (a real-capture confirmation of
+        # the #311 constant).
         self.assertEqual(
             decode_token_rpa(Data, None),
-            (TTI_SESS, SessKey, Salt, DerivedSalt, None, None),
+            (TTI_SESS, SessKey, Salt, DerivedSalt, None, None, 6949),
         )
 
     def test_tns_decode_token_rpa_01(self):
