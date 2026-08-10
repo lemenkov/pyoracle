@@ -1011,7 +1011,7 @@ def _column_description(Col: dict) -> tuple:
     Name = Col.get('column_name')
     if isinstance(Name, bytes):
         Name = Name.decode('utf-8', errors='replace')
-    TnsType = Col.get('data_type')
+    TnsType = Col.get('data_type') or 0
     Csfrm = Col.get('csfrm') or 1
     # type_code is the seerdb.DB_TYPE_* object (so it compares equal to the
     # module constants, PEP-249 §type_code); fall back to the raw wire code for
