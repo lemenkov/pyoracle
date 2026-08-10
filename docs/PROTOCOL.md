@@ -264,10 +264,17 @@ to build the challenge. It holds none of its own: `handle_login` obtains the
 secret from `backend.authenticate(username)` (returns the secret, or `None` to
 reject), keeping identity a property of the data source — the same place Oracle
 stores it. The example backends authenticate against a `credentials` map passed
-in; a real backend could consult a table instead. A rejected user gets an
-**ORA-01017** ("invalid username/password; logon denied") OER in place of the
-challenge, which the client raises out of `connect()` — the same denial Oracle
-gives, rather than a soft connection that fails later.
+in; a real backend could consult a table instead.
+
+Auth is verified in **both** directions, like Oracle. The server proves itself
+via `AUTH_SVR_RESPONSE` (the client's `validate()` checks it), *and* the server
+verifies the client's `AUTH_PASSWORD` proof (`verify_password` — decrypt it
+under the derived ConnKey and match the account password). Without the second
+half a client that simply ignores the server proof would be served with any
+password. An unknown user **or** a wrong password gets an **ORA-01017**
+("invalid username/password; logon denied") OER in place of the next auth reply,
+which the client raises out of `connect()` — the same denial Oracle gives,
+rather than a soft connection that fails later.
 
 **ACCEPT specifics for 11g.** Version **314** is `< 315` (`TNS_VERSION_MIN_LARGE_SDU`),
 so the connection uses **legacy 2-byte packet framing** — no large-SDU uint32

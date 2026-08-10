@@ -5,8 +5,8 @@
 
 The encode side of the client crypto in :mod:`seerdb.common.crypto` (``o5logon`` /
 ``validate``). O5LOGON is *mutually* authenticated, so the server must hold the
-account password — a configured credential for now; a backend-mapped auth API
-comes later. The flow the server drives:
+account password — supplied by ``backend.authenticate(user)`` (auth lives with
+the backend). The flow the server drives:
 
 1. **Challenge** (:func:`make_challenge`): pick a salt and a server session key,
    derive ``key_sess = SHA1(password + salt) + 0x00000000``, and send
@@ -17,8 +17,12 @@ comes later. The flow the server drives:
    ``AUTH_SESSKEY``) plus ``AUTH_PASSWORD``.
 3. **Derive** (:func:`derive_conn_key`): recover the client session key and
    combine both halves into the session ``ConnKey`` — identical to the one the
-   client computed.
-4. **Prove** (:func:`server_proof`): return ``AES-CBC(SERVER_TO_CLIENT, ConnKey)``
+   client computed *only if the passwords match*.
+4. **Verify** (:func:`verify_password`): decrypt the client's ``AUTH_PASSWORD``
+   under the ConnKey and confirm it proves the account password — the server
+   half of the mutual auth, so a wrong password is rejected (ORA-01017) rather
+   than served.
+5. **Prove** (:func:`server_proof`): return ``AES-CBC(SERVER_TO_CLIENT, ConnKey)``
    — the token the client's ``validate()`` decrypts and checks, closing the
    mutual authentication.
 
@@ -110,6 +114,27 @@ def server_proof(session_key: bytes) -> bytes:
     return AES.new(session_key, AES.MODE_CBC, _IV).encrypt(_SERVER_PROOF)
 
 
+def verify_password(
+    session_key: bytes, auth_password: bytes | None, password: bytes
+) -> bool:
+    """True if the client's ``AUTH_PASSWORD`` proves it holds ``password``.
+
+    ``AUTH_PASSWORD = AES-CBC(pad1(password), ConnKey)``, where ``pad1`` prepends
+    a fixed 16-byte block the server discards. Decrypting with the server's
+    ConnKey and comparing the payload past that block to ``pad2(password)``
+    confirms both sides derived the same ConnKey — i.e. the client used the right
+    password. A wrong password yields a different ConnKey, so the payload is
+    garbage and the check fails. This is the server half of the mutual auth: it
+    lets the Mirror *reject* a bad login (ORA-01017) rather than relying on the
+    client to notice the server proof it can't validate.
+    """
+    if not auth_password or len(auth_password) % 16 != 0:
+        return False
+    plain = AES.new(session_key, AES.MODE_CBC, _IV).decrypt(auth_password)
+    remainder = 16 - (len(password) % 16)
+    return plain[16:] == pad2(password, remainder)
+
+
 def _hexval(raw: bytes) -> bytes:
     # The wire form for AUTH_SESSKEY / AUTH_VFR_DATA / AUTH_SVR_RESPONSE: an
     # uppercase-hex ASCII string (the client bytes.fromhex()es it back).
@@ -177,11 +202,12 @@ def parse_osesskey(payload: bytes) -> bytes:
     return user
 
 
-def parse_auth_response(payload: bytes) -> tuple[bytes, bytes]:
-    """Return ``(username, client AUTH_SESSKEY bytes)`` from the phase-two AUTH.
+def parse_auth_response(payload: bytes) -> tuple[bytes, bytes, bytes | None]:
+    """Return ``(username, client AUTH_SESSKEY, AUTH_PASSWORD)`` from the AUTH.
 
-    The client's session key is what the server needs to derive the shared
-    ConnKey; AUTH_PASSWORD is ignored (the ConnKey agreement is the check).
+    The client's session key derives the shared ConnKey; ``AUTH_PASSWORD`` (the
+    client's password proof, ``None`` if absent) lets the server verify the
+    password with :func:`verify_password`.
     """
     subtype, user, kvs = _parse_fun_auth(payload)
     if subtype != TTI_AUTH:
@@ -189,4 +215,6 @@ def parse_auth_response(payload: bytes) -> tuple[bytes, bytes]:
     sesskey = kvs.get(b'AUTH_SESSKEY')
     if sesskey is None:
         raise InterfaceError('AUTH response missing AUTH_SESSKEY')
-    return user, unhexlify(sesskey)
+    password = kvs.get(b'AUTH_PASSWORD')
+    auth_password = unhexlify(password) if password else None
+    return user, unhexlify(sesskey), auth_password

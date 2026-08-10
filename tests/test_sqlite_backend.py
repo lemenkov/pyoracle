@@ -89,6 +89,31 @@ def test_unknown_user_is_rejected() -> None:
     assert 'NOBODY' in str(result['error'])
 
 
+def test_wrong_password_is_rejected() -> None:
+    # The Mirror verifies the client's AUTH_PASSWORD proof server-side, so a
+    # valid user with the wrong password is denied ORA-01017 at connect — it
+    # cannot get a session by ignoring the server proof it can't validate.
+    listen, server, result = _start_mirror()
+    port = listen.getsockname()[1]
+    try:
+        with pytest.raises(seerdb.DatabaseError) as excinfo:
+            seerdb.connect(
+                host='127.0.0.1',
+                port=port,
+                user='PYO',
+                password='WRONGPASS',
+                service_name='XE',
+                timeout=3000,
+            )
+        assert 'ORA-01017' in str(excinfo.value)
+    finally:
+        server.join(timeout=5)
+        listen.close()
+
+    assert isinstance(result.get('error'), Exception)
+    assert 'wrong password' in str(result['error'])
+
+
 def test_real_sql_round_trip() -> None:
     listen, server, result = _start_mirror()
     conn = _connect(listen.getsockname()[1])
