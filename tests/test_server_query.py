@@ -485,3 +485,60 @@ def test_parse_exec_oci_strips_the_internal_query_nul() -> None:
 def test_parse_exec_oci_rejects_a_non_oci_message() -> None:
     with pytest.raises(InterfaceError):
         parse_exec_oci(b'\x03\x5e\x06not the oci shape' + b'\x00' * 200)
+
+
+def test_encode_describe_oci_roundtrips_the_meaningful_fields() -> None:
+    # The thin client can't parse the OCI describe, so round-trip through the
+    # codec's own reader: every meaningful field survives (#265).
+    from seerdb.server.query import _decode_describe_oci, encode_describe_oci
+
+    cols = [
+        ColumnMeta(
+            name=b'DUMMY',
+            data_type=TNS_TYPE_VARCHAR,
+            data_length=1,
+            max_size=1,
+            charset=873,
+            csfrm=1,
+        ),
+        ColumnMeta(
+            name=b'1',
+            data_type=TNS_TYPE_NUMBER,
+            data_length=2,
+            max_size=22,
+            precision=0,
+            scale=-127,
+        ),
+    ]
+    back = _decode_describe_oci(encode_describe_oci(cols))
+    assert [c['name'] for c in back] == [b'DUMMY', b'1']
+    assert back[0]['data_type'] == TNS_TYPE_VARCHAR
+    assert back[0]['charset'] == 873
+    assert back[1]['data_type'] == TNS_TYPE_NUMBER
+    assert back[1]['scale'] == -127  # a NUMBER literal's floating scale
+
+
+def test_encode_describe_oci_matches_live_field_offsets() -> None:
+    # The per-column block's meaningful fields must land where a real 11g
+    # describe puts them. Captured NUMBER column ('select 1 from dual') pre-name:
+    from seerdb.server.query import _OCI_DCB_COL_PRENAME, _encode_dcb_column_oci
+
+    captured = bytes.fromhex(
+        '5101020000810200000000000000000000000000000000000000000000'
+        '0000000000000000000000000001010100000001'
+    )[:_OCI_DCB_COL_PRENAME]
+    mine = _encode_dcb_column_oci(
+        ColumnMeta(
+            name=b'1',
+            data_type=TNS_TYPE_NUMBER,
+            data_length=2,
+            max_size=0,
+            precision=0,
+            scale=-127,
+        ),
+        position=1,
+        first=True,
+    )[:_OCI_DCB_COL_PRENAME]
+    # type / precision / scale / data_length / null_ok / name-length offsets
+    for off in (2, 3, 4, 5, 6, 7, 8, 9, 43, 44):
+        assert mine[off] == captured[off], f'field byte {off} differs'
