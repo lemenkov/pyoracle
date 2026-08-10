@@ -22,6 +22,8 @@ from collections.abc import Sequence
 import psycopg
 
 from seerdb.common.tns_consts import (
+    TNS_TYPE_BDOUBLE,
+    TNS_TYPE_BFLOAT,
     TNS_TYPE_DATE,
     TNS_TYPE_NUMBER,
     TNS_TYPE_RAW,
@@ -49,11 +51,15 @@ _NUMBER_OIDS = frozenset(
         21,
         23,
         26,
-        700,
-        701,
         1700,
-    }  # bool int8 int2 int4 oid float4 float8 numeric
+    }  # bool int8 int2 int4 oid numeric
 )
+# IEEE-754 floats map to Oracle's native binary types, not base-100 NUMBER —
+# preserving the exact bits and the "this is a float, not a decimal" nature.
+_BINARY_FLOAT_OIDS = {
+    700: (TNS_TYPE_BFLOAT, 4),  # float4 (real)
+    701: (TNS_TYPE_BDOUBLE, 8),  # float8 (double precision)
+}
 _TEXT_OIDS = frozenset({18, 19, 25, 1042, 1043})  # char name text bpchar varchar
 _RAW_OIDS = frozenset({17})  # bytea
 # Each PostgreSQL temporal OID maps to the Oracle type of matching precision:
@@ -81,6 +87,11 @@ def _column_meta(desc, values: list) -> ColumnMeta:
             max_size=22,
             precision=desc.precision or 0,
             scale=desc.scale or 0,
+        )
+    if oid in _BINARY_FLOAT_OIDS:
+        data_type, width = _BINARY_FLOAT_OIDS[oid]
+        return ColumnMeta(
+            name=ident, data_type=data_type, data_length=width, max_size=width
         )
     if oid in _TEMPORAL_OIDS:
         data_type, width = _TEMPORAL_OIDS[oid]

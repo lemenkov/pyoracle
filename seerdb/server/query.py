@@ -23,11 +23,15 @@ from seerdb.common.tns import (
     decode_token_oac,
     decode_ub4,
     encode_sb4,
+    encode_token_binary_double,
+    encode_token_binary_float,
     encode_token_datetime,
     encode_token_decimal,
     encode_token_num,
 )
 from seerdb.common.tns_consts import (
+    TNS_TYPE_BDOUBLE,
+    TNS_TYPE_BFLOAT,
     TNS_TYPE_TIMESTAMP,
     TNS_TYPE_TIMESTAMPTZ,
     TTI_ALL8,
@@ -262,6 +266,12 @@ def _encode_value(value: object, data_type: int) -> bytes:
         # so match it before the int branch would silently swallow it).
         return _bytes_with_length(encode_token_num(int(value)))
     if isinstance(value, (int, float)):
+        # A BINARY_FLOAT / BINARY_DOUBLE column carries the IEEE-754 value in
+        # Oracle's order-preserving form, not base-100 NUMBER.
+        if data_type == TNS_TYPE_BDOUBLE:
+            return _bytes_with_length(encode_token_binary_double(float(value)))
+        if data_type == TNS_TYPE_BFLOAT:
+            return _bytes_with_length(encode_token_binary_float(float(value)))
         return _bytes_with_length(encode_token_num(value))
     if isinstance(value, Decimal):
         # NUMBER via the exact base-100 Decimal encoder: high-precision values
