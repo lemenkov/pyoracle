@@ -712,6 +712,22 @@ class CursorIntegration(_IntegrationBase):
         self.cur.fetchone()
         self.assertEqual(self.cur.fetchall(), [(2,), (3,), (4,), (5,)])
 
+    def test_session_timezone_synced_to_client(self):
+        # #307: on 12c+ the driver sends AUTH_ALTER_SESSION at login to pin the
+        # session time zone to the client's UTC offset (as oracledb / OCI /
+        # sqlplus do), so SESSIONTIMEZONE / CURRENT_TIMESTAMP reflect the client,
+        # not the server default. Gated to 12c+ (10g/11g's stricter auth parse
+        # rejects the extra pair; no oracledb reference to match there).
+        if self.conn.field_version < FIELD_VERSION_12_1:
+            self.skipTest('client time-zone sync is 12c+ (AUTH_ALTER_SESSION)')
+        off = datetime.datetime.now().astimezone().utcoffset() or datetime.timedelta(0)
+        total = int(off.total_seconds())
+        sign = '+' if total >= 0 else '-'
+        hh, mm = divmod(abs(total) // 60, 60)
+        expected = f'{sign}{hh:02d}:{mm:02d}'
+        self.cur.execute('SELECT sessiontimezone FROM dual')
+        self.assertEqual(self.cur.fetchone()[0].strip(), expected)
+
     def test_bit_vector_reuse_across_fetch_boundary(self):
         # #326: a column the server elides as "same as previous row" (bit-vector
         # duplicate detection) must survive a fetch-continuation boundary. The

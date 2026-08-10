@@ -1718,8 +1718,21 @@ def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
         UserField = (
             bytes([len(User)]) + User if FieldVersion >= FIELD_VERSION_12_1 else User
         )
-        SessionKvs = b''
-        NumPairs = 2 + SpeedyKeyInd + ProxyInd + DrcpInd
+        # Sync the session time zone to the client's UTC offset, the way oracledb
+        # / OCI / sqlplus do (AUTH_ALTER_SESSION). Without it the session runs at
+        # the server default, so CURRENT_TIMESTAMP / LOCALTIMESTAMP /
+        # SESSIONTIMEZONE and TIMESTAMP WITH LOCAL TIME ZONE reflect the server's
+        # zone, not the client's — a porting surprise (#307). Gated to 12c+: that
+        # is where oracledb (thin, 12.1+) operates and the phase-two AUTH accepts
+        # the extra pair; 10g / 11g have a stricter parse that desyncs on it, and
+        # no oracledb reference to match. The fv > 17 fast-auth path already
+        # carries this via _auth_session_kvs.
+        if FieldVersion >= FIELD_VERSION_12_1:
+            SessionKvs = encode_kv(b'AUTH_ALTER_SESSION', _local_tz_clause(), 1)
+            NumPairs = 2 + SpeedyKeyInd + 1 + ProxyInd + DrcpInd
+        else:
+            SessionKvs = b''
+            NumPairs = 2 + SpeedyKeyInd + ProxyInd + DrcpInd
 
     Data = (
         Header
