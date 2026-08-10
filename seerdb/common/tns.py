@@ -984,7 +984,8 @@ def decode_token_oac(Data: bytes, Acc: tuple) -> tuple[int, int, int, int, bytes
 
 def decode_token_rpa(Data: bytes, Acc: tuple) -> tuple:
     (Num, Rest0) = decode_ub4(Data)
-    (KVs, Rest1) = decode_kv(Rest0, Num, [])
+    Flags: dict = {}
+    (KVs, Rest1) = decode_kv(Rest0, Num, [], Flags)
     SessKey = dict(KVs).get(b'AUTH_SESSKEY')
     Salt = dict(KVs).get(b'AUTH_VFR_DATA')
     DerivedSalt = dict(KVs).get(b'AUTH_PBKDF2_CSK_SALT')
@@ -1005,7 +1006,19 @@ def decode_token_rpa(Data: bytes, Acc: tuple) -> tuple:
         SderRaw = dict(KVs).get(b'AUTH_PBKDF2_SDER_COUNT')
         VgenCount = int(VgenRaw) if VgenRaw else None
         SderCount = int(SderRaw) if SderRaw else None
-        return (TTI_SESS, SessKey, Salt, DerivedSalt, VgenCount, SderCount)
+        # The AUTH_VFR_DATA flag names the verifier type (SHA-1 vs SHA-2 vs
+        # legacy) — needed to pick the right key schedule on a modern server for
+        # a pre-SHA-2 account (#311).
+        VerifierType = Flags.get(b'AUTH_VFR_DATA')
+        return (
+            TTI_SESS,
+            SessKey,
+            Salt,
+            DerivedSalt,
+            VgenCount,
+            SderCount,
+            VerifierType,
+        )
 
 
 def decode_token_pro(Data: bytes) -> dict:
@@ -1621,6 +1634,7 @@ def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
     DerivedSalt = Dictionary['auth']['derived_salt']
     VgenCount = Dictionary['auth'].get('vgen_count')
     SderCount = Dictionary['auth'].get('sder_count')
+    VerifierType = Dictionary['auth'].get('verifier_type')
     User = Dictionary['env']['user'].encode('utf-8')
     Pass = Dictionary['env']['password'].encode('utf-8')
     Role = Dictionary['env'].get('role', 0)
@@ -1628,7 +1642,7 @@ def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
 
     LogonMode = encode_sb4((Role * 32) | (Prelim * 128) | 1 | 256)
     (AuthPass, AuthSess, SpeedyKey, SpeedyKeyInd, ConnKey) = o5logon(
-        Sess, Salt, DerivedSalt, User, Pass, VgenCount, SderCount
+        Sess, Salt, DerivedSalt, User, Pass, VgenCount, SderCount, VerifierType
     )
 
     AuthPass = encode_kv(b'AUTH_PASSWORD', AuthPass.hex().upper().encode('utf-8'))
@@ -4328,7 +4342,12 @@ def encode_chr(String: str | bytes) -> bytes:
     return bytes([Length]) + Bytes
 
 
-def decode_kv(Data: bytes, Num: int, Acc: list) -> tuple[list, bytes]:
+def decode_kv(
+    Data: bytes, Num: int, Acc: list, Flags: dict | None = None
+) -> tuple[list, bytes]:
+    # Flags (optional) collects each pair's trailing number (its "flag") keyed by
+    # key name — needed for AUTH_VFR_DATA, whose flag names the verifier type
+    # (#311). Left None by default so existing callers are unchanged.
     if Num <= 0 or not Data:
         return (sorted(Acc), Data)
 
@@ -4346,13 +4365,16 @@ def decode_kv(Data: bytes, Num: int, Acc: list) -> tuple[list, bytes]:
 
     (Key, R0) = decode_to_bin(Data)
     (Val, R1) = decode_to_bin(R0)
+    if Flags is not None and R1:
+        (Flag, _) = decode_ub4(R1)  # the per-pair number precedes the next pair
+        Flags[Key] = Flag
     if Val == bytes([0]):
         Val = None
     NewAcc = Acc + [(Key, Val)]
     if not R1:
         return (sorted(NewAcc), R1)
     Skip = R1[0] + 1
-    return decode_kv(R1[Skip:], Num - 1, NewAcc)
+    return decode_kv(R1[Skip:], Num - 1, NewAcc, Flags)
 
 
 def encode_kv(Key: bytes, Val: bytes, Padding: int = 0) -> bytes:
