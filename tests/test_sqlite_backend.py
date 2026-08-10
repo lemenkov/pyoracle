@@ -138,6 +138,31 @@ def test_bind_variables() -> None:
     assert row == ('bob',)
 
 
+def test_large_values_round_trip() -> None:
+    # A string and a RAW value well over the 253-byte single-byte DALC limit
+    # must chunk correctly all the way through the wire and back.
+    listen, server, result = _start_mirror()
+    conn = _connect(listen.getsockname()[1])
+    big_str = 'seerdb-' * 500  # 3500 chars
+    big_raw = bytes(range(256)) * 8  # 2048 bytes
+    try:
+        cur = conn.cursor()
+        cur.execute('create table t (id number, s varchar2(4000), b raw(4000))')
+        cur.execute('insert into t values (:1, :2, :3)', [1, big_str, big_raw])
+        cur.execute('select s, b from t where id = :1', [1])
+        row = cur.fetchone()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert row == (big_str, big_raw)
+
+
 def test_executemany_array_dml() -> None:
     # executemany sends one execute carrying every row; the Mirror applies them
     # all and reports the total affected count.
