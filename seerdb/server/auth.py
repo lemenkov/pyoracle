@@ -43,7 +43,10 @@ from seerdb.common.crypto import cat_key, conn_key, pad2
 from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import decode_dalc, decode_kv, decode_ub4, encode_kv, encode_sb4
 from seerdb.common.tns_consts import TTI_AUTH, TTI_FUN, TTI_RPA, TTI_SESS
-from seerdb.server._handshake_11g import CHALLENGE_TEMPLATE_SQLPLUS
+from seerdb.server._handshake_11g import (
+    CHALLENGE_TEMPLATE_SQLPLUS,
+    RESULT_TEMPLATE_SQLPLUS,
+)
 
 # O5LOGON uses AES-CBC with an all-zero IV throughout.
 _IV = bytes(16)
@@ -113,6 +116,30 @@ def derive_conn_key(challenge: Challenge, client_auth_sesskey: bytes) -> bytes:
 def server_proof(session_key: bytes) -> bytes:
     """The AUTH_SVR_RESPONSE value: SERVER_TO_CLIENT encrypted under ConnKey."""
     return AES.new(session_key, AES.MODE_CBC, _IV).encrypt(_SERVER_PROOF)
+
+
+# The OCI dialect's AUTH_SVR_RESPONSE is 48 bytes, not the thin 16: the real 11g
+# listener encrypts a 16-byte nonce, the SERVER_TO_CLIENT marker, and a full
+# PKCS7 pad block (verified byte-exact against a live capture). The client finds
+# the marker substring after decrypting, so the nonce is not checked.
+_PROOF_NONCE_LEN = 16
+_PKCS7_FULL_BLOCK = bytes([16]) * 16
+
+
+def server_proof_oci(session_key: bytes, *, nonce: bytes | None = None) -> bytes:
+    """The 48-byte OCI ``AUTH_SVR_RESPONSE`` (deadbeef dialect, #265).
+
+    ``AES-CBC(nonce16 + SERVER_TO_CLIENT + PKCS7pad, ConnKey)`` — the classic
+    O5LOGON server response the real 11g listener sends. ``nonce`` is injectable
+    for deterministic tests; it defaults to a fresh random value and the client
+    does not check it.
+    """
+    if nonce is None:
+        nonce = token_bytes(_PROOF_NONCE_LEN)
+    if len(nonce) != _PROOF_NONCE_LEN:
+        raise InterfaceError(f'proof nonce must be {_PROOF_NONCE_LEN} bytes')
+    plain = nonce + _SERVER_PROOF + _PKCS7_FULL_BLOCK
+    return AES.new(session_key, AES.MODE_CBC, _IV).encrypt(plain)
 
 
 def verify_password(
@@ -188,6 +215,31 @@ def encode_challenge_oci(challenge: Challenge) -> bytes:
     i_vfr = buf.index(b'AUTH_VFR_DATA') + len(b'AUTH_VFR_DATA') + 5
     buf[i_sk : i_sk + _OCI_SESSKEY_HEXLEN] = sesskey
     buf[i_vfr : i_vfr + _OCI_SALT_HEXLEN] = salt
+    return bytes(buf)
+
+
+# AUTH_SVR_RESPONSE value = hex of the 48-byte server proof (96 chars). It begins
+# at this fixed offset in the captured result template (the framing ahead of it
+# is constant), so encode_result_oci substitutes it in place.
+_OCI_SVR_RESPONSE_HEXLEN = 96
+_RESULT_SVR_RESPONSE_OFF = 1526
+
+
+def encode_result_oci(session_key: bytes, *, nonce: bytes | None = None) -> bytes:
+    """Build the sqlplus / thick-OCI (deadbeef dialect) O5LOGON result (#265).
+
+    Returns the **full TNS_DATA packet** (header included), ready for
+    ``PacketStream.send_raw``. Only ``AUTH_SVR_RESPONSE`` varies per login, so the
+    freshly computed 48-byte server proof (96 hex) is substituted into the
+    captured 1762-byte result template in place. The Mirror keeps the template's
+    session-identity fields (session id, serial, server PID) — the client does not
+    cryptographically check them. ``nonce`` is forwarded to
+    :func:`server_proof_oci` for deterministic tests.
+    """
+    proof = _hexval(server_proof_oci(session_key, nonce=nonce))
+    buf = bytearray(RESULT_TEMPLATE_SQLPLUS)
+    off = _RESULT_SVR_RESPONSE_OFF
+    buf[off : off + _OCI_SVR_RESPONSE_HEXLEN] = proof
     return bytes(buf)
 
 

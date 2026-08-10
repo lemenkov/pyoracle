@@ -193,6 +193,42 @@ def test_parse_auth_response_oci_recovers_the_secrets() -> None:
     assert len(password) == 32  # AUTH_PASSWORD proof, 64 hex on the wire
 
 
+def test_server_proof_oci_is_the_48_byte_deadbeef_form() -> None:
+    from seerdb.server.auth import server_proof_oci
+
+    conn = bytes(24)  # any 192-bit ConnKey
+    proof = server_proof_oci(conn, nonce=bytes(16))
+    assert len(proof) == 48  # nonce(16) + SERVER_TO_CLIENT(16) + PKCS7 pad(16)
+    assert validate(proof, conn)  # decrypts to contain the SERVER_TO_CLIENT marker
+    with pytest.raises(InterfaceError):
+        server_proof_oci(conn, nonce=bytes(8))  # wrong nonce size
+
+
+def test_encode_result_oci_validates_against_the_client() -> None:
+    # The result the Mirror sends after verifying the OCI AUTH: reconstruct the
+    # ConnKey from the seeded challenge + the live AUTH, encode the result, and
+    # confirm the substituted AUTH_SVR_RESPONSE validates (#265).
+    from binascii import unhexlify
+
+    from seerdb.server.auth import (
+        derive_conn_key,
+        encode_result_oci,
+        parse_auth_response_oci,
+    )
+
+    challenge = make_challenge(b'pyo123', salt=bytes(10), server_session=bytes(48))
+    _user, sesskey, _password = parse_auth_response_oci(_OCI_AUTH_SEEDED)
+    conn = derive_conn_key(challenge, sesskey)
+
+    packet = encode_result_oci(conn, nonce=bytes(16))
+    assert len(packet) == 1762  # fixed-size proof keeps the template length
+    i = packet.find(b'AUTH_SVR_RESPONSE') + len(b'AUTH_SVR_RESPONSE') + 5
+    proof = unhexlify(packet[i : i + 96])
+    # if the write offset and the value framing disagreed, this proof would be
+    # the template's stale one and fail against the reconstructed ConnKey.
+    assert validate(proof, conn)
+
+
 def test_full_oci_auth_verifies_against_live_sqlplus() -> None:
     # The OCI counterpart of the thin round-trip below, but the AUTH is REAL
     # sqlplus 11.2 bytes (not seerdb's own client encoder). Reconstruct the exact

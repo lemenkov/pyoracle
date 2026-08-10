@@ -4,10 +4,12 @@
 """Drive the server side of a login over a :class:`PacketStream`.
 
 Sequences the 11g handshake and O5LOGON built up across the handshake/auth
-modules, so a real client (seerdb, python-oracledb thin, ...) that speaks the
-``TTI_PRO`` dialect authenticates against the Mirror:
+modules, so a real client authenticates against the Mirror in either PRO
+dialect — the thin ``TTI_PRO`` form (seerdb, python-oracledb thin) or the classic
+``deadbeef``/OCI form (sqlplus, thick OCI), which runs an extra data-type round
+and marshals auth from captured 11g templates (#265):
 
-    CONNECT → ACCEPT → PRO → DTY → OSESSKEY → challenge → AUTH → result
+    CONNECT → ACCEPT → PRO → DTY → [TYPE] → OSESSKEY → challenge → AUTH → result
 
 The Mirror holds account passwords in a configured credential map (Oracle
 usernames match case-insensitively); a backend-mapped auth API comes later.
@@ -16,6 +18,7 @@ usernames match case-insensitively); a backend-mapped auth API comes later.
 from __future__ import annotations
 
 import logging
+from secrets import token_bytes
 from typing import NoReturn
 
 from seerdb.common.exceptions import InterfaceError
@@ -35,10 +38,14 @@ from seerdb.common.tns_consts import (
 from seerdb.server.auth import (
     derive_conn_key,
     encode_challenge,
+    encode_challenge_oci,
     encode_result,
+    encode_result_oci,
     make_challenge,
     parse_auth_response,
+    parse_auth_response_oci,
     parse_osesskey,
+    parse_osesskey_oci,
     verify_password,
 )
 from seerdb.server.backend import Backend, BackendError, Result
@@ -113,23 +120,44 @@ def handle_login(stream: PacketStream, backend: Backend) -> str:
         stream.send_raw(encode_type_reply_sqlplus())
 
     # --- O5LOGON (§4) ---
-    user = parse_osesskey(_expect(stream, TNS_DATA, 'OSESSKEY')).decode('utf-8')
+    # The same mutual-auth crypto drives both dialects; only the wire marshalling
+    # differs. The thin form carries each phase as an RPA payload
+    # (write_packet); the deadbeef/OCI form (#265) exchanges full packets built
+    # from captured 11g templates (send_raw), so sqlplus / thick OCI logs in too.
+    osesskey = _expect(stream, TNS_DATA, 'OSESSKEY')
+    parse_osesskey_fn = parse_osesskey_oci if sqlplus else parse_osesskey
+    user = parse_osesskey_fn(osesskey).decode('utf-8')
     secret = backend.authenticate(user)
     if secret is None:
         _deny_login(stream, f'unknown user: {user!r}')
-    challenge = make_challenge(secret.encode('utf-8'))
-    stream.write_packet(TNS_DATA, encode_challenge(challenge))
 
-    _, client_sesskey, auth_password = parse_auth_response(
-        _expect(stream, TNS_DATA, 'AUTH')
-    )
+    # The thin AUTH may omit AUTH_PASSWORD (bytes | None); the OCI AUTH always
+    # carries it. Declare the wider type so both branches unpack cleanly.
+    auth_password: bytes | None
+    if sqlplus:
+        # The OCI challenge template carries a 10-byte salt slot (thin uses 16).
+        challenge = make_challenge(secret.encode('utf-8'), salt=token_bytes(10))
+        stream.send_raw(encode_challenge_oci(challenge))
+        _, client_sesskey, auth_password = parse_auth_response_oci(
+            _expect(stream, TNS_DATA, 'AUTH')
+        )
+    else:
+        challenge = make_challenge(secret.encode('utf-8'))
+        stream.write_packet(TNS_DATA, encode_challenge(challenge))
+        _, client_sesskey, auth_password = parse_auth_response(
+            _expect(stream, TNS_DATA, 'AUTH')
+        )
+
     conn_key = derive_conn_key(challenge, client_sesskey)
     # Verify the client's password proof (AUTH_PASSWORD) against the account
     # secret — the server half of O5LOGON's mutual auth. Without it the Mirror
     # would serve any client that ignores the server proof it can't validate.
     if not verify_password(conn_key, auth_password, secret.encode('utf-8')):
         _deny_login(stream, f'wrong password for user: {user!r}')
-    stream.write_packet(TNS_DATA, encode_result(conn_key))
+    if sqlplus:
+        stream.send_raw(encode_result_oci(conn_key))
+    else:
+        stream.write_packet(TNS_DATA, encode_result(conn_key))
 
     logger.info('login OK: %s', user)
     return user
