@@ -1400,7 +1400,13 @@ Timezone encoding has two forms:
   first byte is clear). seerdb handles this form.
 - **Named zone (region ID)**: when bit 0x80 of the first byte is set,
   the two TZ bytes carry an Oracle timezone region id instead of an
-  offset: `region_id = ((byte0 & 0x7f) << 6) + (byte1 >> 2)`. seerdb
+  offset: `region_id = ((byte0 & 0x7f) << 6) + (byte1 >> 2)`. Note the low
+  tz byte (`byte1`) is **0** for any region id that is a multiple of 64
+  (Africa/Windhoek=64, America/Manaus=192, Asia/Macao=256, Europe/Gibraltar=384,
+  …). A 13-byte frame is *always* a real zone — DATE is 7 bytes, TIMESTAMP 7/11,
+  and TIMESTAMP WITH LOCAL TIME ZONE carries no tz bytes — so the decoder must
+  **not** treat a zero low byte as "no zone" (doing so returned a naive UTC wall
+  clock for those zones; #304). seerdb
   maps the id to an IANA zone name (`seerdb/_tzregions.py`, a stable
   id→name table generated from the server's `V$TIMEZONE_NAMES`) and then
   asks the standard-library `zoneinfo` module for the offset **at that
