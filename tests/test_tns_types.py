@@ -312,6 +312,31 @@ class TestEncodeTokenDecimal(unittest.TestCase):
             with self.subTest(i=i):
                 self.assertEqual(encode_token_decimal(Decimal(i)), encode_token_num(i))
 
+    def test_large_integer_magnitudes_round_trip(self):
+        # #304: an integral value >= 10**40 needs more than lnxmin's 20 base-100
+        # groups, but is a valid Oracle NUMBER (<= ~1e125, <= 38 significant
+        # digits) once trailing-zero groups fold into the exponent. Both the int
+        # encoder and the integral-Decimal path used to raise 'LnxMin cannot
+        # handle this'; they must now round-trip through decode_number().
+        cases = [
+            10**40,  # boundary: the first magnitude lnxmin rejects
+            10**41,
+            10**100,
+            10**125,  # Oracle NUMBER maximum magnitude
+            -(10**125),
+            123 * 10**120,  # a few significant digits at a huge magnitude
+            int('9' * 38) * 10**80,  # 38 significant digits, large magnitude
+            -(int('9' * 38) * 10**80),
+        ]
+        for value in cases:
+            with self.subTest(value=value):
+                # int encoder (plain-int bind path)
+                self.assertEqual(decode_number(encode_token_num(value)), value)
+                # integral-Decimal path (Decimal bind), byte-identical to it
+                self.assertEqual(
+                    encode_token_decimal(Decimal(value)), encode_token_num(value)
+                )
+
     def test_non_finite_raises(self):
         for value in (Decimal('NaN'), Decimal('Infinity'), Decimal('-Infinity')):
             with self.subTest(value=value):

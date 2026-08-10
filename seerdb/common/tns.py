@@ -4700,7 +4700,13 @@ def encode_token_decimal(Value: Decimal) -> bytes:
     if Value == 0:
         return bytes([128])
     if Value == Value.to_integral_value():
-        return encode_token_num(int(Value))
+        IntVal = int(Value)
+        # The legacy integer encoder (lnxmin) caps at 20 base-100 groups, i.e.
+        # |value| < 10**40. A larger integral NUMBER (valid up to ~1e125 as long
+        # as it has <= 38 significant digits) falls through to the exact base-100
+        # encoder below, which folds trailing-zero groups into the exponent.
+        if -(10**40) < IntVal < 10**40:
+            return encode_token_num(IntVal)
 
     Sign, Digits, Exp10 = Value.as_tuple()
     # is_finite() above rules out the 'n'/'N'/'F' exponent forms as_tuple() uses
@@ -5322,7 +5328,13 @@ def encode_token_num(Token: int | float) -> bytes:
     if Token == 0:
         return bytes([128])
     elif isinstance(Token, int):
-        return bytes(lnxfmt(lnxmin(abs(Token), 1, []), Token))
+        # lnxmin handles at most 20 base-100 groups (|Token| < 10**40). Beyond
+        # that, a valid Oracle NUMBER (up to ~1e125 with <= 38 significant
+        # digits) needs its exponent to absorb trailing-zero groups, so defer to
+        # the exact base-100 encoder rather than raising 'LnxMin cannot handle'.
+        if -(10**40) < Token < 10**40:
+            return bytes(lnxfmt(lnxmin(abs(Token), 1, []), Token))
+        return encode_token_decimal(Decimal(Token))
     elif isinstance(Token, float):
         return bytes(lnxfmt(lnxren(abs(Token), 0), Token))
     else:
