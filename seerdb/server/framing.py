@@ -28,7 +28,7 @@ from __future__ import annotations
 import socket
 import struct
 
-from seerdb.common.tns import encode_packet
+from seerdb.common.tns import encode_data_packet, encode_packet
 from seerdb.common.tns_consts import DEFAULT_SDU, TNS_DATA
 
 # Re-exported for the server modules that frame at the default SDU.
@@ -107,15 +107,46 @@ class PacketStream:
             return (packet_type, packet[8:size])
 
     def write_packet(self, packet_type: int, body: bytes) -> None:
-        """Send one logical packet, splitting oversized payloads across SDUs.
+        """Send one logical packet, fragmenting an oversized ``DATA`` response.
 
-        Mirrors ``Connection.send()``: ``encode_packet`` hands back the
-        unsent remainder until it is exhausted.
+        A ``DATA`` response is fragmented the way the **real Oracle server**
+        does — which is *not* how ``encode_packet`` (the client side) fragments.
+        A client marks non-final fragments with the ``0x0020`` flag, but the
+        client's :func:`assemble_packet` **ignores that flag** when reading a
+        response: it treats a ``DATA`` packet as a continuation only when its
+        size is exactly ``SDU-37`` or ``SDU-81``, and as final otherwise. So a
+        full-``SDU`` fragment (what ``encode_packet`` emits) is misread as a
+        complete response and the rest is dropped ("truncated DALC field").
+
+        We therefore emit continuation packets of exactly ``SDU-37`` bytes and a
+        final packet whose size is neither magic value. Non-``DATA`` packets
+        (handshake replies) are small and go out whole.
         """
-        data: bytes | None = body
-        while data is not None:
-            packet, data = encode_packet(packet_type, data, self.sdu, self.large)
-            self._sock.sendall(packet)
+        if packet_type == TNS_DATA:
+            self._write_data(body)
+            return
+        packet, rest = encode_packet(packet_type, body, self.sdu, self.large)
+        self._sock.sendall(packet)
+        assert rest is None, 'non-DATA packets do not fragment'
+
+    def _write_data(self, body: bytes) -> None:
+        # Continuation packets are sized SDU-37 (the client reads that exact size
+        # as "more coming"); the final packet is the remainder. If the remainder
+        # would itself land on a magic size (SDU-37 / SDU-81), peel off one more
+        # continuation — sized SDU-81, the other value the client reads as "more"
+        # — so the final packet is safe.
+        cont_body = self.sdu - 37 - 10
+        alt_body = self.sdu - 81 - 10
+        max_final = self.sdu - 10
+        magic = {self.sdu - 37, self.sdu - 81}
+        data = body
+        while len(data) > max_final:
+            self._sock.sendall(encode_data_packet(data[:cont_body], 0x0020, self.large))
+            data = data[cont_body:]
+        if len(data) + 10 in magic:
+            self._sock.sendall(encode_data_packet(data[:alt_body], 0x0020, self.large))
+            data = data[alt_body:]
+        self._sock.sendall(encode_data_packet(data, 0x0000, self.large))
 
     def send_raw(self, packet: bytes) -> None:
         """Send an already-framed packet verbatim (it includes its TNS header).

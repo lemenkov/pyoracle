@@ -138,6 +138,33 @@ def test_bind_variables() -> None:
     assert row == ('bob',)
 
 
+def test_large_response_spans_many_packets() -> None:
+    # A result set far larger than the TNS packet limit (here ~175 KB) must
+    # fragment across many DATA packets and reassemble in the client — the
+    # server-side fragmentation matching Oracle's SDU-37/-81 continuation sizes.
+    listen, server, result = _start_mirror()
+    conn = _connect(listen.getsockname()[1])
+    try:
+        cur = conn.cursor()
+        cur.execute('create table t (id number, v varchar2(4000))')
+        for i in range(50):
+            cur.execute('insert into t values (:1, :2)', [i, chr(65 + i % 26) * 3500])
+        cur.execute('select id, v from t order by id')
+        rows = cur.fetchall()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert len(rows) == 50
+    assert rows[0] == (0, 'A' * 3500)
+    assert rows[49] == (49, 'X' * 3500)
+
+
 def test_large_values_round_trip() -> None:
     # A string and a RAW value well over the 253-byte single-byte DALC limit
     # must chunk correctly all the way through the wire and back.

@@ -113,6 +113,16 @@ be *exactly* maximum-sized from a true continuation. In practice this has not
 been observed as the cause of any desync (the server appears to avoid emitting
 a maximally-sized final fragment), so the test holds for normal traffic.
 
+The **Mirror** (server side) fragments a large `DATA` response this same way —
+`seerdb/server/framing.py::PacketStream._write_data` emits continuation packets
+of exactly `SDU-37` bytes and a final packet of the remainder. It must *not*
+reuse `encode_packet` (the client-side form), which fills fragments to the full
+SDU and marks them `0x0020`: the client ignores that flag and would read the
+first full-SDU fragment as a complete response, dropping the rest. It also
+guards the edge case above — if the remainder would land on a magic size
+(`SDU-37` / `SDU-81`), it peels off one more `SDU-81` continuation so the final
+packet is unambiguously short.
+
 ### 1.4 Break / reset markers (TNS_MARKER)
 
 A `TNS_MARKER` (type 12) is an out-of-band break/attention signal with a 3-byte
