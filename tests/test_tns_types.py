@@ -86,6 +86,20 @@ class TestNamedRegionTSTZ(unittest.TestCase):
             Dt.replace(tzinfo=None), datetime.datetime(2024, 1, 15, 12, 0, 0)
         )
 
+    def test_region_id_multiple_of_64_has_zero_low_byte(self):
+        # A region id that is a multiple of 64 (America/Manaus = 192) encodes its
+        # low tz byte (Data[12]) as 0. The decoder must still resolve the named
+        # zone, not fall through to a naive UTC wall clock (#304). Frame captured
+        # live from 21c: from_tz(timestamp '2024-06-15 10:00:00','America/Manaus')
+        # stores 14:00 UTC (Manaus is UTC-4).
+        Data = bytes([120, 124, 6, 15, 15, 1, 1, 0, 0, 0, 0, 131, 0])
+        Dt = decode_date(Data)
+        self.assertIsNotNone(Dt.tzinfo)
+        self.assertEqual(Dt.utcoffset(), datetime.timedelta(hours=-4))
+        self.assertEqual(
+            Dt.replace(tzinfo=None), datetime.datetime(2024, 6, 15, 10, 0, 0)
+        )
+
     def test_unknown_region_falls_back_to_naive(self):
         # An unmapped region id must not crash — fall back to naive UTC.
         Data = bytes([120, 124, 1, 15, 18, 1, 1, 0, 0, 0, 0, 0xFF, 0xFC])

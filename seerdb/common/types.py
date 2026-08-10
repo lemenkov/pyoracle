@@ -176,7 +176,14 @@ def decode_date(Data: bytes) -> datetime.datetime | None:
     # result both compares equal and prints with the original local time.
     try:
         Tz = None
-        if len(Data) >= 13 and Data[11] != 0 and Data[12] != 0:
+        # A 13-byte frame is always TIMESTAMP WITH TIME ZONE: DATE is 7 bytes,
+        # TIMESTAMP 7/11, and TIMESTAMP WITH LOCAL TIME ZONE carries no tz bytes
+        # (it is normalised to the DB zone). So the two trailing bytes are always
+        # a real zone — do NOT gate on them being non-zero. A region id that is a
+        # multiple of 64 encodes its low byte (Data[12]) as 0 (e.g. America/Manaus,
+        # Asia/Macao, Europe/Gibraltar); such a value must still resolve to its
+        # named zone instead of falling through to a naive UTC wall clock (#304).
+        if len(Data) >= 13:
             if Data[11] & _TZ_REGION_ID_FLAG:
                 # Named region id: resolve to an IANA zone and let zoneinfo
                 # supply the (DST-aware) offset for this instant. Unknown id ->
