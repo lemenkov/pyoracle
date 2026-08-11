@@ -64,6 +64,7 @@ from seerdb.server.query import (
     FetchRequest,
     encode_error,
     encode_fetch_response,
+    encode_fetch_terminator_oci,
     encode_query_response,
     encode_query_response_oci,
     encode_status,
@@ -232,10 +233,11 @@ _OCI_BANNER = (
 
 def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str:
     # The sqlplus / thick-OCI query loop (#265), built up one message shape at a
-    # time. So far: the post-login version call (-> banner, which lets sqlplus
-    # print "Connected to:") and the OCI execute (-> describe). The rows/fetch
-    # response and the remaining OCI calls (piggybacks, commit) are follow-ups;
-    # an unhandled call ends the session cleanly rather than desyncing.
+    # time. So far: the post-login version call (-> banner), the OCI execute
+    # (-> describe + rows + status), and the follow-up fetch (-> end-of-fetch
+    # terminator). The PL/SQL / setup-query calls sqlplus sends before the prompt
+    # (piggyback-wrapped) are follow-ups; an unhandled call ends the session
+    # cleanly rather than desyncing.
     while True:
         received = stream.read_packet()
         if received is None:
@@ -261,6 +263,11 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
                     )
                     continue
                 return user  # OCI DDL/DML status is a later increment
+            if body[1] == TTI_FETCH:
+                # The rows already came back on the execute; the follow-up fetch
+                # just wants the end-of-fetch terminator (ORA-01403).
+                stream.write_packet(TNS_DATA, encode_fetch_terminator_oci())
+                continue
             if body[1] == TTI_LOGOFF:
                 return user
         logger.info('OCI: unhandled call ttc=%s; ending session', body[:2].hex())

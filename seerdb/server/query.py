@@ -403,6 +403,30 @@ def _oci_row_status() -> bytes:
     return bytes(status)
 
 
+# The OCI end-of-fetch terminator sqlplus reads after the execute's rows: an OER
+# carrying ORA-01403 ("no data found"), which the client treats as "cursor
+# drained" rather than an error (the thin path keeps the same thing as its
+# captured _END_OF_FETCH). Reduced to structure by live bisection (#265): a
+# 24-byte OER header (call status + the 1403 code) and one instance constant,
+# the rest zero, then the message computed.
+_OCI_FETCH_OER_LEN = 136
+_OCI_FETCH_OER_HEADER = bytes.fromhex(
+    '0401000000140001010000007b0500000000020000000300'
+)
+_OCI_FETCH_CONST_OFF = 73
+_OCI_FETCH_CONST = bytes.fromhex('f6310a')
+_OCI_END_OF_FETCH_MSG = b'ORA-01403: no data found\n'
+
+
+def encode_fetch_terminator_oci() -> bytes:
+    """The sqlplus / thick-OCI end-of-fetch reply (ORA-01403 = cursor drained)."""
+    oer = bytearray(_OCI_FETCH_OER_LEN)
+    oer[0 : len(_OCI_FETCH_OER_HEADER)] = _OCI_FETCH_OER_HEADER
+    off = _OCI_FETCH_CONST_OFF
+    oer[off : off + len(_OCI_FETCH_CONST)] = _OCI_FETCH_CONST
+    return bytes(oer) + bytes([len(_OCI_END_OF_FETCH_MSG)]) + _OCI_END_OF_FETCH_MSG
+
+
 def encode_query_response_oci(columns: list[ColumnMeta], rows: list[tuple]) -> bytes:
     """Assemble a sqlplus / thick-OCI SELECT execute response (#265).
 

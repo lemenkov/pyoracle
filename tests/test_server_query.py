@@ -600,3 +600,15 @@ def test_oci_trailers_are_computed_mostly_zero() -> None:
     status = _oci_row_status()
     assert len(tail) == 83 and tail.count(0) > 70
     assert len(status) == 171 and status.count(0) > 120
+
+
+def test_encode_fetch_terminator_oci_signals_end_of_fetch() -> None:
+    # The OCI end-of-fetch reply: an OER carrying ORA-01403, which sqlplus reads
+    # as "cursor drained". Computed (mostly-zero OER + the message), not a blob;
+    # renders live when the execute already returned the rows (#265).
+    from seerdb.server.query import encode_fetch_terminator_oci
+
+    term = encode_fetch_terminator_oci()
+    assert len(term) == 162
+    assert term[0] == 0x04  # OER token
+    assert term.endswith(b'ORA-01403: no data found\n')
