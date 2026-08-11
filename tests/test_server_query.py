@@ -518,15 +518,17 @@ def test_encode_describe_oci_roundtrips_the_meaningful_fields() -> None:
     assert back[1]['scale'] == -127  # a NUMBER literal's floating scale
 
 
-def test_encode_describe_oci_matches_live_field_offsets() -> None:
-    # The per-column block's meaningful fields must land where a real 11g
-    # describe puts them. Captured NUMBER column ('select 1 from dual') pre-name:
-    from seerdb.server.query import _OCI_DCB_COL_PRENAME, _encode_dcb_column_oci
+def test_encode_dcb_column_oci_reproduces_the_live_column_block() -> None:
+    # The whole 63-byte per-column block, byte-for-byte against the real 11g
+    # describe for `select 1 from dual` (the NUMBER '1' column). This is ground
+    # truth from the wire, not a hand-derived fixture — an earlier hand-typed
+    # fixture hid a one-byte field shift that a live sqlplus caught (#265).
+    from seerdb.server.query import _encode_dcb_column_oci
 
     captured = bytes.fromhex(
-        '5101020000810200000000000000000000000000000000000000000000'
-        '0000000000000000000000000001010100000001'
-    )[:_OCI_DCB_COL_PRENAME]
+        '51010200008102000000000000000000000000000000000000000000000000'
+        '0000000000000000000000010101000000013100000000000000000000000000'
+    )
     mine = _encode_dcb_column_oci(
         ColumnMeta(
             name=b'1',
@@ -538,10 +540,22 @@ def test_encode_describe_oci_matches_live_field_offsets() -> None:
         ),
         position=1,
         first=True,
-    )[:_OCI_DCB_COL_PRENAME]
-    # type / precision / scale / data_length / null_ok / name-length offsets
-    for off in (2, 3, 4, 5, 6, 7, 8, 9, 43, 44):
-        assert mine[off] == captured[off], f'field byte {off} differs'
+    )
+    assert mine == captured
+
+
+def test_encode_describe_oci_maxrowsize_is_nonzero() -> None:
+    # The thick/OCI client allocates a row buffer of the DCB max-row-size; a zero
+    # there overflows and segfaults sqlplus, so it must sum the column widths
+    # (the thin client ignores the field) (#265).
+    import struct
+
+    from seerdb.server.query import _OCI_DCB_PREAMBLE_LEN, encode_describe_oci
+
+    col = ColumnMeta(name=b'1', data_type=TNS_TYPE_NUMBER, data_length=22, max_size=22)
+    payload = encode_describe_oci([col])
+    off = 1 + 4 + _OCI_DCB_PREAMBLE_LEN  # token + preamble-len + preamble
+    assert struct.unpack('<I', payload[off : off + 4])[0] == 22
 
 
 def test_encode_version_banner_oci_matches_the_captured_reply() -> None:
