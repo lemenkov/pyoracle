@@ -419,13 +419,55 @@ def _oci_dcb_tail(numcols: int) -> bytes:
     return bytes(tail)
 
 
-def _oci_row_status() -> bytes:
+# When the execute delivers fewer rows than the result holds, this byte in the
+# status is non-zero — the client reads it as "more rows, issue a fetch" (0 =
+# the cursor is already drained). The exact value is not load-bearing beyond
+# non-zero; 0x1e is what a live reply carries.
+_OCI_MORE_ROWS_OFF = 55
+_OCI_MORE_ROWS_FLAG = 0x1E
+
+
+def _oci_row_status(*, more: bool = False) -> bytes:
     status = bytearray(_OCI_ROW_STATUS_LEN)
     status[0:3] = b'\x08\x06\x00'  # return marker
     status[11] = 0x02  # a required sentinel
     off = _OCI_EXEC_OER_OFF
     status[off : off + len(_OCI_EXEC_OER)] = _OCI_EXEC_OER
+    if more:
+        status[_OCI_MORE_ROWS_OFF] = _OCI_MORE_ROWS_FLAG
     return bytes(status)
+
+
+# The row-header (TTI_RXH) that leads a fetch batch: a small fixed frame plus the
+# query SCN (zeroable). Reduced to its non-zero structure from a live fetch reply
+# (#265, #351).
+_OCI_RXH_LEN = 50
+_OCI_RXH_NONZERO = {0: 0x06, 1: 0x01, 2: 0x02, 4: 0x02, 10: 0x0F}
+
+
+def _oci_rxh() -> bytes:
+    rxh = bytearray(_OCI_RXH_LEN)
+    for off, value in _OCI_RXH_NONZERO.items():
+        rxh[off] = value
+    return bytes(rxh)
+
+
+def encode_fetch_batch_oci(columns: list[ColumnMeta], rows: list[tuple]) -> bytes:
+    """A sqlplus / thick-OCI fetch reply: RXH + one RXD per row + end-of-fetch.
+
+    Used when the execute parked rows for follow-up fetches — the batch carries
+    the next rows and, since the Mirror returns the remainder in one go, the
+    ORA-01403 terminator (#351).
+    """
+    out = bytearray(_oci_rxh())
+    for row in rows:
+        if len(row) != len(columns):
+            raise InterfaceError('row width does not match the column count')
+        out += bytes([TTI_RXD]) + b''.join(
+            _encode_value(v, col.data_type) for v, col in zip(row, columns)
+        )
+    out += encode_fetch_terminator_oci()
+    return bytes(out)
 
 
 # The OCI end-of-fetch terminator sqlplus reads after the execute's rows: an OER
@@ -480,13 +522,14 @@ def encode_error_oci(ora_code: int, message: str) -> bytes:
     return bytes(oer) + bytes([len(text)]) + text
 
 
-def encode_query_response_oci(columns: list[ColumnMeta], rows: list[tuple]) -> bytes:
+def encode_query_response_oci(
+    columns: list[ColumnMeta], rows: list[tuple], *, more: bool = False
+) -> bytes:
     """Assemble a sqlplus / thick-OCI SELECT execute response (#265).
 
-    describe + DCB tail + one TTI_RXD per row + the status trailer. The whole
-    result comes back on the execute (sqlplus fetches only the terminator after).
-    Renders live in sqlplus 11.2; the two trailers are computed (:func:`_oci_dcb_tail`
-    / :func:`_oci_row_status`), not captured blobs.
+    describe + DCB tail + one TTI_RXD per row + the status trailer. ``more=True``
+    marks the result as not fully delivered, so sqlplus follows up with a fetch
+    (see :func:`encode_fetch_batch_oci`); the trailers are computed, not blobs.
     """
     out = bytearray(encode_describe_oci(columns))
     out += _oci_dcb_tail(len(columns))
@@ -496,7 +539,7 @@ def encode_query_response_oci(columns: list[ColumnMeta], rows: list[tuple]) -> b
         out += bytes([TTI_RXD]) + b''.join(
             _encode_value(v, col.data_type) for v, col in zip(row, columns)
         )
-    out += _oci_row_status()
+    out += _oci_row_status(more=more)
     return bytes(out)
 
 

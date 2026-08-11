@@ -65,6 +65,7 @@ from seerdb.server.query import (
     encode_commit_status_oci,
     encode_error,
     encode_error_oci,
+    encode_fetch_batch_oci,
     encode_fetch_response,
     encode_fetch_terminator_oci,
     encode_logoff_status_oci,
@@ -243,6 +244,9 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
     # terminator). The PL/SQL / setup-query calls sqlplus sends before the prompt
     # (piggyback-wrapped) are follow-ups; an unhandled call ends the session
     # cleanly rather than desyncing.
+    # Rows a multi-row execute delivered only the first of; the rest wait here
+    # for the follow-up fetch (the OCI analogue of the thin _Cursors).
+    parked: tuple[list[ColumnMeta], list[tuple]] | None = None
     while True:
         received = stream.read_packet()
         if received is None:
@@ -258,12 +262,17 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
         body = strip_oci_piggyback(body)
         if len(body) >= 2 and body[0] == TTI_FUN:
             if body[1] == TTI_ALL8:
-                _answer_query_oci(stream, backend, body)
+                parked = _answer_query_oci(stream, backend, body)
                 continue
             if body[1] == TTI_FETCH:
-                # The rows already came back on the execute; the follow-up fetch
-                # just wants the end-of-fetch terminator (ORA-01403).
-                stream.write_packet(TNS_DATA, encode_fetch_terminator_oci())
+                if parked is not None:
+                    columns, rows = parked
+                    stream.write_packet(TNS_DATA, encode_fetch_batch_oci(columns, rows))
+                    parked = None
+                else:
+                    # Nothing parked — the execute already delivered every row;
+                    # the fetch just wants the end-of-fetch terminator (ORA-01403).
+                    stream.write_packet(TNS_DATA, encode_fetch_terminator_oci())
                 continue
             if body[1] in (TTI_COMMIT, TTI_ROLLBACK):
                 stream.write_packet(TNS_DATA, encode_commit_status_oci())
@@ -275,17 +284,20 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
         return user
 
 
-def _answer_query_oci(stream: PacketStream, backend: Backend, body: bytes) -> None:
+def _answer_query_oci(
+    stream: PacketStream, backend: Backend, body: bytes
+) -> tuple[list[ColumnMeta], list[tuple]] | None:
     # Answer one sqlplus / thick-OCI execute. sqlplus fires a chain of setup
     # statements (PL/SQL blocks, PRODUCT_PRIVS selects) before the user's query;
-    # each needs an acceptable reply or sqlplus never reaches the prompt.
+    # each needs an acceptable reply or sqlplus never reaches the prompt. Returns
+    # the rows parked for a follow-up fetch (or None if the reply was complete).
     try:
         request = parse_exec_oci(body)
     except InterfaceError:
         # A shape not parsed yet (e.g. a bound PL/SQL setup call) — acknowledge
         # success so sqlplus proceeds; the backend never sees it.
         stream.write_packet(TNS_DATA, encode_status_oci())
-        return
+        return None
     try:
         result = backend.execute(request.sql, request.binds)
     except BackendError as err:
@@ -298,13 +310,21 @@ def _answer_query_oci(stream: PacketStream, backend: Backend, body: bytes) -> No
             stream.write_packet(TNS_DATA, encode_error_oci(err.ora_code, str(err)))
         else:
             stream.write_packet(TNS_DATA, encode_status_oci())
-        return
-    if result.columns:
-        stream.write_packet(
-            TNS_DATA, encode_query_response_oci(result.columns, list(result.rows))
-        )
-    else:
+        return None
+    if not result.columns:
         stream.write_packet(TNS_DATA, encode_status_oci())
+        return None
+    rows = list(result.rows)
+    if len(rows) <= 1:
+        # 0 or 1 row fits in the execute reply; sqlplus won't fetch further.
+        stream.write_packet(TNS_DATA, encode_query_response_oci(result.columns, rows))
+        return None
+    # Deliver the first row now and park the rest — sqlplus reads the "more rows"
+    # status and issues a fetch for the remainder.
+    stream.write_packet(
+        TNS_DATA, encode_query_response_oci(result.columns, rows[:1], more=True)
+    )
+    return result.columns, rows[1:]
 
 
 def _skip_piggybacks(body: bytes) -> bytes:

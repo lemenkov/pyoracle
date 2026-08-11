@@ -677,3 +677,33 @@ def test_oci_dcb_tail_is_column_aware() -> None:
     assert _oci_dcb_tail(1)[_OCI_DCB_NUMCOLS_OFF] == 1
     off = _OCI_DCB_MARKER_OFF
     assert _oci_dcb_tail(2)[off : off + 3] == bytes.fromhex('060122')
+
+
+def test_encode_query_response_oci_signals_more_rows() -> None:
+    # more=True flips the status byte sqlplus reads as "fetch for the rest" (#351).
+    from seerdb.server.query import (
+        _OCI_MORE_ROWS_OFF,
+        _OCI_ROW_STATUS_LEN,
+        encode_query_response_oci,
+    )
+
+    col = ColumnMeta(
+        name=b'N', data_type=TNS_TYPE_NUMBER, data_length=2, max_size=0, scale=-127
+    )
+    done = encode_query_response_oci([col], [(1,)], more=False)
+    more = encode_query_response_oci([col], [(1,)], more=True)
+    i = len(done) - _OCI_ROW_STATUS_LEN + _OCI_MORE_ROWS_OFF
+    assert more[i] == 0x1E and done[i] == 0x00
+
+
+def test_encode_fetch_batch_oci_carries_rows_and_terminator() -> None:
+    # A fetch batch: RXH + one RXD per remaining row + the end-of-fetch OER (#351).
+    from seerdb.server.query import encode_fetch_batch_oci
+
+    col = ColumnMeta(
+        name=b'N', data_type=TNS_TYPE_NUMBER, data_length=2, max_size=0, scale=-127
+    )
+    batch = encode_fetch_batch_oci([col], [(1,), (2,)])
+    assert batch[0] == 0x06  # TTI_RXH token
+    assert batch.count(b'\x07\x02\xc1') == 2  # two RXD rows (07 + NUMBER DALC)
+    assert batch.endswith(b'ORA-01403: no data found\n')
