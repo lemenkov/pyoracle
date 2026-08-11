@@ -730,3 +730,42 @@ def test_parse_exec_oci_extracts_bind_values() -> None:
     assert req.sql == 'SELECT :n, :s FROM dual'
     assert req.bind_count == 2
     assert req.binds == [42, 'hello']
+
+
+def test_encode_out_bind_response_oci_matches_captured_11g_reply() -> None:
+    # The sqlplus `EXEC :n := 7` OUT-bind reply, captured live from 11g and
+    # normalised (the server pointer, SCN and an internal sequence counter, which
+    # are instance-specific, zeroed). The encoder reproduces it byte-for-byte: a
+    # ttc=0b01 body with the bind count at offset 4, one 0x10 define marker, an
+    # RXD row (07 + NUMBER 7 DALC + a 2-byte return code) and the fixed tail (#347).
+    from seerdb.server.query import encode_out_bind_response_oci
+
+    captured_n7 = bytes.fromhex(
+        '0b0105cc010000000000010000000000000000000000000000000000e80700000000000000'
+        '00000000000000000000000000100702c10800000806000000000000000000020000000000'
+        '00000000000000000000000000000000000004010000000000010100000000000000000002'
+        '0000002f000000000000000000000000000000000000000000000000000000000001000000'
+        '3601000000000000000000000000000020f6310a0000000000000000000000000000000000'
+        '00000000000000000000000000000000000000000000000000000000000000000000000000'
+        '000000000000'
+    )
+    assert encode_out_bind_response_oci([7]) == captured_n7
+
+
+def test_encode_out_bind_response_oci_marshals_each_bind() -> None:
+    # Bind count (offset 4) and one 0x10 define marker per OUT value; the RXD row
+    # carries each value as a DALC followed by a 2-byte per-bind return code. A
+    # VARCHAR OUT bind rides the same frame as a NUMBER one (#347).
+    from seerdb.server.query import TTI_RXD, encode_out_bind_response_oci
+
+    two = encode_out_bind_response_oci([7, 9])
+    assert two[4] == 2  # bind count
+    assert two[50:52] == b'\x10\x10'  # one define marker per bind
+    rxd = two[52:]
+    assert rxd[0] == TTI_RXD
+    # 07 | 02 c1 08 (NUMBER 7) 00 00 | 02 c1 0a (NUMBER 9) 00 00
+    assert rxd[:11] == bytes.fromhex('0702c108000002c10a0000')
+
+    text = encode_out_bind_response_oci(['hi'])
+    assert text[4] == 1
+    assert text[51:].startswith(bytes.fromhex('0702686900'))  # 07 + 'hi' DALC

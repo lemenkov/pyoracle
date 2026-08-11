@@ -631,6 +631,47 @@ def encode_status_oci() -> bytes:
     return bytes(status)
 
 
+# The sqlplus / thick-OCI reply to a PL/SQL block that assigned OUT binds — the
+# ``VARIABLE v NUMBER`` / ``EXEC :v := 42`` flow. The client parked bind buffers
+# and expects their values back: a ttc=0b01 message whose body is a fixed header
+# (bind count at offset 4), one 0x10 define-marker per bind, then an RXD row
+# (``0x07`` + one DALC per OUT value, each followed by a 2-byte per-bind return
+# code) and a fixed status/OER tail. Reduced to structure from live 11g replies
+# (single NUMBER, two NUMBERs, VARCHAR): the server pointer (@18), SCN and an
+# internal sequence counter are instance-specific and zeroed; everything else is
+# computed from the OUT values (#347).
+_OCI_OUTBIND_HEADER = bytes.fromhex(
+    '0b0105cc000000000000010000000000000000000000000000000000e807000000000000'
+    '0000000000000000000000000000'
+)
+_OCI_OUTBIND_BINDCOUNT_OFF = 4
+_OCI_OUTBIND_DEFINE_MARKER = 0x10
+_OCI_OUTBIND_RETCODE = b'\x00\x00'
+_OCI_OUTBIND_TAIL = bytes.fromhex(
+    '08060000000000000000000200000000000000000000000000000000000000000000000401000000'
+    '00000101000000000000000000020000002f00000000000000000000000000000000000000000000'
+    '00000000000000010000003601000000000000000000000000000020f6310a000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000000000000000000000'
+    '0000000000000000000000'
+)
+
+
+def encode_out_bind_response_oci(values: list[object]) -> bytes:
+    """OCI reply returning a PL/SQL block's OUT bind values (``EXEC :v := ...``).
+
+    ``values`` are the assigned OUT values in bind order; each is marshalled as a
+    DALC (the same wire form as a fetched column) so the client reads it back into
+    its bound buffer. The header/tail are computed structure, not blobs (#347).
+    """
+    header = bytearray(_OCI_OUTBIND_HEADER)
+    header[_OCI_OUTBIND_BINDCOUNT_OFF] = len(values)
+    define_markers = bytes([_OCI_OUTBIND_DEFINE_MARKER]) * len(values)
+    rxd = bytes([TTI_RXD]) + b''.join(
+        _encode_value(v, 0) + _OCI_OUTBIND_RETCODE for v in values
+    )
+    return bytes(header) + define_markers + rxd + _OCI_OUTBIND_TAIL
+
+
 # A live commit reply — a small TTI_STA status (the value is the affected-row
 # count / message length, zero here). sqlplus sends a bare commit before the
 # user's statement; this acknowledges it.

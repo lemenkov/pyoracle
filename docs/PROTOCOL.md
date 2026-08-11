@@ -1067,6 +1067,33 @@ execute is just the one-row case. The session applies every row through the
 backend and replies with the **summed** affected-row count, so `cursor.rowcount`
 matches the total inserted/updated.
 
+**OUT-bind reply (the Mirror, OCI dialect).** The classic sqlplus `VARIABLE v
+NUMBER` / `EXEC :v := 42` flow sends a PL/SQL block that assigns literals to OUT
+binds; the client parks bind buffers and expects the values back. The Mirror
+answers with a **`ttc=0b01`** message (`encode_out_bind_response_oci`), reduced
+to structure from live 11g replies (single NUMBER, two NUMBERs, VARCHAR):
+
+```
+0b 01 05 cc | <bindcount ub1 @4> | … fixed header (50 B) …
+<0x10 × bindcount>          # one define marker per OUT bind
+07                          # TTI_RXD
+per OUT bind: <DALC value> 00 00   # value + a 2-byte per-bind return code
+08 06 00 … fixed status/OER tail (171 B) …
+```
+
+Each OUT value is marshalled as a DALC — the same wire form as a fetched column
+(NUMBER `7` → `02 c1 08`, VARCHAR `"hi"` → `02 68 69`) — so the client reads it
+straight into its bound buffer. Note the trailing return code is **two** bytes
+here, versus the thin client-decode path's single indicator byte (§6.5). The
+server pointer (offset 18), the SCN, and an internal sequence counter are
+instance-specific and zeroed; everything else — bind count, define markers, the
+RXD values — is computed, not a captured blob. The single-bind case (the common
+`EXEC :key := N`) reproduces the live reply byte-for-byte. The compatibility shim
+(`examples/oracle_compat_backend.py`) evaluates the literal `:v := <literal>`
+assignments; a non-Oracle backend cannot run general PL/SQL, but this one idiom
+covers the bind-a-value-then-use-it flow, so a following `SELECT … WHERE k = :v`
+receives the value as an ordinary IN bind (§5.4).
+
 ### 6.1 Row Header (TTI_RXH)
 
 Precedes row data in SELECT results. All numeric fields use Oracle's

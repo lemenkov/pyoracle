@@ -36,6 +36,33 @@ _FROM_DUAL = re.compile(r'\s+FROM\s+DUAL\s*$', re.IGNORECASE)
 # familiar "Product user profile information not loaded" warning and continues).
 _ORA_NO_SUCH_TABLE = 942
 
+# The sqlplus ``VARIABLE v NUMBER`` / ``EXEC :v := 42`` flow sends a PL/SQL block
+# that assigns literals to OUT binds — ``BEGIN :n := 42; :s := 'hi'; END;``. A
+# non-Oracle backend can't run PL/SQL, but this one idiom (assign a literal to a
+# bind) is trivially evaluable, and covers the common case: bind a value, then use
+# it in a following statement. Only literal assignments — nothing that reads state.
+_OUT_BIND_ASSIGN = re.compile(
+    r":\w+\s*:=\s*('(?:[^']|'')*'|-?\d+(?:\.\d+)?)", re.IGNORECASE
+)
+
+
+def _plsql_out_bind_values(sql: str) -> list:
+    """Extract the OUT values from ``BEGIN :v := <literal>; ... END;``.
+
+    Returns the assigned values in statement (= bind) order. Empty when the block
+    has no simple literal assignments (a real PL/SQL call we just acknowledge).
+    """
+    values: list = []
+    for match in _OUT_BIND_ASSIGN.finditer(sql):
+        literal = match.group(1)
+        if literal.startswith("'"):
+            values.append(literal[1:-1].replace("''", "'"))
+        elif '.' in literal:
+            values.append(float(literal))
+        else:
+            values.append(int(literal))
+    return values
+
 
 def _varchar(name: bytes, width: int) -> ColumnMeta:
     return ColumnMeta(
@@ -65,10 +92,12 @@ class OracleCompatBackend:
     def execute(self, sql: str, binds: Sequence = ()) -> Result:
         normalized = ' '.join(sql.strip().upper().split())
         if normalized.startswith('BEGIN'):
-            # A PL/SQL session call (DBMS_OUTPUT.DISABLE, SET_MODULE) — the
-            # session-state side effects don't apply to a non-Oracle backend, so
-            # acknowledge success and move on.
-            return Result()
+            # A PL/SQL block. The ``EXEC :v := <literal>`` form assigns OUT binds
+            # the client reads back — evaluate those literal assignments. Any other
+            # PL/SQL session call (DBMS_OUTPUT.DISABLE, SET_MODULE) has no effect on
+            # a non-Oracle backend, so acknowledge success and move on.
+            out_binds = _plsql_out_bind_values(sql)
+            return Result(out_binds=out_binds) if out_binds else Result()
         if 'PRODUCT_PRIVS' in normalized:
             raise BackendError(
                 'table or view does not exist', ora_code=_ORA_NO_SUCH_TABLE
