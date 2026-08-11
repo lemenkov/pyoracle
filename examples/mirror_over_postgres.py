@@ -25,6 +25,7 @@ import logging
 import os
 import sys
 
+from oracle_compat_backend import OracleCompatBackend
 from postgres_backend import PostgresBackend
 
 import seerdb
@@ -42,12 +43,13 @@ def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format='%(asctime)s %(name)s %(levelname)s %(message)s'
     )
-    # One PostgreSQL session per client connection.
+    # One PostgreSQL session per client connection, behind the OracleCompatBackend
+    # so a real sqlplus can bootstrap its session (thin clients pass through).
     seerdb.serve(
         '127.0.0.1',
         port,
-        backend_factory=lambda: PostgresBackend(
-            conninfo, credentials={'PYO': 'pyo123'}
+        backend_factory=lambda: OracleCompatBackend(
+            PostgresBackend(conninfo, credentials={'PYO': 'pyo123'})
         ),
     )
 
