@@ -392,8 +392,12 @@ def encode_describe_oci(columns: list[ColumnMeta]) -> bytes:
 # those constants in place, not replayed from a capture.
 _OCI_DCB_TAIL_LEN = 83
 _OCI_DCB_DATE_LEN = 7  # describe-time DALC: length is load-bearing, value is not
-_OCI_DCB_DESC_CONST_OFF = 33
-_OCI_DCB_DESC_CONST = bytes.fromhex('06012260')  # a required descriptor constant
+_OCI_DCB_MARKER_OFF = 33
+_OCI_DCB_MARKER = bytes.fromhex('060122')  # a required 3-byte descriptor marker
+# The column count sits one byte past the marker; the client reads it to know how
+# many values to expect in each row, so it is load-bearing for a multi-column
+# result (verified: 1/2/3 across live 1/2/3-column describes).
+_OCI_DCB_NUMCOLS_OFF = 37
 # The execute return status (an OCI OER, offsets 32:65 of the status trailer):
 # call status + the return marker sqlplus needs to accept the row set. Reproduced
 # as a unit — the row-count fields inside are constant for the single-row replies
@@ -405,12 +409,13 @@ _OCI_EXEC_OER = bytes.fromhex(
 _OCI_ROW_STATUS_LEN = 171
 
 
-def _oci_dcb_tail() -> bytes:
+def _oci_dcb_tail(numcols: int) -> bytes:
     tail = bytearray(_OCI_DCB_TAIL_LEN)
     tail[1:5] = _oci_ub4(_OCI_DCB_DATE_LEN)  # describe-time DALC char length
     tail[5] = _OCI_DCB_DATE_LEN  # DALC byte length; the value stays zero
-    off = _OCI_DCB_DESC_CONST_OFF
-    tail[off : off + len(_OCI_DCB_DESC_CONST)] = _OCI_DCB_DESC_CONST
+    off = _OCI_DCB_MARKER_OFF
+    tail[off : off + len(_OCI_DCB_MARKER)] = _OCI_DCB_MARKER
+    tail[_OCI_DCB_NUMCOLS_OFF] = numcols
     return bytes(tail)
 
 
@@ -484,7 +489,7 @@ def encode_query_response_oci(columns: list[ColumnMeta], rows: list[tuple]) -> b
     / :func:`_oci_row_status`), not captured blobs.
     """
     out = bytearray(encode_describe_oci(columns))
-    out += _oci_dcb_tail()
+    out += _oci_dcb_tail(len(columns))
     for row in rows:
         if len(row) != len(columns):
             raise InterfaceError('row width does not match the column count')
