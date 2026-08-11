@@ -707,3 +707,26 @@ def test_encode_fetch_batch_oci_carries_rows_and_terminator() -> None:
     assert batch[0] == 0x06  # TTI_RXH token
     assert batch.count(b'\x07\x02\xc1') == 2  # two RXD rows (07 + NUMBER DALC)
     assert batch.endswith(b'ORA-01403: no data found\n')
+
+
+def test_parse_exec_oci_extracts_bind_values() -> None:
+    # A live sqlplus bound execute — SELECT :n, :s FROM dual with :n=42 (NUMBER),
+    # :s='hello' (VARCHAR). The bind count is in the header; the OAC markers give
+    # each type and the RXD row carries the values (#265, #347).
+    bound = bytes.fromhex(
+        '035e176980000000000000feffffffffffffff4500000000000000feffffffffffffff'
+        '0d00000000000000fefffffffffffffffeffffffffffffff0000000001000000000000'
+        '0000000000feffffffffffffff02000000000000000000000000000000feffffffffff'
+        'ffff0000000000000000fefffffffffffffffefffffffffffffff815aa0f0000000000'
+        '00000000000000fefffffffffffffffeffffffffffffff000000000000000000000000'
+        '00000000000000000000000000000000000000001753454c454354203a6e2c203a7320'
+        '46524f4d206475616c0100000000000000000000000000000000000000000000000000'
+        '0000010000000000000000000000000000000000000000000000010203000016000000'
+        '0000000000000000000000000000000000000000000000000000000000000000010103'
+        '00001e0000000000000000000000000000000000000000000000690301000000000000'
+        '0000000702c12b0568656c6c6f'
+    )
+    req = parse_exec_oci(bound)
+    assert req.sql == 'SELECT :n, :s FROM dual'
+    assert req.bind_count == 2
+    assert req.binds == [42, 'hello']

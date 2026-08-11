@@ -12,10 +12,11 @@ encoders that answer it are layered on separately.
 from __future__ import annotations
 
 import datetime
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from seerdb.common.exceptions import InterfaceError
+from seerdb.common.exceptions import DataError, InterfaceError
 from seerdb.common.tns import (
     _bytes_with_length,
     _encode_date_prefix,
@@ -34,6 +35,9 @@ from seerdb.common.tns_consts import (
     TNS_TYPE_BDOUBLE,
     TNS_TYPE_BFLOAT,
     TNS_TYPE_CHAR,
+    TNS_TYPE_DATE,
+    TNS_TYPE_NUMBER,
+    TNS_TYPE_RAW,
     TNS_TYPE_TIMESTAMP,
     TNS_TYPE_TIMESTAMPTZ,
     TNS_TYPE_VARCHAR,
@@ -222,7 +226,72 @@ def parse_exec_oci(payload: bytes) -> ExecRequest:
     # a user-typed statement has none. Strip trailing NULs so the backend sees
     # clean SQL either way.
     sql = raw_sql.rstrip(b'\x00').decode('utf-8')
-    return ExecRequest(sql=sql, cursor=cursor, bind_count=0, fetch=0)
+    bind_count = int.from_bytes(
+        payload[_OCI_BIND_COUNT_OFF : _OCI_BIND_COUNT_OFF + 4], 'little'
+    )
+    binds: list = []
+    if bind_count and marker != 0xFE:
+        binds = _parse_oci_binds(payload, _OCI_ALL8_SQL_OFF + marker, bind_count)
+    return ExecRequest(
+        sql=sql,
+        cursor=cursor,
+        bind_count=bind_count,
+        fetch=0,
+        binds=binds,
+        bind_rows=[binds] if binds else [],
+    )
+
+
+# The bind count sits at this fixed ub4 in the OCI OALL8 header. After the SQL
+# come an option array, one OAC type-descriptor per bind (each led by
+# ``01 <TNS type> 03 00 00``), and an RXD row (``0x07`` + one DALC value per
+# bind) — the same value framing the thin form uses (#265, #347).
+_OCI_BIND_COUNT_OFF = 83
+_OCI_OAC_MARKER = re.compile(rb'\x01(.)\x03\x00\x00')
+_OCI_BIND_TYPES = frozenset(
+    {
+        TNS_TYPE_VARCHAR,
+        TNS_TYPE_NUMBER,
+        TNS_TYPE_DATE,
+        TNS_TYPE_RAW,
+        TNS_TYPE_CHAR,
+        TNS_TYPE_TIMESTAMP,
+        TNS_TYPE_TIMESTAMPTZ,
+        TNS_TYPE_BFLOAT,
+        TNS_TYPE_BDOUBLE,
+    }
+)
+
+
+def _parse_oci_binds(payload: bytes, sql_end: int, bind_count: int) -> list:
+    # Read the bind values from the OCI bind section: collect each bind's TNS
+    # type from its OAC marker, then decode the RXD row's DALC values by type.
+    tail = payload[sql_end:]
+    types = []
+    for match in _OCI_OAC_MARKER.finditer(tail):
+        data_type = match.group(1)[0]
+        if data_type in _OCI_BIND_TYPES:
+            types.append(data_type)
+        if len(types) == bind_count:
+            break
+    if len(types) != bind_count:
+        return []
+    # The RXD row is the 0x07 token whose following DALCs decode cleanly into one
+    # value per bind — a position robust to 0x07 bytes appearing in the OAC area.
+    for i, byte in enumerate(tail):
+        if byte != TTI_RXD:
+            continue
+        rest = tail[i + 1 :]
+        values: list = []
+        try:
+            for data_type in types:
+                raw, rest = decode_dalc(rest)
+                values.append(_decode_bind_value(data_type, raw))
+        except (IndexError, DataError):
+            continue
+        if len(values) == bind_count:
+            return values
+    return []
 
 
 def _read_chunked_sql(data: bytes, total_len: int) -> bytes:
