@@ -525,6 +525,16 @@ def encode_commit_status_oci() -> bytes:
     return _OCI_COMMIT_STATUS
 
 
+# sqlplus waits for this TTI_STA acknowledgement of its logoff before closing;
+# without it the client sees an abrupt EOF and reports ORA-03113 on exit.
+_OCI_LOGOFF_STATUS = bytes.fromhex('09010000000000')
+
+
+def encode_logoff_status_oci() -> bytes:
+    """OCI reply acknowledging a client logoff (TTI_LOGOFF)."""
+    return _OCI_LOGOFF_STATUS
+
+
 # The classic sqlplus / thick-OCI OALL8 arrives wrapped in an OCCA (close-cursors)
 # piggyback for every statement past the first: `0x11 0x69`, then a fixed prefix
 # (seq, an 8-byte indicator, the ub4 cursor count, and one 8-byte entry per closed

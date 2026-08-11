@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import sys
 
+from oracle_compat_backend import OracleCompatBackend
 from sqlite_backend import SqliteBackend
 
 import seerdb
@@ -38,11 +39,16 @@ def main() -> None:
         level=logging.INFO, format='%(asctime)s %(name)s %(levelname)s %(message)s'
     )
     # A fresh SQLite session per client connection (sqlite3 objects are
-    # thread-affine, so the backend must be built inside its own session).
+    # thread-affine, so the backend must be built inside its own session). The
+    # OracleCompatBackend wrapper answers sqlplus's Oracle session-bootstrap
+    # queries so a real sqlplus reaches its prompt; thin clients pass through it
+    # untouched.
     seerdb.serve(
         '127.0.0.1',
         port,
-        backend_factory=lambda: SqliteBackend(database, credentials={'PYO': 'pyo123'}),
+        backend_factory=lambda: OracleCompatBackend(
+            SqliteBackend(database, credentials={'PYO': 'pyo123'})
+        ),
     )
 
 

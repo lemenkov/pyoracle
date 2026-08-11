@@ -67,6 +67,7 @@ from seerdb.server.query import (
     encode_error_oci,
     encode_fetch_response,
     encode_fetch_terminator_oci,
+    encode_logoff_status_oci,
     encode_query_response,
     encode_query_response_oci,
     encode_status,
@@ -268,6 +269,7 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
                 stream.write_packet(TNS_DATA, encode_commit_status_oci())
                 continue
             if body[1] == TTI_LOGOFF:
+                stream.write_packet(TNS_DATA, encode_logoff_status_oci())
                 return user
         logger.info('OCI: unhandled call ttc=%s; ending session', body[:2].hex())
         return user
