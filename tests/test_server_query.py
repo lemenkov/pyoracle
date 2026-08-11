@@ -575,3 +575,28 @@ def test_encode_version_banner_oci_matches_the_captured_reply() -> None:
     # and the request recogniser keys on the 0x11 0x6b lead
     assert is_version_call_oci(b'\x11\x6b\x04\x3b\x00') is True
     assert is_version_call_oci(b'\x03\x5e\x06') is False
+
+
+def test_encode_query_response_oci_structure() -> None:
+    # The OCI execute response: describe + DCB tail + RXD row + status, computed
+    # (not a captured blob). Renders live in sqlplus 11.2 (validated by replay
+    # substitution); here we check the structure holds together offline (#265).
+    from seerdb.server.query import _decode_describe_oci, encode_query_response_oci
+
+    col = ColumnMeta(
+        name=b'1', data_type=TNS_TYPE_NUMBER, data_length=2, max_size=0, scale=-127
+    )
+    resp = encode_query_response_oci([col], [(1,)])
+    assert _decode_describe_oci(resp)[0]['name'] == b'1'  # describe decodes back
+    assert b'\x07\x02\xc1\x02' in resp  # the RXD row: NUMBER 1 = c1 02
+
+
+def test_oci_trailers_are_computed_mostly_zero() -> None:
+    # The two trailers are computed as mostly-zero with a few load-bearing
+    # structural constants — not replayed capture bytes (#265).
+    from seerdb.server.query import _oci_dcb_tail, _oci_row_status
+
+    tail = _oci_dcb_tail()
+    status = _oci_row_status()
+    assert len(tail) == 83 and tail.count(0) > 70
+    assert len(status) == 171 and status.count(0) > 120

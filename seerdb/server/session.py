@@ -62,10 +62,10 @@ from seerdb.server.query import (
     ColumnMeta,
     ExecRequest,
     FetchRequest,
-    encode_describe_oci,
     encode_error,
     encode_fetch_response,
     encode_query_response,
+    encode_query_response_oci,
     encode_status,
     encode_version_banner_oci,
     is_version_call_oci,
@@ -255,7 +255,10 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
                     return user
                 result = backend.execute(request.sql, request.binds)
                 if result.columns:
-                    stream.write_packet(TNS_DATA, encode_describe_oci(result.columns))
+                    stream.write_packet(
+                        TNS_DATA,
+                        encode_query_response_oci(result.columns, list(result.rows)),
+                    )
                     continue
                 return user  # OCI DDL/DML status is a later increment
             if body[1] == TTI_LOGOFF:
