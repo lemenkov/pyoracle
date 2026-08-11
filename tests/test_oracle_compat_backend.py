@@ -81,3 +81,22 @@ def test_real_statements_pass_through_untouched() -> None:
     inner = _FakeInner()
     OracleCompatBackend(inner).execute('SELECT * FROM t')
     assert inner.calls == ['SELECT * FROM t']
+
+
+def test_exec_assigns_out_binds_for_the_variable_flow() -> None:
+    # sqlplus `VARIABLE n NUMBER; EXEC :n := 7` sends a PL/SQL block that assigns
+    # a literal to an OUT bind; the shim evaluates it and returns the value so the
+    # client reads it back (the assignment order is the bind order).
+    inner = _FakeInner()
+    result = OracleCompatBackend(inner).execute("BEGIN :n := 7; :s := 'hi'; END;")
+    assert result.out_binds == [7, 'hi']
+    assert inner.calls == []  # evaluated by the shim, never delegated
+
+
+def test_plsql_without_assignments_stays_a_noop() -> None:
+    # A real PL/SQL session call (no literal OUT-bind assignment) has no OUT binds
+    # to return — still a plain success, not an OUT-bind reply.
+    result = OracleCompatBackend(_FakeInner()).execute(
+        'BEGIN DBMS_OUTPUT.DISABLE; END;'
+    )
+    assert result.out_binds == []

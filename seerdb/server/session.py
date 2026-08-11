@@ -69,6 +69,7 @@ from seerdb.server.query import (
     encode_fetch_response,
     encode_fetch_terminator_oci,
     encode_logoff_status_oci,
+    encode_out_bind_response_oci,
     encode_query_response,
     encode_query_response_oci,
     encode_status,
@@ -310,6 +311,11 @@ def _answer_query_oci(
             stream.write_packet(TNS_DATA, encode_error_oci(err.ora_code, str(err)))
         else:
             stream.write_packet(TNS_DATA, encode_status_oci())
+        return None
+    if result.out_binds:
+        # A PL/SQL block that assigned OUT binds (sqlplus VARIABLE / EXEC) — return
+        # the values so the client reads them back into its bound buffers.
+        stream.write_packet(TNS_DATA, encode_out_bind_response_oci(result.out_binds))
         return None
     if not result.columns:
         stream.write_packet(TNS_DATA, encode_status_oci())

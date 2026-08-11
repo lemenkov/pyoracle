@@ -50,11 +50,18 @@ class Capability(Enum):
 
 @dataclass(frozen=True)
 class Result:
-    """A backend execute outcome: query columns + rows, or a DML row count."""
+    """A backend execute outcome: query columns + rows, or a DML row count.
+
+    ``out_binds`` carries the values a PL/SQL block assigned to its OUT binds,
+    in bind order — the sqlplus ``VARIABLE`` / ``EXEC :v := ...`` flow. Empty for
+    an ordinary statement; when set, the Mirror returns them to the client
+    instead of a plain status.
+    """
 
     columns: list[ColumnMeta] = field(default_factory=list)
     rows: list[tuple] = field(default_factory=list)
     rowcount: int = 0
+    out_binds: list = field(default_factory=list)
 
 
 class BackendError(Exception):
