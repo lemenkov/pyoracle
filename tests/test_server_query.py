@@ -596,7 +596,7 @@ def test_oci_trailers_are_computed_mostly_zero() -> None:
     # structural constants — not replayed capture bytes (#265).
     from seerdb.server.query import _oci_dcb_tail, _oci_row_status
 
-    tail = _oci_dcb_tail()
+    tail = _oci_dcb_tail(1)
     status = _oci_row_status()
     assert len(tail) == 83 and tail.count(0) > 70
     assert len(status) == 171 and status.count(0) > 120
@@ -662,3 +662,18 @@ def test_encode_error_oci_matches_the_captured_ora_error() -> None:
         '7720646f6573206e6f742065786973740a'
     )
     assert encode_error_oci(942, 'table or view does not exist') == captured
+
+
+def test_oci_dcb_tail_is_column_aware() -> None:
+    # The DCB tail carries the column count; the client reads it to parse each
+    # row, so it is load-bearing for a multi-column result (#265, #346).
+    from seerdb.server.query import (
+        _OCI_DCB_MARKER_OFF,
+        _OCI_DCB_NUMCOLS_OFF,
+        _oci_dcb_tail,
+    )
+
+    assert _oci_dcb_tail(3)[_OCI_DCB_NUMCOLS_OFF] == 3
+    assert _oci_dcb_tail(1)[_OCI_DCB_NUMCOLS_OFF] == 1
+    off = _OCI_DCB_MARKER_OFF
+    assert _oci_dcb_tail(2)[off : off + 3] == bytes.fromhex('060122')
