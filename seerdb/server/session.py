@@ -62,17 +62,20 @@ from seerdb.server.query import (
     ColumnMeta,
     ExecRequest,
     FetchRequest,
+    encode_commit_status_oci,
     encode_error,
     encode_fetch_response,
     encode_fetch_terminator_oci,
     encode_query_response,
     encode_query_response_oci,
     encode_status,
+    encode_status_oci,
     encode_version_banner_oci,
     is_version_call_oci,
     parse_exec,
     parse_exec_oci,
     parse_fetch,
+    strip_oci_piggyback,
 )
 
 logger = logging.getLogger('seerdb.server')
@@ -248,30 +251,51 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
         if is_version_call_oci(body):
             stream.write_packet(TNS_DATA, encode_version_banner_oci(_OCI_BANNER))
             continue
+        # Every statement past the first arrives wrapped in an OCCA close-cursors
+        # piggyback; unwrap it to reach the execute.
+        body = strip_oci_piggyback(body)
         if len(body) >= 2 and body[0] == TTI_FUN:
             if body[1] == TTI_ALL8:
-                try:
-                    request = parse_exec_oci(body)
-                except InterfaceError:
-                    logger.info('OCI: unsupported execute shape; ending session')
-                    return user
-                result = backend.execute(request.sql, request.binds)
-                if result.columns:
-                    stream.write_packet(
-                        TNS_DATA,
-                        encode_query_response_oci(result.columns, list(result.rows)),
-                    )
-                    continue
-                return user  # OCI DDL/DML status is a later increment
+                _answer_query_oci(stream, backend, body)
+                continue
             if body[1] == TTI_FETCH:
                 # The rows already came back on the execute; the follow-up fetch
                 # just wants the end-of-fetch terminator (ORA-01403).
                 stream.write_packet(TNS_DATA, encode_fetch_terminator_oci())
                 continue
+            if body[1] in (TTI_COMMIT, TTI_ROLLBACK):
+                stream.write_packet(TNS_DATA, encode_commit_status_oci())
+                continue
             if body[1] == TTI_LOGOFF:
                 return user
         logger.info('OCI: unhandled call ttc=%s; ending session', body[:2].hex())
         return user
+
+
+def _answer_query_oci(stream: PacketStream, backend: Backend, body: bytes) -> None:
+    # Answer one sqlplus / thick-OCI execute. sqlplus fires a chain of setup
+    # statements (PL/SQL blocks, PRODUCT_PRIVS selects) before the user's query;
+    # each needs an acceptable reply or sqlplus never reaches the prompt.
+    try:
+        request = parse_exec_oci(body)
+    except InterfaceError:
+        # A shape not parsed yet (e.g. a bound PL/SQL setup call) — acknowledge
+        # success so sqlplus proceeds; the backend never sees it.
+        stream.write_packet(TNS_DATA, encode_status_oci())
+        return
+    try:
+        result = backend.execute(request.sql, request.binds)
+    except BackendError:
+        # A statement the backend can't run (sqlplus tolerates a failed
+        # PRODUCT_PRIVS lookup); reply success so the session continues.
+        stream.write_packet(TNS_DATA, encode_status_oci())
+        return
+    if result.columns:
+        stream.write_packet(
+            TNS_DATA, encode_query_response_oci(result.columns, list(result.rows))
+        )
+    else:
+        stream.write_packet(TNS_DATA, encode_status_oci())
 
 
 def _skip_piggybacks(body: bytes) -> bytes:

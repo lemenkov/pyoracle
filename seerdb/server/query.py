@@ -447,6 +447,52 @@ def encode_query_response_oci(columns: list[ColumnMeta], rows: list[tuple]) -> b
     return bytes(out)
 
 
+# The reply for a statement that returns no rows — a PL/SQL block or DDL. Same
+# shape as the row-status trailer (:func:`_oci_row_status`), but its own sentinel
+# and OER (this one reports zero rows). Structure only; the SCN / counts a live
+# reply carries are zero (#265).
+_OCI_STATUS_OER = bytes.fromhex(
+    '000000040100000007000101000000000000000000010000002f00000000000000'
+)
+
+
+def encode_status_oci() -> bytes:
+    """OCI reply for a no-row statement (PL/SQL / DDL): success, nothing to fetch."""
+    status = bytearray(_OCI_ROW_STATUS_LEN)
+    status[0:3] = b'\x08\x06\x00'
+    status[11] = 0x01
+    off = _OCI_EXEC_OER_OFF
+    status[off : off + len(_OCI_STATUS_OER)] = _OCI_STATUS_OER
+    return bytes(status)
+
+
+# A live commit reply — a small TTI_STA status (the value is the affected-row
+# count / message length, zero here). sqlplus sends a bare commit before the
+# user's statement; this acknowledges it.
+_OCI_COMMIT_STATUS = bytes.fromhex('09050000001200')
+
+
+def encode_commit_status_oci() -> bytes:
+    """OCI reply to a bare commit / rollback — a TTI_STA acknowledgement."""
+    return _OCI_COMMIT_STATUS
+
+
+# The classic sqlplus / thick-OCI OALL8 arrives wrapped in an OCCA (close-cursors)
+# piggyback for every statement past the first: `0x11 0x69`, then a fixed prefix
+# (seq, an 8-byte indicator, the ub4 cursor count, and one 8-byte entry per closed
+# cursor), then the real TTI_FUN execute. Strip it so the execute can be parsed.
+_OCI_PIGGYBACK = b'\x11\x69'
+_OCI_PIGGYBACK_FIXED = 3 + 8 + 4  # 0x11 0x69 seq | indicator | ub4 count
+
+
+def strip_oci_piggyback(body: bytes) -> bytes:
+    """Return the OALL8 execute inside an OCCA piggyback, or ``body`` unchanged."""
+    if body[:2] != _OCI_PIGGYBACK:
+        return body
+    count = int.from_bytes(body[11:15], 'little')
+    return body[_OCI_PIGGYBACK_FIXED + count * 8 :]
+
+
 def _decode_describe_oci(payload: bytes) -> list[dict]:
     # A minimal reader for encode_describe_oci's own output — the thin client
     # can't parse the OCI describe, so this round-trips the meaningful fields to

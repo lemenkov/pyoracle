@@ -612,3 +612,28 @@ def test_encode_fetch_terminator_oci_signals_end_of_fetch() -> None:
     assert len(term) == 162
     assert term[0] == 0x04  # OER token
     assert term.endswith(b'ORA-01403: no data found\n')
+
+
+def test_strip_oci_piggyback_unwraps_the_execute() -> None:
+    # sqlplus wraps every statement past the first in an OCCA close-cursors
+    # piggyback (0x11 0x69 + fixed prefix + cursor entries), then the execute.
+    from seerdb.server.query import strip_oci_piggyback
+
+    # a real 1169 prefix (count=1 -> 23-byte header) + a stub execute
+    wrapped = (
+        bytes.fromhex('116908feffffffffffffff010000000000000002000000')
+        + b'\x03\x5e\x06rest'
+    )
+    assert strip_oci_piggyback(wrapped) == b'\x03\x5e\x06rest'
+    # a bare execute (no piggyback) is returned unchanged
+    assert strip_oci_piggyback(b'\x03\x5e\x06bare') == b'\x03\x5e\x06bare'
+
+
+def test_encode_status_oci_and_commit_shapes() -> None:
+    # The no-row reply (PL/SQL / DDL) is the 0x08 0x06 status; commit is a small
+    # TTI_STA acknowledgement (#265).
+    from seerdb.server.query import encode_commit_status_oci, encode_status_oci
+
+    status = encode_status_oci()
+    assert status[:3] == b'\x08\x06\x00' and len(status) == 171
+    assert encode_commit_status_oci()[0] == 0x09  # TTI_STA
