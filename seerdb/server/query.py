@@ -314,8 +314,8 @@ def encode_version_banner_oci(banner: bytes) -> bytes:
 # the 49-byte pre-name block, verified against live 11g describes of VARCHAR2,
 # NUMBER, and DATE columns:
 _OCI_DCB_PREAMBLE_LEN = 23  # cursor-uuid preamble (zeroed; the client skips it)
-_OCI_DCB_COL_PRENAME = 49
-_OCI_DCB_COL_POSTNAME = 12
+_OCI_DCB_COL_PRENAME = 48
+_OCI_DCB_COL_POSTNAME = 13
 # A char type carries a charset + form-of-use and sets the pre-name char flag.
 _OCI_CHAR_TYPES = frozenset({TNS_TYPE_VARCHAR, TNS_TYPE_CHAR})
 _OCI_DCB_CHAR_FLAG = 0x80
@@ -335,13 +335,14 @@ def _encode_dcb_column_oci(col: ColumnMeta, position: int, first: bool) -> bytes
         pre[30:32] = int(col.charset).to_bytes(2, 'little')
         pre[32] = col.csfrm
     pre[34:38] = _oci_ub4(col.max_size)
-    pre[43] = col.null_ok
-    pre[44] = len(col.name)
-    pre[45:49] = _oci_ub4(len(col.name))
+    pre[42] = col.null_ok
+    pre[43] = len(col.name)
+    pre[44:48] = _oci_ub4(len(col.name))
     name = bytes([len(col.name)]) + col.name
-    post = bytearray(_OCI_DCB_COL_POSTNAME)
-    post[0:4] = _oci_ub4(position)  # column position; rest (uds flags) zeroed
-    return bytes(pre) + name + bytes(post)
+    # The post-name block is zeroed — a live 11g describe carries no column
+    # position here (verified against the captured single-column reply).
+    post = bytes(_OCI_DCB_COL_POSTNAME)
+    return bytes(pre) + name + post
 
 
 def encode_describe_oci(columns: list[ColumnMeta]) -> bytes:
@@ -353,7 +354,10 @@ def encode_describe_oci(columns: list[ColumnMeta]) -> bytes:
     """
     out = bytearray([TTI_DCB])
     out += _oci_ub4(_OCI_DCB_PREAMBLE_LEN) + bytes(_OCI_DCB_PREAMBLE_LEN)
-    out += _oci_ub4(sum(c.max_size for c in columns))  # max row size (skipped)
+    # Max row size: the thick/OCI client allocates a row buffer of this many
+    # bytes, so it must cover the widest row — a zero here overflows and crashes
+    # sqlplus (unlike the thin client, which skips the field).
+    out += _oci_ub4(sum(c.data_length for c in columns))
     out += _oci_ub4(len(columns))
     for position, col in enumerate(columns, start=1):
         out += _encode_dcb_column_oci(col, position, first=(position == 1))
@@ -373,7 +377,7 @@ def _decode_describe_oci(payload: bytes) -> list[dict]:
     off = 8
     for _ in range(numcols):
         pre = body[off : off + _OCI_DCB_COL_PRENAME]
-        namelen = pre[44]
+        namelen = pre[43]
         name = body[
             off + _OCI_DCB_COL_PRENAME + 1 : off + _OCI_DCB_COL_PRENAME + 1 + namelen
         ]
