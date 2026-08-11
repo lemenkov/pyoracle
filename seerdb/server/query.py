@@ -364,6 +364,65 @@ def encode_describe_oci(columns: list[ColumnMeta]) -> bytes:
     return bytes(out)
 
 
+# The two OCI execute-response trailers, reduced to their load-bearing structure
+# by live bisection against sqlplus (#265): everything a real 11g reply carries
+# here — a describe timestamp, the query SCN, assorted counts — is zeroable; only
+# the field *framing* and a few structural constants matter (zeroing them
+# segfaults sqlplus or draws ORA-03113). So both are computed as mostly-zero with
+# those constants in place, not replayed from a capture.
+_OCI_DCB_TAIL_LEN = 83
+_OCI_DCB_DATE_LEN = 7  # describe-time DALC: length is load-bearing, value is not
+_OCI_DCB_DESC_CONST_OFF = 33
+_OCI_DCB_DESC_CONST = bytes.fromhex('06012260')  # a required descriptor constant
+# The execute return status (an OCI OER, offsets 32:65 of the status trailer):
+# call status + the return marker sqlplus needs to accept the row set. Reproduced
+# as a unit — the row-count fields inside are constant for the single-row replies
+# handled so far; generalising it is a follow-up.
+_OCI_EXEC_OER_OFF = 32
+_OCI_EXEC_OER = bytes.fromhex(
+    '000000040100000013000101000000000000000000020000000300000000000000'
+)
+_OCI_ROW_STATUS_LEN = 171
+
+
+def _oci_dcb_tail() -> bytes:
+    tail = bytearray(_OCI_DCB_TAIL_LEN)
+    tail[1:5] = _oci_ub4(_OCI_DCB_DATE_LEN)  # describe-time DALC char length
+    tail[5] = _OCI_DCB_DATE_LEN  # DALC byte length; the value stays zero
+    off = _OCI_DCB_DESC_CONST_OFF
+    tail[off : off + len(_OCI_DCB_DESC_CONST)] = _OCI_DCB_DESC_CONST
+    return bytes(tail)
+
+
+def _oci_row_status() -> bytes:
+    status = bytearray(_OCI_ROW_STATUS_LEN)
+    status[0:3] = b'\x08\x06\x00'  # return marker
+    status[11] = 0x02  # a required sentinel
+    off = _OCI_EXEC_OER_OFF
+    status[off : off + len(_OCI_EXEC_OER)] = _OCI_EXEC_OER
+    return bytes(status)
+
+
+def encode_query_response_oci(columns: list[ColumnMeta], rows: list[tuple]) -> bytes:
+    """Assemble a sqlplus / thick-OCI SELECT execute response (#265).
+
+    describe + DCB tail + one TTI_RXD per row + the status trailer. The whole
+    result comes back on the execute (sqlplus fetches only the terminator after).
+    Renders live in sqlplus 11.2; the two trailers are computed (:func:`_oci_dcb_tail`
+    / :func:`_oci_row_status`), not captured blobs.
+    """
+    out = bytearray(encode_describe_oci(columns))
+    out += _oci_dcb_tail()
+    for row in rows:
+        if len(row) != len(columns):
+            raise InterfaceError('row width does not match the column count')
+        out += bytes([TTI_RXD]) + b''.join(
+            _encode_value(v, col.data_type) for v, col in zip(row, columns)
+        )
+    out += _oci_row_status()
+    return bytes(out)
+
+
 def _decode_describe_oci(payload: bytes) -> list[dict]:
     # A minimal reader for encode_describe_oci's own output — the thin client
     # can't parse the OCI describe, so this round-trips the meaningful fields to
