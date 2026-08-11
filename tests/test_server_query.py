@@ -637,3 +637,28 @@ def test_encode_status_oci_and_commit_shapes() -> None:
     status = encode_status_oci()
     assert status[:3] == b'\x08\x06\x00' and len(status) == 171
     assert encode_commit_status_oci()[0] == 0x09  # TTI_STA
+
+
+def test_read_chunked_sql_reassembles_the_chunks() -> None:
+    # Long OCI SQL is chunked: 0xFE marker, then <ub1 len><chunk> runs. The reader
+    # reassembles them up to the declared total (#265).
+    from seerdb.server.query import _read_chunked_sql
+
+    data = b'\xfe\x03abc\x02de\x00tail'
+    assert _read_chunked_sql(data, 5) == b'abcde'
+
+
+def test_encode_error_oci_matches_the_captured_ora_error() -> None:
+    # Byte-for-byte against a real 11g OCI error reply (ORA-00942): the OER frame
+    # with call-status 0x05, the code at offset 12, and the message (#265, #350).
+    from seerdb.server.query import encode_error_oci
+
+    captured = bytes.fromhex(
+        '040500000013000100000000ae030000000002000e0003000000000000000000'
+        '0000000000000000000000000000000000150000010000003601000000000000'
+        '000000000000000020f6310a0000000000000000000000000000000000000000'
+        '0000000000000000000000000000000000000000000000000000000000000000'
+        '0000000000000000284f52412d30303934323a207461626c65206f7220766965'
+        '7720646f6573206e6f742065786973740a'
+    )
+    assert encode_error_oci(942, 'table or view does not exist') == captured

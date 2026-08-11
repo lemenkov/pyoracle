@@ -64,6 +64,7 @@ from seerdb.server.query import (
     FetchRequest,
     encode_commit_status_oci,
     encode_error,
+    encode_error_oci,
     encode_fetch_response,
     encode_fetch_terminator_oci,
     encode_query_response,
@@ -285,10 +286,16 @@ def _answer_query_oci(stream: PacketStream, backend: Backend, body: bytes) -> No
         return
     try:
         result = backend.execute(request.sql, request.binds)
-    except BackendError:
-        # A statement the backend can't run (sqlplus tolerates a failed
-        # PRODUCT_PRIVS lookup); reply success so the session continues.
-        stream.write_packet(TNS_DATA, encode_status_oci())
+    except BackendError as err:
+        # A statement the backend can't run. A failed SELECT (e.g. sqlplus's
+        # PRODUCT_PRIVS lookup) must come back as an ORA error — sqlplus expects
+        # a query reply for a query and tolerates the error — while a non-query
+        # (PL/SQL / DDL it can't do) gets a success status so the session
+        # continues.
+        if request.sql.lstrip().upper().startswith('SELECT'):
+            stream.write_packet(TNS_DATA, encode_error_oci(err.ora_code, str(err)))
+        else:
+            stream.write_packet(TNS_DATA, encode_status_oci())
         return
     if result.columns:
         stream.write_packet(

@@ -201,23 +201,43 @@ def parse_exec_oci(payload: bytes) -> ExecRequest:
     cursor = int.from_bytes(
         payload[_OCI_ALL8_CURSOR_OFF : _OCI_ALL8_CURSOR_OFF + 4], 'little'
     )
-    sqllen = payload[_OCI_ALL8_SQL_OFF - 1]  # ub1 length prefix
-    declared3 = int.from_bytes(
-        payload[_OCI_ALL8_SQLLEN3_OFF : _OCI_ALL8_SQLLEN3_OFF + 4], 'little'
-    )
-    if declared3 != 3 * sqllen:
-        # The fixed-offset assumption only holds for a no-bind statement whose
-        # SQL fits the ub1 prefix; anything else disagrees here and is out of
-        # this increment's scope (a clean error, never a mis-parse).
-        raise InterfaceError(
-            'OCI OALL8: SQL length mismatch (binds or long SQL not yet supported)'
+    marker = payload[_OCI_ALL8_SQL_OFF - 1]  # ub1 length prefix (0xFE = chunked)
+    declared_len = (
+        int.from_bytes(
+            payload[_OCI_ALL8_SQLLEN3_OFF : _OCI_ALL8_SQLLEN3_OFF + 4], 'little'
         )
+        // 3
+    )
+    if marker == 0xFE:
+        # Long SQL — chunked from the marker: 0xFE, then <ub1 len><chunk> repeated
+        # (a zero length, or the declared total, ends it).
+        raw_sql = _read_chunked_sql(payload[_OCI_ALL8_SQL_OFF - 1 :], declared_len)
+    elif marker == declared_len:
+        raw_sql = payload[_OCI_ALL8_SQL_OFF : _OCI_ALL8_SQL_OFF + marker]
+    else:
+        # The two lengths disagree only for a bound statement (the bind section
+        # shifts things) — out of this increment's scope, a clean error.
+        raise InterfaceError('OCI OALL8: SQL length mismatch (binds not supported)')
     # sqlplus null-terminates its *internal* queries (the length counts the NUL);
     # a user-typed statement has none. Strip trailing NULs so the backend sees
     # clean SQL either way.
-    raw_sql = payload[_OCI_ALL8_SQL_OFF : _OCI_ALL8_SQL_OFF + sqllen]
     sql = raw_sql.rstrip(b'\x00').decode('utf-8')
     return ExecRequest(sql=sql, cursor=cursor, bind_count=0, fetch=0)
+
+
+def _read_chunked_sql(data: bytes, total_len: int) -> bytes:
+    # `data` starts at the 0xFE chunk marker; collect <ub1 len><chunk> runs until
+    # the declared total is reached or a zero-length chunk terminates it.
+    out = bytearray()
+    i = 1  # skip the 0xFE marker
+    while len(out) < total_len and i < len(data):
+        chunk_len = data[i]
+        i += 1
+        if chunk_len == 0:
+            break
+        out += data[i : i + chunk_len]
+        i += chunk_len
+    return bytes(out[:total_len])
 
 
 @dataclass(frozen=True)
@@ -425,6 +445,34 @@ def encode_fetch_terminator_oci() -> bytes:
     off = _OCI_FETCH_CONST_OFF
     oer[off : off + len(_OCI_FETCH_CONST)] = _OCI_FETCH_CONST
     return bytes(oer) + bytes([len(_OCI_END_OF_FETCH_MSG)]) + _OCI_END_OF_FETCH_MSG
+
+
+# A real 11g OCI error OER (captured for ORA-00942), the structure before the
+# message. Its call status (0x05) and frame differ from the end-of-fetch OER — a
+# real error, not "cursor drained" — so reusing the terminator here crashes
+# sqlplus. The ORA code goes at offset 12 (ub4 LE); the rest is the error frame +
+# the 0x20f6310a instance constant, mostly zero (#265, #350).
+_OCI_ERROR_OER = bytes.fromhex(
+    '04050000001300010000000000000000000002000e0003000000000000000000000000'
+    '0000000000000000000000000000150000010000003601000000000000000000000000'
+    '000020f6310a0000000000000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000'
+)
+_OCI_ERROR_CODE_OFF = 12
+
+
+def encode_error_oci(ora_code: int, message: str) -> bytes:
+    """OCI error reply — an OER carrying ORA-<code>: <message>, connection intact.
+
+    The deadbeef-dialect counterpart of :func:`encode_error`: a failing statement
+    surfaces in sqlplus as the ORA error and the session stays usable.
+    """
+    oer = bytearray(_OCI_ERROR_OER)
+    oer[_OCI_ERROR_CODE_OFF : _OCI_ERROR_CODE_OFF + 4] = int(ora_code).to_bytes(
+        4, 'little'
+    )
+    text = f'ORA-{ora_code:05d}: {message}\n'.encode('utf-8')
+    return bytes(oer) + bytes([len(text)]) + text
 
 
 def encode_query_response_oci(columns: list[ColumnMeta], rows: list[tuple]) -> bytes:
