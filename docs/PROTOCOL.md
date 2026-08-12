@@ -2584,6 +2584,22 @@ ride the OALL8 as ordinary statements (type `0`). Encoder: `encode_8i_oall8_dml`
 (over the shared `_encode_8i_oall8`); decoder: `decode_8i_dml_response`;
 statement classification: `o8i_stmt_type`.
 
+### 19.13 Oracle 8i anonymous PL/SQL blocks — IN binds (#361)
+
+`BEGIN` / `DECLARE` blocks ride the same OALL8 (statement type `8` / `9`) with a
+distinct option word: the byte after the option is `0x00` (or `0x04` when the
+block has binds), and the **next byte is `0x04`** — the PL/SQL-block marker
+(`21 00 04` for a no-bind block, `29 04 04` for a bound one). Unlike 9i, 8i sends
+the **IN bind values inline** (§19.11), so a block executes in a **single round
+trip** — no separate bind-value exchange.
+
+The reply is the bind **prompt** (`0x0b`, informational — it echoes each bind's
+direction: `0x20` IN, `0x10` OUT, `0x30` IN OUT) followed by the RPA + OER, all
+in one packet; a no-bind block skips straight to the RPA + OER. An error (compile
+or runtime, e.g. ORA-06550 / PLS-00201) is surfaced from the trailing `ORA-`
+text. OUT / IN OUT binds — whose returned values ride an RXD inside that reply —
+are a separate follow-up (#362 / #363). Driver: `_execute_8i_block`.
+
 ## 20. Oracle 23ai field version 24 — fast-auth + the fv24 framing (#89)
 
 Column **annotations** are only delivered when the client advertises a TTC

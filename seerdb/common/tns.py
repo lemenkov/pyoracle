@@ -3717,6 +3717,8 @@ O8I_STMT_INSERT = 4
 O8I_STMT_CREATE = 5
 O8I_STMT_DROP = 6
 O8I_STMT_ALTER = 7
+O8I_STMT_BEGIN = 8
+O8I_STMT_DECLARE = 9
 O8I_STMT_TXN = 0
 
 _O8I_STMT_TYPES = {
@@ -3728,6 +3730,8 @@ _O8I_STMT_TYPES = {
     'DROP': O8I_STMT_DROP,
     'ALTER': O8I_STMT_ALTER,
     'TRUNCATE': O8I_STMT_CREATE,  # DDL, no rowcount; rides the CREATE code
+    'BEGIN': O8I_STMT_BEGIN,
+    'DECLARE': O8I_STMT_DECLARE,
 }
 
 
@@ -3746,7 +3750,9 @@ def _encode_8i_oall8(Seq: int, Sql: bytes, StmtType: int, Binds: list) -> bytes:
     # reverse-engineered from a live 9.2-client -> 8.1.7 trace. Everything about
     # the option word and trailer derives from `StmtType`:
     #   - option byte 0x21 base, + 0x40 for a query (SELECT fetches), + 0x08 with
-    #     binds; the next byte is 0x80 for a cursor statement, 0x00 for txn control
+    #     binds; the two option bytes after it are 0x80 0x00 for a cursor
+    #     statement, 0x00 0x00 for txn control, and 0x00/0x04 0x04 for a PL/SQL
+    #     block (the trailing 0x04 marks the block; the 0x04 before it flags binds)
     #   - trailer exec flag 0 for a query (execute is deferred to the fetch), 1
     #     otherwise; the statement type rides at +28.
     # The SQL length rides twice: an encode_sb4 count in the header, then the text
@@ -3758,10 +3764,14 @@ def _encode_8i_oall8(Seq: int, Sql: bytes, StmtType: int, Binds: list) -> bytes:
     # of any concurrent connection.
     NumBinds = len(Binds)
     IsQuery = StmtType == O8I_STMT_SELECT
+    IsBlock = StmtType in (O8I_STMT_BEGIN, O8I_STMT_DECLARE)
     Token = _ENCODE_FIELD_VERSION.set(FIELD_VERSION_9_2)
     try:
         Option = 0x21 | (0x40 if IsQuery else 0) | (0x08 if NumBinds else 0)
-        CursorFlag = 0x80 if StmtType != O8I_STMT_TXN else 0x00
+        if IsBlock:
+            Byte4, Byte5 = (0x04 if NumBinds else 0x00), 0x04
+        else:
+            Byte4, Byte5 = (0x80 if StmtType != O8I_STMT_TXN else 0x00), 0x00
         ExecFlag = 0 if IsQuery else 1
         Al8 = (
             bytes([0, 0, 0, 1, NumBinds, 0, 0, 0, 0, 0, 0, 0])  # iters=1, nbinds
@@ -3770,7 +3780,7 @@ def _encode_8i_oall8(Seq: int, Sql: bytes, StmtType: int, Binds: list) -> bytes:
         )
         Message = (
             bytes([TTI_FUN, TTI_ALL8, Seq & 0xFF])
-            + bytes([Option, CursorFlag, 0, 0, 0, 0, 0, 0])
+            + bytes([Option, Byte4, Byte5, 0, 0, 0, 0, 0])
             + encode_sb4(len(Sql))  # SQL length (ub4)
             + bytes([0, 0, 0])
             + bytes([0x01, 0x0C, 0, 0, 0, 0, 0x01, 0, 0, 0, 0, 0x01, 0, 0, 0, 0])

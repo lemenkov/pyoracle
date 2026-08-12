@@ -4403,11 +4403,6 @@ class O8iSelectIntegration(unittest.TestCase):
         self.cur.execute('select username from all_users where 1 = 0')
         self.assertEqual(self.cur.fetchall(), [])
 
-    def test_plsql_block_raises_not_supported(self):
-        # Anonymous PL/SQL blocks are a follow-up (#361); they must fail cleanly.
-        with self.assertRaises(seerdb.NotSupportedError):
-            self.cur.execute('begin null; end;')
-
     def test_number_bind(self):
         # Positional NUMBER IN bind (#359): the 9.2-era OALL8 bind section.
         self.cur.execute('select username from all_users where user_id = :1', [5])
@@ -4490,6 +4485,25 @@ class O8iDmlIntegration(unittest.TestCase):
     def test_dml_error_surfaces(self):
         with self.assertRaises(seerdb.DatabaseError):
             self.cur.execute('insert into zz_seerdb_no_such_table values (1)')
+
+    def test_plsql_block_with_in_binds(self):
+        # Anonymous PL/SQL block (#361): IN bind values ride inline, executed in a
+        # single round trip. Insert via a block (no-bind, positional, named) and
+        # read the rows back to confirm the binds reached the server.
+        self.cur.execute(f"begin insert into {self.TABLE} values (1, 'nobind'); end;")
+        self.cur.execute(
+            f'begin insert into {self.TABLE} values (:1, :2); end;', [2, 'pos']
+        )
+        self.cur.execute(
+            f'begin insert into {self.TABLE} values (:a, :b); end;',
+            {'a': 3, 'b': 'named'},
+        )
+        self.conn.commit()
+        self.assertEqual(self._rows(), [(1, 'nobind'), (2, 'pos'), (3, 'named')])
+
+    def test_plsql_block_error_surfaces(self):
+        with self.assertRaises(seerdb.DatabaseError):
+            self.cur.execute('begin this_identifier_does_not_exist; end;')
 
 
 if __name__ == '__main__':
