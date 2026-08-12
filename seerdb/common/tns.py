@@ -4095,8 +4095,10 @@ def decode_8i_dcb_describe(Data: bytes) -> tuple[list[dict], bytes]:
     #            ub4be constant 0x33 (skipped)
     #   per column (num_columns times):
     #     +0      ub1  data type (1=VARCHAR2, 2=NUMBER, 96=CHAR, …)
-    #     +1..+4  ub4be: bit31 = character flag, low 31 bits = max_size
-    #     +5..+18 14 bytes precision/scale/reserved (0 for literals; not decoded)
+    #     +1..+4  ub4be size field. For a NUMBER: `00 <precision> <scale sb1>
+    #             <internal size 22>` (#386). For other types: bit31 = character
+    #             flag, low 31 bits = max_size.
+    #     +5..+18 14 reserved bytes (always 0 in captures)
     #     +19..22 ub4be character set id (31 = WE8ISO8859P1; 0 for NUMBER)
     #     +23     reserved (0)
     #     +24     ub1 csform (1 = character type, 0 = number)
@@ -4119,7 +4121,23 @@ def decode_8i_dcb_describe(Data: bytes) -> tuple[list[dict], bytes]:
     for _ in range(NumCols):
         DataType = Data[Off]
         SizeField = int.from_bytes(Data[Off + 1 : Off + 5], 'big')
-        MaxSize = SizeField & 0x7FFFFFFF  # bit31 is the character-type flag
+        if DataType == 2:
+            # NUMBER family: the 4-byte size field packs `00 <precision>
+            # <scale sb1> <internal size (22)>` — NOT a plain max_size (#386).
+            # e.g. NUMBER(6,2) = `00 06 02 16`, NUMBER(38) = `00 26 00 16`.
+            # Match the modern describe: max_size 0 (a NUMBER's display size is
+            # derived from precision/scale), data_length = the 22-byte buffer.
+            Precision = (SizeField >> 16) & 0xFF
+            Scale = (SizeField >> 8) & 0xFF
+            if Scale > 127:
+                Scale -= 256  # scale is signed (e.g. NUMBER(5, -2))
+            DataLength = SizeField & 0xFF
+            MaxSize = 0
+        else:
+            Precision = 0
+            Scale = 0
+            MaxSize = SizeField & 0x7FFFFFFF  # bit31 is the character-type flag
+            DataLength = MaxSize
         Charset = int.from_bytes(Data[Off + 19 : Off + 23], 'big')
         Csform = Data[Off + 24]
         NullOk = 0 if Data[Off + 25] == 0 else 1
@@ -4128,9 +4146,9 @@ def decode_8i_dcb_describe(Data: bytes) -> tuple[list[dict], bytes]:
         Columns.append(
             {
                 'data_type': DataType,
-                'data_length': MaxSize,
-                'data_scale': 0,
-                'precision': 0,
+                'data_length': DataLength,
+                'data_scale': Scale,
+                'precision': Precision,
                 'max_size': MaxSize,
                 'charset': Charset,
                 'csfrm': Csform,

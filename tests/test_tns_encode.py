@@ -6619,6 +6619,25 @@ class TestO8iQueryMessages(unittest.TestCase):
         self.assertEqual(cols[1]['charset'], 31)  # WE8ISO8859P1
         self.assertEqual(cols[0]['charset'], 0)  # NUMBER has no charset
 
+    def test_dcb_number_precision_scale(self):
+        # #386: a NUMBER's size field packs `00 <precision> <scale> <size 22>`
+        # (here `00 06 02 16`), not a plain max_size. Live 8.1.7 describe of a
+        # single NUMBER(6,2) column.
+        from seerdb.common.tns import decode_8i_dcb_describe
+
+        Dcb = bytes.fromhex(
+            '101922acddc5345866050000787e080d021c13940b0000000000001600000001'
+            '0000003302000602160000000000000000000000000000000000000000010101'
+            '000000015300000000000000000700000007787e080d021c13'
+        )
+        (cols, _) = decode_8i_dcb_describe(Dcb)
+        self.assertEqual(cols[0]['column_name'], b'S')
+        self.assertEqual(cols[0]['data_type'], 2)  # NUMBER
+        self.assertEqual(cols[0]['precision'], 6)
+        self.assertEqual(cols[0]['data_scale'], 2)
+        self.assertEqual(cols[0]['max_size'], 0)  # NUMBER: 0, not the packed field
+        self.assertEqual(cols[0]['data_length'], 22)
+
     def test_8i_long_multi_chunk_decode(self):
         # #377: a LONG value rides in the RXD as a chunked DALC (0xfe marker, one
         # length byte per chunk up to 255, ended by a zero length) and can span
