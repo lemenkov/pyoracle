@@ -3671,34 +3671,90 @@ def decode_fv2_describe(Data: bytes) -> list[dict]:
     return Columns
 
 
-def encode_8i_oall8_query(Seq: int, Sql: bytes) -> bytes:
-    # Oracle 8i SELECT execute: the 9.2-era OALL8 (TTI_ALL8, 0x5e) request
-    # (docs/PROTOCOL.md §19.10). 8i CANNOT parse the modern (10g+) OALL8 layout
-    # this driver builds for every other tier — it answers that with an empty
-    # packet and hangs up — so 8i needs this byte-compatible pre-10g form,
-    # reverse-engineered from a live 9.2-client -> 8.1.7 trace. No define block
-    # is sent: the column layout comes back in the 8i TTI_DCB describe
-    # (decode_8i_dcb_describe). The message is fixed apart from the TTI sequence
-    # byte and the SQL length, which is carried twice as a length-prefixed ub4
-    # (encode_sb4): once in the options header, once prefixing the SQL text.
-    SqlLen = encode_sb4(len(Sql))
+def _encode_8i_bind_oac(Value: object) -> bytes:
+    # 25-byte 8i bind descriptor, mirroring the describe column OAC
+    # (decode_8i_dcb_describe): data type, ub4be [flag 0x03 | max_size], 14 bytes
+    # reserved, ub4be character set, reserved, csform. Reverse-engineered from a
+    # live 9.2-client -> 8.1.7 bind trace (docs/PROTOCOL.md §19.11). max_size is
+    # the largest value we may send for this bind: 22 (the NUMBER max) for
+    # numbers, 7 for DATE, and the value byte length for VARCHAR2 / RAW.
+    if Value is None:
+        DType, Charset, Csform, MaxSize = 1, 31, 1, 1  # NULL rides as VARCHAR2(1)
+    elif isinstance(Value, (bool, int, float, Decimal)):
+        DType, Charset, Csform, MaxSize = 2, 0, 0, 22  # NUMBER
+    elif isinstance(Value, (bytes, bytearray)):
+        DType, Charset, Csform, MaxSize = 23, 0, 0, max(len(Value), 1)  # RAW
+    elif isinstance(Value, (datetime.datetime, datetime.date)):
+        DType, Charset, Csform, MaxSize = 12, 0, 0, 7  # DATE
+    else:  # str (and anything else via its str() form) -> VARCHAR2
+        DType, Charset, Csform = 1, 31, 1
+        MaxSize = max(len(str(Value).encode('latin-1')), 1)
     return (
-        bytes([TTI_FUN, TTI_ALL8, Seq & 0xFF])
-        + bytes([0x61, 0x80, 0, 0, 0, 0, 0, 0])  # execute options (query)
-        + SqlLen  # SQL length (ub4)
-        + bytes([0, 0, 0])
-        # al8i4-style count array: mostly zero, three `01` markers the 8i server
-        # requires (define count / iteration / bind count), captured verbatim.
-        + bytes([0x01, 0x0C, 0, 0, 0, 0, 0x01, 0, 0, 0, 0, 0x01, 0, 0, 0, 0])
-        + bytes(12)
-        + SqlLen  # SQL length again, prefixing the text
-        + Sql
-        # trailer: bind-count / define-count markers (no binds, no defines)
-        + bytes([0x01])
-        + bytes(27)
-        + bytes([0x01])
-        + bytes(19)
+        bytes([DType, 0x03])
+        + MaxSize.to_bytes(3, 'big')
+        + bytes(14)
+        + Charset.to_bytes(4, 'big')
+        + bytes([0, Csform])
     )
+
+
+def _encode_8i_bind_value(Value: object) -> bytes:
+    # The bind value as a DALC (length-prefixed). Strings ride as WE8ISO8859P1
+    # (latin-1), matching the 8i DB charset; everything else reuses the shared
+    # value encoder (Oracle NUMBER, DATE, RAW, …).
+    if isinstance(Value, str):
+        return encode_token_rxd(Value.encode('latin-1'))
+    return encode_token_rxd(Value)
+
+
+def encode_8i_oall8_query(Seq: int, Sql: bytes, Binds: list | None = None) -> bytes:
+    # Oracle 8i SELECT execute: the 9.2-era OALL8 (TTI_ALL8, 0x5e) request
+    # (docs/PROTOCOL.md §19.9, binds §19.11). 8i CANNOT parse the modern (10g+)
+    # OALL8 this driver builds for every other tier — it answers that with an
+    # empty packet and hangs up — so 8i needs this byte-compatible pre-10g form,
+    # reverse-engineered from a live 9.2-client -> 8.1.7 trace. No define block
+    # is sent: the column layout comes back in the 8i TTI_DCB describe.
+    #
+    # The SQL length rides twice: an encode_sb4 count in the options header, then
+    # the SQL text itself as a pre-10g chunked string (encode_chr — a plain
+    # length byte up to 64 bytes, else the 0xFE / 64-byte-chunk form). With binds
+    # the option byte gains bit 0x08, the header carries iteration count 1 +
+    # bind count, and the bind section (all OACs, a 0x07 marker, then all values)
+    # follows the trailer. Pin the encode field version to fv2 so encode_chr /
+    # encode_token_rxd take their pre-12c forms regardless of other connections.
+    Binds = Binds or []
+    NumBinds = len(Binds)
+    Token = _ENCODE_FIELD_VERSION.set(FIELD_VERSION_9_2)
+    try:
+        Option = 0x69 if NumBinds else 0x61  # bit 0x08 = binds present
+        Al8 = (
+            bytes([0, 0, 0, 1, NumBinds, 0, 0, 0, 0, 0, 0, 0])  # iters=1, nbinds
+            if NumBinds
+            else bytes(12)
+        )
+        Message = (
+            bytes([TTI_FUN, TTI_ALL8, Seq & 0xFF])
+            + bytes([Option, 0x80, 0, 0, 0, 0, 0, 0])
+            + encode_sb4(len(Sql))  # SQL length (ub4)
+            + bytes([0, 0, 0])
+            + bytes([0x01, 0x0C, 0, 0, 0, 0, 0x01, 0, 0, 0, 0, 0x01, 0, 0, 0, 0])
+            + Al8
+            + bytes([0x01])
+            + encode_chr(Sql.decode('latin-1'))  # SQL text (chunked if > 64 B)
+            + bytes([0x01])
+            + bytes(27)
+            + bytes([0x01])
+            + bytes(19)
+        )
+        if NumBinds:
+            for Value in Binds:
+                Message += _encode_8i_bind_oac(Value)
+            Message += bytes([0x07])  # bind-value section marker
+            for Value in Binds:
+                Message += _encode_8i_bind_value(Value)
+        return Message
+    finally:
+        _ENCODE_FIELD_VERSION.reset(Token)
 
 
 def encode_8i_oall8_fetch(Seq: int, Cursor: int, Count: int) -> bytes:

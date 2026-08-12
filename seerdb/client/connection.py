@@ -1505,18 +1505,17 @@ class OracleConnect:
         # Oracle 8i SELECT (#244 task #4, PROTOCOL.md §19.9-10). 8i speaks the
         # 9.2-era OALL8 (0x5e): the modern OALL8 this driver builds elsewhere
         # draws an empty packet + hangup, and 9i's TTI_ALL7 is rejected too, so
-        # 8i gets its own request encoder. The reply is fv2-encoded — an 8i
-        # TTI_DCB (0x10) describe (decode_8i_dcb_describe) followed by the
-        # 9i-style RXH/RXD row stream (decode_fv2_exec_response). Row values are
-        # WE8ISO8859P1 (latin-1); the column charset drives decoding. Returns the
-        # same 9-tuple as _execute_fv2 so the cursor/_drain_cursor path is
-        # unchanged. Binds and multi-batch fetch continuation are follow-ups.
-        if Bind:
-            from seerdb.common.exceptions import NotSupportedError
-
-            raise NotSupportedError('bind variables are not yet supported on Oracle 8i')
+        # 8i gets its own request encoder. IN binds ride the 9.2-era bind
+        # section (§19.11). The reply is fv2-encoded — an 8i TTI_DCB (0x10)
+        # describe (decode_8i_dcb_describe) followed by the 9i-style RXH/RXD row
+        # stream (decode_8i_exec_response). Row values are WE8ISO8859P1 (latin-1);
+        # the column charset drives decoding. Returns the same 9-tuple as
+        # _execute_fv2 so the cursor/_drain_cursor path is unchanged.
         self.send(
-            TNS_DATA, encode_8i_oall8_query(self._next_seq(), Query.encode('latin-1'))
+            TNS_DATA,
+            encode_8i_oall8_query(
+                self._next_seq(), Query.encode('latin-1'), Bind or None
+            ),
         )
         Received = self._next_data_packet(b'', b'')
         if Received is False:

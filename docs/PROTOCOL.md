@@ -2465,11 +2465,16 @@ from the `TTI_FUN` sequence byte and the SQL length (`encode_sb4`, carried twice
 ```
 03 5e <seq>  61 80 00 00 00 00 00 00  <ub4 sqllen>  00 00 00
 01 0c 00 00 00 00 01 00 00 00 00 01 00 00 00 00  <12×00>
-<ub4 sqllen>  <SQL bytes>
+01 <SQL as pre-10g chunked string>
 01 <27×00> 01 <19×00>          # bind-count / define-count markers (none)
 ```
 
-No define block is sent — the column layout comes back in the describe (§19.10).
+The SQL length rides twice: an `encode_sb4` count in the header, then the SQL
+**text** as a pre-10g chunked string (`encode_chr`: a plain length byte up to 64
+bytes, else the `0xFE` + 64-byte-chunk form). A no-bind SELECT ≤ 64 bytes happens
+to coincide with `sb4-length + raw`, but longer SQL **must** chunk or the server
+desyncs. No define block is sent — the column layout comes back in the describe
+(§19.10).
 The execute returns only the **first row batch** and never signals EOF on the
 execute itself; the remaining rows are pulled by the **fetch** OALL8 (option
 `0x40`, the server-assigned cursor id, no SQL, a `ub4` row count), repeated until
@@ -2480,8 +2485,8 @@ a batch comes back empty (the 8i equivalent of ORA-01403):
 01 00×4 0f  00×23 01 00×19
 ```
 
-Encoders: `encode_8i_oall8_query` / `encode_8i_oall8_fetch`. Binds and 8i DML are
-follow-ups; async 8i (login + query) is unimplemented (the login is sync-only).
+Encoders: `encode_8i_oall8_query` / `encode_8i_oall8_fetch`. IN binds are §19.11;
+8i DML and async 8i (login + query) are follow-ups (the login is sync-only).
 
 ### 19.10 Oracle 8i response — the fixed-field DCB describe and 4-byte RXD (#244)
 
@@ -2513,6 +2518,36 @@ present). A **NULL** column carries no value DALC at all — it is the bare 4-by
 **cursor id** for the fetch loop sits at offset 11 of the post-row terminal —
 whether that opens with the `0x08` session-state piggyback or the `0x04` OER.
 Decoders: `decode_8i_exec_response` / `decode_8i_cursor_id`.
+
+### 19.11 Oracle 8i IN binds — the 9.2-era bind section (#359)
+
+Parameterized statements ride the same OALL8 (§19.9) with three header changes
+and a bind section appended after the trailer. The execute **option byte** gains
+bit `0x08` (`0x61` → `0x69`), and the al8i4 count block carries the **iteration
+count** (1) and the **bind count**:
+
+```
+… 01 0c 00 00 00 00 01 00 00 00 00 01 00 00 00 00   00 00 00 01 <nbinds> 00×7 …
+```
+
+After the trailer come **all bind OACs**, then a single `0x07` value-section
+marker, then **all bind values** in order (so N binds = N descriptors, one `0x07`,
+N values — not interleaved). Each bind OAC is the 25-byte descriptor mirroring the
+describe column OAC (§19.10):
+
+```
+ub1  data type (1 VARCHAR2, 2 NUMBER, 12 DATE, 23 RAW)
+ub4be  flag 0x03 | max_size   (22 for NUMBER, 7 for DATE, value length otherwise)
+14 bytes reserved
+ub4be  character set (31 for char types, 0 otherwise)
+ub1 reserved(0)  ub1 csform (1 for char types, 0 otherwise)
+```
+
+Each value is a plain DALC (`encode_token_rxd`): NUMBER 5 → `02 c1 06`, `'SYS'` →
+`03 53 59 53` (WE8ISO8859P1), a **NULL** bind → the empty DALC `00`. The encode
+field version is pinned to fv2 so the chunked-string / pre-23ai value forms are
+used regardless of any concurrent connection. Encoder: `encode_8i_oall8_query`
+(the `Binds` argument), with `_encode_8i_bind_oac` / `_encode_8i_bind_value`.
 
 ## 20. Oracle 23ai field version 24 — fast-auth + the fv24 framing (#89)
 

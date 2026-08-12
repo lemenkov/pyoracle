@@ -4403,16 +4403,31 @@ class O8iSelectIntegration(unittest.TestCase):
         self.cur.execute('select username from all_users where 1 = 0')
         self.assertEqual(self.cur.fetchall(), [])
 
-    def test_bind_raises_not_supported(self):
-        # Binds are a documented 8i follow-up; they must fail cleanly, not hang.
-        with self.assertRaises(seerdb.NotSupportedError):
-            self.cur.execute('select * from dual where 1 = :x', [1])
-
     def test_dml_raises_not_supported(self):
         # DML/DDL are SELECT-only follow-ups; fail fast rather than send the
         # modern OALL8 the 8i server rejects with an empty packet + hangup.
         with self.assertRaises(seerdb.NotSupportedError):
             self.cur.execute('create table zz_o8i_should_not_exist (a number)')
+
+    def test_number_bind(self):
+        # Positional NUMBER IN bind (#359): the 9.2-era OALL8 bind section.
+        self.cur.execute('select username from all_users where user_id = :1', [5])
+        self.assertEqual(self.cur.fetchall(), [('SYSTEM',)])
+
+    def test_varchar_and_multi_bind(self):
+        # Named VARCHAR bind (dict) and a two-bind range, plus a NULL bind.
+        self.cur.execute(
+            'select user_id from all_users where username = :u', {'u': 'SYSTEM'}
+        )
+        self.assertEqual(self.cur.fetchall(), [(5,)])
+        self.cur.execute(
+            'select username from all_users where user_id >= :a and user_id <= :b '
+            'order by user_id',
+            [0, 5],
+        )
+        self.assertEqual([r[0] for r in self.cur.fetchall()], ['SYS', 'SYSTEM'])
+        self.cur.execute("select nvl(:v, 'was-null') from dual", [None])
+        self.assertEqual(self.cur.fetchone()[0], 'was-null')
 
 
 if __name__ == '__main__':
