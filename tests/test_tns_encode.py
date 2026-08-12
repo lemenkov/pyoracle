@@ -6595,7 +6595,7 @@ class TestO8iQueryMessages(unittest.TestCase):
         )
 
         (cols, rest) = decode_8i_dcb_describe(self.DCB49)
-        (rows, terminal) = decode_8i_exec_response(rest, cols)
+        (rows, terminal, _) = decode_8i_exec_response(rest, cols)
         self.assertEqual(rows, [[42, 'hello']])
         self.assertEqual(decode_8i_cursor_id(terminal), 1)
 
@@ -6608,7 +6608,7 @@ class TestO8iQueryMessages(unittest.TestCase):
 
         (cols, rest) = decode_8i_dcb_describe(self.NULLDCB)
         self.assertEqual([c['column_name'] for c in cols], [b'A', b'B', b'CC'])
-        (rows, _) = decode_8i_exec_response(rest, cols)
+        (rows, _, _) = decode_8i_exec_response(rest, cols)
         self.assertEqual(rows, [[1, None, 'xy']])
 
     # The 9.2-client OALL8 for `... WHERE user_id = :n` with :n = 5 (#52 of the
@@ -6657,3 +6657,88 @@ class TestO8iQueryMessages(unittest.TestCase):
         msg = encode_8i_oall8_query(0x11, b'select :v from dual', [None])
         self.assertEqual(msg[3], 0x69)
         self.assertTrue(msg.endswith(b'\x07\x00'))  # 0x07 marker + empty value
+
+    # 9.2-client DML requests (#360): an INSERT literal (#52 of the DML trace) and
+    # a COMMIT (#80), the affected-row count response for a 300-row UPDATE (#57 of
+    # the large-count trace), and a live duplicate-column fetch.
+    REQ_INSERT = bytes.fromhex(
+        '035e1821800000000000000124000000010c0000000001000000000100000000'
+        '0000000000000000000000000124494e5345525420494e544f207a7a5f646d6c'
+        '2056414c5545532028312c20276f6e6527290100000001000000000000000000'
+        '0000000000000000000000000000040000000000000000000000000000000000'
+        '0000'
+    )
+    REQ_COMMIT = bytes.fromhex(
+        '035e2621000000000000000106000000010c0000000001000000000100000000'
+        '0000000000000000000000000106434f4d4d4954010000000100000000000000'
+        '0000000000000000000000000000000000000000000000000000000000000000'
+        '00000000'
+    )
+    RESP_UPD300 = bytes.fromhex(
+        '0804006b89050000000000010000000100000000000000042c01000000000000'
+        '000001000700060000000011fa600000050000030000002b0100000000001a00'
+        '00010000000d000d01000060fa000500000003012b0000000000000000000000'
+        '00'
+    )
+    # A live 8i SELECT of three rows all sharing b='zz': the execute batch (row 1
+    # full) and the fetch batch (rows 2 & 3, column b omitted / repeated).
+    DUP_EXEC = bytes.fromhex(
+        '101984ab0a4ff09c6c050000787e080c15182d17060000000000002000000002'
+        '0000003302000000160000000000000000000000000000000000000000010101'
+        '00000001410000000000000000018000000a0000000000000000000000000000'
+        '0000001f0001010101000000014200000000000000000700000007787e080c15'
+        '182d0602020000000100000000000000000000000702c10200000000027a7a00'
+        '000000080400098a050000000000090000000000000000000000040100000000'
+        '0000000000090011000300400000000561000005000003000000020000000000'
+        '000f0000010000000000000000000000000000000000'
+    )
+    DUP_FETCH = bytes.fromhex(
+        '0602010000000f000000010000000101000000000702c1030000000006020100'
+        '01000f000000010000000101000000000702c1040000000004030000007b0500'
+        '0000000900000003004000000905610000050000030000000200000000000010'
+        '0000010000000000000000000000000000000000194f52412d30313430333a20'
+        '6e6f206461746120666f756e640a'
+    )
+
+    def test_oall8_dml_insert_byte_exact(self):
+        from seerdb.common.tns import O8I_STMT_INSERT, encode_8i_oall8_dml
+
+        sql = b"INSERT INTO zz_dml VALUES (1, 'one')"
+        self.assertEqual(
+            encode_8i_oall8_dml(0x18, sql, O8I_STMT_INSERT), self.REQ_INSERT
+        )
+
+    def test_oall8_commit_byte_exact(self):
+        from seerdb.common.tns import O8I_STMT_TXN, encode_8i_oall8_dml
+
+        self.assertEqual(
+            encode_8i_oall8_dml(0x26, b'COMMIT', O8I_STMT_TXN), self.REQ_COMMIT
+        )
+
+    def test_o8i_stmt_type(self):
+        from seerdb.common.tns import o8i_stmt_type
+
+        self.assertEqual(o8i_stmt_type('INSERT INTO T VALUES (1)'), 4)
+        self.assertEqual(o8i_stmt_type('UPDATE T SET A=1'), 2)
+        self.assertEqual(o8i_stmt_type('DELETE FROM T'), 3)
+        self.assertEqual(o8i_stmt_type('CREATE TABLE T (A NUMBER)'), 5)
+        self.assertEqual(o8i_stmt_type('COMMIT'), 0)
+
+    def test_dml_response_rowcount(self):
+        # The affected-row count is a little-endian ub4 after the OER token.
+        from seerdb.common.tns import decode_8i_dml_response
+
+        (rowcount, err, _) = decode_8i_dml_response(self.RESP_UPD300)
+        self.assertEqual(rowcount, 300)
+        self.assertEqual(err, 0)
+
+    def test_duplicate_column_compression(self):
+        # Three rows all with b='zz': the fetch batch omits b (repeats it), so the
+        # decoder must reuse the previous row's value threaded across batches.
+        from seerdb.common.tns import decode_8i_dcb_describe, decode_8i_exec_response
+
+        (cols, rest) = decode_8i_dcb_describe(self.DUP_EXEC)
+        (rows, _, last) = decode_8i_exec_response(rest, cols)
+        self.assertEqual(rows, [[1, 'zz']])
+        (more, _, _) = decode_8i_exec_response(self.DUP_FETCH, cols, last)
+        self.assertEqual(more, [[2, 'zz'], [3, 'zz']])

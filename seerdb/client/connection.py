@@ -24,6 +24,7 @@ from seerdb.common.tns import (
     assemble_packet,
     decode_8i_cursor_id,
     decode_8i_dcb_describe,
+    decode_8i_dml_response,
     decode_8i_exec_response,
     decode_fv2_block_out,
     decode_fv2_describe,
@@ -36,6 +37,7 @@ from seerdb.common.tns import (
     decode_packet,
     decode_token_pro,
     decode_token_rpa,
+    encode_8i_oall8_dml,
     encode_8i_oall8_fetch,
     encode_8i_oall8_query,
     encode_aq_array,
@@ -65,6 +67,7 @@ from seerdb.common.tns import (
     encode_tpc_switch,
     exec_oac_signature,
     find_fast_auth_rpa,
+    o8i_stmt_type,
     set_decode_dml_rowcounts,
     set_decode_prev_row,
     set_decode_return_binds,
@@ -1206,20 +1209,21 @@ class OracleConnect:
         Head = Query.strip().upper()
         # Oracle 8i speaks the 9.2-era OALL8 (0x5e) dialect: it rejects both the
         # modern (10g+) OALL8 this method builds AND 9i's TTI_ALL7. A SELECT
-        # rides its own pre-10g OALL8 request + fv2 describe/row decode (#244
-        # task #4, PROTOCOL.md §19.9-10).
+        # rides its own pre-10g OALL8 request + fv2 describe/row decode (§19.9);
+        # DML/DDL ride the same OALL8 with no fetch (§19.12).
         if getattr(self, '_is_8i', False):
             if Head.startswith('SELECT'):
                 return self._drain_cursor(self._execute_8i_select(Query, Bind))
-            # DML / DDL / PL/SQL on 8i are follow-ups. Fail fast with a clear
-            # error rather than falling through to the modern OALL8 the 8i server
-            # rejects (an empty packet + hangup, which would hang until timeout).
-            from seerdb.common.exceptions import NotSupportedError
+            if Head.startswith('BEGIN') or Head.startswith('DECLARE'):
+                # Anonymous PL/SQL blocks need the bind-prompt / OUT-value path
+                # (a separate follow-up, #361). Fail fast rather than send the
+                # modern OALL8 the 8i server rejects (an empty packet + hangup).
+                from seerdb.common.exceptions import NotSupportedError
 
-            raise NotSupportedError(
-                'Oracle 8i support is currently SELECT-only '
-                '(DML/DDL/PL/SQL and binds are not yet implemented)'
-            )
+                raise NotSupportedError(
+                    'PL/SQL blocks are not yet supported on Oracle 8i'
+                )
+            return self._execute_8i_dml(Query, Bind)
         # Oracle 9i (field version < 10g) speaks the old TTI_ALL7 query dialect,
         # not the TTI_ALL8 the rest of execute() builds. Route SELECTs through
         # the dedicated four-call fv2 path (#97, PROTOCOL.md §19).
@@ -1522,11 +1526,13 @@ class OracleConnect:
             raise Exception('Connection closed during 8i query response')
         (_, Packet) = Received
         (Columns, Rest) = decode_8i_dcb_describe(Packet)
-        (Rows, Terminal) = decode_8i_exec_response(Rest, Columns)
+        (Rows, Terminal, LastRow) = decode_8i_exec_response(Rest, Columns)
         # 8i's execute returns only the first row batch and never signals EOF on
         # the execute itself; the cursor id from the response terminal drives a
         # fetch loop that pulls the rest until a batch comes back empty (the 8i
-        # equivalent of ORA-01403 / no-data-found).
+        # equivalent of ORA-01403 / no-data-found). `LastRow` is threaded through
+        # so a batch's first row can repeat a column from the previous batch's
+        # last row (8i's duplicate-column compression).
         Cursor = decode_8i_cursor_id(Terminal)
         while Cursor:
             self.send(
@@ -1535,13 +1541,37 @@ class OracleConnect:
             Fetched = self._next_data_packet(b'', b'')
             if Fetched is False:
                 break
-            (More, _) = decode_8i_exec_response(Fetched[1], Columns)
+            (More, _, LastRow) = decode_8i_exec_response(Fetched[1], Columns, LastRow)
             if not More:
                 break
             Rows.extend(More)
         # call_status 0 + ora_code 0 => _drain_cursor won't issue TTI_FETCHes;
         # the fetch loop above already assembled the full row set.
         return (0, 0, 0, (len(Rows), Columns), Rows, None, None, [], None)
+
+    def _execute_8i_dml(self, Query: str, Bind: list | None = None) -> object:
+        # Oracle 8i INSERT/UPDATE/DELETE and DDL (#360, PROTOCOL.md §19.12): the
+        # same 9.2-era OALL8 as a SELECT but with the statement-type option word
+        # and no fetch. The affected-row count comes back in the response OER.
+        # Returns the same 9-tuple shape as _execute_fv2_dml (rowcount in slot 3).
+        StmtType = o8i_stmt_type(Query.strip().upper())
+        self.send(
+            TNS_DATA,
+            encode_8i_oall8_dml(
+                self._next_seq(), Query.encode('latin-1'), StmtType, Bind or None
+            ),
+        )
+        Received = self._next_data_packet(b'', b'')
+        if Received is False:
+            raise Exception('Connection closed during 8i DML')
+        (RowCount, ErrCode, Message) = decode_8i_dml_response(Received[1])
+        if ErrCode:
+            from seerdb.common.exceptions import from_ora_code
+
+            raise from_ora_code(ErrCode)(Message or f'ORA-{ErrCode:05d}', code=ErrCode)
+        if self.autocommit:
+            self.commit()
+        return (0, 0, 0, (RowCount, None), [], None, None, [], None)
 
     def _lob_read_fv2(self, Locator: bytes) -> bytes:
         # 9i (fv2) LOB content read: the two-call TTI_LOBOPS GETLEN + READ
@@ -2180,6 +2210,9 @@ class OracleConnect:
             # Packet exhausted without hitting OER; loop and recv the next.
 
     def commit(self) -> None:
+        if getattr(self, '_is_8i', False):
+            self._txn_control_8i('COMMIT')
+            return
         from seerdb.common.tns_consts import TTI_COMMIT
 
         Data = encode_dictionary(self._make_dict(DictionaryType.tran, req=TTI_COMMIT))
@@ -2190,11 +2223,35 @@ class OracleConnect:
         self._sessionless_txn_active = False
 
     def rollback(self) -> None:
+        if getattr(self, '_is_8i', False):
+            self._txn_control_8i('ROLLBACK')
+            return
         from seerdb.common.tns_consts import TTI_ROLLBACK
 
         Data = encode_dictionary(self._make_dict(DictionaryType.tran, req=TTI_ROLLBACK))
         self.send(TNS_DATA, Data)
         self._handle_response()
+        self._sessionless_txn_active = False
+
+    def _txn_control_8i(self, Statement: str) -> None:
+        # 8i has no modern TTI_COMMIT / TTI_ROLLBACK function; commit and rollback
+        # ride the OALL8 as ordinary statements (§19.12, statement type 0).
+        from seerdb.common.tns import O8I_STMT_TXN
+
+        self.send(
+            TNS_DATA,
+            encode_8i_oall8_dml(
+                self._next_seq(), Statement.encode('latin-1'), O8I_STMT_TXN
+            ),
+        )
+        Received = self._next_data_packet(b'', b'')
+        if Received is False:
+            raise Exception(f'Connection closed during 8i {Statement}')
+        (_, ErrCode, Message) = decode_8i_dml_response(Received[1])
+        if ErrCode:
+            from seerdb.common.exceptions import from_ora_code
+
+            raise from_ora_code(ErrCode)(Message or f'ORA-{ErrCode:05d}', code=ErrCode)
         self._sessionless_txn_active = False
 
     def ping(self) -> None:
