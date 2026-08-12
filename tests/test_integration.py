@@ -4569,5 +4569,65 @@ class O8iDmlIntegration(unittest.TestCase):
         self.assertEqual(rows[2], (3, None, None))
 
 
+@unittest.skipUnless(_USER, _SKIP_REASON)
+class AsyncO8iIntegration(unittest.IsolatedAsyncioTestCase):
+    # Async Oracle 8i coverage (#365): the sync 8i surface ported to
+    # aconnection.py / acursor.py. Self-skips unless the target is an 8i server.
+    TABLE = 'zz_seerdb_o8i_async'
+
+    def _kwargs(self):
+        return dict(
+            host=_HOST,
+            port=_PORT,
+            user=_USER,
+            password=_PASSWORD,
+            service_name=_SERVICE,
+            autocommit=True,
+            **_FV_KW,
+        )
+
+    async def _connect_8i(self):
+        conn = await seerdb.connect_async(**self._kwargs())
+        if not getattr(conn, '_is_8i', False):
+            await conn.close()
+            self.skipTest('not an Oracle 8i server')
+        return conn
+
+    async def test_async_8i_select_dml_plsql_lob(self):
+        conn = await self._connect_8i()
+        try:
+            cur = conn.cursor()
+            # SELECT (multi-row) + a NUMBER bind
+            await cur.execute('select username from all_users where user_id = :1', [5])
+            self.assertEqual(await cur.fetchall(), [('SYSTEM',)])
+            # DDL + DML + rowcount
+            try:
+                await cur.execute(f'drop table {self.TABLE}')
+            except Exception:
+                pass
+            await cur.execute(f'create table {self.TABLE} (id number, c clob)')
+            await cur.execute(
+                f"insert into {self.TABLE} values (:1, 'async-clob')", [7]
+            )
+            self.assertEqual(cur.rowcount, 1)
+            # PL/SQL OUT bind via callfunc
+            await cur.execute(
+                'create or replace function zz_seerdb_af (a number) return number is '
+                'begin return a * 3; end;'
+            )
+            self.assertEqual(await cur.callfunc('zz_seerdb_af', int, [11]), 33)
+            # LOB read
+            await cur.execute(f'select id, c from {self.TABLE}')
+            self.assertEqual(await cur.fetchall(), [(7, 'async-clob')])
+            await conn.commit()
+        finally:
+            try:
+                await conn.cursor().execute(f'drop table {self.TABLE}')
+                await conn.cursor().execute('drop function zz_seerdb_af')
+            except Exception:
+                pass
+            await conn.close()
+
+
 if __name__ == '__main__':
     unittest.main()
