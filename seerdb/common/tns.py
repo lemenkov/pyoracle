@@ -3890,30 +3890,34 @@ def encode_8i_oall8_dml(
     return _encode_8i_oall8(Seq, Sql, StmtType, Binds or [])
 
 
-def encode_8i_oall8_fetch(Seq: int, Cursor: int, Count: int) -> bytes:
+def encode_8i_oall8_fetch(
+    Seq: int, Cursor: int, Count: int, LongSize: int = 0x7FFFFFFF
+) -> bytes:
     # Oracle 8i array fetch: the 9.2-era OALL8 (0x5e) with the fetch option
     # (0x40) and no SQL, pulling up to `Count` more rows from an open cursor
     # (docs/PROTOCOL.md §19.10). 8i's execute returns only the first row batch;
     # the client fetches the rest until a batch comes back empty (ORA-01403).
     # Reverse-engineered from the 9.2-client trace; fixed apart from the TTI
-    # sequence byte, the cursor id, and the row count (both big-endian ub4).
-    return (
-        bytes([TTI_FUN, TTI_ALL8, Seq & 0xFF, 0x40])
-        + Cursor.to_bytes(4, 'big')
-        + bytes(8)
-        + bytes([0x01, 0x0C])
-        + bytes(4)
-        + bytes([0x01])
-        + bytes(5)
-        + Count.to_bytes(4, 'big')  # rows to fetch
-        + bytes(12)
-        + bytes([0x01])
-        + bytes(4)
-        + bytes([0x0F])
-        + bytes(23)
-        + bytes([0x01])
-        + bytes(19)
-    )
+    # sequence byte, the cursor id, and two ub4 LITTLE-endian counts:
+    #   - offset 31: the LONG fetch size — the maximum bytes of a LONG / LONG RAW
+    #     column the server returns per row. 8i truncates the value to this size
+    #     (it does NOT continue one LONG across fetch round trips), so the caller
+    #     passes a large cap to read the whole value (#377). For a query with no
+    #     LONG column it is just a prefetch hint. An earlier version wrote the row
+    #     count here as big-endian, whose low byte landed on this field and capped
+    #     every LONG at `fetch` bytes.
+    #   - offset 49: the number of rows to return this call (1 when a LONG column
+    #     is present — 8i forces single-row fetches for LONGs).
+    Msg = bytearray(93)
+    Msg[0:4] = bytes([TTI_FUN, TTI_ALL8, Seq & 0xFF, 0x40])
+    Msg[4:8] = Cursor.to_bytes(4, 'big')
+    Msg[16:18] = bytes([0x01, 0x0C])
+    Msg[22] = 0x01
+    Msg[31:35] = min(LongSize, 0xFFFFFFFF).to_bytes(4, 'little')  # LONG fetch size
+    Msg[44] = 0x01
+    Msg[49:53] = Count.to_bytes(4, 'little')  # rows to fetch
+    Msg[73] = 0x01
+    return bytes(Msg)
 
 
 def decode_8i_cursor_id(Terminal: bytes) -> int:

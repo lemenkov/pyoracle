@@ -573,6 +573,23 @@ class TypesIntegration(_IntegrationBase):
         v = self._round_trip('LONG', "RPAD('X', 700, 'X')")
         self.assertEqual(v, 'X' * 700)
 
+    def test_long_over_sdu(self):
+        # A LONG larger than one SDU-sized packet: the fetch response spans
+        # several packets, which the reader must reassemble into one value. On
+        # Oracle 8i this also verifies the fetch request's long-size field is set
+        # wide enough to pull the whole value (#377). Built in a PL/SQL VARCHAR2
+        # since a SQL string literal / RPAD caps at 4000.
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, l LONG)')
+        self.cur.execute(
+            f'DECLARE v VARCHAR2(32767); BEGIN '
+            f"v := RPAD('X', 4000, 'X'); v := v || RPAD('Y', 1000, 'Y'); "
+            f'INSERT INTO {self.TABLE} VALUES (1, v); END;'
+        )
+        self.conn.commit()
+        self.cur.execute(f'SELECT l FROM {self.TABLE} WHERE id = 1')
+        v = self.cur.fetchone()[0]
+        self.assertEqual(v, 'X' * 4000 + 'Y' * 1000)
+
     def test_long_null(self):
         self.assertIsNone(self._round_trip('LONG', 'NULL'))
 

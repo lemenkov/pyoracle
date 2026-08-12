@@ -2658,6 +2658,37 @@ the column charset (WE8ISO8859P1), BLOB stays bytes (`decode_fv2_lob`). Encoder:
 `encode_8i_lob_read`; driver: `_lob_read_8i` / `_resolve_8i_lobs`. BFILE is a
 follow-up.
 
+### 19.16 Oracle 8i LONG / LONG RAW read — the fetch long-size field (#377)
+
+A LONG (TNS type 8) or LONG RAW (type 24) value rides in the RXD as an ordinary
+**chunked DALC** — the `0xFE` marker then one length byte per chunk (up to 255),
+ended by a zero-length chunk — so `decode_8i_exec_response` already reassembles
+it. The catch is **how much of the value the server sends**, which is governed by
+two `ub4` **little-endian** fields in the `encode_8i_oall8_fetch` request:
+
+```
+offset 31  ub4-LE  LONG fetch size — max bytes of a LONG/LONG RAW returned per row
+offset 49  ub4-LE  rows to fetch this call
+```
+
+8i **truncates** the value to the long-fetch-size and does **not** continue one
+LONG across fetch round trips (a size of 1000 returns exactly 1000 bytes), so the
+driver passes a large cap (`0x7FFFFFFF`) whenever a describe column is type 8/24.
+It also drops the row count to **1** for such a cursor — 8i forces single-row
+fetches when a LONG is present (`sqlplus` does the same). An earlier encoder
+wrote the row count **big-endian** across offsets 28–31; its low byte landed on
+the long-fetch-size and capped every LONG at `fetch` bytes (the #377 symptom: a
+17-byte LONG read back as 15).
+
+**Multi-packet reassembly.** A LONG larger than the negotiated SDU (2048 by
+default) makes the fetch response span several `TNS_DATA` packets, and 8i sets
+**no end-of-message flag** — every packet header carries `flags = 0x00`. There is
+no framing signal, so the driver accumulates packets and uses the decoder itself
+as the completeness test: `decode_8i_exec_response` raises while a value is still
+truncated, and a complete response ends on a terminal token (`0x08` piggyback /
+`0x04` OER, ≥ 12 bytes for the cursor id). `_recv_8i_rows` reads until that holds.
+Driver: `_execute_8i_select` / `_recv_8i_rows`; encoder: `encode_8i_oall8_fetch`.
+
 ## 20. Oracle 23ai field version 24 — fast-auth + the fv24 framing (#89)
 
 Column **annotations** are only delivered when the client advertises a TTC
