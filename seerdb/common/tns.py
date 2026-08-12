@@ -3702,10 +3702,15 @@ def _encode_8i_bind_oac(Value: object) -> bytes:
     else:  # str (and anything else via its str() form) -> VARCHAR2
         DType, Charset, Csform = 1, 31, 1
         MaxSize = max(len(str(Value).encode('latin-1')), 1)
+    # max_size rides as a 2-byte LITTLE-endian field at offset +4 (8i is x86):
+    # `type, 0x03, 00, 00, <max_size LE16>, …`. For values <= 255 this is
+    # byte-identical to a 3-byte big-endian field, which is why short binds
+    # worked; at >= 256 the little-endian form is required — otherwise the 8i
+    # server mis-reads the size and rejects the bind as a LONG value (ORA-01461).
     return (
-        bytes([DType, 0x03])
-        + MaxSize.to_bytes(3, 'big')
-        + bytes(14)
+        bytes([DType, 0x03, 0, 0])
+        + min(MaxSize, 0xFFFF).to_bytes(2, 'little')
+        + bytes(13)
         + Charset.to_bytes(4, 'big')
         + bytes([0, Csform])
     )

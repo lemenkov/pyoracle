@@ -4584,6 +4584,24 @@ class O8iDmlIntegration(unittest.TestCase):
         self.cur.execute(f'select v, nv, nc from {self.TABLE}')
         self.assertEqual(self.cur.fetchone(), ('café-niño', 'nv-val', 'nchar '))
 
+    def test_bind_over_255_bytes(self):
+        # A VARCHAR2 / RAW bind of 256+ bytes (#375): the OAC max_size must ride
+        # little-endian or 8i rejects it as a LONG value (ORA-01461).
+        self.cur.execute(f'drop table {self.TABLE}')
+        self.cur.execute(f'create table {self.TABLE} (v varchar2(4000), r raw(2000))')
+        big = 'Z' * 500
+        raw = bytes(range(256)) + bytes(range(44))  # 300 bytes, all byte values
+        self.cur.execute(f'insert into {self.TABLE} (v) values (:1)', [big])
+        self.cur.execute(f'insert into {self.TABLE} (r) values (:1)', [raw])
+        self.conn.commit()
+        self.cur.execute(f'select v from {self.TABLE} where v is not null')
+        self.assertEqual(self.cur.fetchone()[0], big)
+        self.cur.execute(f'select r from {self.TABLE} where r is not null')
+        self.assertEqual(self.cur.fetchone()[0], raw)
+        # SELECT bind at 4000 bytes too
+        self.cur.execute('select length(:s) from dual', ['A' * 4000])
+        self.assertEqual(self.cur.fetchone()[0], 4000)
+
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class AsyncO8iIntegration(unittest.IsolatedAsyncioTestCase):

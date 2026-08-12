@@ -2558,11 +2558,19 @@ describe column OAC (§19.10):
 
 ```
 ub1  data type (1 VARCHAR2, 2 NUMBER, 12 DATE, 23 RAW)
-ub4be  flag 0x03 | max_size   (22 for NUMBER, 7 for DATE, value length otherwise)
-14 bytes reserved
-ub4be  character set (31 for char types, 0 otherwise)
+ub1  flag 0x03    ub2 reserved(0)
+ub2-LE  max_size  (22 for NUMBER, 7 for DATE, value length otherwise)   [+4]
+13 bytes reserved
+ub4be  character set (31 for char types, 0 otherwise)                   [+19]
 ub1 reserved(0)  ub1 csform (1 for char types, 0 otherwise)
 ```
+
+`max_size` is a **little-endian ub2 at offset +4** (8i is x86). For values ≤ 255
+this is byte-identical to a big-endian 3-byte field (so short binds worked
+either way), but a bind of **≥ 256 bytes** needs the little-endian form — a value
+sent with `max_size` in the wrong bytes is mis-read as a LONG and rejected with
+**ORA-01461** (#375). Values > 64 bytes ride the chunked string form (`0xFE` +
+64-byte chunks), same as any long char value.
 
 Each value is a plain DALC (`encode_token_rxd`): NUMBER 5 → `02 c1 06`, `'SYS'` →
 `03 53 59 53` (WE8ISO8859P1), a **NULL** bind → the empty DALC `00`. The encode
