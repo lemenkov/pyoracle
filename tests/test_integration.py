@@ -4548,6 +4548,26 @@ class O8iDmlIntegration(unittest.TestCase):
         finally:
             self.cur.execute('drop procedure zz_seerdb_io')
 
+    def test_clob_blob_read(self):
+        # LOB read (#364): a CLOB (short + a 4000-char one that spans packets), a
+        # BLOB, and NULL LOBs — resolved via the single TTI_LOBOPS READ.
+        self.cur.execute(f'drop table {self.TABLE}')
+        self.cur.execute(f'create table {self.TABLE} (id number, c clob, b blob)')
+        self.cur.execute(
+            f'insert into {self.TABLE} values '
+            "(1, 'hello-clob', hextoraw('DEADBEEF00CAFE'))"
+        )
+        self.cur.execute(
+            f"insert into {self.TABLE} values (2, rpad('A', 4000, 'AB'), hextoraw('00'))"
+        )
+        self.cur.execute(f'insert into {self.TABLE} values (3, NULL, NULL)')
+        self.conn.commit()
+        self.cur.execute(f'select id, c, b from {self.TABLE} order by id')
+        rows = self.cur.fetchall()
+        self.assertEqual(rows[0], (1, 'hello-clob', b'\xde\xad\xbe\xef\x00\xca\xfe'))
+        self.assertEqual((rows[1][0], len(rows[1][1]), rows[1][2]), (2, 4000, b'\x00'))
+        self.assertEqual(rows[2], (3, None, None))
+
 
 if __name__ == '__main__':
     unittest.main()

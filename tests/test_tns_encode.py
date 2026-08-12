@@ -6884,3 +6884,65 @@ class TestO8iQueryMessages(unittest.TestCase):
             decode_8i_block_out(self.RESP_INOUT, 2),
             [bytes.fromhex('c10c'), b'hi-io'],
         )
+
+    # 9.2-client CLOB read (#364): the `select id, c` describe + row (#61), the
+    # single TTI_LOBOPS READ request (#62), and the content reply (#63).
+    CLOB_DCB = bytes.fromhex(
+        '1019e7f93000405a66050000787e080c160e253507000000000000b60f000002'
+        '0000003302000000160000000000000000000000000000000000000000010202'
+        '000000024944000000000000000070000000a00f000000000000000000000000'
+        '00000000000001010101000000014300000000000000000700000007787e080c'
+        '160e250602020000000100000000000000000000000702c10200000000560000'
+        '005600540001020c0000000100000001000000001f7300006122000061210002'
+        '0002001f00000000000000000000000000000000000000058b47000000000000'
+        '0000000000000000000000000000000061210140000300000000000008040047'
+        '8b05000000000001000000000000000000000004010000000000000000000100'
+        '12000300400000002161000005000003000000000000000000001c0000010000'
+        '000000000000000000000000000000'
+    )
+    LOBOP_REQ = bytes.fromhex(
+        '03601d0156000000000000000001000000000000000001000200000000000000'
+        '0000540001020c0000000100000001000000001f730000612200006121000200'
+        '02001f00000000000000000000000000000000000000058b4700000000000000'
+        '000000000000000000000000000000612101400003000050000000'
+    )
+    LOB_CONTENT = bytes.fromhex(
+        '0efe1568656c6c6f2d636c6f622d636f6e74656e742d3869000800540001020c'
+        '0000000100000001000000001f73000061220000612100020002001f00000000'
+        '000000000000000000000000000000058b470000000000000000000000000000'
+        '0000000000000000612101400003000015000000040100000000000000000000'
+        '0000000000400000002161000005000003000000000000000000001d00000100'
+        '00000000000000000000000000000000'
+    )
+
+    def test_lob_column_decode(self):
+        # A CLOB column in the row is a ub4-LE num_bytes + DALC locator; the
+        # decoder yields a LOB carrying that locator (resolved later).
+        from seerdb.common.lob import LOB
+        from seerdb.common.tns import decode_8i_dcb_describe, decode_8i_exec_response
+
+        (cols, rest) = decode_8i_dcb_describe(self.CLOB_DCB)
+        self.assertEqual([c['column_name'] for c in cols], [b'ID', b'C'])
+        self.assertEqual([c['data_type'] for c in cols], [2, 112])  # NUMBER, CLOB
+        (rows, _, _) = decode_8i_exec_response(rest, cols)
+        self.assertEqual(rows[0][0], 1)
+        self.assertIsInstance(rows[0][1], LOB)
+        self.assertEqual(rows[0][1].data_type, 112)
+        # the locator matches the one the LOBOPS request carries
+        self.assertEqual(rows[0][1].raw, self.LOBOP_REQ[33:-4])
+
+    def test_lob_read_request_byte_exact(self):
+        # The single TTI_LOBOPS READ: LE locator length + middle + locator + LE
+        # amount (80 here). Byte-exact against the captured request.
+        from seerdb.common.tns import encode_8i_lob_read
+
+        locator = self.LOBOP_REQ[33:-4]
+        self.assertEqual(encode_8i_lob_read(0x1D, locator, 80), self.LOBOP_REQ)
+
+    def test_lob_content_decode(self):
+        # 8i's single READ reply is the shared `0e fe <chunks> 00` form.
+        from seerdb.common.tns import decode_fv2_lob_chunks
+
+        (content, complete) = decode_fv2_lob_chunks(self.LOB_CONTENT)
+        self.assertTrue(complete)
+        self.assertEqual(content, b'hello-clob-content-8i')
