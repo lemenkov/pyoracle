@@ -3671,6 +3671,186 @@ def decode_fv2_describe(Data: bytes) -> list[dict]:
     return Columns
 
 
+def encode_8i_oall8_query(Seq: int, Sql: bytes) -> bytes:
+    # Oracle 8i SELECT execute: the 9.2-era OALL8 (TTI_ALL8, 0x5e) request
+    # (docs/PROTOCOL.md §19.10). 8i CANNOT parse the modern (10g+) OALL8 layout
+    # this driver builds for every other tier — it answers that with an empty
+    # packet and hangs up — so 8i needs this byte-compatible pre-10g form,
+    # reverse-engineered from a live 9.2-client -> 8.1.7 trace. No define block
+    # is sent: the column layout comes back in the 8i TTI_DCB describe
+    # (decode_8i_dcb_describe). The message is fixed apart from the TTI sequence
+    # byte and the SQL length, which is carried twice as a length-prefixed ub4
+    # (encode_sb4): once in the options header, once prefixing the SQL text.
+    SqlLen = encode_sb4(len(Sql))
+    return (
+        bytes([TTI_FUN, TTI_ALL8, Seq & 0xFF])
+        + bytes([0x61, 0x80, 0, 0, 0, 0, 0, 0])  # execute options (query)
+        + SqlLen  # SQL length (ub4)
+        + bytes([0, 0, 0])
+        # al8i4-style count array: mostly zero, three `01` markers the 8i server
+        # requires (define count / iteration / bind count), captured verbatim.
+        + bytes([0x01, 0x0C, 0, 0, 0, 0, 0x01, 0, 0, 0, 0, 0x01, 0, 0, 0, 0])
+        + bytes(12)
+        + SqlLen  # SQL length again, prefixing the text
+        + Sql
+        # trailer: bind-count / define-count markers (no binds, no defines)
+        + bytes([0x01])
+        + bytes(27)
+        + bytes([0x01])
+        + bytes(19)
+    )
+
+
+def encode_8i_oall8_fetch(Seq: int, Cursor: int, Count: int) -> bytes:
+    # Oracle 8i array fetch: the 9.2-era OALL8 (0x5e) with the fetch option
+    # (0x40) and no SQL, pulling up to `Count` more rows from an open cursor
+    # (docs/PROTOCOL.md §19.10). 8i's execute returns only the first row batch;
+    # the client fetches the rest until a batch comes back empty (ORA-01403).
+    # Reverse-engineered from the 9.2-client trace; fixed apart from the TTI
+    # sequence byte, the cursor id, and the row count (both big-endian ub4).
+    return (
+        bytes([TTI_FUN, TTI_ALL8, Seq & 0xFF, 0x40])
+        + Cursor.to_bytes(4, 'big')
+        + bytes(8)
+        + bytes([0x01, 0x0C])
+        + bytes(4)
+        + bytes([0x01])
+        + bytes(5)
+        + Count.to_bytes(4, 'big')  # rows to fetch
+        + bytes(12)
+        + bytes([0x01])
+        + bytes(4)
+        + bytes([0x0F])
+        + bytes(23)
+        + bytes([0x01])
+        + bytes(19)
+    )
+
+
+def decode_8i_cursor_id(Terminal: bytes) -> int:
+    # The server-assigned cursor id, needed to drive the 8i fetch loop. It sits
+    # at offset 11 of the response's post-row terminal — whether that terminal
+    # opens with the 0x08 session-state piggyback (08 04 00 11 89 05 00 00 00 00
+    # 00 <cid>) or goes straight to the 0x04 OER (04 01 00 00 00 00 00 00 00 00
+    # 00 <cid>); the cursor id is a ub2 at [10:12] in both. Returns 0 when the
+    # terminal is too short (an empty result set), which suppresses the fetch.
+    if len(Terminal) < 12:
+        return 0
+    return int.from_bytes(Terminal[10:12], 'big')
+
+
+def decode_8i_exec_response(Data: bytes, Columns: list) -> tuple[list, bytes]:
+    # Decode an 8i execute/fetch row stream: repeated TTI_RXH (06) + TTI_RXD (07)
+    # pairs, one row per RXD, terminated by the 0x08 piggyback / 0x04 OER
+    # (docs/PROTOCOL.md §19.10). Unlike the 9i fv2 rows (decode_fv2_exec_response,
+    # a 1-byte indicator), each 8i column value is a DALC followed by a FIXED
+    # 4-byte trailer — an sb2 indicator + ub2 return code, both zero when the
+    # value is present. A NULL column carries no value DALC at all: it is the
+    # 4-byte `ff ff 00 00` (indicator -1) on its own. Values are WE8ISO8859P1
+    # (latin-1); decode_value uses the column charset. Returns (rows, terminal)
+    # where `terminal` is the bytes from the first post-row token (for the
+    # cursor id / EOF check).
+    from seerdb.common.types import decode_value
+
+    Rows: list = []
+    Rest = Data
+    while Rest:
+        Token = Rest[0]
+        if Token == TTI_RXH:
+            # token + 1B flags, then a run of small ub4 counts; consume until the
+            # next token appears (same tactic as decode_fv2_exec_response).
+            Rest = Rest[2:]
+            while Rest and Rest[0] not in (TTI_RXH, TTI_RXD, TTI_OER, TTI_RPA):
+                (_, Rest) = decode_ub4(Rest)
+        elif Token == TTI_RXD:
+            Rest = Rest[1:]
+            Row: list = []
+            for Col in Columns:
+                if Rest and Rest[0] == 0xFF:
+                    # NULL column: sb2 indicator 0xFFFF + ub2 return code 0x0000,
+                    # with no value DALC.
+                    Rest = Rest[4:]
+                    Row.append(None)
+                else:
+                    (Val, Rest) = decode_dalc(Rest)
+                    Rest = Rest[4:]  # sb2 indicator (0) + ub2 return code (0)
+                    Row.append(decode_value(Col, Val))
+            Rows.append(Row)
+        else:
+            break
+    return (Rows, Rest)
+
+
+def decode_8i_dcb_describe(Data: bytes) -> tuple[list[dict], bytes]:
+    # Oracle 8i answers the modern OALL8 (0x5e) execute with a TTI_DCB (0x10)
+    # describe block whose header and per-column descriptors use FIXED-width
+    # big-endian fields — NOT the ub1-length-prefixed ub4s the 10g+ DCB
+    # (decode_token_dcb) expects. The modern decoder therefore reads num_columns
+    # as 0 and desyncs, so 8i needs this dedicated parser. Reverse-engineered
+    # from a live 9.2-client -> 8.1.7 SQL*Net trace (docs/PROTOCOL.md §19.9).
+    # Returns (columns, rest) where `rest` begins at the fv2 row stream
+    # (TTI_RXH / TTI_RXD / TTI_OER), which decode_fv2_exec_response consumes.
+    #
+    # Layout (offsets into the TTC payload):
+    #   0        TTI_DCB (0x10)
+    #   1        ub1 preamble length (0x19 = 25) — SCN + 7-byte date, skipped
+    #   2..      preamble bytes
+    #   header:  ub1 row width (sum of column widths, skipped)
+    #            ub4be num_columns
+    #            ub4be constant 0x33 (skipped)
+    #   per column (num_columns times):
+    #     +0      ub1  data type (1=VARCHAR2, 2=NUMBER, 96=CHAR, …)
+    #     +1..+4  ub4be: bit31 = character flag, low 31 bits = max_size
+    #     +5..+18 14 bytes precision/scale/reserved (0 for literals; not decoded)
+    #     +19..22 ub4be character set id (31 = WE8ISO8859P1; 0 for NUMBER)
+    #     +23     reserved (0)
+    #     +24     ub1 csform (1 = character type, 0 = number)
+    #     +25     ub1 null_ok (0 = NOT NULL, 1 = nullable)
+    #     +26,+27 ub1 name length (twice)
+    #     +28..31 ub4be name length
+    #     +32..   name bytes (name length)
+    #     +…      8-byte inter-column trailer (type-OID slot; 0 for scalar types)
+    #   trailer  8i bytes-with-length current date: ub1 len, ub4be len, len bytes
+    PreLen = Data[1]
+    Off = 2 + PreLen  # skip the SCN/date preamble
+    Off += 1  # row width (ub1)
+    NumCols = int.from_bytes(Data[Off : Off + 4], 'big')
+    Off += 4
+    Off += 4  # constant 0x33
+    Columns: list[dict] = []
+    for _ in range(NumCols):
+        DataType = Data[Off]
+        SizeField = int.from_bytes(Data[Off + 1 : Off + 5], 'big')
+        MaxSize = SizeField & 0x7FFFFFFF  # bit31 is the character-type flag
+        Charset = int.from_bytes(Data[Off + 19 : Off + 23], 'big')
+        Csform = Data[Off + 24]
+        NullOk = 0 if Data[Off + 25] == 0 else 1
+        NameLen = int.from_bytes(Data[Off + 28 : Off + 32], 'big')
+        Name = bytes(Data[Off + 32 : Off + 32 + NameLen])
+        Columns.append(
+            {
+                'data_type': DataType,
+                'data_length': MaxSize,
+                'data_scale': 0,
+                'precision': 0,
+                'max_size': MaxSize,
+                'charset': Charset,
+                'csfrm': Csform,
+                'null_ok': NullOk,
+                'domain_schema': None,
+                'domain_name': None,
+                'column_name': Name,
+            }
+        )
+        Off += 32 + NameLen + 8  # descriptor + name + type-OID trailer
+    # Describe trailer: the current date as an 8i bytes-with-length value
+    # (ub1 len, ub4be len, data) — the same pre-10g coding the OSESSKEY login
+    # uses. Skip it to land on the first row token (TTI_RXH / TTI_RXD).
+    TLen = int.from_bytes(Data[Off + 1 : Off + 5], 'big')
+    Off += 1 + 4 + TLen
+    return (Columns, Data[Off:])
+
+
 def _decode_fv2_oer(Rest: bytes) -> tuple[int, int, bytes]:
     # Minimal fv2 (9i) OER: the short pre-10g form. The exec+fetch terminates
     # with `04 <ub4 rows-this-fetch> <ub4 ORA code> …`; ORA-01403 ("no data

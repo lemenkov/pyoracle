@@ -6505,3 +6505,108 @@ class TestO8iOsesskeyMessages(unittest.TestCase):
         self.assertEqual(_DTY_8I[0], 2)  # TTI_DTY
         self.assertEqual(struct.unpack('<H', _DTY_8I[1:3])[0], 31)  # WE8ISO8859P1
         self.assertEqual(struct.unpack('<H', _DTY_8I[3:5])[0], 31)
+
+
+class TestO8iQueryMessages(unittest.TestCase):
+    # Pinned against a live 9.2-client -> 8.1.7 query trace
+    # (~/o8i/captures/cli8i_9.2_queries.trc, #244 task #4). 8i speaks the 9.2-era
+    # OALL8 (0x5e): the modern 10g+ OALL8 draws an empty packet + hangup, so 8i
+    # has its own request encoders + fv2-style TTI_DCB / RXD response decoders.
+
+    # The 9.2-client OALL8 for `select 42 as n, 'hello' as s from dual` (#48).
+    REQ48 = bytes.fromhex(
+        '035e1661800000000000000126000000010c0000000001000000000100000000'
+        '000000000000000000000000012673656c656374203432206173206e2c202768'
+        '656c6c6f2720617320732066726f6d206475616c010000000000000000000000'
+        '0000000000000000000000000000000001000000000000000000000000000000'
+        '00000000'
+    )
+    # The 9.2-client fetch OALL8 (#56): option 0x40, cursor id 1, count 31.
+    FETCH56 = bytes.fromhex(
+        '035e1a40000000010000000000000000010c000000000100000000000000001f'
+        '00000000000000000000000001000000000f0000000000000000000000000000'
+        '0000000000000000000100000000000000000000000000000000000000'
+    )
+    # The TTI_DCB (0x10) response to #48: 2 columns N (NUMBER), S (CHAR), one
+    # row (42, 'hello'), the row value carrying the 8i 4-byte column trailer.
+    DCB49 = bytes.fromhex(
+        '1019f716206b58aa82050000787e080c112f1390040000000000000700000002'
+        '0000003302000000020000000000000000000000000000000000000000010101'
+        '000000014e000000000000000060800000050000000000000000000000000000'
+        '0000001f0001010101000000015300000000000000000700000007787e080c11'
+        '2f130602020000000100000000000000000000000702c12b000000000568656c'
+        '6c6f000000000804001189050000000000010000000000000000000000040100'
+        '0000000000000000010022000300400000000000000000000000000000000000'
+        '00000000160000010000000000000000000000000000000000'
+    )
+    # A live TTI_DCB response for `select 1 a, cast(null as varchar2(4)) b,
+    # 'xy' cc from dual` — the NULL column rides as the bare 4-byte `ff ff 00 00`.
+    NULLDCB = bytes.fromhex(
+        '10193c59601d545981050000787e080c131b05a8040000000000000400000003'
+        '0000003302000000020000000000000000000000000000000000000000010101'
+        '0000000141000000000000000001800000000000000000000000000000000000'
+        '0000001f00010101010000000142000000000000000060800000020000000000'
+        '0000000000000000000000001f00010102020000000243430000000000000000'
+        '0700000007787e080c13211d0602030000000100000000000000000000000702'
+        'c10200000000ffff000002787900000000080400138905000000000001000000'
+        '0000000000000000040100000000000000000001000000030040000000000000'
+        '0000000000000000000000000000000600000100000000000000000000000000'
+        '00000000'
+    )
+
+    def setUp(self):
+        # 8i pins field version 2; set it for the decode tests and restore
+        # afterwards so the shared ContextVar does not leak into other tests.
+        from seerdb.common.tns import _DECODE_FIELD_VERSION
+
+        self._fv_token = _DECODE_FIELD_VERSION.set(2)
+
+    def tearDown(self):
+        from seerdb.common.tns import _DECODE_FIELD_VERSION
+
+        _DECODE_FIELD_VERSION.reset(self._fv_token)
+
+    def test_oall8_query_byte_exact(self):
+        from seerdb.common.tns import encode_8i_oall8_query
+
+        sql = b"select 42 as n, 'hello' as s from dual"
+        self.assertEqual(encode_8i_oall8_query(0x16, sql), self.REQ48)
+
+    def test_oall8_fetch_byte_exact(self):
+        from seerdb.common.tns import encode_8i_oall8_fetch
+
+        self.assertEqual(encode_8i_oall8_fetch(0x1A, 1, 31), self.FETCH56)
+
+    def test_dcb_describe_columns(self):
+        from seerdb.common.tns import decode_8i_dcb_describe
+
+        (cols, _) = decode_8i_dcb_describe(self.DCB49)
+        self.assertEqual([c['column_name'] for c in cols], [b'N', b'S'])
+        self.assertEqual([c['data_type'] for c in cols], [2, 96])  # NUMBER, CHAR
+        self.assertEqual(cols[1]['max_size'], 5)
+        self.assertEqual(cols[1]['charset'], 31)  # WE8ISO8859P1
+        self.assertEqual(cols[0]['charset'], 0)  # NUMBER has no charset
+
+    def test_dcb_row_and_cursor_id(self):
+        from seerdb.common.tns import (
+            decode_8i_cursor_id,
+            decode_8i_dcb_describe,
+            decode_8i_exec_response,
+        )
+
+        (cols, rest) = decode_8i_dcb_describe(self.DCB49)
+        (rows, terminal) = decode_8i_exec_response(rest, cols)
+        self.assertEqual(rows, [[42, 'hello']])
+        self.assertEqual(decode_8i_cursor_id(terminal), 1)
+
+    def test_dcb_null_column(self):
+        # The NULL column decodes to None, the present neighbours intact.
+        from seerdb.common.tns import (
+            decode_8i_dcb_describe,
+            decode_8i_exec_response,
+        )
+
+        (cols, rest) = decode_8i_dcb_describe(self.NULLDCB)
+        self.assertEqual([c['column_name'] for c in cols], [b'A', b'B', b'CC'])
+        (rows, _) = decode_8i_exec_response(rest, cols)
+        self.assertEqual(rows, [[1, None, 'xy']])
