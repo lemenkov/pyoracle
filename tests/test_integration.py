@@ -4531,6 +4531,23 @@ class O8iDmlIntegration(unittest.TestCase):
             self.cur.execute('drop procedure zz_seerdb_p')
             self.cur.execute('drop function zz_seerdb_f')
 
+    def test_in_out_binds(self):
+        # IN OUT binds (#363): the input value rides inline and the updated value
+        # comes back, in one round trip. Also covers a mixed IN / IN OUT / OUT proc.
+        self.cur.execute(
+            'create or replace procedure zz_seerdb_io '
+            '(a in number, b in out number, c out varchar2) is '
+            "begin b := a + b; c := 'done'; end;"
+        )
+        try:
+            b = self.cur.var(int)
+            b.setvalue(0, 100)
+            c = self.cur.var(str)
+            self.cur.execute('begin zz_seerdb_io(:1, :2, :3); end;', [5, b, c])
+            self.assertEqual((b.getvalue(), c.getvalue()), (105, 'done'))
+        finally:
+            self.cur.execute('drop procedure zz_seerdb_io')
+
 
 if __name__ == '__main__':
     unittest.main()

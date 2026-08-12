@@ -6842,3 +6842,45 @@ class TestO8iQueryMessages(unittest.TestCase):
         self.assertEqual(
             decode_8i_block_out(self.RESP_FUNC_OUT, 1), [bytes.fromhex('c20208')]
         )
+
+    # 9.2-client IN OUT block (#363): `BEGIN zz_io(:v, :s); END;` with :v = 10 and
+    # :s = 'hi' as IN OUT (#60) and its reply (#61: v = 11, s = 'hi-io').
+    REQ_INOUT = bytes.fromhex(
+        '035e1c29040400000000000119000000010c0000000001000000000100000000'
+        '0000000102000000000000000119424547494e207a7a5f696f283a762c203a73'
+        '293b20454e443b01000000010000000000000000000000000000000000000000'
+        '0000000800000000000000000000000000000000000000020300001600000000'
+        '0000000000000000000000000000000001030000140000000000000000000000'
+        '0000000000001f00010702c10b026869'
+    )
+    RESP_INOUT = bytes.fromhex(
+        '0b050200000001000000000000000000000030300702c10c00000568692d696f'
+        '0000080400c88a05000000000001000000000000000000000004010000000000'
+        '00000000010000002f0040000000000000000000000000000000000000000000'
+        '1c0000010000000000000000000000000000000000'
+    )
+
+    def test_inout_bind_sends_inline_value(self):
+        # An IN OUT `Var` (setvalue -> has_value) sends its input value INLINE,
+        # not the OUT placeholder — byte-exact against the captured request.
+        from seerdb.common.datatypes import Var
+        from seerdb.common.tns import O8I_STMT_BEGIN, encode_8i_oall8_dml
+
+        v = Var(int)
+        v.setvalue(0, 10)
+        s = Var(str, 20)
+        s.setvalue(0, 'hi')
+        msg = encode_8i_oall8_dml(
+            0x1C, b'BEGIN zz_io(:v, :s); END;', O8I_STMT_BEGIN, [v, s]
+        )
+        self.assertEqual(msg, self.REQ_INOUT)
+        # value section: 07 marker + NUMBER 10 (02 c1 0b) + 'hi' (02 68 69)
+        self.assertTrue(msg.endswith(bytes.fromhex('0702c10b026869')))
+
+    def test_inout_response_returns_updated_values(self):
+        from seerdb.common.tns import decode_8i_block_out
+
+        self.assertEqual(
+            decode_8i_block_out(self.RESP_INOUT, 2),
+            [bytes.fromhex('c10c'), b'hi-io'],
+        )

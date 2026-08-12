@@ -2615,6 +2615,12 @@ the RPA + OER. `decode_8i_block_out` returns the raw value bytes per OUT bind; t
 cursor's `_assign_out_binds` decodes each against its `Var`'s type. `callfunc`
 is the same shape with the return value as the first (`:1`) OUT bind.
 
+An **IN OUT** bind (#363) is a `Var` whose value is set: it sends its input value
+**inline** in the request (not the `fd 01` placeholder) and its updated value
+comes back in the reply's RXD, both in the same single round trip. Its prompt
+direction is `0x30`. No extra machinery — the inline value path and the OUT-value
+decode above already cover it.
+
 ## 20. Oracle 23ai field version 24 — fast-auth + the fv24 framing (#89)
 
 Column **annotations** are only delivered when the client advertises a TTC
