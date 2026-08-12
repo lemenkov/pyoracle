@@ -373,10 +373,15 @@ Client                              Server
 
 Client sends:
 ```
-TTI_PRO | 6 | 5 | 4 | 3 | 2 | 1 | 0 | "python" | 0
+TTI_PRO | 6 | 5 | 4 | 3 | 2 | 1 | 0 | "<client banner>" | 0
 ```
 - `6, 5, 4, 3, 2, 1, 0`: Protocol version vector (descending preference).
-- `"python"`: Client driver name (null-terminated).
+- `"<client banner>"`: NUL-terminated client self-identifier. A real Oracle
+  client sends its platform (e.g. `x86_64/Linux`); seerdb sends
+  `seerdb <machine>/<system>` (e.g. `seerdb x86_64/Linux`) so the value both
+  identifies the driver and carries the platform (#381). The server accepts an
+  arbitrary length here (verified 9i–23ai). Earlier releases sent the bare
+  `python`.
 
 The server replies with a TTI_PRO message carrying its own capabilities — this
 is where the client learns the server's TTC field version and negotiates the

@@ -2175,6 +2175,20 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
             encode_dictionary_pig(Dict), bytes([17, 105, 13, 1, 1, 1, 1, 1])
         )
 
+    def test_tns_pro_banner(self):
+        # #381: the PRO request is TTI_PRO + the 6..0 version vector, then a
+        # single NUL-terminated client banner that identifies seerdb and carries
+        # the platform. Platform-independent structural assertions.
+        from seerdb.common.tns import TTI_PRO, encode_dictionary_pro
+
+        Msg = encode_dictionary_pro({})
+        self.assertEqual(Msg[:8], bytes([TTI_PRO, 6, 5, 4, 3, 2, 1, 0]))
+        self.assertTrue(Msg.endswith(b'\x00'))
+        Banner = Msg[8:-1]
+        self.assertTrue(Banner.startswith(b'seerdb '))
+        self.assertNotIn(b'\x00', Banner)  # exactly one terminator
+        self.assertNotIn(b'python', Banner)
+
     def test_tns_dty_0(self):
         Dict = {'type': DictionaryType.dty, 'req': 'utf-8'}
         Wtf0 = bytes(
