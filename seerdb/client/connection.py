@@ -38,6 +38,7 @@ from seerdb.common.tns import (
     decode_packet,
     decode_token_pro,
     decode_token_rpa,
+    encode_8i_lob_read,
     encode_8i_oall8_dml,
     encode_8i_oall8_fetch,
     encode_8i_oall8_query,
@@ -1541,7 +1542,42 @@ class OracleConnect:
             Rows.extend(More)
         # call_status 0 + ora_code 0 => _drain_cursor won't issue TTI_FETCHes;
         # the fetch loop above already assembled the full row set.
+        self._resolve_8i_lobs(Rows, Columns)
         return (0, 0, 0, (len(Rows), Columns), Rows, None, None, [], None)
+
+    def _lob_read_8i(self, Locator: bytes) -> bytes:
+        # 8i LOB content read (#364, PROTOCOL.md §19.15): a single TTI_LOBOPS READ
+        # (8i reads the whole value at once, unlike 9i's GETLEN + READ). The reply
+        # is the shared `0e fe <chunks> 00` form, which may span packets, so
+        # accumulate until decode_fv2_lob_chunks reports the zero-length end.
+        self.send(TNS_DATA, encode_8i_lob_read(self._next_seq(), Locator, 1 << 30))
+        Data = b''
+        while True:
+            Received = self._next_data_packet(b'', b'')
+            if Received is False:
+                raise Exception('Connection closed during 8i LOB read')
+            Data += Received[1]
+            (Content, Complete) = decode_fv2_lob_chunks(Data)
+            if Complete:
+                return Content
+
+    def _resolve_8i_lobs(self, Rows: list, Columns: list) -> None:
+        # Replace each LOB locator left in the rows by decode_8i_exec_response with
+        # its content: read the locator, then decode CLOB text with the column
+        # charset (WE8ISO8859P1) and keep BLOB bytes (decode_fv2_lob, shared with
+        # the 9i path).
+        from seerdb.common.lob import LOB
+        from seerdb.common.types import decode_fv2_lob
+
+        for Row in Rows:
+            for I, Val in enumerate(Row):
+                if isinstance(Val, LOB):
+                    Content = self._lob_read_8i(Val.raw)
+                    Row[I] = decode_fv2_lob(
+                        Columns[I].get('data_type'),
+                        Content,
+                        Columns[I].get('charset') or 0,
+                    )
 
     def _execute_8i_dml(self, Query: str, Bind: list | None = None) -> object:
         # Oracle 8i INSERT/UPDATE/DELETE and DDL (#360, PROTOCOL.md §19.12): the

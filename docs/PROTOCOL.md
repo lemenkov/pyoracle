@@ -2621,6 +2621,25 @@ comes back in the reply's RXD, both in the same single round trip. Its prompt
 direction is `0x30`. No extra machinery — the inline value path and the OUT-value
 decode above already cover it.
 
+### 19.15 Oracle 8i LOB read — the single TTI_LOBOPS READ (#364)
+
+A LOB column in the row is a **`ub4`-LE `num_bytes`** then a DALC **locator** (86
+bytes for a CLOB/BLOB) then the 4-byte trailer — `decode_8i_exec_response` turns
+it into a `LOB` the connection resolves after the fetch. **Two latent bugs the
+LOB describe exposed:** the DCB header's row width and `num_columns` are `ub4`-LE
+(not a 1-byte width + big-endian count) — a CLOB's 4000-byte row width is
+`a0 0f 00 00`, so any row ≥ 256 bytes wide (LOB or a wide VARCHAR2) mis-read
+`num_columns` before the fix (§19.10).
+
+Unlike 9i's GETLEN + READ pair, 8i reads the whole value in **one** `TTI_LOBOPS`
+(`0x60`) READ: `03 60 <seq> 01` + `ub4`-LE locator length + a 25-byte op middle +
+the locator + `ub4`-LE amount (chars for a CLOB, bytes for a BLOB — pass a large
+value to read it all). The reply is the **shared `0e fe <chunks> 00`** content
+form (`decode_fv2_lob_chunks`), possibly spanning packets; CLOB text decodes with
+the column charset (WE8ISO8859P1), BLOB stays bytes (`decode_fv2_lob`). Encoder:
+`encode_8i_lob_read`; driver: `_lob_read_8i` / `_resolve_8i_lobs`. BFILE is a
+follow-up.
+
 ## 20. Oracle 23ai field version 24 — fast-auth + the fv24 framing (#89)
 
 Column **annotations** are only delivered when the client advertises a TTC

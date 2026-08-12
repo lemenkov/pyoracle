@@ -3734,6 +3734,28 @@ def _encode_8i_bind_value(Value: object) -> bytes:
     return encode_token_rxd(Value)
 
 
+# The op-specific middle (25 bytes) of the 8i TTI_LOBOPS READ request, captured
+# verbatim from a 9.2-client -> 8.1.7 CLOB read (docs/PROTOCOL.md §19.15).
+_O8I_LOBOP_READ_MID = bytes.fromhex(
+    '00000000000100000000000000000100020000000000000000'
+)
+
+
+def encode_8i_lob_read(Seq: int, Locator: bytes, Amount: int) -> bytes:
+    # 8i TTI_LOBOPS (0x60) single READ: unlike 9i's GETLEN + READ pair, 8i reads
+    # the whole value in one call whose reply is the shared `0e fe <chunks> 00`
+    # LOB content (decode_fv2_lob_chunks). The locator length and read amount ride
+    # LITTLE-endian (8i is x86). `Amount` is chars for a CLOB, bytes for a BLOB;
+    # pass a large value to read the whole LOB (the server returns what exists).
+    return (
+        bytes([TTI_FUN, TTI_LOBOPS, Seq & 0xFF, 0x01])
+        + len(Locator).to_bytes(4, 'little')
+        + _O8I_LOBOP_READ_MID
+        + Locator
+        + Amount.to_bytes(4, 'little')
+    )
+
+
 def decode_8i_block_out(Data: bytes, NumOut: int) -> list:
     # Decode the OUT / IN OUT return values from an 8i PL/SQL block reply
     # (docs/PROTOCOL.md §19.14). After the bind prompt (0x0b), the values ride a
@@ -3921,6 +3943,7 @@ def decode_8i_exec_response(
     # row of the PREVIOUS batch, so the caller threads `PrevRow` in and the last
     # decoded row back out. Returns (rows, terminal, last_row) where `terminal`
     # is the bytes from the first post-row token (for the cursor id / EOF check).
+    from seerdb.common.lob import LOB
     from seerdb.common.types import decode_value
 
     Rows: list = []
@@ -3952,6 +3975,20 @@ def decode_8i_exec_response(
                     # with no value DALC.
                     Rest = Rest[4:]
                     Row.append(None)
+                elif Col.get('data_type') in (112, 113, 114):
+                    # LOB column (CLOB/BLOB/BFILE): ub4-LE num_bytes then the DALC
+                    # locator, then the 4-byte trailer. A present cell becomes a
+                    # LOB the connection resolves after the fetch (_resolve_8i_lobs);
+                    # num_bytes 0 is an empty/NULL LOB.
+                    NumBytes = int.from_bytes(Rest[0:4], 'little')
+                    Rest = Rest[4:]
+                    (Locator, Rest) = decode_dalc(Rest)
+                    Rest = Rest[4:]  # sb2 indicator + ub2 return code
+                    Row.append(
+                        LOB(Col['data_type'], bytes(Locator))
+                        if NumBytes and not isinstance(Locator, list)
+                        else None
+                    )
                 else:
                     (Val, Rest) = decode_dalc(Rest)
                     Rest = Rest[4:]  # sb2 indicator (0) + ub2 return code (0)
@@ -4031,10 +4068,13 @@ def decode_8i_dcb_describe(Data: bytes) -> tuple[list[dict], bytes]:
     #   trailer  8i bytes-with-length current date: ub1 len, ub4be len, len bytes
     PreLen = Data[1]
     Off = 2 + PreLen  # skip the SCN/date preamble
-    Off += 1  # row width (ub1)
-    NumCols = int.from_bytes(Data[Off : Off + 4], 'big')
+    # Header: max row width, then num_columns — both LITTLE-endian ub4 (8i is
+    # x86, so these ride native-endian; a wide row like a CLOB's 4000-byte width
+    # is `a0 0f 00 00`). Then the constant 0x33 byte.
+    Off += 4  # max row width (ub4 LE)
+    NumCols = int.from_bytes(Data[Off : Off + 4], 'little')
     Off += 4
-    Off += 4  # constant 0x33
+    Off += 1  # constant 0x33
     Columns: list[dict] = []
     for _ in range(NumCols):
         DataType = Data[Off]
