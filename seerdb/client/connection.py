@@ -1607,6 +1607,8 @@ class OracleConnect:
         # (8i reads the whole value at once, unlike 9i's GETLEN + READ). The reply
         # is the shared `0e fe <chunks> 00` form, which may span packets, so
         # accumulate until decode_fv2_lob_chunks reports the zero-length end.
+        from seerdb.common.tns_consts import TTI_LOB
+
         self.send(TNS_DATA, encode_8i_lob_read(self._next_seq(), Locator, 1 << 30))
         Data = b''
         while True:
@@ -1614,6 +1616,11 @@ class OracleConnect:
             if Received is False:
                 raise Exception('Connection closed during 8i LOB read')
             Data += Received[1]
+            # An empty LOB (EMPTY_CLOB / EMPTY_BLOB) has no TTI_LOB (0x0e) content
+            # block — the server replies with a bare 0x08 piggyback — so there is
+            # no zero-length chunk to wait for; report it as empty (#387).
+            if Data[0] != TTI_LOB:
+                return b''
             (Content, Complete) = decode_fv2_lob_chunks(Data)
             if Complete:
                 return Content

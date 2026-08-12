@@ -3998,19 +3998,29 @@ def decode_8i_exec_response(
                         Rest = Rest[4:]
                         Row.append(None)
                     elif Col.get('data_type') in (112, 113, 114):
-                        # LOB column (CLOB/BLOB/BFILE): ub4-LE num_bytes then the
-                        # DALC locator, then the 4-byte trailer. A present cell
-                        # becomes a LOB the connection resolves after the fetch
-                        # (_resolve_8i_lobs); num_bytes 0 is an empty/NULL LOB.
+                        # LOB column (CLOB/BLOB/BFILE). A NULL LOB is ub4-LE
+                        # num_bytes == 0 followed *directly* by the 4-byte trailer
+                        # (sb2 indicator -1 + ub2 rc), with NO locator. A non-NULL
+                        # cell — including an EMPTY_CLOB/EMPTY_BLOB — carries
+                        # num_bytes == the locator length, then the DALC locator,
+                        # then the trailer; it becomes a LOB the connection
+                        # resolves after the fetch (_resolve_8i_lobs), an empty one
+                        # reading back as ''/b''. Calling decode_dalc on a NULL
+                        # cell (which has no locator) ate the indicator's first
+                        # byte and desynced every later row (#387).
                         NumBytes = int.from_bytes(Rest[0:4], 'little')
                         Rest = Rest[4:]
-                        (Locator, Rest) = decode_dalc(Rest)
-                        Rest = Rest[4:]  # sb2 indicator + ub2 return code
-                        Row.append(
-                            LOB(Col['data_type'], bytes(Locator))
-                            if NumBytes and not isinstance(Locator, list)
-                            else None
-                        )
+                        if NumBytes == 0:
+                            Rest = Rest[4:]  # sb2 indicator (-1) + ub2 rc
+                            Row.append(None)
+                        else:
+                            (Locator, Rest) = decode_dalc(Rest)
+                            Rest = Rest[4:]  # sb2 indicator + ub2 rc
+                            Row.append(
+                                LOB(Col['data_type'], bytes(Locator))
+                                if not isinstance(Locator, list)
+                                else None
+                            )
                     else:
                         (Val, Rest) = decode_dalc(Rest)
                         Rest = Rest[4:]  # sb2 indicator (0) + ub2 return code (0)

@@ -1147,6 +1147,8 @@ class AsyncOracleConnect:
 
     async def _lob_read_8i(self, Locator: bytes) -> bytes:
         # Async port of OracleConnect._lob_read_8i (#364, §19.15).
+        from seerdb.common.tns_consts import TTI_LOB
+
         await self.send(
             TNS_DATA, encode_8i_lob_read(self._next_seq(), Locator, 1 << 30)
         )
@@ -1156,6 +1158,10 @@ class AsyncOracleConnect:
             if Received is False:
                 raise Exception('Connection closed during 8i LOB read')
             Data += Received[1]
+            # An empty LOB has no TTI_LOB (0x0e) content block (bare 0x08
+            # piggyback reply); report it as empty rather than looping (#387).
+            if Data[0] != TTI_LOB:
+                return b''
             (Content, Complete) = decode_fv2_lob_chunks(Data)
             if Complete:
                 return Content

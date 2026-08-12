@@ -2656,6 +2656,17 @@ LOB describe exposed:** the DCB header's row width and `num_columns` are `ub4`-L
 `a0 0f 00 00`, so any row ≥ 256 bytes wide (LOB or a wide VARCHAR2) mis-read
 `num_columns` before the fix (§19.10).
 
+**NULL vs EMPTY LOB (#387).** `num_bytes` is the locator length (86), *not* the
+content size — both a present and an `EMPTY_CLOB()`/`EMPTY_BLOB()` cell carry
+`num_bytes = 0x56` and a full locator. A **NULL** LOB is the exception: `num_bytes
+== 0` followed **directly** by the 4-byte trailer (`ff ff 00 00`, indicator −1)
+with **no locator DALC**. Calling `decode_dalc` on a NULL cell (there is no
+locator) eats the indicator's first byte and desyncs every following row, so the
+decoder keys on `num_bytes == 0` → `None`, else reads the locator. Reading an
+**empty** LOB's content then returns a bare **`0x08`** piggyback with no `TTI_LOB`
+(`0x0e`) block — `_lob_read_8i` treats a non-`TTI_LOB` reply as empty (`''`/`b''`)
+rather than waiting for a zero-length chunk that never comes.
+
 Unlike 9i's GETLEN + READ pair, 8i reads the whole value in **one** `TTI_LOBOPS`
 (`0x60`) READ: `03 60 <seq> 01` + `ub4`-LE locator length + a 25-byte op middle +
 the locator + `ub4`-LE amount (chars for a CLOB, bytes for a BLOB — pass a large
