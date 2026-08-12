@@ -6742,3 +6742,51 @@ class TestO8iQueryMessages(unittest.TestCase):
         self.assertEqual(rows, [[1, 'zz']])
         (more, _, _) = decode_8i_exec_response(self.DUP_FETCH, cols, last)
         self.assertEqual(more, [[2, 'zz'], [3, 'zz']])
+
+    # 9.2-client PL/SQL block (#361): a no-bind block (#34 of the block trace) and
+    # the reply to a bound block (#61) — a 0x0b bind prompt + RPA + OER.
+    REQ_BLOCK_NOBIND = bytes.fromhex(
+        '035e0f2100040000000000011f000000010c0000000001000000000100000000'
+        '000000000000000000000000011f424547494e2044424d535f4f55545055542e'
+        '44495341424c453b20454e443b01000000010000000000000000000000000000'
+        '0000000000000000000800000000000000000000000000000000000000'
+    )
+    RESP_BLOCK_BIND = bytes.fromhex(
+        '0b05020000000100000000000000000000002020080400158a05000000000001'
+        '00000001000000000000000401000000000000000000010000002f0000000000'
+        '0000000000000000000000000000000000001c00000100000000000000000000'
+        '00000000000000'
+    )
+
+    def test_oall8_block_byte_exact(self):
+        from seerdb.common.tns import O8I_STMT_BEGIN, encode_8i_oall8_dml
+
+        sql = b'BEGIN DBMS_OUTPUT.DISABLE; END;'
+        self.assertEqual(
+            encode_8i_oall8_dml(0x0F, sql, O8I_STMT_BEGIN), self.REQ_BLOCK_NOBIND
+        )
+
+    def test_oall8_block_bind_option_bytes(self):
+        # A bound block carries option `0x29` (binds) then `0x04 0x04` (bind flag +
+        # the PL/SQL block marker); a no-bind block is `0x21 0x00 0x04`.
+        from seerdb.common.tns import O8I_STMT_BEGIN, encode_8i_oall8_dml
+
+        nobind = encode_8i_oall8_dml(1, b'begin null; end;', O8I_STMT_BEGIN)
+        self.assertEqual(nobind[3:6], bytes([0x21, 0x00, 0x04]))
+        bound = encode_8i_oall8_dml(1, b'begin p(:1); end;', O8I_STMT_BEGIN, [7])
+        self.assertEqual(bound[3:6], bytes([0x29, 0x04, 0x04]))
+
+    def test_o8i_stmt_type_block(self):
+        from seerdb.common.tns import o8i_stmt_type
+
+        self.assertEqual(o8i_stmt_type('BEGIN NULL; END;'), 8)
+        self.assertEqual(o8i_stmt_type('DECLARE X NUMBER; BEGIN NULL; END;'), 9)
+
+    def test_block_bind_response_no_error(self):
+        # A successful bound block replies with a 0x0b bind prompt + RPA + OER;
+        # the decoder must report no error (the rowcount is not meaningful here).
+        from seerdb.common.tns import decode_8i_dml_response
+
+        (_, err, msg) = decode_8i_dml_response(self.RESP_BLOCK_BIND)
+        self.assertEqual(err, 0)
+        self.assertIsNone(msg)

@@ -1215,14 +1215,7 @@ class OracleConnect:
             if Head.startswith('SELECT'):
                 return self._drain_cursor(self._execute_8i_select(Query, Bind))
             if Head.startswith('BEGIN') or Head.startswith('DECLARE'):
-                # Anonymous PL/SQL blocks need the bind-prompt / OUT-value path
-                # (a separate follow-up, #361). Fail fast rather than send the
-                # modern OALL8 the 8i server rejects (an empty packet + hangup).
-                from seerdb.common.exceptions import NotSupportedError
-
-                raise NotSupportedError(
-                    'PL/SQL blocks are not yet supported on Oracle 8i'
-                )
+                return self._execute_8i_block(Query, Bind)
             return self._execute_8i_dml(Query, Bind)
         # Oracle 9i (field version < 10g) speaks the old TTI_ALL7 query dialect,
         # not the TTI_ALL8 the rest of execute() builds. Route SELECTs through
@@ -1572,6 +1565,35 @@ class OracleConnect:
         if self.autocommit:
             self.commit()
         return (0, 0, 0, (RowCount, None), [], None, None, [], None)
+
+    def _execute_8i_block(self, Query: str, Bind: list | None = None) -> object:
+        # Oracle 8i anonymous PL/SQL block (#361, PROTOCOL.md §19.13): the same
+        # OALL8 as DML but with the BEGIN/DECLARE statement type and the block
+        # option flag. IN bind values ride inline, so the block executes in a
+        # single round trip — the reply is the bind prompt (informational, when
+        # binds are present) + RPA + OER, no second exchange. OUT / IN OUT binds
+        # (which return values in that reply) are a separate follow-up (#362).
+        StmtType = o8i_stmt_type(Query.strip().upper())
+        self.send(
+            TNS_DATA,
+            encode_8i_oall8_dml(
+                self._next_seq(), Query.encode('latin-1'), StmtType, Bind or None
+            ),
+        )
+        Received = self._next_data_packet(b'', b'')
+        if Received is False:
+            raise Exception('Connection closed during 8i PL/SQL block')
+        # The block reply may open with a 0x0b bind prompt; decode_8i_dml_response
+        # surfaces any ORA- error regardless (the rowcount field is not meaningful
+        # for a block).
+        (_, ErrCode, Message) = decode_8i_dml_response(Received[1])
+        if ErrCode:
+            from seerdb.common.exceptions import from_ora_code
+
+            raise from_ora_code(ErrCode)(Message or f'ORA-{ErrCode:05d}', code=ErrCode)
+        if self.autocommit:
+            self.commit()
+        return (0, 0, 0, (0, None), [], None, None, [], None)
 
     def _lob_read_fv2(self, Locator: bytes) -> bytes:
         # 9i (fv2) LOB content read: the two-call TTI_LOBOPS GETLEN + READ
