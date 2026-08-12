@@ -4505,6 +4505,32 @@ class O8iDmlIntegration(unittest.TestCase):
         with self.assertRaises(seerdb.DatabaseError):
             self.cur.execute('begin this_identifier_does_not_exist; end;')
 
+    def test_out_binds_callproc_callfunc(self):
+        # PL/SQL OUT binds (#362): a block with OUT Vars, then callproc / callfunc.
+        self.cur.execute(
+            'create or replace procedure zz_seerdb_p '
+            '(x in number, y out number, z out varchar2) is '
+            "begin y := x * 10; z := 'out'; end;"
+        )
+        self.cur.execute(
+            'create or replace function zz_seerdb_f (a in number) return number is '
+            'begin return a + 100; end;'
+        )
+        try:
+            y = self.cur.var(int)
+            z = self.cur.var(str)
+            self.cur.execute('begin zz_seerdb_p(:1, :2, :3); end;', [5, y, z])
+            self.assertEqual((y.getvalue(), z.getvalue()), (50, 'out'))
+
+            yy, zz = self.cur.var(int), self.cur.var(str)
+            self.assertEqual(
+                self.cur.callproc('zz_seerdb_p', [8, yy, zz]), [8, 80, 'out']
+            )
+            self.assertEqual(self.cur.callfunc('zz_seerdb_f', int, [7]), 107)
+        finally:
+            self.cur.execute('drop procedure zz_seerdb_p')
+            self.cur.execute('drop function zz_seerdb_f')
+
 
 if __name__ == '__main__':
     unittest.main()

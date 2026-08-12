@@ -22,6 +22,7 @@ from seerdb.common.tns import (
     FIELD_VERSION_12_1,
     FIELD_VERSION_21_1,
     assemble_packet,
+    decode_8i_block_out,
     decode_8i_cursor_id,
     decode_8i_dcb_describe,
     decode_8i_dml_response,
@@ -1567,12 +1568,17 @@ class OracleConnect:
         return (0, 0, 0, (RowCount, None), [], None, None, [], None)
 
     def _execute_8i_block(self, Query: str, Bind: list | None = None) -> object:
-        # Oracle 8i anonymous PL/SQL block (#361, PROTOCOL.md §19.13): the same
-        # OALL8 as DML but with the BEGIN/DECLARE statement type and the block
-        # option flag. IN bind values ride inline, so the block executes in a
-        # single round trip — the reply is the bind prompt (informational, when
-        # binds are present) + RPA + OER, no second exchange. OUT / IN OUT binds
-        # (which return values in that reply) are a separate follow-up (#362).
+        # Oracle 8i anonymous PL/SQL block (#361/#362, PROTOCOL.md §19.13-14): the
+        # same OALL8 as DML but with the BEGIN/DECLARE statement type and the
+        # block option flag. IN bind values ride inline, so the block executes in
+        # a single round trip — the reply is the bind prompt (informational) then
+        # any OUT-value RXD + RPA + OER. OUT / IN OUT binds are `Var` objects,
+        # whose returned values come back in that reply and are handed to the
+        # cursor's _assign_out_binds as an {out_positions, out_values} record.
+        from seerdb.common.datatypes import Var
+
+        Bind = Bind or []
+        OutPositions = [I for I, B in enumerate(Bind) if isinstance(B, Var)]
         StmtType = o8i_stmt_type(Query.strip().upper())
         self.send(
             TNS_DATA,
@@ -1583,16 +1589,20 @@ class OracleConnect:
         Received = self._next_data_packet(b'', b'')
         if Received is False:
             raise Exception('Connection closed during 8i PL/SQL block')
-        # The block reply may open with a 0x0b bind prompt; decode_8i_dml_response
-        # surfaces any ORA- error regardless (the rowcount field is not meaningful
-        # for a block).
-        (_, ErrCode, Message) = decode_8i_dml_response(Received[1])
+        Packet = Received[1]
+        # The reply may open with a 0x0b bind prompt; decode_8i_dml_response
+        # surfaces any ORA- error regardless (its rowcount is not meaningful here).
+        (_, ErrCode, Message) = decode_8i_dml_response(Packet)
         if ErrCode:
             from seerdb.common.exceptions import from_ora_code
 
             raise from_ora_code(ErrCode)(Message or f'ORA-{ErrCode:05d}', code=ErrCode)
         if self.autocommit:
             self.commit()
+        if OutPositions:
+            OutValues = decode_8i_block_out(Packet, len(OutPositions))
+            Record = {'out_positions': OutPositions, 'out_values': OutValues}
+            return (0, 0, 0, (None, None), [Record], None, None, [], None)
         return (0, 0, 0, (0, None), [], None, None, [], None)
 
     def _lob_read_fv2(self, Locator: bytes) -> bytes:

@@ -6790,3 +6790,55 @@ class TestO8iQueryMessages(unittest.TestCase):
         (_, err, msg) = decode_8i_dml_response(self.RESP_BLOCK_BIND)
         self.assertEqual(err, 0)
         self.assertIsNone(msg)
+
+    # 9.2-client OUT-bind block (#362): `BEGIN zz_p(5, :yy, :zz); END;` with two
+    # OUT binds (#56 of the OUT trace) and the replies for the proc (#57: y=50,
+    # z='proc-out') and the function `:rr := zz_f(7)` (#73: 107).
+    REQ_PROC_OUT = bytes.fromhex(
+        '035e1a2904040000000000011d000000010c0000000001000000000100000000'
+        '000000010200000000000000011d424547494e207a7a5f7028352c203a79792c'
+        '203a7a7a293b20454e443b010000000100000000000000000000000000000000'
+        '0000000000000008000000000000000000000000000000000000000203000016'
+        '0000000000000000000000000000000000000000010300001400000000000000'
+        '000000000000000000001f000107fd01fd01'
+    )
+    RESP_PROC_OUT = bytes.fromhex(
+        '0b050200000001000000000000000000000010100702c13300000870726f632d'
+        '6f757400000804006d8a05000000000001000000000000000000000004010000'
+        '00000000000000010000002f0040000000000000000000000000000000000000'
+        '0000001a0000010000000000000000000000000000000000'
+    )
+    RESP_FUNC_OUT = bytes.fromhex(
+        '0b0501000000010000000000000000000000100703c2020800000804006d8a05'
+        '0000000000010000000000000000000000040100000000000000000001000000'
+        '2f00400000000000000000000000000000000000000000002200000100000000'
+        '00000000000000000000000000'
+    )
+
+    def test_oall8_out_bind_placeholder(self):
+        # Two OUT `Var` binds send the fixed OUT placeholder `fd 01` each, after
+        # their descriptors — byte-exact against the proc-call block.
+        from seerdb.common.datatypes import Var
+        from seerdb.common.tns import O8I_STMT_BEGIN, encode_8i_oall8_dml
+
+        msg = encode_8i_oall8_dml(
+            0x1A,
+            b'BEGIN zz_p(5, :yy, :zz); END;',
+            O8I_STMT_BEGIN,
+            [Var(int), Var(str, 20)],
+        )
+        self.assertEqual(msg, self.REQ_PROC_OUT)
+        self.assertTrue(msg.endswith(b'\x07\xfd\x01\xfd\x01'))
+
+    def test_block_out_values_decode(self):
+        # The OUT values ride a 07 RXD after the prompt: NUMBER 50 (c1 33),
+        # 'proc-out', and NUMBER 107 (c2 02 08) for the function.
+        from seerdb.common.tns import decode_8i_block_out
+
+        self.assertEqual(
+            decode_8i_block_out(self.RESP_PROC_OUT, 2),
+            [bytes.fromhex('c133'), b'proc-out'],
+        )
+        self.assertEqual(
+            decode_8i_block_out(self.RESP_FUNC_OUT, 1), [bytes.fromhex('c20208')]
+        )
