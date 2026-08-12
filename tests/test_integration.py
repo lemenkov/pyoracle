@@ -107,10 +107,7 @@ _8I_UNSUPPORTED = (
     # Known 8i bugs, tracked for milestone #25.
     ('rowid', 'Oracle 8i ROWID / UROWID support pending (#385)'),
     ('description_precision', 'Oracle 8i describe omits precision/scale (#386)'),
-    ('multiple_rows_with_lobs', 'Oracle 8i LOB read edge cases pending (#387)'),
-    ('empty_lobs', 'Oracle 8i LOB read edge cases pending (#387)'),
-    ('clob_larger_than_inline', 'Oracle 8i LOB read edge cases pending (#387)'),
-    ('lob_auto_resolve', 'Oracle 8i LOB read edge cases pending (#387)'),
+    ('clob_larger_than_inline', 'Oracle 8i SQL statement >= 256 bytes fails (#391)'),
     # Async-only / connectivity tests (AsyncConnectionIntegration, Redirect).
     ('async_iteration', 'CONNECT BY LEVEL returns one row on Oracle 8i'),
     ('fetchall_and_fetchmany', 'CONNECT BY LEVEL returns one row on Oracle 8i'),
