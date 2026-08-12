@@ -6610,3 +6610,50 @@ class TestO8iQueryMessages(unittest.TestCase):
         self.assertEqual([c['column_name'] for c in cols], [b'A', b'B', b'CC'])
         (rows, _) = decode_8i_exec_response(rest, cols)
         self.assertEqual(rows, [[1, None, 'xy']])
+
+    # The 9.2-client OALL8 for `... WHERE user_id = :n` with :n = 5 (#52 of the
+    # bind trace): option byte 0x69 (binds present), one NUMBER bind OAC, and the
+    # value `07 02 c1 06` (the 0x07 value-section marker + NUMBER 5).
+    REQ52_NUMBIND = bytes.fromhex(
+        '035e1869800000000000000131000000010c0000000001000000000100000000'
+        '000000010100000000000000013153454c45435420757365726e616d65204652'
+        '4f4d20616c6c5f757365727320574845524520757365725f6964203d203a6e01'
+        '0000000000000000000000000000000000000000000000000000000100000000'
+        '0000000000000000000000000000000203000016000000000000000000000000'
+        '00000000000000000702c106'
+    )
+
+    def test_oall8_number_bind_byte_exact(self):
+        from seerdb.common.tns import encode_8i_oall8_query
+
+        sql = b'SELECT username FROM all_users WHERE user_id = :n'
+        self.assertEqual(encode_8i_oall8_query(0x18, sql, [5]), self.REQ52_NUMBIND)
+
+    def test_oall8_two_binds_layout(self):
+        # Two binds: option gains bit 0x08, the header carries the bind count,
+        # and the section is [OAC][OAC] then a 0x07 marker then [val][val]
+        # (NUMBER 0 = `01 80`, 'SYS' = `03 53 59 53`).
+        from seerdb.common.tns import encode_8i_oall8_query
+
+        sql = b'SELECT username FROM all_users WHERE user_id > :a AND username = :b'
+        msg = encode_8i_oall8_query(0x1A, sql, [0, 'SYS'])
+        self.assertEqual(msg[3], 0x69)  # binds-present option byte
+        self.assertEqual(msg[36], 2)  # bind count
+        self.assertIn(bytes.fromhex('0203000016'), msg)  # NUMBER bind OAC head
+        self.assertTrue(msg.endswith(bytes.fromhex('07018003535953')))
+
+    def test_oall8_chunks_long_sql(self):
+        # SQL over 64 bytes rides as the pre-10g chunked string (0xFE + 64-byte
+        # chunks), not a flat length-prefixed blob.
+        from seerdb.common.tns import encode_8i_oall8_query
+
+        sql = b'select ' + b'x' * 80 + b' from dual'
+        self.assertIn(b'\xfe\x40', encode_8i_oall8_query(0x10, sql))
+
+    def test_oall8_null_bind(self):
+        # A None bind rides as a VARCHAR2 OAC + an empty-DALC (NULL) value.
+        from seerdb.common.tns import encode_8i_oall8_query
+
+        msg = encode_8i_oall8_query(0x11, b'select :v from dual', [None])
+        self.assertEqual(msg[3], 0x69)
+        self.assertTrue(msg.endswith(b'\x07\x00'))  # 0x07 marker + empty value
