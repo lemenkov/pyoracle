@@ -3707,26 +3707,62 @@ def _encode_8i_bind_value(Value: object) -> bytes:
     return encode_token_rxd(Value)
 
 
-def encode_8i_oall8_query(Seq: int, Sql: bytes, Binds: list | None = None) -> bytes:
-    # Oracle 8i SELECT execute: the 9.2-era OALL8 (TTI_ALL8, 0x5e) request
-    # (docs/PROTOCOL.md §19.9, binds §19.11). 8i CANNOT parse the modern (10g+)
-    # OALL8 this driver builds for every other tier — it answers that with an
-    # empty packet and hangs up — so 8i needs this byte-compatible pre-10g form,
-    # reverse-engineered from a live 9.2-client -> 8.1.7 trace. No define block
-    # is sent: the column layout comes back in the 8i TTI_DCB describe.
-    #
-    # The SQL length rides twice: an encode_sb4 count in the options header, then
-    # the SQL text itself as a pre-10g chunked string (encode_chr — a plain
-    # length byte up to 64 bytes, else the 0xFE / 64-byte-chunk form). With binds
-    # the option byte gains bit 0x08, the header carries iteration count 1 +
-    # bind count, and the bind section (all OACs, a 0x07 marker, then all values)
-    # follows the trailer. Pin the encode field version to fv2 so encode_chr /
-    # encode_token_rxd take their pre-12c forms regardless of other connections.
-    Binds = Binds or []
+# 8i statement-type codes (the OCI OCI_STMT_* family), carried at trailer offset
+# +28 of the OALL8 and driving the whole option word. 0 = transaction control
+# (COMMIT / ROLLBACK), which has no cursor.
+O8I_STMT_SELECT = 1
+O8I_STMT_UPDATE = 2
+O8I_STMT_DELETE = 3
+O8I_STMT_INSERT = 4
+O8I_STMT_CREATE = 5
+O8I_STMT_DROP = 6
+O8I_STMT_ALTER = 7
+O8I_STMT_TXN = 0
+
+_O8I_STMT_TYPES = {
+    'SELECT': O8I_STMT_SELECT,
+    'UPDATE': O8I_STMT_UPDATE,
+    'DELETE': O8I_STMT_DELETE,
+    'INSERT': O8I_STMT_INSERT,
+    'CREATE': O8I_STMT_CREATE,
+    'DROP': O8I_STMT_DROP,
+    'ALTER': O8I_STMT_ALTER,
+    'TRUNCATE': O8I_STMT_CREATE,  # DDL, no rowcount; rides the CREATE code
+}
+
+
+def o8i_stmt_type(Head: str) -> int:
+    # Map an upper-cased, stripped statement to its 8i OALL8 statement-type code.
+    # COMMIT / ROLLBACK / SAVEPOINT / SET (transaction control) fall through to
+    # O8I_STMT_TXN (0), which the encoder treats as a cursor-less statement.
+    return _O8I_STMT_TYPES.get(Head.split(None, 1)[0] if Head else '', O8I_STMT_TXN)
+
+
+def _encode_8i_oall8(Seq: int, Sql: bytes, StmtType: int, Binds: list) -> bytes:
+    # The shared 8i OALL8 (TTI_ALL8, 0x5e) execute request (docs/PROTOCOL.md
+    # §19.9, DML §19.12, binds §19.11). 8i CANNOT parse the modern (10g+) OALL8
+    # this driver builds for every other tier — it answers that with an empty
+    # packet and hangs up — so 8i needs this byte-compatible pre-10g form,
+    # reverse-engineered from a live 9.2-client -> 8.1.7 trace. Everything about
+    # the option word and trailer derives from `StmtType`:
+    #   - option byte 0x21 base, + 0x40 for a query (SELECT fetches), + 0x08 with
+    #     binds; the next byte is 0x80 for a cursor statement, 0x00 for txn control
+    #   - trailer exec flag 0 for a query (execute is deferred to the fetch), 1
+    #     otherwise; the statement type rides at +28.
+    # The SQL length rides twice: an encode_sb4 count in the header, then the text
+    # as a pre-10g chunked string (encode_chr — a plain length byte up to 64
+    # bytes, else the 0xFE / 64-byte-chunk form). With binds the header carries
+    # iteration count 1 + the bind count, and the bind section (all OACs, a 0x07
+    # marker, then all values) follows the trailer. Pin the encode field version
+    # to fv2 so encode_chr / encode_token_rxd take their pre-12c forms regardless
+    # of any concurrent connection.
     NumBinds = len(Binds)
+    IsQuery = StmtType == O8I_STMT_SELECT
     Token = _ENCODE_FIELD_VERSION.set(FIELD_VERSION_9_2)
     try:
-        Option = 0x69 if NumBinds else 0x61  # bit 0x08 = binds present
+        Option = 0x21 | (0x40 if IsQuery else 0) | (0x08 if NumBinds else 0)
+        CursorFlag = 0x80 if StmtType != O8I_STMT_TXN else 0x00
+        ExecFlag = 0 if IsQuery else 1
         Al8 = (
             bytes([0, 0, 0, 1, NumBinds, 0, 0, 0, 0, 0, 0, 0])  # iters=1, nbinds
             if NumBinds
@@ -3734,16 +3770,16 @@ def encode_8i_oall8_query(Seq: int, Sql: bytes, Binds: list | None = None) -> by
         )
         Message = (
             bytes([TTI_FUN, TTI_ALL8, Seq & 0xFF])
-            + bytes([Option, 0x80, 0, 0, 0, 0, 0, 0])
+            + bytes([Option, CursorFlag, 0, 0, 0, 0, 0, 0])
             + encode_sb4(len(Sql))  # SQL length (ub4)
             + bytes([0, 0, 0])
             + bytes([0x01, 0x0C, 0, 0, 0, 0, 0x01, 0, 0, 0, 0, 0x01, 0, 0, 0, 0])
             + Al8
             + bytes([0x01])
             + encode_chr(Sql.decode('latin-1'))  # SQL text (chunked if > 64 B)
-            + bytes([0x01])
-            + bytes(27)
-            + bytes([0x01])
+            + bytes([0x01, 0, 0, 0, ExecFlag])
+            + bytes(23)
+            + bytes([StmtType])  # trailer +28: statement type
             + bytes(19)
         )
         if NumBinds:
@@ -3755,6 +3791,20 @@ def encode_8i_oall8_query(Seq: int, Sql: bytes, Binds: list | None = None) -> by
         return Message
     finally:
         _ENCODE_FIELD_VERSION.reset(Token)
+
+
+def encode_8i_oall8_query(Seq: int, Sql: bytes, Binds: list | None = None) -> bytes:
+    # 8i SELECT (statement type 1); see _encode_8i_oall8.
+    return _encode_8i_oall8(Seq, Sql, O8I_STMT_SELECT, Binds or [])
+
+
+def encode_8i_oall8_dml(
+    Seq: int, Sql: bytes, StmtType: int, Binds: list | None = None
+) -> bytes:
+    # 8i INSERT/UPDATE/DELETE/DDL and COMMIT/ROLLBACK (docs/PROTOCOL.md §19.12) —
+    # the same OALL8 as a query but with no fetch; the affected-row count comes
+    # back in the response OER (decode_8i_dml_response).
+    return _encode_8i_oall8(Seq, Sql, StmtType, Binds or [])
 
 
 def encode_8i_oall8_fetch(Seq: int, Cursor: int, Count: int) -> bytes:
@@ -3795,7 +3845,9 @@ def decode_8i_cursor_id(Terminal: bytes) -> int:
     return int.from_bytes(Terminal[10:12], 'big')
 
 
-def decode_8i_exec_response(Data: bytes, Columns: list) -> tuple[list, bytes]:
+def decode_8i_exec_response(
+    Data: bytes, Columns: list, PrevRow: list | None = None
+) -> tuple[list, bytes, list | None]:
     # Decode an 8i execute/fetch row stream: repeated TTI_RXH (06) + TTI_RXD (07)
     # pairs, one row per RXD, terminated by the 0x08 piggyback / 0x04 OER
     # (docs/PROTOCOL.md §19.10). Unlike the 9i fv2 rows (decode_fv2_exec_response,
@@ -3803,26 +3855,43 @@ def decode_8i_exec_response(Data: bytes, Columns: list) -> tuple[list, bytes]:
     # 4-byte trailer — an sb2 indicator + ub2 return code, both zero when the
     # value is present. A NULL column carries no value DALC at all: it is the
     # 4-byte `ff ff 00 00` (indicator -1) on its own. Values are WE8ISO8859P1
-    # (latin-1); decode_value uses the column charset. Returns (rows, terminal)
-    # where `terminal` is the bytes from the first post-row token (for the
-    # cursor id / EOF check).
+    # (latin-1); decode_value uses the column charset.
+    #
+    # 8i compresses duplicate columns: the RXH carries a column bit vector
+    # (`ub1 length` then the vector, at offset 14) whose UNSET bits mark columns
+    # that REPEAT the previous row and so carry no bytes in the following RXD
+    # (LSB = column 0; an empty vector means every column is present). Since 8i
+    # fetches one batch per round trip, a row can repeat a column from the last
+    # row of the PREVIOUS batch, so the caller threads `PrevRow` in and the last
+    # decoded row back out. Returns (rows, terminal, last_row) where `terminal`
+    # is the bytes from the first post-row token (for the cursor id / EOF check).
     from seerdb.common.types import decode_value
 
     Rows: list = []
     Rest = Data
+    Last = PrevRow
+    BitVec = b''
     while Rest:
         Token = Rest[0]
         if Token == TTI_RXH:
-            # token + 1B flags, then a run of small ub4 counts; consume until the
-            # next token appears (same tactic as decode_fv2_exec_response).
-            Rest = Rest[2:]
-            while Rest and Rest[0] not in (TTI_RXH, TTI_RXD, TTI_OER, TTI_RPA):
-                (_, Rest) = decode_ub4(Rest)
+            # The bit vector is `ub1 len` + `len` bytes at offset 14; the RXD
+            # (0x07) follows after a short trailer (skip up to it). An empty
+            # vector (len 0) means all columns are present.
+            VecLen = Rest[14] if len(Rest) > 14 else 0
+            BitVec = bytes(Rest[15 : 15 + VecLen])
+            Idx = 15 + VecLen
+            while Idx < len(Rest) and Rest[Idx] not in (TTI_RXD, TTI_OER, TTI_RPA):
+                Idx += 1
+            Rest = Rest[Idx:]
         elif Token == TTI_RXD:
             Rest = Rest[1:]
             Row: list = []
-            for Col in Columns:
-                if Rest and Rest[0] == 0xFF:
+            for ColIdx, Col in enumerate(Columns):
+                Present = not BitVec or bool((BitVec[ColIdx >> 3] >> (ColIdx & 7)) & 1)
+                if not Present:
+                    # Repeated column: reuse the previous row's value.
+                    Row.append(Last[ColIdx] if Last and ColIdx < len(Last) else None)
+                elif Rest and Rest[0] == 0xFF:
                     # NULL column: sb2 indicator 0xFFFF + ub2 return code 0x0000,
                     # with no value DALC.
                     Rest = Rest[4:]
@@ -3832,9 +3901,46 @@ def decode_8i_exec_response(Data: bytes, Columns: list) -> tuple[list, bytes]:
                     Rest = Rest[4:]  # sb2 indicator (0) + ub2 return code (0)
                     Row.append(decode_value(Col, Val))
             Rows.append(Row)
+            Last = Row
+            BitVec = b''
         else:
             break
-    return (Rows, Rest)
+    return (Rows, Rest, Last)
+
+
+def _scan_ora_message(Data: bytes) -> tuple[int, str | None]:
+    # Locate a server "ORA-NNNNN: ..." error in a response and return
+    # (code, message), or (0, None) if there is none. Used for 8i non-query
+    # responses, whose binary OER layout differs from 9i's — scanning the
+    # human-readable text is layout-independent.
+    Idx = Data.find(b'ORA-')
+    if Idx < 0:
+        return (0, None)
+    Digits = Data[Idx + 4 : Idx + 9]
+    if not Digits.isdigit():
+        return (0, None)
+    End = Data.find(b'\x00', Idx)
+    Message = (
+        Data[Idx : End if End >= 0 else len(Data)].decode('latin-1', 'replace').rstrip()
+    )
+    return (int(Digits), Message)
+
+
+def decode_8i_dml_response(Data: bytes) -> tuple[int, int, str | None]:
+    # Decode an 8i non-query (DML / DDL / transaction-control) response
+    # (docs/PROTOCOL.md §19.12): a 0x08 RPA session-state piggyback (a fixed 23
+    # bytes on 8i) then the OER, whose first field after the token is the
+    # affected-row count as a LITTLE-endian ub4 (8i is x86 / Windows, so the
+    # count rides native-endian — e.g. 300 = `2c 01 00 00`). Returns (rowcount,
+    # ora_code, message); a server error is surfaced from the trailing
+    # "ORA-NNNNN: ..." text so a failed statement raises instead of reporting a
+    # bogus count.
+    (ErrCode, Message) = _scan_ora_message(Data)
+    Rest = Data[23:] if Data[:1] == bytes([TTI_RPA]) else Data
+    RowCount = 0
+    if not ErrCode and Rest[:1] == bytes([TTI_OER]):
+        RowCount = int.from_bytes(Rest[1:5], 'little')
+    return (RowCount, ErrCode, Message)
 
 
 def decode_8i_dcb_describe(Data: bytes) -> tuple[list[dict], bytes]:

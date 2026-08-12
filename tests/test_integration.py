@@ -4403,11 +4403,10 @@ class O8iSelectIntegration(unittest.TestCase):
         self.cur.execute('select username from all_users where 1 = 0')
         self.assertEqual(self.cur.fetchall(), [])
 
-    def test_dml_raises_not_supported(self):
-        # DML/DDL are SELECT-only follow-ups; fail fast rather than send the
-        # modern OALL8 the 8i server rejects with an empty packet + hangup.
+    def test_plsql_block_raises_not_supported(self):
+        # Anonymous PL/SQL blocks are a follow-up (#361); they must fail cleanly.
         with self.assertRaises(seerdb.NotSupportedError):
-            self.cur.execute('create table zz_o8i_should_not_exist (a number)')
+            self.cur.execute('begin null; end;')
 
     def test_number_bind(self):
         # Positional NUMBER IN bind (#359): the 9.2-era OALL8 bind section.
@@ -4428,6 +4427,69 @@ class O8iSelectIntegration(unittest.TestCase):
         self.assertEqual([r[0] for r in self.cur.fetchall()], ['SYS', 'SYSTEM'])
         self.cur.execute("select nvl(:v, 'was-null') from dual", [None])
         self.assertEqual(self.cur.fetchone()[0], 'was-null')
+
+
+@unittest.skipUnless(_USER, _SKIP_REASON)
+class O8iDmlIntegration(unittest.TestCase):
+    # Live DDL / DML / transaction coverage for Oracle 8i (#360): the 9.2-era
+    # OALL8 with the statement-type option word and no fetch, the affected-row
+    # count from the response OER, and OALL8-based COMMIT / ROLLBACK. Self-skips
+    # unless the target is an 8i server; creates and drops its own scratch table.
+    TABLE = 'zz_seerdb_o8i_dml'
+
+    def setUp(self):
+        self.conn = _connect()
+        if not getattr(self.conn, '_is_8i', False):
+            self.conn.close()
+            self.skipTest('not an Oracle 8i server')
+        self.conn.autocommit = False
+        self.cur = self.conn.cursor()
+        self._drop()
+        self.cur.execute(f'create table {self.TABLE} (a number, b varchar2(20))')
+
+    def _drop(self):
+        try:
+            self.conn.cursor().execute(f'drop table {self.TABLE}')
+        except Exception:
+            # First run / already gone: nothing to drop.
+            pass
+
+    def tearDown(self):
+        try:
+            self._drop()
+            self.conn.close()
+        except Exception:
+            pass
+
+    def _rows(self):
+        self.cur.execute(f'select a, b from {self.TABLE} order by a')
+        return self.cur.fetchall()
+
+    def test_insert_update_delete_rowcounts(self):
+        self.cur.execute(f"insert into {self.TABLE} values (1, 'one')")
+        self.assertEqual(self.cur.rowcount, 1)
+        self.cur.execute(f'insert into {self.TABLE} values (:1, :2)', [2, 'two'])
+        self.assertEqual(self.cur.rowcount, 1)
+        self.cur.execute(f"insert into {self.TABLE} values (3, 'three')")
+        self.assertEqual(self._rows(), [(1, 'one'), (2, 'two'), (3, 'three')])
+        # Update two rows to the SAME value (exercises duplicate-column fetch).
+        self.cur.execute(f'update {self.TABLE} set b = :1 where a >= :2', ['x', 2])
+        self.assertEqual(self.cur.rowcount, 2)
+        self.assertEqual(self._rows(), [(1, 'one'), (2, 'x'), (3, 'x')])
+        self.cur.execute(f'delete from {self.TABLE} where a = :1', [1])
+        self.assertEqual(self.cur.rowcount, 1)
+        self.assertEqual(self._rows(), [(2, 'x'), (3, 'x')])
+
+    def test_commit_and_rollback(self):
+        self.cur.execute(f"insert into {self.TABLE} values (1, 'keep')")
+        self.conn.commit()
+        self.cur.execute(f"insert into {self.TABLE} values (2, 'undo')")
+        self.conn.rollback()
+        self.assertEqual(self._rows(), [(1, 'keep')])
+
+    def test_dml_error_surfaces(self):
+        with self.assertRaises(seerdb.DatabaseError):
+            self.cur.execute('insert into zz_seerdb_no_such_table values (1)')
 
 
 if __name__ == '__main__':

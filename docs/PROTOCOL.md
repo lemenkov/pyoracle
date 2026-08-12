@@ -2519,6 +2519,17 @@ present). A **NULL** column carries no value DALC at all — it is the bare 4-by
 whether that opens with the `0x08` session-state piggyback or the `0x04` OER.
 Decoders: `decode_8i_exec_response` / `decode_8i_cursor_id`.
 
+**Duplicate-column compression.** Like the modern `TTI_BVC`, 8i omits a column
+from the RXD when it repeats the previous row's value — but 8i carries the
+**column bit vector inside the RXH** (a `ub1` length + the vector, at offset 14)
+rather than as a separate token. LSB = column 0; an **unset** bit means "repeat
+the previous row", so the RXD only carries the set-bit columns (e.g. a 3-column
+row whose middle value repeats sends bit vector `05` = `0b101`). Because 8i
+fetches one batch per round trip, a row can repeat a column from the **previous
+batch's** last row, so `decode_8i_exec_response` threads the last decoded row
+across calls. Missing this desyncs the RXD as soon as two consecutive rows share
+a column value.
+
 ### 19.11 Oracle 8i IN binds — the 9.2-era bind section (#359)
 
 Parameterized statements ride the same OALL8 (§19.9) with three header changes
@@ -2548,6 +2559,30 @@ Each value is a plain DALC (`encode_token_rxd`): NUMBER 5 → `02 c1 06`, `'SYS'
 field version is pinned to fv2 so the chunked-string / pre-23ai value forms are
 used regardless of any concurrent connection. Encoder: `encode_8i_oall8_query`
 (the `Binds` argument), with `_encode_8i_bind_oac` / `_encode_8i_bind_value`.
+
+### 19.12 Oracle 8i DML / DDL and transaction control (#360)
+
+INSERT / UPDATE / DELETE and DDL ride the **same OALL8** as a SELECT (§19.9,
+binds §19.11) — the whole option word derives from the **statement type** carried
+at trailer offset +28 (`1` SELECT, `2` UPDATE, `3` DELETE, `4` INSERT, `5` CREATE,
+`6` DROP, `7` ALTER, `0` transaction control):
+
+- **option byte** = `0x21` base, `+0x40` for a query (only SELECT fetches),
+  `+0x08` with binds; the following byte is `0x80` for a cursor statement and
+  `0x00` for `COMMIT` / `ROLLBACK`.
+- **trailer exec flag** (offset +4) is `0` for a query (execute deferred to the
+  fetch) and `1` otherwise.
+
+There is no describe or fetch. The response is a `0x08` RPA session-state
+piggyback (a fixed 23 bytes) then the OER, whose first field after the token is
+the **affected-row count as a little-endian `ub4`** — 8i is x86/Windows, so the
+count rides native-endian (300 = `2c 01 00 00`). A server error is surfaced from
+the trailing `ORA-NNNNN: ...` text (the binary OER layout differs from 9i's).
+
+**COMMIT / ROLLBACK** have no modern `TTI_COMMIT` / `TTI_ROLLBACK` on 8i; they
+ride the OALL8 as ordinary statements (type `0`). Encoder: `encode_8i_oall8_dml`
+(over the shared `_encode_8i_oall8`); decoder: `decode_8i_dml_response`;
+statement classification: `o8i_stmt_type`.
 
 ## 20. Oracle 23ai field version 24 — fast-auth + the fv24 framing (#89)
 
