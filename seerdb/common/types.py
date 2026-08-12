@@ -7,6 +7,7 @@
 #
 # Algorithms cross-referenced with python-oracledb's decoders.pyx.
 
+import contextvars
 import datetime
 import struct
 import zoneinfo
@@ -72,6 +73,23 @@ _CHARSET_PYTHON_NAME = {
 }
 
 
+# Oracle 8i is a single-byte-session tier: unlike 9i+, it does NOT negotiate an
+# AL32UTF8 session (its DTY declares WE8ISO8859P1), and its national charset is
+# also WE8ISO8859P1, not Unicode. So ALL 8i char data — VARCHAR2 / CHAR /
+# NVARCHAR2 / NCHAR / LONG — arrives in Latin-1, regardless of csfrm. The 8i row
+# decoder sets this flag around its decode so _string_charset picks Latin-1
+# instead of the UTF-8 / UTF-16 the modern/9i session would return (#366).
+_DECODE_IS_8I = contextvars.ContextVar('decode_is_8i', default=False)
+
+
+def set_decode_8i(value: bool) -> object:
+    return _DECODE_IS_8I.set(value)
+
+
+def reset_decode_8i(token: object) -> None:
+    _DECODE_IS_8I.reset(token)  # type: ignore[arg-type]
+
+
 def _string_charset(Column: dict) -> int:
     # Pick the charset a CHAR/VARCHAR2/LONG value arrives in (#174). The driver
     # negotiates an AL32UTF8 session, so the server returns ordinary (csfrm 1)
@@ -80,6 +98,9 @@ def _string_charset(Column: dict) -> int:
     # mojibake it. National (csfrm 2) data arrives as AL16UTF16. When csfrm is
     # unknown (older decode paths that don't record it), fall back to the
     # column's reported charset.
+    if _DECODE_IS_8I.get():
+        # 8i speaks a single-byte (WE8ISO8859P1) session for all char data.
+        return ISO_LATIN_1_CHARSET
     Csfrm = Column.get('csfrm')
     if Csfrm == 2:
         return AL16UTF16_CHARSET
