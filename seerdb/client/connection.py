@@ -13,7 +13,12 @@ import threading
 import uuid
 
 from seerdb.common.crypto import validate
-from seerdb.common.exceptions import DatabaseError, InterfaceError, OperationalError
+from seerdb.common.exceptions import (
+    DatabaseError,
+    DataError,
+    InterfaceError,
+    OperationalError,
+)
 from seerdb.common.tns import (
     _DTY_8I,
     CCAP_FIELD_VERSION,
@@ -458,6 +463,10 @@ def _apply_rowfactory(rows, rowfactory):
 # fv4+ path.)
 _FV2_MAX_RAW_BIND = 2000
 _FV2_MAX_VARCHAR_BIND = 4000
+
+# Oracle 8i data types LONG (8) and LONG RAW (24): fetched one row per round trip
+# and truncated to the fetch request's long-size field (#377).
+_O8I_LONG_TYPES = frozenset((8, 24))
 
 
 def _check_fv2_bind_sizes(Bind, Batch=None) -> None:
@@ -1521,22 +1530,25 @@ class OracleConnect:
             raise Exception('Connection closed during 8i query response')
         (_, Packet) = Received
         (Columns, Rest) = decode_8i_dcb_describe(Packet)
-        (Rows, Terminal, LastRow) = decode_8i_exec_response(Rest, Columns)
-        # 8i's execute returns only the first row batch and never signals EOF on
-        # the execute itself; the cursor id from the response terminal drives a
-        # fetch loop that pulls the rest until a batch comes back empty (the 8i
+        # A LONG / LONG RAW column changes the fetch shape: 8i returns one row per
+        # fetch round trip for a LONG, and caps the value at the fetch request's
+        # long-size field, so ask for the whole value (#377, PROTOCOL.md §19.16).
+        HasLong = any(Col.get('data_type') in _O8I_LONG_TYPES for Col in Columns)
+        # 8i's execute returns describe + a terminal (the cursor id) but no rows;
+        # the fetch loop pulls the rows until a batch comes back empty (the 8i
         # equivalent of ORA-01403 / no-data-found). `LastRow` is threaded through
         # so a batch's first row can repeat a column from the previous batch's
         # last row (8i's duplicate-column compression).
+        (Rows, Terminal, LastRow) = self._recv_8i_rows(Rest, Columns, None)
         Cursor = decode_8i_cursor_id(Terminal)
+        RowCount = 1 if HasLong else self.fetch
+        LongSize = 0x7FFFFFFF if HasLong else self.fetch
         while Cursor:
             self.send(
-                TNS_DATA, encode_8i_oall8_fetch(self._next_seq(), Cursor, self.fetch)
+                TNS_DATA,
+                encode_8i_oall8_fetch(self._next_seq(), Cursor, RowCount, LongSize),
             )
-            Fetched = self._next_data_packet(b'', b'')
-            if Fetched is False:
-                break
-            (More, _, LastRow) = decode_8i_exec_response(Fetched[1], Columns, LastRow)
+            (More, _, LastRow) = self._recv_8i_rows(b'', Columns, LastRow)
             if not More:
                 break
             Rows.extend(More)
@@ -1544,6 +1556,33 @@ class OracleConnect:
         # the fetch loop above already assembled the full row set.
         self._resolve_8i_lobs(Rows, Columns)
         return (0, 0, 0, (len(Rows), Columns), Rows, None, None, [], None)
+
+    def _recv_8i_rows(
+        self, Buf: bytes, Columns: list, LastRow: list | None
+    ) -> tuple[list, bytes, list | None]:
+        # Read one logical 8i execute/fetch response and decode its RXH/RXD row
+        # stream. 8i caps each DATA packet at the SDU and sets no end-of-message
+        # flag, so a LONG value (or a wide batch) larger than the SDU arrives
+        # across several packets with no framing signal (#377). Accumulate DATA
+        # packets until the row stream decodes cleanly AND lands on a complete
+        # terminal token (TTI 0x08 piggyback / 0x04 OER, >= 12 bytes for the
+        # cursor id) — decode raises DataError/IndexError while a value is still
+        # truncated, which tells us to read more.
+        while True:
+            try:
+                (Rows, Terminal, Last) = decode_8i_exec_response(Buf, Columns, LastRow)
+                if len(Terminal) >= 12 and Terminal[0] in (0x04, 0x08):
+                    return (Rows, Terminal, Last)
+            except (DataError, IndexError):
+                pass
+            Received = self._next_data_packet(b'', b'')
+            if Received is False:
+                # Connection closed: return whatever fully decodes, else nothing.
+                try:
+                    return decode_8i_exec_response(Buf, Columns, LastRow)
+                except (DataError, IndexError):
+                    return ([], b'', LastRow)
+            Buf += Received[1]
 
     def _lob_read_8i(self, Locator: bytes) -> bytes:
         # 8i LOB content read (#364, PROTOCOL.md §19.15): a single TTI_LOBOPS READ

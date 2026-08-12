@@ -6575,7 +6575,25 @@ class TestO8iQueryMessages(unittest.TestCase):
     def test_oall8_fetch_byte_exact(self):
         from seerdb.common.tns import encode_8i_oall8_fetch
 
-        self.assertEqual(encode_8i_oall8_fetch(0x1A, 1, 31), self.FETCH56)
+        # Live sqlplus scalar fetch #56: 15 rows (offset 49) with a prefetch/long
+        # size of 31 (offset 31), both ub4 little-endian.
+        self.assertEqual(encode_8i_oall8_fetch(0x1A, 1, 15, 31), self.FETCH56)
+
+    def test_oall8_fetch_long_size_is_ub4_le_at_31(self):
+        # #377: the LONG fetch size is a ub4 LE at offset 31 (bytes the server
+        # returns for a LONG / LONG RAW column) and the row count a ub4 LE at
+        # offset 49 — two independent fields. The pre-fix encoder wrote the row
+        # count big-endian at 28-31, so its low byte fell on offset 31 and capped
+        # every LONG at `fetch` bytes.
+        from seerdb.common.tns import encode_8i_oall8_fetch
+
+        Msg = encode_8i_oall8_fetch(0x1A, 7, 1, 0x7FFFFFFF)
+        self.assertEqual(int.from_bytes(Msg[31:35], 'little'), 0x7FFFFFFF)
+        self.assertEqual(int.from_bytes(Msg[49:53], 'little'), 1)
+        # The row count must NOT bleed into the long-size field.
+        Msg2 = encode_8i_oall8_fetch(0x1A, 7, 200, 4000)
+        self.assertEqual(int.from_bytes(Msg2[31:35], 'little'), 4000)
+        self.assertEqual(int.from_bytes(Msg2[49:53], 'little'), 200)
 
     def test_dcb_describe_columns(self):
         from seerdb.common.tns import decode_8i_dcb_describe
@@ -6586,6 +6604,35 @@ class TestO8iQueryMessages(unittest.TestCase):
         self.assertEqual(cols[1]['max_size'], 5)
         self.assertEqual(cols[1]['charset'], 31)  # WE8ISO8859P1
         self.assertEqual(cols[0]['charset'], 0)  # NUMBER has no charset
+
+    def test_8i_long_multi_chunk_decode(self):
+        # #377: a LONG value rides in the RXD as a chunked DALC (0xfe marker, one
+        # length byte per chunk up to 255, ended by a zero length) and can span
+        # more than 255 bytes. Assert the decoder reassembles all chunks (here
+        # 255 + 255 + 90 = 600) rather than stopping at the first.
+        from seerdb.common.tns import decode_8i_exec_response
+
+        payload = b'ABCDEFGHIJ' * 60  # 600 bytes
+        c1, c2, c3 = payload[:255], payload[255:510], payload[510:600]
+        rxh = bytes([0x06]) + bytes(14)  # byte 14 = bit-vector length 0
+        long_val = (
+            bytes([0xFE, len(c1)])
+            + c1
+            + bytes([len(c2)])
+            + c2
+            + bytes([len(c3)])
+            + c3
+            + bytes([0])
+        )
+        rxd = bytes([0x07]) + b'\x02\xc1\x02' + bytes(4) + long_val + bytes(4)
+        terminal = bytes([0x08, 0x04, 0, 0x11, 0x89, 5, 0, 0, 0, 0, 0, 1])
+        cols = [
+            {'data_type': 2, 'charset': 0, 'csfrm': 0, 'column_name': b'ID'},
+            {'data_type': 8, 'charset': 31, 'csfrm': 1, 'column_name': b'L'},
+        ]
+        (rows, _, _) = decode_8i_exec_response(rxh + rxd + terminal, cols)
+        self.assertEqual(rows[0][0], 1)
+        self.assertEqual(rows[0][1], payload.decode('latin-1'))
 
     def test_dcb_row_and_cursor_id(self):
         from seerdb.common.tns import (

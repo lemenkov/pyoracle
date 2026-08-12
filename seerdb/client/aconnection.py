@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 from seerdb.client.connection import (
     _MAX_REDIRECTS,
+    _O8I_LONG_TYPES,
     Xid,
     _decode_tpc_context,
     _decode_tpc_state,
@@ -39,7 +40,12 @@ from seerdb.client.connection import (
     _parse_accept_sdu,
 )
 from seerdb.common.crypto import validate
-from seerdb.common.exceptions import DatabaseError, InterfaceError, OperationalError
+from seerdb.common.exceptions import (
+    DatabaseError,
+    DataError,
+    InterfaceError,
+    OperationalError,
+)
 from seerdb.common.tns import (
     _DTY_8I,
     CCAP_FIELD_VERSION,
@@ -1083,21 +1089,46 @@ class AsyncOracleConnect:
         if Received is False:
             raise Exception('Connection closed during 8i query response')
         (Columns, Rest) = decode_8i_dcb_describe(Received[1])
-        (Rows, Terminal, LastRow) = decode_8i_exec_response(Rest, Columns)
+        # A LONG / LONG RAW column forces single-row fetches capped at the fetch
+        # request's long-size field; ask for the whole value (#377, §19.16).
+        HasLong = any(Col.get('data_type') in _O8I_LONG_TYPES for Col in Columns)
+        (Rows, Terminal, LastRow) = await self._recv_8i_rows(Rest, Columns, None)
         Cursor = decode_8i_cursor_id(Terminal)
+        RowCount = 1 if HasLong else self.fetch
+        LongSize = 0x7FFFFFFF if HasLong else self.fetch
         while Cursor:
             await self.send(
-                TNS_DATA, encode_8i_oall8_fetch(self._next_seq(), Cursor, self.fetch)
+                TNS_DATA,
+                encode_8i_oall8_fetch(self._next_seq(), Cursor, RowCount, LongSize),
             )
-            Fetched = await self._next_data_packet(b'', b'')
-            if Fetched is False:
-                break
-            (More, _, LastRow) = decode_8i_exec_response(Fetched[1], Columns, LastRow)
+            (More, _, LastRow) = await self._recv_8i_rows(b'', Columns, LastRow)
             if not More:
                 break
             Rows.extend(More)
         await self._resolve_8i_lobs(Rows, Columns)
         return (0, 0, 0, (len(Rows), Columns), Rows, None, None, [], None)
+
+    async def _recv_8i_rows(
+        self, Buf: bytes, Columns: list, LastRow: list | None
+    ) -> tuple[list, bytes, list | None]:
+        # Async port of OracleConnect._recv_8i_rows (#377): accumulate DATA
+        # packets into one logical 8i response until the row stream decodes
+        # cleanly and lands on a complete terminal token (a LONG larger than the
+        # SDU spans several packets with no end-of-message flag).
+        while True:
+            try:
+                (Rows, Terminal, Last) = decode_8i_exec_response(Buf, Columns, LastRow)
+                if len(Terminal) >= 12 and Terminal[0] in (0x04, 0x08):
+                    return (Rows, Terminal, Last)
+            except (DataError, IndexError):
+                pass
+            Received = await self._next_data_packet(b'', b'')
+            if Received is False:
+                try:
+                    return decode_8i_exec_response(Buf, Columns, LastRow)
+                except (DataError, IndexError):
+                    return ([], b'', LastRow)
+            Buf += Received[1]
 
     async def _lob_read_8i(self, Locator: bytes) -> bytes:
         # Async port of OracleConnect._lob_read_8i (#364, §19.15).
