@@ -1564,14 +1564,18 @@ class OracleConnect:
         # stream. 8i caps each DATA packet at the SDU and sets no end-of-message
         # flag, so a LONG value (or a wide batch) larger than the SDU arrives
         # across several packets with no framing signal (#377). Accumulate DATA
-        # packets until the row stream decodes cleanly AND lands on a complete
-        # terminal token (TTI 0x08 piggyback / 0x04 OER, >= 12 bytes for the
-        # cursor id) — decode raises DataError/IndexError while a value is still
-        # truncated, which tells us to read more.
+        # packets until the row stream decodes cleanly AND leaves a non-empty
+        # terminal. A value truncated across a packet boundary makes the decoder
+        # raise DataError/IndexError; a split at an exact row boundary decodes
+        # cleanly but leaves nothing after the rows — both mean "read more". Once
+        # a real terminal token follows the rows (a TTI 0x08 piggyback, a 0x04
+        # OER, or the inline end-of-fetch marker) the leftover is non-empty and
+        # the response is whole. (decode_8i_exec_response only stops on a
+        # non-row token, so a non-empty leftover is never mid-value.)
         while True:
             try:
                 (Rows, Terminal, Last) = decode_8i_exec_response(Buf, Columns, LastRow)
-                if len(Terminal) >= 12 and Terminal[0] in (0x04, 0x08):
+                if Terminal:
                     return (Rows, Terminal, Last)
             except (DataError, IndexError):
                 pass
