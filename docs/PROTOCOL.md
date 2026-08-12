@@ -2486,7 +2486,8 @@ a batch comes back empty (the 8i equivalent of ORA-01403):
 ```
 
 Encoders: `encode_8i_oall8_query` / `encode_8i_oall8_fetch`. IN binds are §19.11;
-8i DML and async 8i (login + query) are follow-ups (the login is sync-only).
+The whole 8i surface (login + query/DML/PL/SQL/LOB) is ported to both the sync
+(`OracleConnect`) and async (`AsyncOracleConnect`) clients.
 
 ### 19.10 Oracle 8i response — the fixed-field DCB describe and 4-byte RXD (#244)
 

@@ -41,10 +41,16 @@ from seerdb.client.connection import (
 from seerdb.common.crypto import validate
 from seerdb.common.exceptions import DatabaseError, InterfaceError, OperationalError
 from seerdb.common.tns import (
+    _DTY_8I,
     CCAP_FIELD_VERSION,
     FIELD_VERSION_10_2,
     FIELD_VERSION_12_1,
     assemble_packet,
+    decode_8i_block_out,
+    decode_8i_cursor_id,
+    decode_8i_dcb_describe,
+    decode_8i_dml_response,
+    decode_8i_exec_response,
     decode_fv2_block_out,
     decode_fv2_describe,
     decode_fv2_dml_response,
@@ -56,6 +62,10 @@ from seerdb.common.tns import (
     decode_packet,
     decode_token_pro,
     decode_token_rpa,
+    encode_8i_lob_read,
+    encode_8i_oall8_dml,
+    encode_8i_oall8_fetch,
+    encode_8i_oall8_query,
     encode_close_cursors_piggyback,
     encode_data_packet,
     encode_dictionary,
@@ -80,6 +90,7 @@ from seerdb.common.tns import (
     encode_tpc_switch,
     exec_oac_signature,
     find_fast_auth_rpa,
+    o8i_stmt_type,
     set_decode_dml_rowcounts,
     set_decode_prev_row,
     set_decode_return_binds,
@@ -475,12 +486,20 @@ class AsyncOracleConnect:
                                 # (the legacy OSESSKEY is rejected). See the sync
                                 # OracleConnect._fast_auth_login.
                                 return await self._fast_auth_login()
-                            Data = encode_dictionary(
-                                self._make_dict(DictionaryType.dty)
-                            )
+                            if getattr(self, '_is_8i', False):
+                                # 8i needs its own shorter DTY (§ _DTY_8I).
+                                Data = _DTY_8I
+                            else:
+                                Data = encode_dictionary(
+                                    self._make_dict(DictionaryType.dty)
+                                )
                             await self.send(TNS_DATA, Data)
                         case p if p == TTI_DTY:
-                            if self.field_version < FIELD_VERSION_10_2:
+                            if getattr(self, '_is_8i', False):
+                                # Oracle 8i: O3LOGON via the OSESSKEY envelope.
+                                self._o3_phase = 1
+                                await self._send_8i_osesskey()
+                            elif self.field_version < FIELD_VERSION_10_2:
                                 # Pre-10g (9i): O3LOGON thin auth (#90). Async
                                 # port of OracleConnect's branch.
                                 from seerdb.common.tns import encode_o3logon_phase1
@@ -498,6 +517,14 @@ class AsyncOracleConnect:
                                 )
                                 await self.send(TNS_DATA, Data)
                         case p if p == TTI_RPA:
+                            if getattr(self, '_is_8i', False):
+                                # 8i O3LOGON: phase-1 RPA (AUTH_SESSKEY) -> send the
+                                # proof; the phase-2 RPA means authenticated.
+                                if self._o3_phase == 1:
+                                    await self._send_8i_oauth_phase2(Packet)
+                                    continue
+                                self.conn_state = CONN_STATE_AUTHENTICATED
+                                return 0
                             if getattr(self, '_o3_phase', 0) == 1:
                                 await self._send_o3logon_phase2(Packet)
                                 continue
@@ -599,11 +626,23 @@ class AsyncOracleConnect:
         # Parse the server's PRO response and lower the field version to the
         # server's if older — min(client, server). See OracleConnect for the
         # full rationale. Best-effort: keep the default on any parse error.
+        import re
+
+        from seerdb.common.tns_consts import FIELD_VERSION_9_2
+
         try:
             Pro = decode_token_pro(Packet)
             Caps = Pro['compile_caps']
             if len(Caps) > CCAP_FIELD_VERSION:
                 self.field_version = min(self.field_version, Caps[CCAP_FIELD_VERSION])
+            # Oracle 8i carries no caps in its PRO: pin the field version to 2 and
+            # flag 8i so the OSESSKEY-envelope O3LOGON path runs (see the sync
+            # OracleConnect._negotiate_capabilities).
+            Banner = Pro.get('banner') or b''
+            VerMatch = re.search(rb'(\d+)\.\d+\.\d+', Banner)
+            if VerMatch and VerMatch.group(1) == b'8':
+                self._is_8i = True
+                self.field_version = FIELD_VERSION_9_2
             logger.debug(
                 'handle_login: PRO server_version=%s banner=%r field_version=%s',
                 Pro['server_version'],
@@ -694,6 +733,16 @@ class AsyncOracleConnect:
         if Batch is None:
             Batch = []
         Head = Query.strip().upper()
+        # Oracle 8i speaks the 9.2-era OALL8 dialect (#244, PROTOCOL.md §19.9-15);
+        # SELECT / DML / DDL / PL/SQL each ride their own pre-10g path.
+        if getattr(self, '_is_8i', False):
+            if Head.startswith('SELECT'):
+                return await self._drain_cursor(
+                    await self._execute_8i_select(Query, Bind)
+                )
+            if Head.startswith('BEGIN') or Head.startswith('DECLARE'):
+                return await self._execute_8i_block(Query, Bind)
+            return await self._execute_8i_dml(Query, Bind)
         # Oracle 9i (field version < 10g) speaks the old TTI_ALL7 query dialect
         # (#97, PROTOCOL.md §19); route SELECTs through the fv2 path.
         if self.field_version < FIELD_VERSION_10_2:
@@ -853,6 +902,59 @@ class AsyncOracleConnect:
             TNS_DATA, encode_o3logon_phase2(self._next_seq(), UserB, PwdField)
         )
 
+    def _auth_info_pairs(self) -> list:
+        # Async port of OracleConnect._auth_info_pairs (#244): informational
+        # AUTH_ pairs the OSESSKEY / OAUTH calls carry (no I/O).
+        import os
+        import socket
+
+        return [
+            (b'AUTH_PROGRAM_NM', self.app_name.encode('utf-8')),
+            (b'AUTH_MACHINE', socket.gethostname().encode('utf-8')),
+            (b'AUTH_PID', str(os.getpid()).encode('utf-8')),
+        ]
+
+    async def _send_8i_osesskey(self) -> None:
+        # Async port of OracleConnect._send_8i_osesskey: O3LOGON phase one, the
+        # OSESSKEY (0x76) call carrying the username + informational pairs.
+        from seerdb.common.tns import encode_o3logon_osesskey_phase1
+
+        await self.send(
+            TNS_DATA,
+            encode_o3logon_osesskey_phase1(
+                self._next_seq(), self.user.encode('utf-8'), self._auth_info_pairs()
+            ),
+        )
+
+    async def _send_8i_oauth_phase2(self, Packet: bytes) -> None:
+        # Async port of OracleConnect._send_8i_oauth_phase2: recover AUTH_SESSKEY,
+        # DES-encrypt the password (same crypto as 9i), send it as AUTH_PASSWORD
+        # in the OAUTH (0x73) call.
+        from binascii import hexlify
+
+        from seerdb.common.crypto import des_verifier, o3logon
+        from seerdb.common.tns import encode_o3logon_oauth_phase2, parse_8i_auth_sesskey
+
+        SessKey = parse_8i_auth_sesskey(Packet)
+        UserB = self.user.encode('utf-8')
+        PassB = self.password.encode('utf-8')
+        Verifier = des_verifier(UserB, PassB)
+        (AuthPass, _, _) = o3logon(SessKey, Verifier, PassB)
+        PadCount = (8 - len(PassB) % 8) % 8
+        PwdField = (hexlify(AuthPass).decode('ascii').upper() + str(PadCount)).encode(
+            'ascii'
+        )
+        self._o3_phase = 2
+        await self.send(
+            TNS_DATA,
+            encode_o3logon_oauth_phase2(
+                self._next_seq(),
+                UserB,
+                PwdField,
+                self._auth_info_pairs() + [(b'AUTH_ACL', b'8000')],
+            ),
+        )
+
     def _fv2_raise_for_error(self, Packet: bytes) -> None:
         # Raise the server's error if `Packet` is a 9i OER with a real ORA code
         # (mirror of OracleConnect._fv2_raise_for_error, #102).
@@ -968,6 +1070,136 @@ class AsyncOracleConnect:
 
             raise from_ora_code(ErrCode)(f'ORA-{ErrCode:05d}', code=ErrCode)
         return (0, 0, 0, (len(AllRows), Columns), AllRows, None, None, [], None)
+
+    async def _execute_8i_select(self, Query: str, Bind: list | None = None) -> object:
+        # Async port of OracleConnect._execute_8i_select (#244, §19.9-10).
+        await self.send(
+            TNS_DATA,
+            encode_8i_oall8_query(
+                self._next_seq(), Query.encode('latin-1'), Bind or None
+            ),
+        )
+        Received = await self._next_data_packet(b'', b'')
+        if Received is False:
+            raise Exception('Connection closed during 8i query response')
+        (Columns, Rest) = decode_8i_dcb_describe(Received[1])
+        (Rows, Terminal, LastRow) = decode_8i_exec_response(Rest, Columns)
+        Cursor = decode_8i_cursor_id(Terminal)
+        while Cursor:
+            await self.send(
+                TNS_DATA, encode_8i_oall8_fetch(self._next_seq(), Cursor, self.fetch)
+            )
+            Fetched = await self._next_data_packet(b'', b'')
+            if Fetched is False:
+                break
+            (More, _, LastRow) = decode_8i_exec_response(Fetched[1], Columns, LastRow)
+            if not More:
+                break
+            Rows.extend(More)
+        await self._resolve_8i_lobs(Rows, Columns)
+        return (0, 0, 0, (len(Rows), Columns), Rows, None, None, [], None)
+
+    async def _lob_read_8i(self, Locator: bytes) -> bytes:
+        # Async port of OracleConnect._lob_read_8i (#364, §19.15).
+        await self.send(
+            TNS_DATA, encode_8i_lob_read(self._next_seq(), Locator, 1 << 30)
+        )
+        Data = b''
+        while True:
+            Received = await self._next_data_packet(b'', b'')
+            if Received is False:
+                raise Exception('Connection closed during 8i LOB read')
+            Data += Received[1]
+            (Content, Complete) = decode_fv2_lob_chunks(Data)
+            if Complete:
+                return Content
+
+    async def _resolve_8i_lobs(self, Rows: list, Columns: list) -> None:
+        # Async port of OracleConnect._resolve_8i_lobs (#364).
+        from seerdb.common.lob import LOB
+        from seerdb.common.types import decode_fv2_lob
+
+        for Row in Rows:
+            for I, Val in enumerate(Row):
+                if isinstance(Val, LOB):
+                    Content = await self._lob_read_8i(Val.raw)
+                    Row[I] = decode_fv2_lob(
+                        Columns[I].get('data_type'),
+                        Content,
+                        Columns[I].get('charset') or 0,
+                    )
+
+    async def _execute_8i_dml(self, Query: str, Bind: list | None = None) -> object:
+        # Async port of OracleConnect._execute_8i_dml (#360, §19.12).
+        StmtType = o8i_stmt_type(Query.strip().upper())
+        await self.send(
+            TNS_DATA,
+            encode_8i_oall8_dml(
+                self._next_seq(), Query.encode('latin-1'), StmtType, Bind or None
+            ),
+        )
+        Received = await self._next_data_packet(b'', b'')
+        if Received is False:
+            raise Exception('Connection closed during 8i DML')
+        (RowCount, ErrCode, Message) = decode_8i_dml_response(Received[1])
+        if ErrCode:
+            from seerdb.common.exceptions import from_ora_code
+
+            raise from_ora_code(ErrCode)(Message or f'ORA-{ErrCode:05d}', code=ErrCode)
+        if self.autocommit:
+            await self.commit()
+        return (0, 0, 0, (RowCount, None), [], None, None, [], None)
+
+    async def _execute_8i_block(self, Query: str, Bind: list | None = None) -> object:
+        # Async port of OracleConnect._execute_8i_block (#361/#362, §19.13-14).
+        from seerdb.common.datatypes import Var
+
+        Bind = Bind or []
+        OutPositions = [I for I, B in enumerate(Bind) if isinstance(B, Var)]
+        StmtType = o8i_stmt_type(Query.strip().upper())
+        await self.send(
+            TNS_DATA,
+            encode_8i_oall8_dml(
+                self._next_seq(), Query.encode('latin-1'), StmtType, Bind or None
+            ),
+        )
+        Received = await self._next_data_packet(b'', b'')
+        if Received is False:
+            raise Exception('Connection closed during 8i PL/SQL block')
+        Packet = Received[1]
+        (_, ErrCode, Message) = decode_8i_dml_response(Packet)
+        if ErrCode:
+            from seerdb.common.exceptions import from_ora_code
+
+            raise from_ora_code(ErrCode)(Message or f'ORA-{ErrCode:05d}', code=ErrCode)
+        if self.autocommit:
+            await self.commit()
+        if OutPositions:
+            OutValues = decode_8i_block_out(Packet, len(OutPositions))
+            Record = {'out_positions': OutPositions, 'out_values': OutValues}
+            return (0, 0, 0, (None, None), [Record], None, None, [], None)
+        return (0, 0, 0, (0, None), [], None, None, [], None)
+
+    async def _txn_control_8i(self, Statement: str) -> None:
+        # Async port of OracleConnect._txn_control_8i (#360): COMMIT / ROLLBACK
+        # ride the OALL8 as ordinary statements (8i has no TTI_COMMIT).
+        from seerdb.common.tns import O8I_STMT_TXN
+
+        await self.send(
+            TNS_DATA,
+            encode_8i_oall8_dml(
+                self._next_seq(), Statement.encode('latin-1'), O8I_STMT_TXN
+            ),
+        )
+        Received = await self._next_data_packet(b'', b'')
+        if Received is False:
+            raise Exception(f'Connection closed during 8i {Statement}')
+        (_, ErrCode, Message) = decode_8i_dml_response(Received[1])
+        if ErrCode:
+            from seerdb.common.exceptions import from_ora_code
+
+            raise from_ora_code(ErrCode)(Message or f'ORA-{ErrCode:05d}', code=ErrCode)
+        self._sessionless_txn_active = False
 
     async def _lob_read_fv2(self, Locator: bytes) -> bytes:
         # Async port of the sync `_lob_read_fv2`: 9i two-call TTI_LOBOPS
@@ -1491,6 +1723,9 @@ class AsyncOracleConnect:
     # ----- transaction control -----
 
     async def commit(self) -> None:
+        if getattr(self, '_is_8i', False):
+            await self._txn_control_8i('COMMIT')
+            return
         from seerdb.common.tns_consts import TTI_COMMIT
 
         Data = encode_dictionary(self._make_dict(DictionaryType.tran, req=TTI_COMMIT))
@@ -1500,6 +1735,9 @@ class AsyncOracleConnect:
         self._sessionless_txn_active = False
 
     async def rollback(self) -> None:
+        if getattr(self, '_is_8i', False):
+            await self._txn_control_8i('ROLLBACK')
+            return
         from seerdb.common.tns_consts import TTI_ROLLBACK
 
         Data = encode_dictionary(self._make_dict(DictionaryType.tran, req=TTI_ROLLBACK))
