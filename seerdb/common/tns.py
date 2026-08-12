@@ -3676,9 +3676,22 @@ def _encode_8i_bind_oac(Value: object) -> bytes:
     # (decode_8i_dcb_describe): data type, ub4be [flag 0x03 | max_size], 14 bytes
     # reserved, ub4be character set, reserved, csform. Reverse-engineered from a
     # live 9.2-client -> 8.1.7 bind trace (docs/PROTOCOL.md §19.11). max_size is
-    # the largest value we may send for this bind: 22 (the NUMBER max) for
-    # numbers, 7 for DATE, and the value byte length for VARCHAR2 / RAW.
-    if Value is None:
+    # the largest value we may send / receive for this bind: 22 (the NUMBER max)
+    # for numbers, 7 for DATE, and the value byte length for VARCHAR2 / RAW. An
+    # OUT / IN OUT `Var` declares its registered type + return-buffer size (#362).
+    from seerdb.common.datatypes import Var
+
+    if isinstance(Value, Var):
+        DType = Value.dbtype.tns_type
+        if DType == 2:  # NUMBER
+            Charset, Csform, MaxSize = 0, 0, 22
+        elif DType in (1, 96):  # VARCHAR2, CHAR
+            Charset, Csform, MaxSize = 31, Value.dbtype.csfrm, max(Value.size, 1)
+        elif DType == 12:  # DATE
+            Charset, Csform, MaxSize = 0, 0, 7
+        else:
+            Charset, Csform, MaxSize = 0, 0, max(Value.size, 1)
+    elif Value is None:
         DType, Charset, Csform, MaxSize = 1, 31, 1, 1  # NULL rides as VARCHAR2(1)
     elif isinstance(Value, (bool, int, float, Decimal)):
         DType, Charset, Csform, MaxSize = 2, 0, 0, 22  # NUMBER
@@ -3698,13 +3711,46 @@ def _encode_8i_bind_oac(Value: object) -> bytes:
     )
 
 
+# A pure-OUT bind sends no input value: the 8i value section carries this fixed
+# placeholder in the bind's slot (#362, captured verbatim).
+_O8I_OUT_PLACEHOLDER = bytes([0xFD, 0x01])
+
+
 def _encode_8i_bind_value(Value: object) -> bytes:
     # The bind value as a DALC (length-prefixed). Strings ride as WE8ISO8859P1
     # (latin-1), matching the 8i DB charset; everything else reuses the shared
-    # value encoder (Oracle NUMBER, DATE, RAW, …).
+    # value encoder (Oracle NUMBER, DATE, RAW, …). A pure-OUT `Var` sends the OUT
+    # placeholder; an IN OUT `Var` (has_value) sends its input value inline.
+    from seerdb.common.datatypes import Var
+
+    if isinstance(Value, Var):
+        return (
+            _encode_8i_bind_value(Value._value)
+            if Value.has_value
+            else _O8I_OUT_PLACEHOLDER
+        )
     if isinstance(Value, str):
         return encode_token_rxd(Value.encode('latin-1'))
     return encode_token_rxd(Value)
+
+
+def decode_8i_block_out(Data: bytes, NumOut: int) -> list:
+    # Decode the OUT / IN OUT return values from an 8i PL/SQL block reply
+    # (docs/PROTOCOL.md §19.14). After the bind prompt (0x0b), the values ride a
+    # single TTI_RXD (07) as `NumOut` × (DALC value + 2-byte trailer), in OUT-bind
+    # position order. Returns the raw value bytes per OUT bind (None for empty /
+    # NULL), decoded against each Var's declared type by the cursor.
+    Rest = strip_fv2_bind_prompt(Data)
+    OutValues: list = []
+    if NumOut > 0 and Rest[:1] == bytes([TTI_RXD]):
+        Rest = Rest[1:]
+        for _ in range(NumOut):
+            (Val, Rest) = decode_dalc(Rest)
+            Rest = Rest[2:]  # sb2 indicator / return code
+            OutValues.append(
+                bytes(Val) if isinstance(Val, (bytes, bytearray)) and Val else None
+            )
+    return OutValues
 
 
 # 8i statement-type codes (the OCI OCI_STMT_* family), carried at trailer offset

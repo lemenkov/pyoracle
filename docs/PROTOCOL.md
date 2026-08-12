@@ -2598,7 +2598,22 @@ direction: `0x20` IN, `0x10` OUT, `0x30` IN OUT) followed by the RPA + OER, all
 in one packet; a no-bind block skips straight to the RPA + OER. An error (compile
 or runtime, e.g. ORA-06550 / PLS-00201) is surfaced from the trailing `ORA-`
 text. OUT / IN OUT binds — whose returned values ride an RXD inside that reply —
-are a separate follow-up (#362 / #363). Driver: `_execute_8i_block`.
+are §19.14. Driver: `_execute_8i_block`.
+
+### 19.14 Oracle 8i PL/SQL OUT binds — callproc / callfunc (#362)
+
+An OUT (or IN OUT) parameter is a `Var` bind. In the **request** it declares its
+type + return-buffer size in the OAC (§19.11), and its slot in the value section
+carries the fixed OUT placeholder **`fd 01`** (an IN OUT bind sends its input
+value inline instead). So `callproc('p', [5, y, z])` → `BEGIN p(:1,:2,:3); END;`
+with the value section `07 <5> fd 01 fd 01`.
+
+In the **reply**, after the `0x0b` prompt (whose direction bytes are `0x10` for
+each OUT), a single `07` RXD carries the returned values in OUT-bind order, each a
+**DALC + 2-byte trailer** (`c1 33` = 50, `08 proc-out`, `c2 02 08` = 107), then
+the RPA + OER. `decode_8i_block_out` returns the raw value bytes per OUT bind; the
+cursor's `_assign_out_binds` decodes each against its `Var`'s type. `callfunc`
+is the same shape with the return value as the first (`:1`) OUT bind.
 
 ## 20. Oracle 23ai field version 24 — fast-auth + the fv24 framing (#89)
 
