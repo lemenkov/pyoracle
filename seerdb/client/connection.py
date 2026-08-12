@@ -15,7 +15,9 @@ import uuid
 from seerdb.common.crypto import validate
 from seerdb.common.exceptions import DatabaseError, InterfaceError, OperationalError
 from seerdb.common.tns import (
+    _DTY_8I,
     CCAP_FIELD_VERSION,
+    FIELD_VERSION_9_2,
     FIELD_VERSION_10_2,
     FIELD_VERSION_12_1,
     FIELD_VERSION_21_1,
@@ -850,13 +852,23 @@ class OracleConnect:
                                 # the bundle. Only reached when the caller opts in
                                 # with field_version >= 18 (default stays 21.1).
                                 return self._fast_auth_login()
-                            Data = encode_dictionary(
-                                self._make_dict(DictionaryType.dty)
-                            )
+                            if getattr(self, '_is_8i', False):
+                                # 8i has no Unicode charset and predates ~37 data
+                                # types, so it needs its own shorter DTY — the
+                                # modern one draws ORA-03120 (§ _DTY_8I).
+                                Data = _DTY_8I
+                            else:
+                                Data = encode_dictionary(
+                                    self._make_dict(DictionaryType.dty)
+                                )
                             self.send(TNS_DATA, Data)
                         case p if p == TTI_DTY:
                             logger.debug('handle_login: recv DTY')
-                            if self.field_version < FIELD_VERSION_10_2:
+                            if getattr(self, '_is_8i', False):
+                                # Oracle 8i: O3LOGON via the OSESSKEY envelope.
+                                self._o3_phase = 1
+                                self._send_8i_osesskey()
+                            elif self.field_version < FIELD_VERSION_10_2:
                                 # Pre-10g (9i, field version 2): O3LOGON thin
                                 # auth — TTI_3LOGA fetches the session key (#90).
                                 from seerdb.common.tns import encode_o3logon_phase1
@@ -875,6 +887,17 @@ class OracleConnect:
                                 self.send(TNS_DATA, Data)
                         case p if p == TTI_RPA:
                             logger.debug('handle_login: recv RPA')
+                            if getattr(self, '_is_8i', False):
+                                # 8i O3LOGON: phase-1 RPA carries AUTH_SESSKEY ->
+                                # send the proof; the phase-2 RPA (AUTH_VERSION_
+                                # STRING) means authenticated (no server proof to
+                                # validate on the pre-10g path).
+                                if self._o3_phase == 1:
+                                    self._send_8i_oauth_phase2(Packet)
+                                    continue
+                                self.conn_state = CONN_STATE_AUTHENTICATED
+                                logger.debug('handle_login: authenticated (8i O3LOGON)')
+                                return 0
                             if getattr(self, '_o3_phase', 0) == 1:
                                 self._send_o3logon_phase2(Packet)
                                 continue
@@ -1010,6 +1033,16 @@ class OracleConnect:
             if len(Caps) > CCAP_FIELD_VERSION:
                 ServerFv = Caps[CCAP_FIELD_VERSION]
                 self.field_version = min(self.field_version, ServerFv)
+            # Oracle 8i (8.1.x) carries no caps in its PRO, so the field version
+            # can't be negotiated down from the client default — pin it to 2 (as
+            # 9i) so the O3LOGON path runs, not the 23ai fast-auth path. 8i also
+            # speaks the OSESSKEY-envelope O3LOGON (not 9i's TTI_3LOGA), so flag
+            # it for the login state machine.
+            Banner = Pro.get('banner') or b''
+            VerMatch = _re.search(rb'(\d+)\.\d+\.\d+', Banner)
+            if VerMatch and VerMatch.group(1) == b'8':
+                self._is_8i = True
+                self.field_version = FIELD_VERSION_9_2
             logger.debug(
                 'handle_login: PRO server_version=%s banner=%r field_version=%s',
                 Pro['server_version'],
@@ -1090,6 +1123,62 @@ class OracleConnect:
         )
         self._o3_phase = 2
         self.send(TNS_DATA, encode_o3logon_phase2(self._next_seq(), UserB, PwdField))
+
+    def _auth_info_pairs(self) -> list:
+        # Informational AUTH_ pairs the OSESSKEY/OAUTH calls carry — session
+        # metadata (program/machine/pid) the server stores in v$session but does
+        # not authenticate on.
+        import os
+
+        return [
+            (b'AUTH_PROGRAM_NM', self.app_name.encode('utf-8')),
+            (b'AUTH_MACHINE', socket.gethostname().encode('utf-8')),
+            (b'AUTH_PID', str(os.getpid()).encode('utf-8')),
+        ]
+
+    def _send_8i_osesskey(self) -> None:
+        # Oracle 8i O3LOGON phase one: OSESSKEY (0x76) with the username and the
+        # informational pairs; the server replies with an AUTH_SESSKEY RPA.
+        from seerdb.common.tns import encode_o3logon_osesskey_phase1
+
+        self.send(
+            TNS_DATA,
+            encode_o3logon_osesskey_phase1(
+                self._next_seq(), self.user.encode('utf-8'), self._auth_info_pairs()
+            ),
+        )
+
+    def _send_8i_oauth_phase2(self, Packet: bytes) -> None:
+        # Oracle 8i O3LOGON phase two: recover the session key from AUTH_SESSKEY,
+        # DES-encrypt the password under it (the same crypto as the 9i path), and
+        # send it as AUTH_PASSWORD in the OAUTH (0x73) call.
+        from binascii import hexlify
+
+        from seerdb.common.crypto import des_verifier, o3logon
+        from seerdb.common.tns import (
+            encode_o3logon_oauth_phase2,
+            parse_8i_auth_sesskey,
+        )
+
+        SessKey = parse_8i_auth_sesskey(Packet)
+        UserB = self.user.encode('utf-8')
+        PassB = self.password.encode('utf-8')
+        Verifier = des_verifier(UserB, PassB)
+        (AuthPass, _, _) = o3logon(SessKey, Verifier, PassB)
+        PadCount = (8 - len(PassB) % 8) % 8
+        PwdField = (hexlify(AuthPass).decode('ascii').upper() + str(PadCount)).encode(
+            'ascii'
+        )
+        self._o3_phase = 2
+        self.send(
+            TNS_DATA,
+            encode_o3logon_oauth_phase2(
+                self._next_seq(),
+                UserB,
+                PwdField,
+                self._auth_info_pairs() + [(b'AUTH_ACL', b'8000')],
+            ),
+        )
 
     def execute(
         self,
