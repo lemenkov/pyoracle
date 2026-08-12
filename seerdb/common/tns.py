@@ -3944,60 +3944,75 @@ def decode_8i_exec_response(
     # decoded row back out. Returns (rows, terminal, last_row) where `terminal`
     # is the bytes from the first post-row token (for the cursor id / EOF check).
     from seerdb.common.lob import LOB
-    from seerdb.common.types import decode_value
+    from seerdb.common.types import decode_value, reset_decode_8i, set_decode_8i
 
+    # All 8i char data is WE8ISO8859P1 (latin-1); flag the decode so
+    # decode_value picks Latin-1 rather than the UTF-8 / UTF-16 a modern session
+    # would use (#366). Reset afterwards so the flag never leaks to other tiers.
+    _FlagToken = set_decode_8i(True)
     Rows: list = []
     Rest = Data
     Last = PrevRow
     BitVec = b''
-    while Rest:
-        Token = Rest[0]
-        if Token == TTI_RXH:
-            # The bit vector is `ub1 len` + `len` bytes at offset 14; the RXD
-            # (0x07) follows after a short trailer (skip up to it). An empty
-            # vector (len 0) means all columns are present.
-            VecLen = Rest[14] if len(Rest) > 14 else 0
-            BitVec = bytes(Rest[15 : 15 + VecLen])
-            Idx = 15 + VecLen
-            while Idx < len(Rest) and Rest[Idx] not in (TTI_RXD, TTI_OER, TTI_RPA):
-                Idx += 1
-            Rest = Rest[Idx:]
-        elif Token == TTI_RXD:
-            Rest = Rest[1:]
-            Row: list = []
-            for ColIdx, Col in enumerate(Columns):
-                Present = not BitVec or bool((BitVec[ColIdx >> 3] >> (ColIdx & 7)) & 1)
-                if not Present:
-                    # Repeated column: reuse the previous row's value.
-                    Row.append(Last[ColIdx] if Last and ColIdx < len(Last) else None)
-                elif Rest and Rest[0] == 0xFF:
-                    # NULL column: sb2 indicator 0xFFFF + ub2 return code 0x0000,
-                    # with no value DALC.
-                    Rest = Rest[4:]
-                    Row.append(None)
-                elif Col.get('data_type') in (112, 113, 114):
-                    # LOB column (CLOB/BLOB/BFILE): ub4-LE num_bytes then the DALC
-                    # locator, then the 4-byte trailer. A present cell becomes a
-                    # LOB the connection resolves after the fetch (_resolve_8i_lobs);
-                    # num_bytes 0 is an empty/NULL LOB.
-                    NumBytes = int.from_bytes(Rest[0:4], 'little')
-                    Rest = Rest[4:]
-                    (Locator, Rest) = decode_dalc(Rest)
-                    Rest = Rest[4:]  # sb2 indicator + ub2 return code
-                    Row.append(
-                        LOB(Col['data_type'], bytes(Locator))
-                        if NumBytes and not isinstance(Locator, list)
-                        else None
+    try:
+        while Rest:
+            Token = Rest[0]
+            if Token == TTI_RXH:
+                # The bit vector is `ub1 len` + `len` bytes at offset 14; the RXD
+                # (0x07) follows after a short trailer (skip up to it). An empty
+                # vector (len 0) means all columns are present.
+                VecLen = Rest[14] if len(Rest) > 14 else 0
+                BitVec = bytes(Rest[15 : 15 + VecLen])
+                Idx = 15 + VecLen
+                while Idx < len(Rest) and Rest[Idx] not in (
+                    TTI_RXD,
+                    TTI_OER,
+                    TTI_RPA,
+                ):
+                    Idx += 1
+                Rest = Rest[Idx:]
+            elif Token == TTI_RXD:
+                Rest = Rest[1:]
+                Row: list = []
+                for ColIdx, Col in enumerate(Columns):
+                    Present = not BitVec or bool(
+                        (BitVec[ColIdx >> 3] >> (ColIdx & 7)) & 1
                     )
-                else:
-                    (Val, Rest) = decode_dalc(Rest)
-                    Rest = Rest[4:]  # sb2 indicator (0) + ub2 return code (0)
-                    Row.append(decode_value(Col, Val))
-            Rows.append(Row)
-            Last = Row
-            BitVec = b''
-        else:
-            break
+                    if not Present:
+                        # Repeated column: reuse the previous row's value.
+                        Row.append(
+                            Last[ColIdx] if Last and ColIdx < len(Last) else None
+                        )
+                    elif Rest and Rest[0] == 0xFF:
+                        # NULL column: sb2 indicator 0xFFFF + ub2 return code
+                        # 0x0000, with no value DALC.
+                        Rest = Rest[4:]
+                        Row.append(None)
+                    elif Col.get('data_type') in (112, 113, 114):
+                        # LOB column (CLOB/BLOB/BFILE): ub4-LE num_bytes then the
+                        # DALC locator, then the 4-byte trailer. A present cell
+                        # becomes a LOB the connection resolves after the fetch
+                        # (_resolve_8i_lobs); num_bytes 0 is an empty/NULL LOB.
+                        NumBytes = int.from_bytes(Rest[0:4], 'little')
+                        Rest = Rest[4:]
+                        (Locator, Rest) = decode_dalc(Rest)
+                        Rest = Rest[4:]  # sb2 indicator + ub2 return code
+                        Row.append(
+                            LOB(Col['data_type'], bytes(Locator))
+                            if NumBytes and not isinstance(Locator, list)
+                            else None
+                        )
+                    else:
+                        (Val, Rest) = decode_dalc(Rest)
+                        Rest = Rest[4:]  # sb2 indicator (0) + ub2 return code (0)
+                        Row.append(decode_value(Col, Val))
+                Rows.append(Row)
+                Last = Row
+                BitVec = b''
+            else:
+                break
+    finally:
+        reset_decode_8i(_FlagToken)
     return (Rows, Rest, Last)
 
 

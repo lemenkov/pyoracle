@@ -6946,3 +6946,18 @@ class TestO8iQueryMessages(unittest.TestCase):
         (content, complete) = decode_fv2_lob_chunks(self.LOB_CONTENT)
         self.assertTrue(complete)
         self.assertEqual(content, b'hello-clob-content-8i')
+
+    def test_8i_char_decodes_as_latin1(self):
+        # 8i char data (incl. NVARCHAR2 / NCHAR, csform 2) is WE8ISO8859P1: the
+        # decode-8i flag makes decode_value pick Latin-1 instead of the UTF-8 /
+        # UTF-16 a modern session uses (#366). The flag must not leak.
+        from seerdb.common.types import decode_value, reset_decode_8i, set_decode_8i
+
+        col = {'data_type': 1, 'csfrm': 2, 'charset': 31}  # NVARCHAR2
+        token = set_decode_8i(True)
+        try:
+            self.assertEqual(decode_value(col, b'caf\xe9'), 'café')
+        finally:
+            reset_decode_8i(token)
+        # flag reset -> back to the modern csform-2 (UTF-16BE) behaviour
+        self.assertNotEqual(decode_value(col, b'caf\xe9'), 'café')

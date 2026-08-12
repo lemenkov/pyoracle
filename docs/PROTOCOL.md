@@ -2489,6 +2489,15 @@ Encoders: `encode_8i_oall8_query` / `encode_8i_oall8_fetch`. IN binds are §19.1
 The whole 8i surface (login + query/DML/PL/SQL/LOB) is ported to both the sync
 (`OracleConnect`) and async (`AsyncOracleConnect`) clients.
 
+**Charset.** Unlike 9i+, 8i does **not** negotiate an AL32UTF8 session (its DTY
+declares WE8ISO8859P1), and its national charset is **also WE8ISO8859P1**, not
+Unicode — 8i predates Unicode `NCHAR`. So **all** 8i char data — `VARCHAR2` /
+`CHAR` / `NVARCHAR2` / `NCHAR` / `LONG` — arrives in **Latin-1**, regardless of
+csform. The 8i row decoder flags this (`set_decode_8i`) so `_string_charset`
+picks Latin-1 rather than the UTF-8 (csform 1) / UTF-16BE (csform 2) a modern
+session would use; without it non-ASCII `VARCHAR2` mojibakes and `NVARCHAR2` /
+`NCHAR` read as garbage (#366).
+
 ### 19.10 Oracle 8i response — the fixed-field DCB describe and 4-byte RXD (#244)
 
 The reply is fv2-style but its own shape. The **describe** is a `TTI_DCB` (`0x10`)

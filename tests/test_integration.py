@@ -4568,6 +4568,22 @@ class O8iDmlIntegration(unittest.TestCase):
         self.assertEqual((rows[1][0], len(rows[1][1]), rows[1][2]), (2, 4000, b'\x00'))
         self.assertEqual(rows[2], (3, None, None))
 
+    def test_char_data_is_latin1(self):
+        # 8i char data (VARCHAR2 / CHAR / NVARCHAR2 / NCHAR) is WE8ISO8859P1, not
+        # the UTF-8 / UTF-16 a modern session uses (#366): non-ASCII VARCHAR2 and
+        # any NVARCHAR2 / NCHAR previously came back mojibaked.
+        self.cur.execute(f'drop table {self.TABLE}')
+        self.cur.execute(
+            f'create table {self.TABLE} (v varchar2(20), nv nvarchar2(20), nc nchar(6))'
+        )
+        self.cur.execute(
+            f'insert into {self.TABLE} values '
+            "('caf'||chr(233)||'-ni'||chr(241)||'o', N'nv-val', N'nchar')"
+        )
+        self.conn.commit()
+        self.cur.execute(f'select v, nv, nc from {self.TABLE}')
+        self.assertEqual(self.cur.fetchone(), ('café-niño', 'nv-val', 'nchar '))
+
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class AsyncO8iIntegration(unittest.IsolatedAsyncioTestCase):
