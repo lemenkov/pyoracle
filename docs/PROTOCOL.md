@@ -2460,21 +2460,23 @@ the same way §4.2's modern table is). The 8i **query** path is §19.9–19.10.
 answers the same `0x5e` function code but expects the **9.2-era OALL8 layout** —
 sending the modern one draws an **empty DATA packet followed by a hangup**.
 Reverse-engineered from the 9.2-client → 8.1.7 trace; the request is fixed apart
-from the `TTI_FUN` sequence byte and the SQL length (`encode_sb4`, carried twice):
+from the `TTI_FUN` sequence byte and the SQL length:
 
 ```
-03 5e <seq>  61 80 00 00 00 00 00 00  <ub4 sqllen>  00 00 00
+03 5e <seq>  61 80 00 00 00 00 00 00  01 <ub4le sqllen>
 01 0c 00 00 00 00 01 00 00 00 00 01 00 00 00 00  <12×00>
 01 <SQL as pre-10g chunked string>
 01 <27×00> 01 <19×00>          # bind-count / define-count markers (none)
 ```
 
-The SQL length rides twice: an `encode_sb4` count in the header, then the SQL
-**text** as a pre-10g chunked string (`encode_chr`: a plain length byte up to 64
-bytes, else the `0xFE` + 64-byte-chunk form). A no-bind SELECT ≤ 64 bytes happens
-to coincide with `sb4-length + raw`, but longer SQL **must** chunk or the server
-desyncs. No define block is sent — the column layout comes back in the describe
-(§19.10).
+The SQL length rides twice. In the **header** it is a `0x01` marker + a **fixed
+4-byte little-endian** count (8i is x86) — **not** `encode_sb4`. The variable-width
+`encode_sb4` is byte-identical for a length ≤ 255 (`01 <len> 00 00 00`) but one
+byte longer at ≥ 256 (`02 01 1c …` vs `01 1c 01 00 00`), which shifts the whole
+request and the server rejects it with **ORA-01009** (#391). The SQL **text**
+follows as a pre-10g chunked string (`encode_chr`: a plain length byte up to 64
+bytes, else the `0xFE` + 64-byte-chunk form). No define block is sent — the column
+layout comes back in the describe (§19.10).
 The execute returns only the **first row batch** and never signals EOF on the
 execute itself; the remaining rows are pulled by the **fetch** OALL8 (option
 `0x40`, the server-assigned cursor id, no SQL, a `ub4` row count), repeated until
