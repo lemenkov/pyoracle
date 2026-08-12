@@ -1113,12 +1113,13 @@ class AsyncOracleConnect:
     ) -> tuple[list, bytes, list | None]:
         # Async port of OracleConnect._recv_8i_rows (#377): accumulate DATA
         # packets into one logical 8i response until the row stream decodes
-        # cleanly and lands on a complete terminal token (a LONG larger than the
-        # SDU spans several packets with no end-of-message flag).
+        # cleanly and leaves a non-empty terminal (a LONG larger than the SDU
+        # spans several packets with no end-of-message flag; a truncated value
+        # raises and an exact row-boundary split leaves nothing — both read more).
         while True:
             try:
                 (Rows, Terminal, Last) = decode_8i_exec_response(Buf, Columns, LastRow)
-                if len(Terminal) >= 12 and Terminal[0] in (0x04, 0x08):
+                if Terminal:
                     return (Rows, Terminal, Last)
             except (DataError, IndexError):
                 pass
