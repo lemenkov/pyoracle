@@ -6961,3 +6961,16 @@ class TestO8iQueryMessages(unittest.TestCase):
             reset_decode_8i(token)
         # flag reset -> back to the modern csform-2 (UTF-16BE) behaviour
         self.assertNotEqual(decode_value(col, b'caf\xe9'), 'café')
+
+    def test_bind_oac_maxsize_little_endian(self):
+        # The bind OAC max_size is a 2-byte LITTLE-endian field at offset +4
+        # (#375). <= 255 is byte-identical to the old 3-byte big-endian form, but
+        # >= 256 needs LE — else 8i mis-reads the size and rejects the bind as a
+        # LONG value (ORA-01461).
+        from seerdb.common.tns import _encode_8i_bind_oac
+
+        self.assertEqual(_encode_8i_bind_oac('x' * 20)[2:6], bytes.fromhex('00001400'))
+        self.assertEqual(_encode_8i_bind_oac('x' * 400)[2:6], bytes.fromhex('00009001'))
+        self.assertEqual(
+            _encode_8i_bind_oac(b'\x00' * 300)[2:6], bytes.fromhex('00002c01')
+        )
