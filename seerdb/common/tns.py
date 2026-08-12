@@ -3854,8 +3854,13 @@ def _encode_8i_oall8(Seq: int, Sql: bytes, StmtType: int, Binds: list) -> bytes:
         Message = (
             bytes([TTI_FUN, TTI_ALL8, Seq & 0xFF])
             + bytes([Option, Byte4, Byte5, 0, 0, 0, 0, 0])
-            + encode_sb4(len(Sql))  # SQL length (ub4)
-            + bytes([0, 0, 0])
+            # SQL length: a 0x01 marker + a FIXED 4-byte LITTLE-endian count (8i
+            # is x86). The earlier `encode_sb4` wrote a variable-width big-endian
+            # field — byte-identical for a length <= 255 (`01 <len> 00 00 00`) but
+            # one byte longer at >= 256, which shifted the whole request and the
+            # server rejected it with ORA-01009 (#391).
+            + bytes([0x01])
+            + len(Sql).to_bytes(4, 'little')
             + bytes([0x01, 0x0C, 0, 0, 0, 0, 0x01, 0, 0, 0, 0, 0x01, 0, 0, 0, 0])
             + Al8
             + bytes([0x01])
