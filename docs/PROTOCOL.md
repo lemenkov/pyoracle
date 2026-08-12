@@ -2518,8 +2518,9 @@ desyncs. `decode_8i_dcb_describe`:
 <ub1 row-width>  <ub4be num_columns>  <ub4be 0x33 (const)>
 per column:
   ub1  data type (1=VARCHAR2, 2=NUMBER, 96=CHAR, …)
-  ub4be  bit31 = character flag | low 31 bits = max_size
-  14 bytes  precision/scale/reserved (0 for literals)
+  ub4be  size field — NUMBER: `00 <precision> <scale sb1> <internal size 22>`;
+         else bit31 = character flag | low 31 bits = max_size
+  14 bytes  reserved (always 0 in captures)
   ub4be  character set (31 = WE8ISO8859P1; 0 for NUMBER)
   ub1 reserved(0)  ub1 csform  ub1 null_ok(0=NOT NULL,1=nullable)
   ub1 namelen  ub1 namelen  ub4be namelen  <name bytes>
