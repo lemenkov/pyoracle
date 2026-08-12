@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import datetime
+import platform
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, cast
 
@@ -4550,7 +4551,16 @@ def encode_dictionary_pig(Dictionary: dict) -> bytes:
 
 
 def encode_dictionary_pro(Dictionary: dict) -> bytes:
-    return bytes([TTI_PRO, 6, 5, 4, 3, 2, 1, 0]) + b'python' + bytes([0])
+    # TTI_PRO request: the descending TTC protocol-version vector (6..0) then a
+    # NUL-terminated client self-identifier. A real Oracle client puts its
+    # platform here (e.g. "x86_64/Linux"); we prefix a driver tag so the value is
+    # informative and identifies seerdb, instead of the bare "python" we sent
+    # before (#381). ASCII with a safe fallback — the field is a plain byte
+    # string, and the server accepts an arbitrary length (verified 9i–23ai).
+    Banner = f'seerdb {platform.machine()}/{platform.system()}'.encode(
+        'ascii', 'replace'
+    )
+    return bytes([TTI_PRO, 6, 5, 4, 3, 2, 1, 0]) + Banner + bytes([0])
 
 
 def encode_fast_auth(Pro: bytes, Dty: bytes, Sess: bytes) -> bytes:
