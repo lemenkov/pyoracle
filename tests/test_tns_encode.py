@@ -6423,3 +6423,85 @@ class TestScrollableExecEncoding(unittest.TestCase):
     def test_non_scrollable_unchanged(self):
         # Default path carries no scroll exec flags (no regression).
         self.assertNotIn('028082', self._exec().hex())
+
+
+class TestO8iOsesskeyMessages(unittest.TestCase):
+    # Pinned against a live 9.2-client -> 8.1.7 handshake
+    # (~/o8i/captures/cli8i_9.2_to_8i.trc, #244). 8i wraps the same DES O3LOGON
+    # crypto as 9i in the OSESSKEY (0x76) / OAUTH (0x73) envelope with key-value
+    # AUTH_ pairs, coded ub1(len) ub4be(len) data ub4be(pad).
+    _INFO = [
+        (b'AUTH_PROGRAM_NM', b'sqlplus@o9i (TNS V1-V3)'),
+        (b'AUTH_MACHINE', b'o9i'),
+        (b'AUTH_PID', b'13148'),
+    ]
+
+    def test_osesskey_phase1(self):
+        from seerdb.common.tns import encode_o3logon_osesskey_phase1
+
+        self.assertEqual(
+            encode_o3logon_osesskey_phase1(2, b'system', self._INFO).hex(),
+            '037602010600000001000000010300000001010673797374656d0f0000000f'
+            '415554485f50524f4752414d5f4e4d170000001773716c706c7573406f3969'
+            '2028544e532056312d563329000000000c0000000c415554485f4d41434849'
+            '4e4503000000036f3969000000000800000008415554485f50494405000000'
+            '05313331343800000000',
+        )
+
+    def test_oauth_phase2(self):
+        from seerdb.common.tns import encode_o3logon_oauth_phase2
+
+        pairs = self._INFO + [(b'AUTH_ACL', b'8000')]
+        self.assertEqual(
+            encode_o3logon_oauth_phase2(
+                3, b'system', b'9BCFED6D1BCEBBB51', pairs
+            ).hex(),
+            '037303010600000001010000010500000001010673797374656d0d0000000d'
+            '415554485f50415353574f524411000000113942434645443644314243454242'
+            '423531000000000f0000000f415554485f50524f4752414d5f4e4d1700000017'
+            '73716c706c7573406f39692028544e532056312d563329000000000c0000000c'
+            '415554485f4d414348494e4503000000036f3969000000000800000008415554'
+            '485f5049440500000005313331343800000000080000000841555448'
+            '5f41434c04000000043830303000000000',
+        )
+
+    def test_parse_auth_sesskey(self):
+        from binascii import hexlify
+
+        from seerdb.common.tns import parse_8i_auth_sesskey
+
+        rpa = bytes.fromhex(
+            '0801000c0000000c415554485f534553534b45591000000010'
+            '4236443944383632463446443242423700000000'
+        )
+        self.assertEqual(
+            hexlify(parse_8i_auth_sesskey(rpa)).upper(), b'B6D9D862F4FD2BB7'
+        )
+
+    def test_crypto_matches_capture(self):
+        # The DES O3LOGON crypto (shared with the 9i path) reproduces the
+        # captured AUTH_PASSWORD for system/manager under the captured session
+        # key: hex(DES blocks) + decimal pad count.
+        from binascii import hexlify, unhexlify
+
+        from seerdb.common.crypto import des_verifier, o3logon
+
+        sesskey = unhexlify(b'B6D9D862F4FD2BB7')
+        verifier = des_verifier(b'system', b'manager')
+        (authpass, _, _) = o3logon(sesskey, verifier, b'manager')
+        padcount = (8 - len(b'manager') % 8) % 8
+        self.assertEqual(
+            hexlify(authpass).decode().upper() + str(padcount), '9BCFED6D1BCEBBB51'
+        )
+
+    def test_dty_8i_shape(self):
+        # 8i's DTY: TTI_DTY (2), single-byte charset WE8ISO8859P1 (31) both ways,
+        # and a shorter identity map than the modern table (8i predates ~37 types).
+        import struct
+
+        from seerdb.common.tns import _DTY_8I
+
+        self.assertEqual(len(_DTY_8I), 1019)
+        self.assertEqual(_DTY_8I[0], 2)  # TTI_DTY
+        self.assertEqual(struct.unpack('<H', _DTY_8I[1:3])[0], 31)  # WE8ISO8859P1
+        self.assertEqual(struct.unpack('<H', _DTY_8I[3:5])[0], 31)

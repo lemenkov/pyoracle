@@ -2704,6 +2704,44 @@ def _datatype_table_12c() -> bytes:
     return bytes(Out)
 
 
+# Oracle 8i (8.1.7) DTY (data-type negotiation), captured from a live
+# 9.2-client -> 8.1.7 handshake. 8i predates ~37 later data types, so its
+# identity map is shorter than the modern table (1019 B vs 1167 B), and it
+# negotiates a single-byte charset (WE8ISO8859P1 = 31) — 8i has no Unicode
+# charset, so the modern AL32UTF8 (873) DTY draws ORA-03120. Emitted as a
+# constant the same way encode_dictionary_dty emits the modern table (the
+# negotiation does not vary with the workload); sent when the server is 8i.
+_DTY_8I = bytes.fromhex(
+    '021f001f0002150601010105010102010101010101017f0f03060300020201800000003c3c3c80'
+    '0000000101010002020a00080801000c0c0a0017170100181801001919181901001a1a191a0100'
+    '1b1b0a1b01001c1c161c01001d1d171d01001e1e171e01001f1f191f010020200c20010021210c'
+    '2101000a0a01000b0b010022220100232301230100242401002525010026260100282801002929'
+    '01002a2a01002b2b01002c2c01002d2d01002e2e01002f2f010030300100313101003232010033'
+    '3301003434010035350100363601003737010038380100393901003b3b01003c3c01003d3d0100'
+    '3e3e01003f3f0100404001004141010042420100434301004747010048480100494901004b4b01'
+    '004d4d01004e4e01004f4f01005050010051510100525201005353010054540100555501005656'
+    '0100575701570100595901005a5a01005c5c01005d5d01006262010063630100676701006b6b01'
+    '0075750100787801007c7c014201007d7d01007e7e01007f7f0100808001008181010082820100'
+    '8383010084840100858501008686010087870100898901008a8a01008b8b01008c8c01008d8d01'
+    '008e8e01008f8f010090900100919101009494012501009595010096960100979701009d9d0100'
+    '9e9e01009f9f0100a0a00100a1a10100a2a20100a3a30100a4a40100a5a50100a6a60100a7a701'
+    '00a8a80100a9a90100aaaa0100abab0100adad0100aeae0100afaf0100b0b00100b1b10100c1c1'
+    '0100c2c201250100c6c60100c7c70100c8c80100c9c90100caca019f0100cbcb01a00100cccc01'
+    'a20100cdcd01a30100cece01b10100cfcf01220100d2d20100d3d301ab0100d4d40100d5d50100'
+    'd6d60100d7d70100d8d80100d9d90100dada0100dbdb0100dcdc0100dddd0100dede0100dfdf01'
+    '00e0e00100e1e10100e2e20100e3e3016b0100e4e40100e5e50100e6e60100eaea0100ebeb0100'
+    'ecec0100eded0100eeee0100efef0100f2f20100f4f40100f5f5010003020a0004020a00050101'
+    '0006020a0007020a00090101000d000e000f17010010001100120013001400150016002778015d'
+    '012601003a6d010044020a00450046004a6d01004c0058005b020a005e0101005f170100606001'
+    '00616001006400650066660100680069006a6a01006c6d01006d6d01006e6f01006f6f01007070'
+    '01007171010072720100737301007466010076007700796d01007a6d01007b6d01008800929201'
+    '009393010098020a0099020a009a020a009b0101009c0c0a00ac020a00b2b20100b3b30100b4b4'
+    '0100b5b50100b6b60100b7b70100b80c0a00b9b20100bab30100bbb40100bcb50100bdb60100be'
+    'b70100bf00c000c3700100c4710100c5720100d0d00100d100e7e70100e8e70100e900f000f16d'
+    '0100f30000'
+)
+
+
 def encode_dictionary_dty(Dictionary: dict) -> bytes:
     # TTI_DTY (Data Type Negotiation). Sent during the TTC handshake right
     # after TTI_PRO. Tells the server which native Oracle data types this
@@ -4174,6 +4212,84 @@ def encode_o3logon_phase2(Seq: int, User: bytes, PwdField: bytes) -> bytes:
         + PwdField
         + _O3_ENV
     )
+
+
+# --- Oracle 8i (8.1.7) O3LOGON via the OSESSKEY/OAUTH envelope ---------------
+# 8i uses the same DES O3LOGON *crypto* as 9i, but wraps it in the OSESSKEY
+# (0x76) / OAUTH (0x73) function envelope with key-value AUTH_ pairs — NOT 9i's
+# positional TTI_3LOGA/TTI_3LOGON. Sending 3LOGA to 8i draws a TTI_OER. The
+# pre-10g key-value length coding is `ub1(len) ub4be(len) data`, then a ub4be
+# padding word — distinct from the modern variable-length encode_sb4 form.
+# Byte-for-byte reproduced from a live 9.2-client -> 8.1.7 capture
+# (docs/PROTOCOL.md; ~/o8i/captures/cli8i_9.2_to_8i.trc).
+
+
+def _kv8i(Key: bytes, Val: bytes) -> bytes:
+    def field(Data: bytes) -> bytes:
+        return (
+            bytes([len(Data)]) + struct.pack('>I', len(Data)) + Data
+            if Data
+            else bytes([0])
+        )
+
+    return field(Key) + field(Val) + struct.pack('>I', 0)
+
+
+def encode_o3logon_osesskey_phase1(
+    Seq: int, User: bytes, Pairs: list[tuple[bytes, bytes]]
+) -> bytes:
+    # TTI_FUN + OSESSKEY (0x76): request the session key. Carries the username
+    # and informational AUTH_ pairs (program/machine/pid — session metadata the
+    # server does not authenticate on). The pair count is a ub1 at offset 13.
+    return (
+        bytes([TTI_FUN, TTI_SESS, Seq, 1])
+        + bytes([len(User)])
+        + struct.pack('>I', 1)  # logon mode
+        + struct.pack('>I', 1)
+        + bytes([len(Pairs)])  # number of key-value pairs
+        + struct.pack('>I', 1)
+        + bytes([1])  # has-username
+        + bytes([len(User)])
+        + User
+        + b''.join(_kv8i(k, v) for k, v in Pairs)
+    )
+
+
+def encode_o3logon_oauth_phase2(
+    Seq: int, User: bytes, PwdField: bytes, Pairs: list[tuple[bytes, bytes]]
+) -> bytes:
+    # TTI_FUN + OAUTH (0x73): send AUTH_PASSWORD (hex(DES blocks) + decimal pad
+    # count) plus the informational pairs. Logon mode 0x105 marks phase two.
+    return (
+        bytes([TTI_FUN, TTI_AUTH, Seq, 1])
+        + bytes([len(User)])
+        + struct.pack('>I', 1)
+        + bytes([1])
+        + struct.pack('>I', 0x105)  # phase-two logon mode
+        + struct.pack('>I', 1)
+        + bytes([1])  # has-username
+        + bytes([len(User)])
+        + User
+        + _kv8i(b'AUTH_PASSWORD', PwdField)
+        + b''.join(_kv8i(k, v) for k, v in Pairs)
+    )
+
+
+def parse_8i_auth_sesskey(Packet: bytes) -> bytes:
+    """Extract the 8-byte session key from an 8i OSESSKEY response RPA.
+
+    The AUTH_SESSKEY value is a length-prefixed ASCII-hex string in the pre-10g
+    key-value coding (``ub1 len``, ``ub4be len``, then the hex)."""
+    from binascii import unhexlify
+
+    from seerdb.common.exceptions import InterfaceError
+
+    Idx = Packet.find(b'AUTH_SESSKEY')
+    if Idx < 0:
+        raise InterfaceError('8i OSESSKEY response carried no AUTH_SESSKEY')
+    After = Packet[Idx + len(b'AUTH_SESSKEY') :]
+    ValLen = After[0]  # ub1 length; the ub4be repeat follows in After[1:5]
+    return unhexlify(After[5 : 5 + ValLen])
 
 
 def encode_dictionary_spfp(Dictionary: dict) -> bytes:

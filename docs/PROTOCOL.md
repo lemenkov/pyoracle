@@ -2415,6 +2415,45 @@ from `_resolve_fv2_lobs` by data type; the BFILE column resolves to the file
 bytes, like the modern path. This completes the 9i LOB surface (CLOB, BLOB,
 BFILE) and, with §19.6 / §19.7, the PL/SQL surface (IN, OUT, IN OUT).
 
+### 19.8 Oracle 8i login — the OSESSKEY-envelope O3LOGON (#244)
+
+Oracle **8i (8.1.7)** also negotiates field version 2 and uses the same DES
+**O3LOGON crypto** as 9i, but it does **not** speak 9i's positional
+`TTI_3LOGA`/`TTI_3LOGON` messages — sending those draws a `TTI_OER`. Instead 8i
+wraps the O3LOGON exchange in the **OSESSKEY (`0x76`) / OAUTH (`0x73`, `TTI_AUTH`)**
+function envelope with key-value `AUTH_` pairs, the same envelope 10g+ uses for
+O5LOGON but carrying the 8i-era DES crypto. Reverse-engineered from a live
+9.2-client → 8.1.7 capture (a stock 11.2 client is too new to connect to 8i).
+seerdb detects 8i from the PRO banner (major version 8) and pins field version 2
+(8i's PRO carries no caps to negotiate it down, else the client stays at its
+default and wrongly takes the fv24 fast-auth path).
+
+**Pre-10g key-value coding.** Each `AUTH_` pair is `ub1(len) ub4be(len) <data>`
+for the key, the same for the value, then a `ub4be` padding word — distinct from
+the modern variable-length `encode_sb4` form. The two-phase exchange:
+
+| Phase | Client `TTI_FUN` | Carries | Server `TTI_RPA` (08) |
+|-------|------------------|---------|-----------------------|
+| 1 | `0x76` OSESSKEY | username + `AUTH_PROGRAM_NM`/`AUTH_MACHINE`/`AUTH_PID` | `AUTH_SESSKEY` (8-byte DES key, ASCII-hex) |
+| 2 | `0x73` OAUTH    | username + `AUTH_PASSWORD` (+ `AUTH_ACL`, info pairs) | `AUTH_VERSION_STRING` … = **authenticated** |
+
+`AUTH_PASSWORD` is `hex(DES blocks) + decimal pad count` — identical to the 9i
+computation (`des_verifier` + `o3logon`), so the crypto is reused unchanged;
+only the message envelope differs. Phase two succeeding with a value RPA (not the
+clean `TTI_OER` 9i answers with) means authenticated — there is no server proof
+to validate on the pre-10g path. Encoders: `encode_o3logon_osesskey_phase1` /
+`encode_o3logon_oauth_phase2` / `parse_8i_auth_sesskey`, gated on the `_is_8i`
+flag.
+
+**8i needs its own DTY.** 8i predates ~37 later data types (so its identity map
+is shorter — 1019 B vs the modern 1167 B) and has **no Unicode charset** — it
+negotiates single-byte **WE8ISO8859P1 (31)**, not AL32UTF8 (873). Sending the
+modern DTY draws **ORA-03120** ("two-task conversion: integer overflow") on the
+following OSESSKEY. seerdb sends the captured `_DTY_8I` constant when `_is_8i`
+(the datatype negotiation does not vary with the workload, so it is a constant
+the same way §4.2's modern table is). The 8i **query** path (the older `TTI_ALL7`
+dialect, §19, plus the single-byte charset) is a separate follow-up on #244.
+
 ## 20. Oracle 23ai field version 24 — fast-auth + the fv24 framing (#89)
 
 Column **annotations** are only delivered when the client advertises a TTC
