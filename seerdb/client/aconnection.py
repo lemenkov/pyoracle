@@ -51,6 +51,7 @@ from seerdb.common.tns import (
     CCAP_FIELD_VERSION,
     FIELD_VERSION_10_2,
     FIELD_VERSION_12_1,
+    _scan_ora_message,
     assemble_packet,
     decode_8i_block_out,
     decode_8i_cursor_id,
@@ -1088,7 +1089,20 @@ class AsyncOracleConnect:
         Received = await self._next_data_packet(b'', b'')
         if Received is False:
             raise Exception('Connection closed during 8i query response')
-        (Columns, Rest) = decode_8i_dcb_describe(Received[1])
+        Packet = Received[1]
+        # A rejected SELECT comes back as a TTI_OER (0x04) error status, not the
+        # TTI_DCB describe; surface the mapped ORA error rather than feeding the
+        # OER to decode_8i_dcb_describe (which would IndexError) (#384).
+        if Packet[:1] == bytes([TTI_OER]):
+            (ErrCode, Message) = _scan_ora_message(Packet)
+            if ErrCode:
+                from seerdb.common.exceptions import from_ora_code
+
+                raise from_ora_code(ErrCode)(
+                    Message or f'ORA-{ErrCode:05d}', code=ErrCode
+                )
+            raise DatabaseError('Oracle 8i rejected the query (no ORA code)')
+        (Columns, Rest) = decode_8i_dcb_describe(Packet)
         # A LONG / LONG RAW column forces single-row fetches capped at the fetch
         # request's long-size field; ask for the whole value (#377, §19.16).
         HasLong = any(Col.get('data_type') in _O8I_LONG_TYPES for Col in Columns)

@@ -26,6 +26,7 @@ from seerdb.common.tns import (
     FIELD_VERSION_10_2,
     FIELD_VERSION_12_1,
     FIELD_VERSION_21_1,
+    _scan_ora_message,
     assemble_packet,
     decode_8i_block_out,
     decode_8i_cursor_id,
@@ -1529,6 +1530,19 @@ class OracleConnect:
         if Received is False:
             raise Exception('Connection closed during 8i query response')
         (_, Packet) = Received
+        # A rejected SELECT (bad table, bad column, …) comes back as a TTI_OER
+        # (0x04) error status, not the TTI_DCB (0x10) describe. Surface the mapped
+        # ORA error instead of feeding the OER to decode_8i_dcb_describe, which
+        # would overrun and raise a meaningless IndexError (#384).
+        if Packet[:1] == bytes([TTI_OER]):
+            (ErrCode, Message) = _scan_ora_message(Packet)
+            if ErrCode:
+                from seerdb.common.exceptions import from_ora_code
+
+                raise from_ora_code(ErrCode)(
+                    Message or f'ORA-{ErrCode:05d}', code=ErrCode
+                )
+            raise DatabaseError('Oracle 8i rejected the query (no ORA code)')
         (Columns, Rest) = decode_8i_dcb_describe(Packet)
         # A LONG / LONG RAW column changes the fetch shape: 8i returns one row per
         # fetch round trip for a LONG, and caps the value at the fetch request's

@@ -2529,6 +2529,13 @@ present). A **NULL** column carries no value DALC at all — it is the bare 4-by
 whether that opens with the `0x08` session-state piggyback or the `0x04` OER.
 Decoders: `decode_8i_exec_response` / `decode_8i_cursor_id`.
 
+**Rejected SELECT (#384).** When the server rejects the statement (bad table, bad
+column, …) the execute reply is a **`TTI_OER` (`0x04`)** error status, *not* the
+`TTI_DCB` (`0x10`) describe — the human-readable `ORA-NNNNN: …` text sits inline
+(`_scan_ora_message`). `_execute_8i_select` checks the first byte and raises the
+mapped ORA error; feeding an OER to `decode_8i_dcb_describe` (which assumes a
+describe header) overruns and raises a meaningless `IndexError`.
+
 **Duplicate-column compression.** Like the modern `TTI_BVC`, 8i omits a column
 from the RXD when it repeats the previous row's value — but 8i carries the
 **column bit vector inside the RXH** (a `ub1` length + the vector, at offset 14)

@@ -107,9 +107,6 @@ _8I_UNSUPPORTED = (
     # Known 8i bugs, tracked for milestone #25.
     ('rowid', 'Oracle 8i ROWID / UROWID support pending (#385)'),
     ('description_precision', 'Oracle 8i describe omits precision/scale (#386)'),
-    ('nonexistent_raises_942', 'Oracle 8i SELECT-error handling pending (#384)'),
-    ('missing_table_raises', 'Oracle 8i SELECT-error handling pending (#384)'),
-    ('error_message_includes_ora', 'Oracle 8i SELECT-error handling pending (#384)'),
     ('multiple_rows_with_lobs', 'Oracle 8i LOB read edge cases pending (#387)'),
     ('empty_lobs', 'Oracle 8i LOB read edge cases pending (#387)'),
     ('clob_larger_than_inline', 'Oracle 8i LOB read edge cases pending (#387)'),
