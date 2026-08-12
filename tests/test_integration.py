@@ -4326,5 +4326,94 @@ class PreSha2VerifierLoginIntegration(unittest.TestCase):
             conn.close()
 
 
+@unittest.skipUnless(_USER, _SKIP_REASON)
+class O8iSelectIntegration(unittest.TestCase):
+    # Live read-only SELECT coverage for Oracle 8i (8.1.7), whose support is
+    # currently SELECT-only (#244 task #4, PROTOCOL.md §19.9-10). 8i cannot run
+    # the CREATE/INSERT the rest of the suite uses to seed a table, so these
+    # tests query only always-present read-only sources — DUAL and the ALL_USERS
+    # data dictionary view. The class self-skips unless the target the SEERDB_TEST_*
+    # env points at is actually an 8i server, so it is inert on every other tier.
+    def setUp(self):
+        self.conn = _connect()
+        if not getattr(self.conn, '_is_8i', False):
+            self.conn.close()
+            self.skipTest('not an Oracle 8i server')
+        self.cur = self.conn.cursor()
+
+    def tearDown(self):
+        try:
+            self.conn.close()
+        except Exception:
+            # Best-effort close; the test already recorded its outcome.
+            pass
+
+    def test_select_literals_from_dual(self):
+        # NUMBER + CHAR literals, and the column names from the 8i DCB describe.
+        self.cur.execute("select 42 as n, 'hello' as s from dual")
+        self.assertEqual(self.cur.fetchall(), [(42, 'hello')])
+        self.assertEqual([d[0] for d in self.cur.description], ['N', 'S'])
+
+    def test_null_column_between_present_ones(self):
+        # The 8i RXD NULL form (bare `ff ff 00 00`) decodes to None without
+        # slipping the neighbouring columns.
+        self.cur.execute("select 1 a, cast(null as varchar2(4)) b, 'xy' cc from dual")
+        self.assertEqual(self.cur.fetchall(), [(1, None, 'xy')])
+
+    def test_multi_row_fetch_continuation(self):
+        # 8i returns one row per batch, so >1 row exercises the OALL8 fetch loop.
+        self.cur.execute(
+            'select username from all_users where rownum <= 5 order by username'
+        )
+        rows = self.cur.fetchall()
+        self.assertEqual(len(rows), 5)
+        self.assertTrue(all(isinstance(r[0], str) and r[0] for r in rows))
+
+    def test_varchar_number_date_types(self):
+        # ALL_USERS gives a VARCHAR2, a NUMBER, and a DATE column in one row.
+        import datetime
+
+        self.cur.execute(
+            'select username, user_id, created from all_users where rownum <= 3'
+        )
+        rows = self.cur.fetchall()
+        self.assertTrue(rows)
+        for name, uid, created in rows:
+            self.assertIsInstance(name, str)
+            self.assertIsInstance(uid, int)
+            self.assertIsInstance(created, datetime.datetime)
+        self.assertEqual(
+            [d[0] for d in self.cur.description], ['USERNAME', 'USER_ID', 'CREATED']
+        )
+
+    def test_aggregate_count(self):
+        self.cur.execute('select count(*) from all_users')
+        (n,) = self.cur.fetchone()
+        self.assertIsInstance(n, int)
+        self.assertGreater(n, 0)
+
+    def test_sysdate_is_datetime(self):
+        import datetime
+
+        self.cur.execute('select sysdate from dual')
+        (value,) = self.cur.fetchone()
+        self.assertIsInstance(value, datetime.datetime)
+
+    def test_empty_result_set(self):
+        self.cur.execute('select username from all_users where 1 = 0')
+        self.assertEqual(self.cur.fetchall(), [])
+
+    def test_bind_raises_not_supported(self):
+        # Binds are a documented 8i follow-up; they must fail cleanly, not hang.
+        with self.assertRaises(seerdb.NotSupportedError):
+            self.cur.execute('select * from dual where 1 = :x', [1])
+
+    def test_dml_raises_not_supported(self):
+        # DML/DDL are SELECT-only follow-ups; fail fast rather than send the
+        # modern OALL8 the 8i server rejects with an empty packet + hangup.
+        with self.assertRaises(seerdb.NotSupportedError):
+            self.cur.execute('create table zz_o8i_should_not_exist (a number)')
+
+
 if __name__ == '__main__':
     unittest.main()

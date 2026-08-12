@@ -2451,8 +2451,68 @@ negotiates single-byte **WE8ISO8859P1 (31)**, not AL32UTF8 (873). Sending the
 modern DTY draws **ORA-03120** ("two-task conversion: integer overflow") on the
 following OSESSKEY. seerdb sends the captured `_DTY_8I` constant when `_is_8i`
 (the datatype negotiation does not vary with the workload, so it is a constant
-the same way §4.2's modern table is). The 8i **query** path (the older `TTI_ALL7`
-dialect, §19, plus the single-byte charset) is a separate follow-up on #244.
+the same way §4.2's modern table is). The 8i **query** path is §19.9–19.10.
+
+### 19.9 Oracle 8i SELECT — the 9.2-era OALL8 request (#244)
+
+8i's query dialect is **neither** 9i's `TTI_ALL7` four-call sequence (§19.1–19.3)
+**nor** the modern `TTI_ALL8` (`0x5e`) request this driver builds for 10g+. 8i
+answers the same `0x5e` function code but expects the **9.2-era OALL8 layout** —
+sending the modern one draws an **empty DATA packet followed by a hangup**.
+Reverse-engineered from the 9.2-client → 8.1.7 trace; the request is fixed apart
+from the `TTI_FUN` sequence byte and the SQL length (`encode_sb4`, carried twice):
+
+```
+03 5e <seq>  61 80 00 00 00 00 00 00  <ub4 sqllen>  00 00 00
+01 0c 00 00 00 00 01 00 00 00 00 01 00 00 00 00  <12×00>
+<ub4 sqllen>  <SQL bytes>
+01 <27×00> 01 <19×00>          # bind-count / define-count markers (none)
+```
+
+No define block is sent — the column layout comes back in the describe (§19.10).
+The execute returns only the **first row batch** and never signals EOF on the
+execute itself; the remaining rows are pulled by the **fetch** OALL8 (option
+`0x40`, the server-assigned cursor id, no SQL, a `ub4` row count), repeated until
+a batch comes back empty (the 8i equivalent of ORA-01403):
+
+```
+03 5e <seq>  40  <ub4 cursor>  00×8  01 0c 00×4 01 00×5 <ub4 count>  00×12
+01 00×4 0f  00×23 01 00×19
+```
+
+Encoders: `encode_8i_oall8_query` / `encode_8i_oall8_fetch`. Binds and 8i DML are
+follow-ups; async 8i (login + query) is unimplemented (the login is sync-only).
+
+### 19.10 Oracle 8i response — the fixed-field DCB describe and 4-byte RXD (#244)
+
+The reply is fv2-style but its own shape. The **describe** is a `TTI_DCB` (`0x10`)
+block whose header and per-column descriptors use **fixed-width big-endian**
+fields — not the `ub1`-length-prefixed `ub4`s the 10g+ DCB (§4.2's
+`decode_token_dcb`) reads, so the modern decoder sees `num_columns = 0` and
+desyncs. `decode_8i_dcb_describe`:
+
+```
+10  <ub1 preamble-len> <preamble: SCN + 7-byte date>
+<ub1 row-width>  <ub4be num_columns>  <ub4be 0x33 (const)>
+per column:
+  ub1  data type (1=VARCHAR2, 2=NUMBER, 96=CHAR, …)
+  ub4be  bit31 = character flag | low 31 bits = max_size
+  14 bytes  precision/scale/reserved (0 for literals)
+  ub4be  character set (31 = WE8ISO8859P1; 0 for NUMBER)
+  ub1 reserved(0)  ub1 csform  ub1 null_ok(0=NOT NULL,1=nullable)
+  ub1 namelen  ub1 namelen  ub4be namelen  <name bytes>
+  8-byte inter-column trailer (type-OID slot; 0 for scalar types)
+describe trailer: current date as 8i bytes-with-length (ub1 len, ub4be len, data)
+```
+
+The **rows** follow as repeated `TTI_RXH` (`06`) + `TTI_RXD` (`07`) pairs. Unlike
+the 9i 1-byte indicator (§19.2), each 8i column value is a DALC **followed by a
+fixed 4-byte trailer** (`sb2` indicator + `ub2` return code, both zero when
+present). A **NULL** column carries no value DALC at all — it is the bare 4-byte
+`ff ff 00 00` (indicator −1). Values are **WE8ISO8859P1** (latin-1). The
+**cursor id** for the fetch loop sits at offset 11 of the post-row terminal —
+whether that opens with the `0x08` session-state piggyback or the `0x04` OER.
+Decoders: `decode_8i_exec_response` / `decode_8i_cursor_id`.
 
 ## 20. Oracle 23ai field version 24 — fast-auth + the fv24 framing (#89)
 
