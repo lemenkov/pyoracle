@@ -26,6 +26,8 @@ from seerdb.common.tns import decode_ub4
 from seerdb.common.tns_consts import (
     TNS_CONNECT,
     TNS_DATA,
+    TNS_TYPE_LONG,
+    TNS_TYPE_LONGRAW,
     TTI_ALL8,
     TTI_COMMIT,
     TTI_FETCH,
@@ -71,12 +73,15 @@ from seerdb.server.query import (
     encode_fetch_response,
     encode_fetch_terminator_oci,
     encode_logoff_status_oci,
+    encode_long_fetch_row_oci,
     encode_out_bind_response_oci,
     encode_query_response,
     encode_query_response_oci,
+    encode_reexec_row_oci,
     encode_status,
     encode_status_oci,
     encode_version_banner_oci,
+    is_reexecute_oci,
     is_version_call_oci,
     parse_exec,
     parse_exec_oci,
@@ -265,10 +270,21 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
         body = strip_oci_piggyback(body)
         if len(body) >= 2 and body[0] == TTI_FUN:
             if body[1] == TTI_ALL8:
+                if parked is not None and is_reexecute_oci(body):
+                    # sqlplus re-executes the described cursor to pull LONG rows
+                    # once its streaming define is set up. LONG rows stream one per
+                    # reply: deliver the first now, re-park the rest for the
+                    # follow-up fetches (#407).
+                    parked = _serve_oci_long_row(stream, parked, reexecute=True)
+                    continue
                 parked = _answer_query_oci(stream, backend, body)
                 continue
             if body[1] == TTI_FETCH:
-                if parked is not None:
+                if parked is not None and _is_long_result(parked[0]):
+                    # A LONG result drains one row per fetch (each with "more"),
+                    # the last fetch drawing the 1403 terminator below (#407).
+                    parked = _serve_oci_long_row(stream, parked, reexecute=False)
+                elif parked is not None:
                     columns, rows = parked
                     stream.write_packet(TNS_DATA, encode_fetch_batch_oci(columns, rows))
                     parked = None
@@ -289,6 +305,31 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
 
 _OCI_DML_KEYWORDS = ('INSERT', 'UPDATE', 'DELETE', 'MERGE')
 _OCI_DDL_KEYWORDS = ('CREATE', 'DROP')
+
+
+def _is_long_result(columns: list[ColumnMeta]) -> bool:
+    # A result that carries a LONG / LONG RAW column, which sqlplus streams one
+    # row per reply over the re-execute / fetch flow (#407).
+    return any(col.data_type in (TNS_TYPE_LONG, TNS_TYPE_LONGRAW) for col in columns)
+
+
+def _serve_oci_long_row(
+    stream: PacketStream,
+    parked: tuple[list[ColumnMeta], list[tuple]],
+    *,
+    reexecute: bool,
+) -> tuple[list[ColumnMeta], list[tuple]] | None:
+    # Deliver one LONG row and re-park the remainder (LONG streams a row per
+    # reply). The re-execute reply ends with the execute row-status; a fetch reply
+    # ends with the "more rows" OER status. Either way the drained state (None)
+    # makes the next fetch return the 1403 terminator (#407).
+    columns, rows = parked
+    if reexecute:
+        reply = encode_reexec_row_oci(columns, rows[:1], more=len(rows) > 1)
+    else:
+        reply = encode_long_fetch_row_oci(columns, rows[0])
+    stream.write_packet(TNS_DATA, reply)
+    return (columns, rows[1:]) if len(rows) > 1 else None
 
 
 def _oci_no_row_status(sql: str, rowcount: int) -> bytes:
@@ -342,6 +383,18 @@ def _answer_query_oci(
         stream.write_packet(TNS_DATA, _oci_no_row_status(request.sql, result.rowcount))
         return None
     rows = list(result.rows)
+    has_long = any(
+        col.data_type in (TNS_TYPE_LONG, TNS_TYPE_LONGRAW) for col in result.columns
+    )
+    if has_long and rows:
+        # sqlplus fetches a LONG / LONG RAW row separately from the describe — it
+        # sets up the streaming define buffer on the describe, then issues a fetch
+        # — so deliver no row inline (an inline LONG row segfaults it): describe +
+        # "more rows", then the row in the follow-up fetch (#407).
+        stream.write_packet(
+            TNS_DATA, encode_query_response_oci(result.columns, [], more=True)
+        )
+        return result.columns, rows
     if len(rows) <= 1:
         # 0 or 1 row fits in the execute reply; sqlplus won't fetch further.
         stream.write_packet(TNS_DATA, encode_query_response_oci(result.columns, rows))

@@ -36,6 +36,8 @@ from seerdb.common.tns_consts import (
     TNS_TYPE_BFLOAT,
     TNS_TYPE_CHAR,
     TNS_TYPE_DATE,
+    TNS_TYPE_LONG,
+    TNS_TYPE_LONGRAW,
     TNS_TYPE_NUMBER,
     TNS_TYPE_RAW,
     TNS_TYPE_TIMESTAMP,
@@ -177,6 +179,7 @@ def parse_exec(payload: bytes) -> ExecRequest:
 # offset (#265). The preamble also carries 3x the SQL byte length as a ub4 (the
 # worst-case max-byte buffer for the DB charset), which cross-checks the parse.
 _OCI_ALL8_IND = b'\xfe\xff\xff\xff\xff\xff\xff\xff'
+_OCI_ALL8_IND_OFF = 11  # the SQL pointer indicator; absent on a re-execute
 _OCI_ALL8_CURSOR_OFF = 7  # ub4 LE; 0 = a new statement
 _OCI_ALL8_SQLLEN3_OFF = 19  # ub4 LE = 3 x the SQL byte length
 _OCI_ALL8_SQL_OFF = 196  # SQL text; the ub1 length prefix is the byte before it
@@ -239,6 +242,19 @@ def parse_exec_oci(payload: bytes) -> ExecRequest:
         fetch=0,
         binds=binds,
         bind_rows=[binds] if binds else [],
+    )
+
+
+def is_reexecute_oci(payload: bytes) -> bool:
+    """True if an OCI OALL8 is a re-execute of an already-described cursor — it
+    carries no SQL (the SQL pointer at offset 11 is absent). sqlplus issues one
+    to pull a LONG / LONG RAW row after setting up its streaming define, so the
+    Mirror answers it with the row it parked on the describe (#407)."""
+    return (
+        len(payload) > _OCI_ALL8_IND_OFF + 8
+        and payload[0] == TTI_FUN
+        and payload[1] == TTI_ALL8
+        and payload[_OCI_ALL8_IND_OFF : _OCI_ALL8_IND_OFF + 8] != _OCI_ALL8_IND
     )
 
 
@@ -406,7 +422,11 @@ _OCI_DCB_PREAMBLE_LEN = 23  # cursor-uuid preamble (zeroed; the client skips it)
 _OCI_DCB_COL_PRENAME = 48
 _OCI_DCB_COL_POSTNAME = 13
 # A char type carries a charset + form-of-use and sets the pre-name char flag.
-_OCI_CHAR_TYPES = frozenset({TNS_TYPE_VARCHAR, TNS_TYPE_CHAR})
+# LONG is a character type (charset + form-of-use, like VARCHAR2); LONG RAW is
+# binary. Both are streamed inline with no fixed width — a live 11g LONG /
+# LONG RAW describe reports data_length / max_size / max-row-size all 0 (#407).
+_OCI_CHAR_TYPES = frozenset({TNS_TYPE_VARCHAR, TNS_TYPE_CHAR, TNS_TYPE_LONG})
+_OCI_LONG_TYPES = frozenset({TNS_TYPE_LONG, TNS_TYPE_LONGRAW})
 _OCI_DCB_CHAR_FLAG = 0x80
 
 
@@ -423,7 +443,11 @@ def _encode_dcb_column_oci(col: ColumnMeta, position: int, first: bool) -> bytes
     if is_char:
         pre[30:32] = int(col.charset).to_bytes(2, 'little')
         pre[32] = col.csfrm
-    pre[34:38] = _oci_ub4(col.max_size)
+    # A LONG / LONG RAW carries no fixed max size — the value is streamed inline
+    # and unbounded, so a live 11g describe leaves this zero (like the data length
+    # the backend already sets to 0). Only fixed-width columns fill it (#407).
+    if col.data_type not in _OCI_LONG_TYPES:
+        pre[34:38] = _oci_ub4(col.max_size)
     pre[42] = col.null_ok
     pre[43] = len(col.name)
     pre[44:48] = _oci_ub4(len(col.name))
@@ -445,8 +469,13 @@ def encode_describe_oci(columns: list[ColumnMeta]) -> bytes:
     out += _oci_ub4(_OCI_DCB_PREAMBLE_LEN) + bytes(_OCI_DCB_PREAMBLE_LEN)
     # Max row size: the thick/OCI client allocates a row buffer of this many
     # bytes, so it must cover the widest row — a zero here overflows and crashes
-    # sqlplus (unlike the thin client, which skips the field).
-    out += _oci_ub4(sum(c.data_length for c in columns))
+    # sqlplus (unlike the thin client, which skips the field). A LONG / LONG RAW
+    # is streamed inline and unbounded, so it contributes nothing to the fixed row
+    # buffer (its data_length is 0 anyway); it is excluded to match a live 11g
+    # describe, which reports max-row-size 0 for a LONG-only result (#407).
+    out += _oci_ub4(
+        sum(c.data_length for c in columns if c.data_type not in _OCI_LONG_TYPES)
+    )
     out += _oci_ub4(len(columns))
     for position, col in enumerate(columns, start=1):
         out += _encode_dcb_column_oci(col, position, first=(position == 1))
@@ -533,10 +562,57 @@ def encode_fetch_batch_oci(columns: list[ColumnMeta], rows: list[tuple]) -> byte
         if len(row) != len(columns):
             raise InterfaceError('row width does not match the column count')
         out += bytes([TTI_RXD]) + b''.join(
-            _encode_value(v, col.data_type) for v, col in zip(row, columns)
+            _encode_oci_value(v, col) for v, col in zip(row, columns)
         )
     out += encode_fetch_terminator_oci()
     return bytes(out)
+
+
+def encode_reexec_row_oci(
+    columns: list[ColumnMeta], rows: list[tuple], *, more: bool = False
+) -> bytes:
+    """The reply to a re-execute-to-fetch (a LONG / streamed column, #407).
+
+    sqlplus describes the query, sets up its streaming define, then re-executes
+    the cursor to pull the rows — one LONG row per reply, each led by a row header
+    and ended with the row status (``more`` set while rows remain), then a final
+    fetch draws the 1403 terminator. No describe (the client already has it).
+    Matches a live 11g LONG re-execute / fetch reply."""
+    out = bytearray(_oci_rxh())
+    for row in rows:
+        if len(row) != len(columns):
+            raise InterfaceError('row width does not match the column count')
+        out += bytes([TTI_RXD]) + b''.join(
+            _encode_oci_value(v, col) for v, col in zip(row, columns)
+        )
+    out += _oci_row_status(more=more)
+    return bytes(out)
+
+
+# The OER status that trails a *fetch*-delivered LONG row (as opposed to the
+# execute row-status of the re-execute reply): a 136-byte OER with no error and a
+# "more rows" call status, captured from a live 11g LONG fetch. It carries no
+# message (unlike the 1403 terminator) — the final empty fetch draws the
+# terminator instead (#407).
+_OCI_LONG_FETCH_STATUS = bytes.fromhex(
+    '04010000001100010200000000000000000002000000030000000000000000000000'
+    '00000000000000000000000000000013000001000000360100000000000000000000'
+    '0000000020f6310a0000000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000000000'
+)
+
+
+def encode_long_fetch_row_oci(columns: list[ColumnMeta], row: tuple) -> bytes:
+    """The fetch reply carrying one LONG row (#407): row header + the row, then a
+    "more rows" OER status (not the execute row-status the re-execute reply uses,
+    nor the 1403 terminator — a following empty fetch drains that)."""
+    if len(row) != len(columns):
+        raise InterfaceError('row width does not match the column count')
+    out = bytearray(_oci_rxh())
+    out += bytes([TTI_RXD]) + b''.join(
+        _encode_oci_value(v, col) for v, col in zip(row, columns)
+    )
+    return bytes(out) + _OCI_LONG_FETCH_STATUS
 
 
 # The OCI end-of-fetch terminator sqlplus reads after the execute's rows: an OER
@@ -606,7 +682,7 @@ def encode_query_response_oci(
         if len(row) != len(columns):
             raise InterfaceError('row width does not match the column count')
         out += bytes([TTI_RXD]) + b''.join(
-            _encode_value(v, col.data_type) for v, col in zip(row, columns)
+            _encode_oci_value(v, col) for v, col in zip(row, columns)
         )
     out += _oci_row_status(more=more)
     return bytes(out)
@@ -910,6 +986,46 @@ def _encode_value(value: object, data_type: int) -> bytes:
         # bytes ("truncated DALC field").
         return encode_chr(value)
     raise InterfaceError(f'unsupported column value type: {type(value).__name__}')
+
+
+# --- OCI LONG / LONG RAW row value (#407) ---
+# A LONG (type 8, character) or LONG RAW (type 24, binary) column is streamed
+# inline in the RXD — no LOB locator. The value is always the chunked form
+# (0xFE marker, then a run of <ub1 len><bytes> chunks terminated by a zero-length
+# chunk) even when it fits one chunk, followed by a trailing ub4 indicator (0),
+# reproduced from a live 11g capture. A NULL LONG is a single 0x00. Character LONG
+# content is UTF-8, LONG RAW is raw bytes.
+_OCI_LONG_CHUNK = 0xFC  # max bytes per inline LONG chunk
+_OCI_LONG_TRAILER = bytes(4)  # trailing ub4 indicator (actual/return length = 0)
+
+
+def encode_long_value_oci(value: object) -> bytes:
+    """The RXD value for a LONG / LONG RAW column (#407): the content streamed
+    inline as 0xFE-chunked bytes + a zero trailing indicator. NULL is an empty
+    value (0x00) still followed by the trailing indicator. ``str`` content is
+    UTF-8 (LONG), ``bytes`` is raw (LONG RAW)."""
+    if value is None:
+        return bytes([0]) + _OCI_LONG_TRAILER
+    if isinstance(value, str):
+        content = value.encode('utf-8')
+    elif isinstance(value, (bytes, bytearray)):
+        content = bytes(value)
+    else:
+        content = str(value).encode('utf-8')
+    out = bytearray([0xFE])
+    for start in range(0, len(content), _OCI_LONG_CHUNK):
+        chunk = content[start : start + _OCI_LONG_CHUNK]
+        out += bytes([len(chunk)]) + chunk
+    out += bytes([0])  # zero-length chunk terminates the run
+    return bytes(out) + _OCI_LONG_TRAILER
+
+
+def _encode_oci_value(value: object, col: ColumnMeta) -> bytes:
+    # A row value in the OCI dialect: a LONG / LONG RAW column streams inline via
+    # the chunked form (#407); everything else is the ordinary inline DALC value.
+    if col.data_type in _OCI_LONG_TYPES:
+        return encode_long_value_oci(value)
+    return _encode_value(value, col.data_type)
 
 
 def encode_rows(
