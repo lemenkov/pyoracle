@@ -63,6 +63,7 @@ from seerdb.server.query import (
     ExecRequest,
     FetchRequest,
     encode_commit_status_oci,
+    encode_dml_status_oci,
     encode_error,
     encode_error_oci,
     encode_fetch_batch_oci,
@@ -285,6 +286,20 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
         return user
 
 
+_OCI_DML_KEYWORDS = ('INSERT', 'UPDATE', 'DELETE', 'MERGE')
+
+
+def _oci_no_row_status(sql: str, rowcount: int) -> bytes:
+    # Pick the OCI success reply for a statement that returned no columns, so
+    # sqlplus renders the right message (#348): DML carries the affected row count
+    # ("N rows created/updated/deleted"), and everything else (DDL, PL/SQL blocks,
+    # session bootstrap) the generic "PL/SQL procedure successfully completed".
+    keyword = sql.lstrip().split(None, 1)[0].upper() if sql.strip() else ''
+    if keyword in _OCI_DML_KEYWORDS:
+        return encode_dml_status_oci(keyword, rowcount)
+    return encode_status_oci()
+
+
 def _answer_query_oci(
     stream: PacketStream, backend: Backend, body: bytes
 ) -> tuple[list[ColumnMeta], list[tuple]] | None:
@@ -318,7 +333,7 @@ def _answer_query_oci(
         stream.write_packet(TNS_DATA, encode_out_bind_response_oci(result.out_binds))
         return None
     if not result.columns:
-        stream.write_packet(TNS_DATA, encode_status_oci())
+        stream.write_packet(TNS_DATA, _oci_no_row_status(request.sql, result.rowcount))
         return None
     rows = list(result.rows)
     if len(rows) <= 1:

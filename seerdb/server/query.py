@@ -631,6 +631,55 @@ def encode_status_oci() -> bytes:
     return bytes(status)
 
 
+# Execute-status replies for OCI DML (#348), reproduced from live 11g replies so
+# sqlplus renders the right completion message ("N rows updated.") instead of the
+# generic PL/SQL one. sqlplus derives the *verb* from statement-type fields in the
+# reply (the SQL command code — INSERT 2, UPDATE 6, DELETE 7 — and neighbours), so
+# each DML verb needs its own captured template; the *count* is a `ub4`
+# little-endian at offset 43 of the body, the one field computed. The surrounding
+# structure (return marker, SCN region, cursor/rowid trailer, and a session
+# row-counter at 75/186 that is NOT the count) is carried as-is. Fully computing
+# the OER is a follow-up.
+_OCI_DML_STATUS = {
+    'INSERT': bytes.fromhex(
+        '08060024e85b00000000000200000001000000000000000000000000000000000000'
+        '0004020000001300010100000000000000000002000c000200000000007fb5010001'
+        '000000b1b40000000000000000000000150000010000003601000000000000000000'
+        '000000000020f6310a000000000d0000000000000000000000000000000000000000'
+        '00000000000000000000000000000000000000000000000000000000000000000000'
+        '000d000d010001b57f00010000b4b10000'
+    ),
+    'UPDATE': bytes.fromhex(
+        '08060025e85b00000000000200000001000000000000000000000000000000000000'
+        '00040200000019000102000000000000000000020007000600000000007fb5010001'
+        '000000b1b400000100000000000000001b0000010000003601000000000000000000'
+        '000000000020f6310a000000000d0000000000000000000000000000000000000000'
+        '00000000000000000000000000000000000000000000000000000000000000000000'
+        '000d000d010001b57f00010000b4b10001'
+    ),
+    'DELETE': bytes.fromhex(
+        '08060026e85b00000000000300000001000000000000000000000000000000000000'
+        '0004020000001b00010100000000000000000003000c000700000000007fb5010001'
+        '000000b1b400000200000000000000001d0000010000003601000000000000000000'
+        '000000000020f6310a000000000d0000000000000000000000000000000000000000'
+        '00000000000000000000000000000000000000000000000000000000000000000000'
+        '000d000d010001b57f00010000b4b10002'
+    ),
+}
+_OCI_DML_ROWCOUNT_OFF = 43
+
+
+def encode_dml_status_oci(keyword: str, rowcount: int) -> bytes:
+    """OCI reply for a DML — success carrying the affected-row count so sqlplus
+    prints ``N rows created/updated/deleted``. ``keyword`` (INSERT/UPDATE/DELETE)
+    selects the verb template; MERGE and anything else fall back to INSERT."""
+    status = bytearray(_OCI_DML_STATUS.get(keyword, _OCI_DML_STATUS['INSERT']))
+    status[_OCI_DML_ROWCOUNT_OFF : _OCI_DML_ROWCOUNT_OFF + 4] = rowcount.to_bytes(
+        4, 'little'
+    )
+    return bytes(status)
+
+
 # The sqlplus / thick-OCI reply to a PL/SQL block that assigned OUT binds — the
 # ``VARIABLE v NUMBER`` / ``EXEC :v := 42`` flow. The client parked bind buffers
 # and expects their values back: a ttc=0b01 message whose body is a fixed header
