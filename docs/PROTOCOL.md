@@ -2729,6 +2729,47 @@ truncated, and a complete response ends on a terminal token (`0x08` piggyback /
 `0x04` OER, ≥ 12 bytes for the cursor id). `_recv_8i_rows` reads until that holds.
 Driver: `_execute_8i_select` / `_recv_8i_rows`; encoder: `encode_8i_oall8_fetch`.
 
+### 19.17 Oracle 8i BFILE read — the server-side helper (#396)
+
+A **BFILE** (TNS type 114) is a pointer to an external OS file, not inline LOB
+content. `decode_8i_exec_response` turns the column into a `LOB` whose locator
+parses into `directory_name` / `filename` (a length-prefixed directory-object
+name then file name — e.g. `… 05 "BDUMP" 0c "ORCLALRT.LOG"`), the same as the
+10g+ locator.
+
+Reading the bytes needs a `TTI_LOBOPS` **FILE_OPEN → GETLEN → READ → FILE_CLOSE**
+sequence. 8i's LOBOPS envelope differs from 9i's (a **fixed 4-byte little-endian**
+length + a **25-byte** op-middle, vs 9i's `encode_sb4` length + 13-byte middle —
+the same divergence as the CLOB/BLOB read §19.15 and the SQL length §19.9), and
+its BFILE op-middles have **not** been reverse-engineered: no available 8i client
+reads BFILE content over the wire, so there is nothing to capture (`sqlplus`
+shows only the locator). Reusing the 9i `encode_o7_bfile_open` request draws no
+reply (the request hangs).
+
+So — pragmatically — the driver **mimics** the read with a **server-side helper**
+instead of the native wire (a future native RE could replace it). On the first 8i
+BFILE read it installs, lazily, a PL/SQL function that loads the file into a
+temporary BLOB with `DBMS_LOB`:
+
+```sql
+CREATE OR REPLACE FUNCTION seerdb_bfile_to_blob(d VARCHAR2, f VARCHAR2) RETURN BLOB IS
+  bf BFILE := BFILENAME(d, f); bl BLOB; ln NUMBER;
+BEGIN
+  DBMS_LOB.CREATETEMPORARY(bl, TRUE);
+  DBMS_LOB.FILEOPEN(bf, DBMS_LOB.FILE_READONLY);
+  ln := DBMS_LOB.GETLENGTH(bf);
+  IF ln > 0 THEN DBMS_LOB.LOADFROMFILE(bl, bf, ln); END IF;
+  DBMS_LOB.FILECLOSE(bf);
+  RETURN bl;
+END;
+```
+
+`_bfile_read_8i` then runs `SELECT seerdb_bfile_to_blob(:dir, :file) FROM dual`;
+the returned temp BLOB comes back as bytes over the ordinary 8i BLOB path
+(§19.15, `_lob_read_8i`). A missing file surfaces the server's `ORA-22288`.
+Requires `CREATE PROCEDURE` + `EXECUTE` on `DBMS_LOB` for the connecting user.
+Driver: `_resolve_8i_lobs` → `_bfile_read_8i`; helper: `_O8I_BFILE_HELPER`.
+
 ## 20. Oracle 23ai field version 24 — fast-auth + the fv24 framing (#89)
 
 Column **annotations** are only delivered when the client advertises a TTC
