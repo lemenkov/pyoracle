@@ -639,6 +639,82 @@ def test_encode_status_oci_and_commit_shapes() -> None:
     assert encode_commit_status_oci()[0] == 0x09  # TTI_STA
 
 
+def test_encode_long_value_oci_matches_the_captured_wire() -> None:
+    # A LONG value streams inline as 0xFE-chunked bytes + a zero trailing ub4,
+    # reproduced byte-for-byte from a live 11g LONG SELECT (#407).
+    from seerdb.server.query import encode_long_value_oci
+
+    got = encode_long_value_oci('LONG-value-inline-0123456789-abcdefghij')
+    assert got == bytes.fromhex(
+        'fe274c4f4e472d76616c75652d696e6c696e652d3031323334353637383'
+        '92d6162636465666768696a0000000000'
+    )
+    # NULL is an empty value still followed by the trailing indicator.
+    assert encode_long_value_oci(None) == b'\x00\x00\x00\x00\x00'
+    # LONG RAW carries raw bytes; a value over one chunk (0xFC) splits.
+    big = bytes(range(256)) * 2  # 512 bytes -> chunks 0xFC, 0xFC, 0x08
+    raw = encode_long_value_oci(big)
+    assert raw[0] == 0xFE and raw[-4:] == b'\x00\x00\x00\x00'
+    assert raw[1] == 0xFC  # first chunk length
+    # The chunks reassemble to the original content.
+    body, pos, acc = raw[1:], 0, bytearray()
+    while body[pos] != 0:
+        length = body[pos]
+        acc += body[pos + 1 : pos + 1 + length]
+        pos += 1 + length
+    assert bytes(acc) == big
+
+
+def test_encode_describe_oci_long_column_is_streamed() -> None:
+    # A LONG column describes as a character type (charset + 0x80 flag) with its
+    # sizes zero — the value is streamed inline, not fixed-width (#407).
+    from seerdb.common.tns_consts import TNS_TYPE_LONG, TNS_TYPE_LONGRAW
+    from seerdb.server.query import ColumnMeta, encode_describe_oci
+
+    long_col = ColumnMeta(name=b'V', data_type=TNS_TYPE_LONG, data_length=0, max_size=0)
+    body = encode_describe_oci([long_col])
+    col = body[36:]  # column block, after preamble + max-row-size + column count
+    assert col[2] == TNS_TYPE_LONG and col[3] == 0x80  # char flag
+    assert int.from_bytes(col[34:38], 'little') == 0  # max size zeroed
+    # A LONG contributes nothing to the max-row-size (offset 28, ub4 LE).
+    assert int.from_bytes(body[28:32], 'little') == 0
+    # LONG RAW is binary — no char flag.
+    raw_col = ColumnMeta(
+        name=b'R', data_type=TNS_TYPE_LONGRAW, data_length=0, max_size=0
+    )
+    assert encode_describe_oci([raw_col])[36:][3] == 0x00
+
+
+def test_is_reexecute_oci_detects_the_sql_less_reexecute() -> None:
+    # A fresh OCI execute carries the SQL pointer indicator at offset 11; a
+    # re-execute (the LONG fetch step) omits it (#407).
+    from seerdb.server.query import _OCI_ALL8_IND, is_reexecute_oci
+
+    fresh = bytes([0x03, 0x5E, 0x01]) + b'\x00' * 8 + _OCI_ALL8_IND + b'\x00' * 240
+    reexec = bytes([0x03, 0x5E, 0x01]) + b'\x00' * 8 + b'\x00' * 8 + b'\x00' * 240
+    assert is_reexecute_oci(reexec) is True
+    assert is_reexecute_oci(fresh) is False
+
+
+def test_long_row_replies_carry_the_right_status() -> None:
+    # The re-execute reply ends with the execute row-status (0x08 0x06); a
+    # fetch-delivered LONG row ends with the "more rows" OER status (#407).
+    from seerdb.common.tns_consts import TNS_TYPE_LONG
+    from seerdb.server.query import (
+        ColumnMeta,
+        encode_long_fetch_row_oci,
+        encode_reexec_row_oci,
+    )
+
+    col = ColumnMeta(name=b'V', data_type=TNS_TYPE_LONG, data_length=0, max_size=0)
+    reexec = encode_reexec_row_oci([col], [('hi',)], more=True)
+    assert reexec[0] == 0x06  # TTI_RXH
+    assert b'\x08\x06\x00' in reexec  # execute row-status
+    fetch = encode_long_fetch_row_oci([col], ('hi',))
+    assert fetch[0] == 0x06  # TTI_RXH
+    assert fetch[-136:][:2] == b'\x04\x01'  # OER "more rows" status, no 1403 body
+
+
 def test_encode_dml_status_oci_carries_the_verb_and_rowcount() -> None:
     # Each DML verb has its own captured template (sqlplus reads the verb from the
     # statement-type fields), and the affected-row count is injected as a ub4-LE at

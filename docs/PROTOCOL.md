@@ -1689,6 +1689,33 @@ not one big chunk. LONG decodes to `str` (charset-aware), LONG RAW to `bytes`,
 NULL to `None`. Confirmed against XE 11g (NULL, single-chunk, a 700-byte
 multi-chunk value, and a LONG that is not the last column).
 
+**Server side — the Mirror answering sqlplus (OCI, #407).** A LONG / LONG RAW
+column is streamed inline (no LOB locator), but sqlplus drives it through a
+distinct **describe → re-execute → fetch** flow, not the inline execute reply the
+scalar types use:
+
+- **Describe.** The column reports type 8 / 24 with `data_length`, `max_size`, and
+  the describe **max-row-size** all `0` (the value is unbounded and streamed).
+  LONG is a character type (charset + the `0x80` char flag, like VARCHAR2); LONG
+  RAW is binary.
+- **Row value.** Always the `0xFE`-chunked form — `0xFE`, then `<ub1 len><bytes>`
+  chunks (the Mirror emits ≤ `0xFC`-byte chunks) terminated by a zero-length
+  chunk — followed by a single trailing `ub4` indicator (`0`). A NULL value is
+  `0x00` followed by that same trailing `ub4`. (The Mirror emits one trailing
+  `ub4`; the thin-decode form above tolerates the pair.)
+- **Flow.** The first execute returns the describe with a "more rows" status and
+  **no row inline** (an inline LONG row crashes sqlplus, which sets up its
+  streaming define first). sqlplus then **re-executes** the cursor — an `OALL8`
+  with the cursor id set and **no SQL** (the SQL-pointer indicator at OALL8 byte
+  11 is absent) — and the Mirror replies with the first row: row header (`TTI_RXH`)
+  + `TTI_RXD` + the **execute row-status** (`08 06 00 …`). Each subsequent row
+  comes on a `TTI_FETCH`, replied as `TTI_RXH` + `TTI_RXD` + a **"more rows" OER
+  status** (`04 01 …`, no ORA-01403 message). A final empty fetch draws the
+  ORA-01403 terminator. Verified live on 11g: single-row, multi-row, multi-chunk
+  (300+ bytes), NULL, and multi-column results, with the session continuing
+  cleanly afterward. sqlplus renders LONG RAW poorly (a display quirk of its own,
+  reproduced against real Oracle); the bytes round-trip intact.
+
 ## 12. Wire Encoding Primitives
 
 ### 12.1 Variable-Length Integer (SB4/SB2)

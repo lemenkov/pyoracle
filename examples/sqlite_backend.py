@@ -27,11 +27,20 @@ _ORACLE_BIND = re.compile(r'(?<!:):\w+')
 
 from seerdb.common.tns_consts import (
     TNS_TYPE_DATE,
+    TNS_TYPE_LONG,
+    TNS_TYPE_LONGRAW,
     TNS_TYPE_NUMBER,
     TNS_TYPE_RAW,
     TNS_TYPE_TIMESTAMP,
     TNS_TYPE_VARCHAR,
 )
+
+# A simple single-table SELECT, for looking a column's declared type back up.
+# SQLite infers a result column's type from its value, which can't tell a LONG
+# from a VARCHAR2 (both are text) — so for the legacy LONG / LONG RAW types the
+# backend consults the table's declared types instead (#407).
+_SELECT_FROM = re.compile(r'\bfrom\s+"?(\w+)"?', re.IGNORECASE)
+_DECLARED_LONG_TYPES = {'LONG': TNS_TYPE_LONG, 'LONG RAW': TNS_TYPE_LONGRAW}
 from seerdb.server import (
     BackendError,
     Capability,
@@ -91,10 +100,16 @@ def _adapt_int(value: int) -> int | float:
 _register_codecs()
 
 
-def _column_meta(name: str, values: list) -> ColumnMeta:
+def _column_meta(name: str, values: list, declared: str | None = None) -> ColumnMeta:
     # Infer an Oracle column type from the first non-NULL value. Oracle folds
     # unquoted identifiers to upper-case, so match that on the name.
     ident = name.upper().encode('utf-8')
+    # A LONG / LONG RAW column can't be told from a VARCHAR2 / RAW by its value, so
+    # honour the declared type when the SELECT let us recover it — the value is
+    # streamed inline over the LONG path (#407). data_length 0: unbounded.
+    long_type = _DECLARED_LONG_TYPES.get((declared or '').upper())
+    if long_type is not None:
+        return ColumnMeta(name=ident, data_type=long_type, data_length=0, max_size=0)
     sample = next((v for v in values if v is not None), None)
     if isinstance(sample, bool):
         # bool is an int subclass; a NUMBER either way, matched first for clarity.
@@ -160,11 +175,36 @@ class SqliteBackend:
             # DDL / DML: no result set, just an affected-row count.
             return Result(rowcount=max(cursor.rowcount, 0))
         rows = cursor.fetchall()
+        declared = self._declared_types(sql)
         columns = [
-            _column_meta(description[0], [row[index] for row in rows])
+            _column_meta(
+                description[0],
+                [row[index] for row in rows],
+                declared.get(description[0].upper()),
+            )
             for index, description in enumerate(cursor.description)
         ]
         return Result(columns=columns, rows=rows)
+
+    def _declared_types(self, sql: str) -> dict[str, str]:
+        # Map result column name (upper-case) -> declared SQLite type, for a plain
+        # single-table SELECT, so a LONG / LONG RAW column can be typed from the
+        # schema rather than its value (#407). Joins/subqueries are skipped — the
+        # column-to-table mapping is ambiguous there.
+        lowered = sql.lower()
+        if not lowered.lstrip().startswith('select') or ' join ' in lowered:
+            return {}
+        match = _SELECT_FROM.search(sql)
+        if not match:
+            return {}
+        try:
+            info = self._conn.execute(
+                f'PRAGMA table_info("{match.group(1)}")'
+            ).fetchall()
+        except sqlite3.Error:
+            # An expression/derived source with no such table — nothing to map.
+            return {}
+        return {row[1].upper(): (row[2] or '') for row in info}
 
     def commit(self) -> None:
         self._conn.commit()
