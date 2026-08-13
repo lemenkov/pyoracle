@@ -2555,6 +2555,20 @@ batch's** last row, so `decode_8i_exec_response` threads the last decoded row
 across calls. Missing this desyncs the RXD as soon as two consecutive rows share
 a column value.
 
+**ROWID / UROWID (#385).** These are **not** length-prefixed DALCs. A physical
+**ROWID** (type 11) is a 1-byte reserved-size indicator (`0e`; 0 = NULL), a
+**fixed 13-byte struct** — data object (ub4 LE), relative file (ub2 LE), an
+unused byte, block (ub4 LE), slot (ub2 LE) — then the 4-byte trailer; it renders
+to the extended base64 string (matches `ROWIDTOCHAR`), e.g. struct
+`33 68 00 00 05 00 00 bb 00 00 00 00 00` → `AAAGgzAAFAAAAC7AAA`. A **UROWID**
+(type 208, e.g. an index-organized table's logical rowid) is the indicator, a
+reserved byte, a 1-byte body length, the body, then the trailer; it renders as
+the `*`-prefixed base64 form (`urowid_to_string`). Both are usable as binds
+(a ROWID/UROWID string binds straight back into `WHERE ROWID = :r`). Reading a
+ROWID as a DALC over-consumes one byte and desyncs the next column. Decoder:
+`_decode_8i_rowid`. Note: `ROWIDTOCHAR(ROWID)` on an IOT raises ORA-01410 on 8i,
+so the UROWID reference comes from the raw value, not that function.
+
 ### 19.11 Oracle 8i IN binds — the 9.2-era bind section (#359)
 
 Parameterized statements ride the same OALL8 (§19.9) with three header changes

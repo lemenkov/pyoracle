@@ -6638,6 +6638,32 @@ class TestO8iQueryMessages(unittest.TestCase):
         self.assertEqual(cols[0]['max_size'], 0)  # NUMBER: 0, not the packed field
         self.assertEqual(cols[0]['data_length'], 22)
 
+    def test_8i_rowid_urowid_decode(self):
+        # #385: a physical ROWID (type 11) rides as a 1-byte indicator + a fixed
+        # 13-byte struct + a 4-byte trailer (NOT a length-prefixed DALC) and
+        # renders to the extended base64 form; a UROWID (208, e.g. an IOT) is an
+        # indicator + reserved + 1-byte length + body + trailer, rendering "*"+
+        # base64. Both followed by a NUMBER column so a byte-count slip would
+        # desync it. Cells captured from a live 8.1.7 SELECT ROWID, id.
+        from seerdb.common.tns import decode_8i_exec_response
+
+        cols = lambda t: [  # noqa: E731
+            {'data_type': t, 'column_name': b'R'},
+            {'data_type': 2, 'column_name': b'ID'},
+        ]
+        Phys = bytes.fromhex(
+            '060000000000000000000000000000000000070e33680000050000bb0000'
+            '0000000000000002c10800000000080400000000000000000000'
+        )
+        (rows, _, _) = decode_8i_exec_response(Phys, cols(11))
+        self.assertEqual(rows[0], ['AAAGgzAAFAAAAC7AAA', 7])
+        Urow = bytes.fromhex(
+            '060000000000000000000000000000000000070a000a0204014000b702c1'
+            '02fe0000000002c10200000000080400000000000000000000'
+        )
+        (rows, _, _) = decode_8i_exec_response(Urow, cols(208))
+        self.assertEqual(rows[0], ['*BAFAALcCwQL+', 1])
+
     def test_8i_long_multi_chunk_decode(self):
         # #377: a LONG value rides in the RXD as a chunked DALC (0xfe marker, one
         # length byte per chunk up to 255, ended by a zero length) and can span
