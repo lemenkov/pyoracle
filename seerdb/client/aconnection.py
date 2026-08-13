@@ -32,6 +32,8 @@ from seerdb.client.connection import (
     _MAX_REDIRECTS,
     _O8I_BFILE_HELPER,
     _O8I_LONG_TYPES,
+    _REDIRECT_CONNECT_ATTEMPTS,
+    _REDIRECT_CONNECT_DELAY,
     Xid,
     _decode_tpc_context,
     _decode_tpc_state,
@@ -316,9 +318,20 @@ class AsyncOracleConnect:
         # often hands back ::1 first; some Oracle listener configs
         # only bind IPv4 and silently drop IPv6 connects.
         Loop = asyncio.get_running_loop()
-        Sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        Sock.setblocking(False)
-        await Loop.sock_connect(Sock, (self.host, self.port))
+        # Following a redirect (self._redirects > 0), retry a refused connect —
+        # the dispatcher / dedicated server may still be binding its port (#399).
+        Attempts = _REDIRECT_CONNECT_ATTEMPTS if getattr(self, '_redirects', 0) else 1
+        for Attempt in range(Attempts):
+            Sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            Sock.setblocking(False)
+            try:
+                await Loop.sock_connect(Sock, (self.host, self.port))
+                break
+            except ConnectionRefusedError:
+                Sock.close()
+                if Attempt + 1 >= Attempts:
+                    raise
+                await asyncio.sleep(_REDIRECT_CONNECT_DELAY)
         self._reader, self._writer = await asyncio.open_connection(
             sock=Sock,
             ssl=SslArg,

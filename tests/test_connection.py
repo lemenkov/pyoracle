@@ -5,10 +5,12 @@ import socket
 import threading
 import time
 import unittest
+from unittest import mock
 
 from seerdb.client.connection import (
     _FV2_MAX_RAW_BIND,
     _FV2_MAX_VARCHAR_BIND,
+    _REDIRECT_CONNECT_ATTEMPTS,
     OracleConnect,
     _check_fv2_bind_sizes,
     _split_proxy_user,
@@ -131,3 +133,72 @@ class TestConnection(unittest.TestCase):
         self.assertGreaterEqual(elapsed, 0.5)
         for conn in accepted:
             conn.close()
+
+
+class TestRedirectConnectRetry(unittest.TestCase):
+    # #399: following a TNS_REDIRECT, the target dispatcher / dedicated-server
+    # process may still be binding its port — a refused connect should be retried
+    # briefly. An INITIAL refused connect must still fail fast.
+
+    @staticmethod
+    def _conn():
+        return OracleConnect(
+            host='127.0.0.1', port=1, user='x', password='y', service_name='XE'
+        )
+
+    def _fake_socket(self, refusals):
+        # A socket whose connect() raises ConnectionRefusedError `refusals` times,
+        # then succeeds. Tracks the attempt count.
+        state = {'n': 0}
+
+        class Fake:
+            def settimeout(self, _t):
+                pass
+
+            def connect(self, _addr):
+                state['n'] += 1
+                if state['n'] <= refusals:
+                    raise ConnectionRefusedError(111, 'Connection refused')
+
+            def close(self):
+                pass
+
+        return Fake(), state
+
+    def test_retries_on_refused_while_following_redirect(self):
+        con = self._conn()
+        con._redirects = 1  # we are following a redirect
+        fake, state = self._fake_socket(refusals=3)
+        with (
+            mock.patch('seerdb.client.connection.socket.socket', return_value=fake),
+            mock.patch('seerdb.client.connection.time.sleep'),
+            mock.patch.object(con, 'send'),
+        ):
+            con._open_transport()  # must not raise
+        self.assertEqual(state['n'], 4)  # 3 refusals + 1 success
+
+    def test_initial_connect_does_not_retry(self):
+        con = self._conn()
+        con._redirects = 0  # initial connect
+        fake, state = self._fake_socket(refusals=99)
+        with (
+            mock.patch('seerdb.client.connection.socket.socket', return_value=fake),
+            mock.patch('seerdb.client.connection.time.sleep'),
+            mock.patch.object(con, 'send'),
+        ):
+            with self.assertRaises(ConnectionRefusedError):
+                con._open_transport()
+        self.assertEqual(state['n'], 1)  # failed fast, no retry
+
+    def test_gives_up_after_the_attempt_cap(self):
+        con = self._conn()
+        con._redirects = 1
+        fake, state = self._fake_socket(refusals=999)  # never comes up
+        with (
+            mock.patch('seerdb.client.connection.socket.socket', return_value=fake),
+            mock.patch('seerdb.client.connection.time.sleep'),
+            mock.patch.object(con, 'send'),
+        ):
+            with self.assertRaises(ConnectionRefusedError):
+                con._open_transport()
+        self.assertEqual(state['n'], _REDIRECT_CONNECT_ATTEMPTS)
