@@ -10,6 +10,7 @@ import logging
 import socket
 import struct
 import threading
+import time
 import uuid
 
 from seerdb.common.crypto import validate
@@ -163,6 +164,14 @@ _O8I_BFILE_HELPER = (
 # misconfigured listener that redirects in a loop fails fast instead of
 # spinning forever.
 _MAX_REDIRECTS = 5
+
+# When following a TNS_REDIRECT, the target may be a shared-server dispatcher or a
+# dedicated-server process still binding its (often dynamic) port — connecting the
+# instant the redirect arrives loses that spawn race with ConnectionRefused. Retry
+# the redirect-follow connect a few times over ~1s. The INITIAL connect is never
+# retried: a refused address the user handed us should fail fast. (#399)
+_REDIRECT_CONNECT_ATTEMPTS = 10
+_REDIRECT_CONNECT_DELAY = 0.1
 
 # A pipelined fetchall (#158) can't interleave follow-up TTI_FETCH calls inside
 # the burst, so its execute asks for a large prefetch to pull the whole result
@@ -773,10 +782,22 @@ class OracleConnect:
         # send the initial CONNECT. Shared by connect() and the TNS_REDIRECT
         # handler, which re-points host/port and re-opens against the address
         # the server handed back.
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock = sock
-        self._apply_socket_timeout()
-        sock.connect((self.host, self.port))
+        # Following a redirect (self._redirects > 0), retry a refused connect —
+        # the dispatcher / dedicated server may still be binding its port (#399).
+        Attempts = _REDIRECT_CONNECT_ATTEMPTS if getattr(self, '_redirects', 0) else 1
+        for Attempt in range(Attempts):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock = sock
+            self._apply_socket_timeout()
+            try:
+                sock.connect((self.host, self.port))
+                break
+            except ConnectionRefusedError:
+                sock.close()
+                self.sock = None
+                if Attempt + 1 >= Attempts:
+                    raise
+                time.sleep(_REDIRECT_CONNECT_DELAY)
         if self.ssl:
             try:
                 sock = self._wrap_socket_tls(sock)

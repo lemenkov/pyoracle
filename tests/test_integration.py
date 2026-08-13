@@ -107,14 +107,6 @@ _8I_UNSUPPORTED = (
     # Async-only / connectivity tests (AsyncConnectionIntegration, Redirect).
     ('async_iteration', 'CONNECT BY LEVEL returns one row on Oracle 8i'),
     ('fetchall_and_fetchmany', 'CONNECT BY LEVEL returns one row on Oracle 8i'),
-    # 8i is dedicated-server: its listener redirects each session to a dynamic
-    # dedicated-server port. seerdb follows that fine on the normal path (every
-    # 8i connection does it), but the RedirectListener -> 8i-listener *double*
-    # redirect races the dedicated-server spawn under load — not a driver gap.
-    (
-        'follows_redirect',
-        'Oracle 8i dedicated-server redirect races the double-redirect fixture (#388)',
-    ),
 )
 
 
@@ -2670,20 +2662,13 @@ class RedirectIntegration(unittest.TestCase):
     answers the first CONNECT with a redirect to the real backend, and the
     driver must reconnect there and complete the handshake."""
 
-    def setUp(self):
-        if _target_is_8i():
-            # 8i is dedicated-server, so the RedirectListener -> 8i-listener path
-            # is a double redirect that races the dedicated-server spawn. seerdb
-            # follows 8i's own redirect fine on the normal path (#388).
-            self.skipTest(
-                'Oracle 8i dedicated-server redirect races the double-redirect fixture'
-            )
-
     def test_sync_follows_redirect(self):
+        # Connect to the listener's own host (it binds 127.0.0.1, which only
+        # equals _HOST on the localhost tiers); it redirects to the real backend.
         with (
             RedirectListener(_HOST, _PORT) as listener,
             seerdb.connect(
-                host=_HOST,
+                host=listener.listen_host,
                 port=listener.listen_port,
                 user=_USER,
                 password=_PASSWORD,
@@ -2692,8 +2677,10 @@ class RedirectIntegration(unittest.TestCase):
                 **_FV_KW,
             ) as conn,
         ):
-            # The connection ended up on the backend, not the listener.
-            self.assertEqual(conn.port, _PORT)
+            # The connection moved off the listener to the backend. (8i's own
+            # listener then does a second dedicated-server redirect to a dynamic
+            # port, so assert it left the listener rather than a fixed port.)
+            self.assertNotEqual(conn.port, listener.listen_port)
             cur = conn.cursor()
             cur.execute("SELECT 'redirected' FROM dual")
             self.assertEqual(cur.fetchone(), ('redirected',))
@@ -3047,10 +3034,12 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
         # backend the listener hands back (#23).
         with RedirectListener(_HOST, _PORT) as listener:
             Kw = self._kwargs()
+            Kw['host'] = listener.listen_host
             Kw['port'] = listener.listen_port
             Conn = await seerdb.connect_async(**Kw)
             try:
-                self.assertEqual(Conn.port, _PORT)
+                # Moved off the listener (8i double-redirects to a dynamic port).
+                self.assertNotEqual(Conn.port, listener.listen_port)
                 Cur = Conn.cursor()
                 await Cur.execute("SELECT 'redirected' FROM dual")
                 self.assertEqual(await Cur.fetchone(), ('redirected',))
