@@ -107,7 +107,14 @@ _8I_UNSUPPORTED = (
     # Async-only / connectivity tests (AsyncConnectionIntegration, Redirect).
     ('async_iteration', 'CONNECT BY LEVEL returns one row on Oracle 8i'),
     ('fetchall_and_fetchmany', 'CONNECT BY LEVEL returns one row on Oracle 8i'),
-    ('follows_redirect', 'Oracle 8i TNS_REDIRECT connectivity pending (#388)'),
+    # 8i is dedicated-server: its listener redirects each session to a dynamic
+    # dedicated-server port. seerdb follows that fine on the normal path (every
+    # 8i connection does it), but the RedirectListener -> 8i-listener *double*
+    # redirect races the dedicated-server spawn under load — not a driver gap.
+    (
+        'follows_redirect',
+        'Oracle 8i dedicated-server redirect races the double-redirect fixture (#388)',
+    ),
 )
 
 
@@ -2665,7 +2672,12 @@ class RedirectIntegration(unittest.TestCase):
 
     def setUp(self):
         if _target_is_8i():
-            self.skipTest('Oracle 8i TNS_REDIRECT connectivity pending (#388)')
+            # 8i is dedicated-server, so the RedirectListener -> 8i-listener path
+            # is a double redirect that races the dedicated-server spawn. seerdb
+            # follows 8i's own redirect fine on the normal path (#388).
+            self.skipTest(
+                'Oracle 8i dedicated-server redirect races the double-redirect fixture'
+            )
 
     def test_sync_follows_redirect(self):
         with (
@@ -4006,7 +4018,16 @@ class SSLIntegration(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if _target_is_8i():
-            raise unittest.SkipTest('Oracle 8i TLS-proxy connectivity pending (#388)')
+            # Not a driver limitation: Oracle 8i is dedicated-server, so its
+            # listener redirects every session to a dynamic dedicated-server port
+            # and drops the listener socket. seerdb follows that redirect fine on
+            # plaintext (see RedirectIntegration), but this fixture only wraps the
+            # listener port in TLS — the redirect target is a plaintext port
+            # outside the tunnel, so the TLS session can't follow it. A real TCPS
+            # 8i deployment terminates TLS end-to-end; the fixture can't. (#388)
+            raise unittest.SkipTest(
+                'Oracle 8i dedicated-server redirect escapes the TLS-proxy fixture'
+            )
         cls.proxy = TLSProxy(_HOST, _PORT)
         cls.proxy.start()
 
