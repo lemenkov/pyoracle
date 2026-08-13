@@ -3938,6 +3938,26 @@ def decode_8i_cursor_id(Terminal: bytes) -> int:
     return int.from_bytes(Terminal[10:12], 'big')
 
 
+def _decode_8i_rowid(DataType: int, Val: bytes) -> str | None:
+    # Render an 8i ROWID / UROWID column value (#385). A physical ROWID (type 11)
+    # is a fixed-width little-endian struct — data object (ub4), relative file
+    # (ub2), an unused byte, block (ub4), slot (ub2) — rendered as the extended
+    # base64 form (matches ROWIDTOCHAR). A UROWID (type 208, e.g. an
+    # index-organized table's logical rowid) renders as the "*"-prefixed base64
+    # form (urowid_to_string), the same as the 10g+ path.
+    from seerdb.common.types import rowid_to_string, urowid_to_string
+
+    if not Val:
+        return None
+    if DataType == 208:
+        return urowid_to_string(Val)
+    Obj = int.from_bytes(Val[0:4], 'little')
+    File = int.from_bytes(Val[4:6], 'little')
+    Block = int.from_bytes(Val[7:11], 'little')
+    Slot = int.from_bytes(Val[11:13], 'little')
+    return rowid_to_string(Obj, File, Block, Slot)
+
+
 def decode_8i_exec_response(
     Data: bytes, Columns: list, PrevRow: list | None = None
 ) -> tuple[list, bytes, list | None]:
@@ -4027,6 +4047,32 @@ def decode_8i_exec_response(
                                 if not isinstance(Locator, list)
                                 else None
                             )
+                    elif Col.get('data_type') == 11:
+                        # Physical ROWID (#385): a 1-byte reserved-size indicator
+                        # (0 = NULL), then the FIXED 13-byte rowid struct (it is
+                        # NOT a length-prefixed DALC), then the 4-byte trailer.
+                        Indicator = Rest[0]
+                        Rest = Rest[1:]
+                        if Indicator == 0:
+                            Rest = Rest[4:]  # trailer
+                            Row.append(None)
+                        else:
+                            Struct = bytes(Rest[:13])
+                            Rest = Rest[13 + 4 :]  # struct + trailer
+                            Row.append(_decode_8i_rowid(11, Struct))
+                    elif Col.get('data_type') == 208:
+                        # UROWID (#385): a 1-byte indicator (0 = NULL), a reserved
+                        # byte, a 1-byte body length, the logical-rowid body, then
+                        # the 4-byte trailer.
+                        Indicator = Rest[0]
+                        if Indicator == 0:
+                            Rest = Rest[1 + 4 :]
+                            Row.append(None)
+                        else:
+                            BodyLen = Rest[2]
+                            Body = bytes(Rest[3 : 3 + BodyLen])
+                            Rest = Rest[3 + BodyLen + 4 :]  # header + body + trailer
+                            Row.append(_decode_8i_rowid(208, Body))
                     else:
                         (Val, Rest) = decode_dalc(Rest)
                         Rest = Rest[4:]  # sb2 indicator (0) + ub2 return code (0)

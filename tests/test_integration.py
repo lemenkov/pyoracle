@@ -104,8 +104,6 @@ _8I_UNSUPPORTED = (
     ('interval', 'INTERVAL is a 9i+ type; Oracle 8i lacks it'),
     ('national_char', 'Oracle 8i predates AL16UTF16 NCHAR (WE8ISO8859P1 only)'),
     ('bit_vector_reuse', 'CONNECT BY LEVEL returns one row on Oracle 8i'),
-    # Known 8i bugs, tracked for milestone #25.
-    ('rowid', 'Oracle 8i ROWID / UROWID support pending (#385)'),
     # Async-only / connectivity tests (AsyncConnectionIntegration, Redirect).
     ('async_iteration', 'CONNECT BY LEVEL returns one row on Oracle 8i'),
     ('fetchall_and_fetchmany', 'CONNECT BY LEVEL returns one row on Oracle 8i'),
