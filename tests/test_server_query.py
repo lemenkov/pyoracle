@@ -639,6 +639,32 @@ def test_encode_status_oci_and_commit_shapes() -> None:
     assert encode_commit_status_oci()[0] == 0x09  # TTI_STA
 
 
+def test_encode_dml_status_oci_carries_the_verb_and_rowcount() -> None:
+    # Each DML verb has its own captured template (sqlplus reads the verb from the
+    # statement-type fields), and the affected-row count is injected as a ub4-LE at
+    # offset 43 of the body so sqlplus prints "N rows created/updated/deleted".
+    from seerdb.server.query import _OCI_DML_ROWCOUNT_OFF, encode_dml_status_oci
+
+    off = _OCI_DML_ROWCOUNT_OFF
+    for keyword in ('INSERT', 'UPDATE', 'DELETE'):
+        status = encode_dml_status_oci(keyword, 7)
+        assert status[:3] == b'\x08\x06\x00'
+        assert len(status) == 187
+        assert int.from_bytes(status[off : off + 4], 'little') == 7
+
+    # The verb templates are distinct — the command-code byte differs per verb.
+    codes = {kw: encode_dml_status_oci(kw, 1) for kw in ('INSERT', 'UPDATE', 'DELETE')}
+    assert codes['INSERT'] != codes['UPDATE'] != codes['DELETE']
+
+    # An unknown verb (e.g. MERGE) falls back to the INSERT template.
+    assert encode_dml_status_oci('MERGE', 3) == encode_dml_status_oci('INSERT', 3)
+
+    # Zero rows is representable (DML matching no rows).
+    assert (
+        int.from_bytes(encode_dml_status_oci('DELETE', 0)[off : off + 4], 'little') == 0
+    )
+
+
 def test_read_chunked_sql_reassembles_the_chunks() -> None:
     # Long OCI SQL is chunked: 0xFE marker, then <ub1 len><chunk> runs. The reader
     # reassembles them up to the declared total (#265).

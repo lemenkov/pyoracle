@@ -1099,6 +1099,29 @@ assignments; a non-Oracle backend cannot run general PL/SQL, but this one idiom
 covers the bind-a-value-then-use-it flow, so a following `SELECT … WHERE k = :v`
 receives the value as an ordinary IN bind (§5.4).
 
+**DML completion reply (the Mirror, OCI dialect).** A DML that returns no columns
+(`INSERT` / `UPDATE` / `DELETE`) still needs sqlplus to print `N rows created.` /
+`N rows updated.` / `N rows deleted.` rather than the generic PL/SQL message.
+sqlplus derives the **verb** from statement-type fields in the reply (the SQL
+command code — `INSERT` 2, `UPDATE` 6, `DELETE` 7 — plus neighbours at body
+offsets 53/55/57), and the **count** from a `ub4` little-endian at **body offset
+43**. The Mirror (`encode_dml_status_oci`) keeps one captured 187-byte body per
+verb and injects only the count:
+
+```
+08 06 00 | … | <affected count ub4-LE @43> | … | <cmd-code + neighbours @53/55/57> | …
+```
+
+The surrounding structure (the `08 06 00` return marker, an SCN region, the
+cursor/rowid trailer, and a session row-counter at offsets 75/186 that is *not*
+the count) is carried as-is from the live 11g reply; only the count field is
+computed. The backend supplies the count (`Result.rowcount`); a `MERGE` or any
+unrecognised verb falls back to the `INSERT` template. Fully computing the OER
+(rather than patching a captured body) is a follow-up, as is the matching DDL
+completion reply (`Table created.` / `Table dropped.`). Statements the classifier
+does not recognise as DML still get the generic no-row status (§the `08 06 00`
+171-byte `encode_status_oci` tail).
+
 ### 6.1 Row Header (TTI_RXH)
 
 Precedes row data in SELECT results. All numeric fields use Oracle's
