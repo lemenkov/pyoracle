@@ -26,12 +26,15 @@ from seerdb.common.tns import decode_ub4
 from seerdb.common.tns_consts import (
     TNS_CONNECT,
     TNS_DATA,
+    TNS_TYPE_BLOB,
+    TNS_TYPE_CLOB,
     TNS_TYPE_LONG,
     TNS_TYPE_LONGRAW,
     TTI_ALL8,
     TTI_COMMIT,
     TTI_FETCH,
     TTI_FUN,
+    TTI_LOBOPS,
     TTI_LOGOFF,
     TTI_MSG_TYPE_PIGGYBACK,
     TTI_OCCA,
@@ -72,6 +75,8 @@ from seerdb.server.query import (
     encode_fetch_batch_oci,
     encode_fetch_response,
     encode_fetch_terminator_oci,
+    encode_lob_fetch_rows_oci,
+    encode_lob_read_response_oci,
     encode_logoff_status_oci,
     encode_long_fetch_row_oci,
     encode_out_bind_response_oci,
@@ -83,6 +88,7 @@ from seerdb.server.query import (
     encode_version_banner_oci,
     is_reexecute_oci,
     is_version_call_oci,
+    oci_lob_contents,
     parse_exec,
     parse_exec_oci,
     parse_fetch,
@@ -255,6 +261,9 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
     # Rows a multi-row execute delivered only the first of; the rest wait here
     # for the follow-up fetch (the OCI analogue of the thin _Cursors).
     parked: tuple[list[ColumnMeta], list[tuple]] | None = None
+    # LOB contents (wire bytes + amount) the current statement's rows carry, in the
+    # order their locators went out; sqlplus drains them with TTI_LOBOPS reads (#405).
+    lobs: list[tuple[bytes, int]] = []
     while True:
         received = stream.read_packet()
         if received is None:
@@ -277,13 +286,31 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
                     # follow-up fetches (#407).
                     parked = _serve_oci_long_row(stream, parked, reexecute=True)
                     continue
-                parked = _answer_query_oci(stream, backend, body)
+                parked, lobs = _answer_query_oci(stream, backend, body)
+                continue
+            if body[1] == TTI_LOBOPS:
+                # sqlplus reads a LOB column's content: hand back the next queued
+                # LOB (row-major, matching the locators we emitted). An unexpected
+                # read (empty queue) gets an empty LOB so the client stays in sync.
+                content, amount = lobs.pop(0) if lobs else (b'', 0)
+                stream.write_packet(
+                    TNS_DATA, encode_lob_read_response_oci(content, amount)
+                )
                 continue
             if body[1] == TTI_FETCH:
                 if parked is not None and _is_long_result(parked[0]):
                     # A LONG result drains one row per fetch (each with "more"),
                     # the last fetch drawing the 1403 terminator below (#407).
                     parked = _serve_oci_long_row(stream, parked, reexecute=False)
+                elif parked is not None and _is_lob_result(parked[0]):
+                    # A LOB result: deliver the locator row(s) with a non-terminator
+                    # status (the content still comes over TTI_LOBOPS); the next
+                    # fetch, once the LOBs are read, draws the 1403 terminator (#405).
+                    columns, rows = parked
+                    stream.write_packet(
+                        TNS_DATA, encode_lob_fetch_rows_oci(columns, rows)
+                    )
+                    parked = None
                 elif parked is not None:
                     columns, rows = parked
                     stream.write_packet(TNS_DATA, encode_fetch_batch_oci(columns, rows))
@@ -311,6 +338,12 @@ def _is_long_result(columns: list[ColumnMeta]) -> bool:
     # A result that carries a LONG / LONG RAW column, which sqlplus streams one
     # row per reply over the re-execute / fetch flow (#407).
     return any(col.data_type in (TNS_TYPE_LONG, TNS_TYPE_LONGRAW) for col in columns)
+
+
+def _is_lob_result(columns: list[ColumnMeta]) -> bool:
+    # A result that carries a CLOB / BLOB column, whose locator row is fetched with
+    # a non-terminator status and whose content follows over TTI_LOBOPS (#405).
+    return any(col.data_type in (TNS_TYPE_CLOB, TNS_TYPE_BLOB) for col in columns)
 
 
 def _serve_oci_long_row(
@@ -349,18 +382,19 @@ def _oci_no_row_status(sql: str, rowcount: int) -> bytes:
 
 def _answer_query_oci(
     stream: PacketStream, backend: Backend, body: bytes
-) -> tuple[list[ColumnMeta], list[tuple]] | None:
+) -> tuple[tuple[list[ColumnMeta], list[tuple]] | None, list[tuple[bytes, int]]]:
     # Answer one sqlplus / thick-OCI execute. sqlplus fires a chain of setup
     # statements (PL/SQL blocks, PRODUCT_PRIVS selects) before the user's query;
     # each needs an acceptable reply or sqlplus never reaches the prompt. Returns
-    # the rows parked for a follow-up fetch (or None if the reply was complete).
+    # ``(parked, lobs)``: the rows held for a follow-up fetch (or None), and the
+    # LOB contents the result's rows carry for the follow-up TTI_LOBOPS reads.
     try:
         request = parse_exec_oci(body)
     except InterfaceError:
         # A shape not parsed yet (e.g. a bound PL/SQL setup call) — acknowledge
         # success so sqlplus proceeds; the backend never sees it.
         stream.write_packet(TNS_DATA, encode_status_oci())
-        return None
+        return None, []
     try:
         result = backend.execute(request.sql, request.binds)
     except BackendError as err:
@@ -373,20 +407,26 @@ def _answer_query_oci(
             stream.write_packet(TNS_DATA, encode_error_oci(err.ora_code, str(err)))
         else:
             stream.write_packet(TNS_DATA, encode_status_oci())
-        return None
+        return None, []
     if result.out_binds:
         # A PL/SQL block that assigned OUT binds (sqlplus VARIABLE / EXEC) — return
         # the values so the client reads them back into its bound buffers.
         stream.write_packet(TNS_DATA, encode_out_bind_response_oci(result.out_binds))
-        return None
+        return None, []
     if not result.columns:
         stream.write_packet(TNS_DATA, _oci_no_row_status(request.sql, result.rowcount))
-        return None
+        return None, []
     rows = list(result.rows)
+    # Every LOB cell across the whole result queues its content now, row-major, so
+    # the follow-up TTI_LOBOPS reads drain it in the order the locators went out.
+    lobs = oci_lob_contents(result.columns, rows)
     has_long = any(
         col.data_type in (TNS_TYPE_LONG, TNS_TYPE_LONGRAW) for col in result.columns
     )
-    if has_long and rows:
+    has_lob = any(
+        col.data_type in (TNS_TYPE_CLOB, TNS_TYPE_BLOB) for col in result.columns
+    )
+    if (has_long or has_lob) and rows:
         # sqlplus fetches a LONG / LONG RAW row separately from the describe — it
         # sets up the streaming define buffer on the describe, then issues a fetch
         # — so deliver no row inline (an inline LONG row segfaults it): describe +
@@ -394,17 +434,17 @@ def _answer_query_oci(
         stream.write_packet(
             TNS_DATA, encode_query_response_oci(result.columns, [], more=True)
         )
-        return result.columns, rows
+        return (result.columns, rows), lobs
     if len(rows) <= 1:
         # 0 or 1 row fits in the execute reply; sqlplus won't fetch further.
         stream.write_packet(TNS_DATA, encode_query_response_oci(result.columns, rows))
-        return None
+        return None, lobs
     # Deliver the first row now and park the rest — sqlplus reads the "more rows"
     # status and issues a fetch for the remainder.
     stream.write_packet(
         TNS_DATA, encode_query_response_oci(result.columns, rows[:1], more=True)
     )
-    return result.columns, rows[1:]
+    return (result.columns, rows[1:]), lobs
 
 
 def _skip_piggybacks(body: bytes) -> bytes:

@@ -26,6 +26,8 @@ from decimal import Decimal
 _ORACLE_BIND = re.compile(r'(?<!:):\w+')
 
 from seerdb.common.tns_consts import (
+    TNS_TYPE_BLOB,
+    TNS_TYPE_CLOB,
     TNS_TYPE_DATE,
     TNS_TYPE_LONG,
     TNS_TYPE_LONGRAW,
@@ -41,6 +43,14 @@ from seerdb.common.tns_consts import (
 # backend consults the table's declared types instead (#407).
 _SELECT_FROM = re.compile(r'\bfrom\s+"?(\w+)"?', re.IGNORECASE)
 _DECLARED_LONG_TYPES = {'LONG': TNS_TYPE_LONG, 'LONG RAW': TNS_TYPE_LONGRAW}
+
+# Oracle's inline limits: a VARCHAR2 holds ≤ 4000 bytes, a RAW ≤ 2000. SQLite
+# keeps no column type, so the Mirror infers a value wider than these as a LOB —
+# a CLOB (text) / BLOB (bytes) delivered over the TTI_LOBOPS locator path (#405),
+# exactly where Oracle would need one. A LOB column describes with data_length 0
+# (unbounded); the content size travels in the locator.
+_VARCHAR2_MAX = 4000
+_RAW_MAX = 2000
 from seerdb.server import (
     BackendError,
     Capability,
@@ -132,10 +142,18 @@ def _column_meta(name: str, values: list, declared: str | None = None) -> Column
         )
     if isinstance(sample, bytes):
         width = max((len(v) for v in values if isinstance(v, bytes)), default=1)
+        if width > _RAW_MAX:  # too wide for RAW → BLOB over the LOB path (#405)
+            return ColumnMeta(
+                name=ident, data_type=TNS_TYPE_BLOB, data_length=0, max_size=0
+            )
         return ColumnMeta(
             name=ident, data_type=TNS_TYPE_RAW, data_length=width, max_size=width
         )
     width = max((len(str(v)) for v in values if v is not None), default=1)
+    if width > _VARCHAR2_MAX:  # too wide for VARCHAR2 → CLOB over the LOB path (#405)
+        return ColumnMeta(
+            name=ident, data_type=TNS_TYPE_CLOB, data_length=0, max_size=0
+        )
     return ColumnMeta(
         name=ident, data_type=TNS_TYPE_VARCHAR, data_length=width, max_size=width
     )
