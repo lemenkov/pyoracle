@@ -134,12 +134,31 @@ from seerdb.common.tns_consts import (
 
 logger = logging.getLogger(__name__)
 
-# Server-side helper used by `OracleConnect.bfile_read`. Reads a BFILE
-# end-to-end into a temporary BLOB and returns that BLOB by value, which
-# lets the client get the file contents back over the regular CLOB/BLOB
-# wire path without needing a BFILE-specific TTI_LOBOPS OPEN opcode.
-# Created lazily on first BFILE read; CREATE OR REPLACE so a stale
-# version from an earlier driver release gets overwritten.
+# Server-side BFILE helper for Oracle 8i (#396). 8i's native BFILE
+# FILE_OPEN/READ TTI_LOBOPS wire differs from both 9i and 10g+ and has not been
+# reverse-engineered (no available 8i client reads BFILE content to capture it),
+# so — pragmatically — the driver loads the external file into a temporary BLOB
+# server-side with DBMS_LOB and reads THAT back over the working 8i BLOB path
+# (_lob_read_8i). The function returns the temp BLOB by value; a plain
+# `SELECT seerdb_bfile_to_blob(dir, file) FROM dual` then yields the bytes over
+# the ordinary LOB path. Installed lazily on first 8i BFILE read; CREATE OR
+# REPLACE so a stale version is overwritten. Needs CREATE PROCEDURE + EXECUTE on
+# DBMS_LOB for the connecting user. A future native RE could replace this
+# (tracked as a possible follow-up); for now it mimics the read with the tools 8i
+# gives us.
+_O8I_BFILE_HELPER = (
+    'CREATE OR REPLACE FUNCTION seerdb_bfile_to_blob'
+    '(d VARCHAR2, f VARCHAR2) RETURN BLOB IS '
+    'bf BFILE := BFILENAME(d, f); bl BLOB; ln NUMBER; '
+    'BEGIN '
+    'DBMS_LOB.CREATETEMPORARY(bl, TRUE); '
+    'DBMS_LOB.FILEOPEN(bf, DBMS_LOB.FILE_READONLY); '
+    'ln := DBMS_LOB.GETLENGTH(bf); '
+    'IF ln > 0 THEN DBMS_LOB.LOADFROMFILE(bl, bf, ln); END IF; '
+    'DBMS_LOB.FILECLOSE(bf); '
+    'RETURN bl; END;'
+)
+
 # Cap how many times we'll chase a TNS_REDIRECT during one login, so a
 # misconfigured listener that redirects in a loop fails fast instead of
 # spinning forever.
@@ -1636,12 +1655,35 @@ class OracleConnect:
         for Row in Rows:
             for I, Val in enumerate(Row):
                 if isinstance(Val, LOB):
+                    if Val.data_type == 114:  # BFILE — external file pointer
+                        Row[I] = self._bfile_read_8i(Val.directory_name, Val.filename)
+                        continue
                     Content = self._lob_read_8i(Val.raw)
                     Row[I] = decode_fv2_lob(
                         Columns[I].get('data_type'),
                         Content,
                         Columns[I].get('charset') or 0,
                     )
+
+    def _bfile_read_8i(self, DirectoryName: str | None, FileName: str | None) -> bytes:
+        # Read an 8i BFILE via the server-side BFILE -> temp-BLOB helper (#396,
+        # PROTOCOL.md §19.17). 8i's native BFILE TTI_LOBOPS wire is not RE'd, so
+        # DBMS_LOB loads the external file into a temp BLOB server-side and the
+        # driver reads that BLOB back over the ordinary 8i LOB path. The helper is
+        # installed lazily on first use. Returns the file bytes.
+        if DirectoryName is None or FileName is None:
+            raise DataError('8i BFILE locator carries no directory / file name')
+        if not getattr(self, '_o8i_bfile_helper_ready', False):
+            with self.cursor() as Setup:
+                Setup.execute(_O8I_BFILE_HELPER)
+            self._o8i_bfile_helper_ready = True
+        with self.cursor() as Cur:
+            Cur.execute(
+                'SELECT seerdb_bfile_to_blob(:d, :f) FROM DUAL',
+                {'d': DirectoryName, 'f': FileName},
+            )
+            # The temporary BLOB auto-resolves to bytes on the normal LOB path.
+            return Cur.fetchone()[0]
 
     def _execute_8i_dml(self, Query: str, Bind: list | None = None) -> object:
         # Oracle 8i INSERT/UPDATE/DELETE and DDL (#360, PROTOCOL.md §19.12): the

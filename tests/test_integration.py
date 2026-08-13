@@ -4670,6 +4670,43 @@ class O8iDmlIntegration(unittest.TestCase):
         self.assertEqual((rows[1][0], len(rows[1][1]), rows[1][2]), (2, 4000, b'\x00'))
         self.assertEqual(rows[2], (3, None, None))
 
+    def test_bfile_read(self):
+        # 8i BFILE read (#396) via the server-side BFILE -> temp-BLOB helper.
+        # There is no writable UTL_FILE directory on the 8i testbed, so use the
+        # instance's own background-dump directory + alert log (always present)
+        # as a read-only fixture. A plain SELECT of a BFILE column must return
+        # the file bytes (Cursor auto-resolve -> _bfile_read_8i).
+        self.conn.autocommit = True
+        (DumpDir,) = (
+            self.conn.cursor()
+            .execute(
+                "select value from v$parameter where name = 'background_dump_dest'"
+            )
+            .fetchone()
+        )
+        self.cur.execute(f"create or replace directory zz_seerdb_bd as '{DumpDir}'")
+        Alert = None
+        for Cand in ('ORCLALRT.LOG', 'alert_ORCL.log', 'alert_orcl.log'):
+            (Exists,) = self.cur.execute(
+                "select dbms_lob.fileexists(bfilename('ZZ_SEERDB_BD', :f)) from dual",
+                {'f': Cand},
+            ).fetchone()
+            if Exists == 1:
+                Alert = Cand
+                break
+        if Alert is None:
+            self.skipTest('no alert log found in background_dump_dest')
+        (FileLen,) = self.cur.execute(
+            "select dbms_lob.getlength(bfilename('ZZ_SEERDB_BD', :f)) from dual",
+            {'f': Alert},
+        ).fetchone()
+        (Got,) = self.cur.execute(
+            "select bfilename('ZZ_SEERDB_BD', :f) from dual", {'f': Alert}
+        ).fetchone()
+        self.assertIsInstance(Got, bytes)
+        self.assertEqual(len(Got), FileLen)
+        self.assertTrue(Got.startswith(b'Dump file'))
+
     def test_char_data_is_latin1(self):
         # 8i char data (VARCHAR2 / CHAR / NVARCHAR2 / NCHAR) is WE8ISO8859P1, not
         # the UTF-8 / UTF-16 a modern session uses (#366): non-ASCII VARCHAR2 and

@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 from seerdb.client.connection import (
     _MAX_REDIRECTS,
+    _O8I_BFILE_HELPER,
     _O8I_LONG_TYPES,
     Xid,
     _decode_tpc_context,
@@ -1174,12 +1175,37 @@ class AsyncOracleConnect:
         for Row in Rows:
             for I, Val in enumerate(Row):
                 if isinstance(Val, LOB):
+                    if Val.data_type == 114:  # BFILE — external file pointer
+                        Row[I] = await self._bfile_read_8i(
+                            Val.directory_name, Val.filename
+                        )
+                        continue
                     Content = await self._lob_read_8i(Val.raw)
                     Row[I] = decode_fv2_lob(
                         Columns[I].get('data_type'),
                         Content,
                         Columns[I].get('charset') or 0,
                     )
+
+    async def _bfile_read_8i(
+        self, DirectoryName: str | None, FileName: str | None
+    ) -> bytes:
+        # Async port of OracleConnect._bfile_read_8i (#396, PROTOCOL.md §19.17):
+        # read a BFILE via the server-side BFILE -> temp-BLOB helper, since 8i's
+        # native BFILE wire is not RE'd. Installs the helper lazily on first use.
+        if DirectoryName is None or FileName is None:
+            raise DataError('8i BFILE locator carries no directory / file name')
+        if not getattr(self, '_o8i_bfile_helper_ready', False):
+            Setup = self.cursor()
+            await Setup.execute(_O8I_BFILE_HELPER)
+            self._o8i_bfile_helper_ready = True
+        Cur = self.cursor()
+        await Cur.execute(
+            'SELECT seerdb_bfile_to_blob(:d, :f) FROM DUAL',
+            {'d': DirectoryName, 'f': FileName},
+        )
+        Row = await Cur.fetchone()
+        return Row[0]
 
     async def _execute_8i_dml(self, Query: str, Bind: list | None = None) -> object:
         # Async port of OracleConnect._execute_8i_dml (#360, §19.12).
