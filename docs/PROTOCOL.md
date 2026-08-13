@@ -1117,10 +1117,22 @@ cursor/rowid trailer, and a session row-counter at offsets 75/186 that is *not*
 the count) is carried as-is from the live 11g reply; only the count field is
 computed. The backend supplies the count (`Result.rowcount`); a `MERGE` or any
 unrecognised verb falls back to the `INSERT` template. Fully computing the OER
-(rather than patching a captured body) is a follow-up, as is the matching DDL
-completion reply (`Table created.` / `Table dropped.`). Statements the classifier
-does not recognise as DML still get the generic no-row status (§the `08 06 00`
-171-byte `encode_status_oci` tail).
+(rather than patching a captured body) is a follow-up.
+
+**DDL completion reply (the Mirror, OCI dialect).** `CREATE TABLE` and
+`DROP TABLE` share the same reply shape as the DML status above, so sqlplus prints
+`Table created.` / `Table dropped.` instead of the generic PL/SQL message. The
+verb comes from the SQL command code at **body offset 57** — `CREATE TABLE` 1,
+`DROP TABLE` 12 (the `V$SQL.COMMAND_TYPE` values, the same field the DML verbs use:
+INSERT 2 / UPDATE 6 / DELETE 7) — plus neighbouring type fields at offsets
+40/53/55/84 that co-vary with it. A DDL affects no rows, so unlike the DML case
+**nothing is computed**: `encode_ddl_status_oci` keeps one captured 171-byte body
+per verb and returns it verbatim (the two differ only at offsets 40/53/55/57/84
+and instance-specific SCN/counter bytes). Only `CREATE` and `DROP` are captured;
+other DDL verbs and the non-`TABLE` object variants (`Index created.`,
+`Table altered.`, …) keep the generic no-row status until captured. Statements the
+classifier recognises as neither DML nor DDL still get the generic `08 06 00`
+171-byte `encode_status_oci` tail.
 
 ### 6.1 Row Header (TTI_RXH)
 

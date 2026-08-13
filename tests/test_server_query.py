@@ -665,6 +665,25 @@ def test_encode_dml_status_oci_carries_the_verb_and_rowcount() -> None:
     )
 
 
+def test_encode_ddl_status_oci_selects_create_or_drop() -> None:
+    # CREATE and DROP carry their own captured 171-byte body; sqlplus reads the SQL
+    # command code at offset 57 (CREATE TABLE 1, DROP TABLE 12 = 0x0c) to render
+    # "Table created." vs "Table dropped.". DDL affects no rows — nothing computed.
+    from seerdb.server.query import encode_ddl_status_oci
+
+    create = encode_ddl_status_oci('CREATE')
+    drop = encode_ddl_status_oci('DROP')
+    for body in (create, drop):
+        assert body[:3] == b'\x08\x06\x00'
+        assert len(body) == 171
+    assert create[57] == 0x01  # CREATE TABLE command code
+    assert drop[57] == 0x0C  # DROP TABLE command code
+    assert create != drop
+
+    # An uncaptured verb falls back to the CREATE body.
+    assert encode_ddl_status_oci('ALTER') == create
+
+
 def test_read_chunked_sql_reassembles_the_chunks() -> None:
     # Long OCI SQL is chunked: 0xFE marker, then <ub1 len><chunk> runs. The reader
     # reassembles them up to the declared total (#265).

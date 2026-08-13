@@ -680,6 +680,41 @@ def encode_dml_status_oci(keyword: str, rowcount: int) -> bytes:
     return bytes(status)
 
 
+# Execute-status replies for OCI DDL (#349), CREATE TABLE / DROP TABLE captured
+# from live 11g. Same shape as the DML status above: sqlplus reads the SQL command
+# code at body offset 57 (CREATE TABLE 1, DROP TABLE 12 — the V$SQL COMMAND_TYPE
+# values) plus neighbouring type fields at 40/53/55/84 to pick "Table created."
+# vs "Table dropped.". DDL affects no rows, so unlike DML nothing is computed —
+# each verb carries its own captured 171-byte body verbatim. Only CREATE and DROP
+# are captured; other DDL verbs/objects keep the generic no-row status (a follow-up
+# would capture ALTER/TRUNCATE and the non-TABLE object variants).
+_OCI_DDL_STATUS = {
+    'CREATE': bytes.fromhex(
+        '080600b0eb5b00000000000100000000000000000000000000000000000000000000'
+        '00040100000011000100000000000000000000010000000100000000000000000000'
+        '00000000000000000000000000000000130000010000003601000000000000000000'
+        '000000000020f6310a00000000000000000000000000000000000000000000000000'
+        '00000000000000000000000000000000000000000000000000000000000000000000'
+        '00'
+    ),
+    'DROP': bytes.fromhex(
+        '080600c1eb5b00000000000300000000000000000000000000000000000000000000'
+        '0004010000001300010000000000000000000003000b000c00000000000000000000'
+        '00000000000000000000000000000000150000010000003601000000000000000000'
+        '000000000020f6310a00000000000000000000000000000000000000000000000000'
+        '00000000000000000000000000000000000000000000000000000000000000000000'
+        '00'
+    ),
+}
+
+
+def encode_ddl_status_oci(keyword: str) -> bytes:
+    """OCI reply for a DDL — success so sqlplus prints ``Table created.`` /
+    ``Table dropped.``. ``keyword`` (CREATE/DROP) selects the captured body;
+    anything else falls back to CREATE."""
+    return _OCI_DDL_STATUS.get(keyword, _OCI_DDL_STATUS['CREATE'])
+
+
 # The sqlplus / thick-OCI reply to a PL/SQL block that assigned OUT binds — the
 # ``VARIABLE v NUMBER`` / ``EXEC :v := 42`` flow. The client parked bind buffers
 # and expects their values back: a ttc=0b01 message whose body is a fixed header

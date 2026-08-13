@@ -63,6 +63,7 @@ from seerdb.server.query import (
     ExecRequest,
     FetchRequest,
     encode_commit_status_oci,
+    encode_ddl_status_oci,
     encode_dml_status_oci,
     encode_error,
     encode_error_oci,
@@ -287,16 +288,21 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
 
 
 _OCI_DML_KEYWORDS = ('INSERT', 'UPDATE', 'DELETE', 'MERGE')
+_OCI_DDL_KEYWORDS = ('CREATE', 'DROP')
 
 
 def _oci_no_row_status(sql: str, rowcount: int) -> bytes:
     # Pick the OCI success reply for a statement that returned no columns, so
-    # sqlplus renders the right message (#348): DML carries the affected row count
-    # ("N rows created/updated/deleted"), and everything else (DDL, PL/SQL blocks,
-    # session bootstrap) the generic "PL/SQL procedure successfully completed".
+    # sqlplus renders the right message (#348 / #349): DML carries the affected row
+    # count ("N rows created/updated/deleted"), CREATE/DROP a plain DDL success
+    # ("Table created." / "Table dropped."), and everything else (other DDL, PL/SQL
+    # blocks, session bootstrap) the generic "PL/SQL procedure successfully
+    # completed".
     keyword = sql.lstrip().split(None, 1)[0].upper() if sql.strip() else ''
     if keyword in _OCI_DML_KEYWORDS:
         return encode_dml_status_oci(keyword, rowcount)
+    if keyword in _OCI_DDL_KEYWORDS:
+        return encode_ddl_status_oci(keyword)
     return encode_status_oci()
 
 
