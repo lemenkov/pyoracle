@@ -1172,7 +1172,7 @@ under default sqlplus settings (the 80-char read loop) and with a large
 `LONGCHUNKSIZE` (single read, multi-packet), single- and multi-row, session clean
 afterward. The demo backend types a column as a CLOB / BLOB from its **declared**
 type (via `PRAGMA table_info`), not its value size, so a plain VARCHAR2 / RAW
-value stays inline (thin clients have no Mirror-side LOB emit yet).
+value stays inline (the thin dialect has its own LOB emit, below).
 
 **LOB write (the Mirror, OCI dialect, #406).** For sqlplus, `INSERT` / `UPDATE`
 of a CLOB / BLOB value that fits an inline literal or bind is an **ordinary DML**
@@ -1184,6 +1184,33 @@ live: `INSERT` / `UPDATE` of CLOB and BLOB values round-trip byte-for-byte
 (`x'deadbeefcafe'` comes back `DEADBEEFCAFE`). A `TTI_LOBOPS` WRITE / temp-LOB
 path (for values too large for an inline bind, used by programmatic OCI clients)
 is a follow-up.
+
+**LOB read (the Mirror, thin dialect, #413).** A thin client (oracledb / seerdb)
+reads a LOB the same shape as sqlplus — locator in the row, content over
+`TTI_LOBOPS` — but the wire is the *thin* codec, not the OCI describe/RXH dance:
+
+1. **Locator in the RXD.** The thin describe already types the column as a CLOB /
+   BLOB (`_encode_dcb_column`); the row value is then not the content but a minted
+   opaque locator, `encode_lob_locator_thin` → `sb4 length | bytes_with_length`
+   over the ordinary RXD. A NULL LOB is the bare `0x00` (`§12`), drawing no read.
+   The client keeps the locator opaque and echoes it back.
+
+2. **`TTI_LOBOPS` READ → whole content, once.** The thin client does *not* loop:
+   its `encode_dictionary_lobops` requests the whole LOB in one read (amount
+   `0x40000000`, no per-chunk offset walk). The Mirror answers with
+   `encode_lob_read_response_thin` — the full content as `LOB_DATA` (`0e` +
+   `0xFF`-byte chunks, §14) followed by a **success OER** `04 01 <status>`
+   (`_encode_oer(1,0,0,b'')`). The client reads the content, scans to the OER, and
+   stops; CLOB content is UTF-16BE (decoded to `str`), BLOB is raw `bytes`.
+
+Unlike the OCI locator, the thin locator carries no load-bearing size / charset
+fields (the CLOB / BLOB split is already in the describe, and the read is
+single-shot), so one template serves both. Verified against the seerdb thin client
+over the SQLite-backed Mirror: small and multi-chunk (6000-char CLOB / 5120-byte
+BLOB) values, NULL, and multi-row / multi-LOB-column results all round-trip, CLOB
+as `str` and BLOB as exact `bytes` (`tests/test_sqlite_backend.py`). LOB column
+typing is still by **declared** type, so VARCHAR2 / RAW stay inline. A thin
+`TTI_LOBOPS` WRITE path (large LOB writes) remains the #412 follow-up.
 
 ### 6.1 Row Header (TTI_RXH)
 

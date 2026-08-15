@@ -831,6 +831,41 @@ def test_oci_lob_contents_reports_type_and_wire_bytes() -> None:
     assert got == [('hi'.encode('utf-16-be'), True), (b'\xca\xfe', False)]
 
 
+def test_encode_value_emits_a_thin_lob_locator_for_lob_columns() -> None:
+    # A thin (oracledb/seerdb) client's LOB column carries a minted opaque locator
+    # inline; the content follows over TTI_LOBOPS. NULL is a bare 0x00 (#413).
+    from seerdb.common.tns_consts import TNS_TYPE_BLOB, TNS_TYPE_CLOB
+    from seerdb.server.query import (
+        _THIN_LOB_LOCATOR,
+        _encode_value,
+        encode_lob_locator_thin,
+    )
+
+    for lob_type in (TNS_TYPE_CLOB, TNS_TYPE_BLOB):
+        locator = _encode_value('anything', lob_type)
+        assert locator == encode_lob_locator_thin()
+        # sb4 length prefix, then the length-led locator bytes the client keeps.
+        assert _THIN_LOB_LOCATOR in locator
+        assert _encode_value(None, lob_type) == b'\x00'
+
+
+def test_encode_lob_read_response_thin_carries_content_then_a_success_oer() -> None:
+    # The thin READ reply is the whole LOB as LOB_DATA followed by a success OER:
+    # the client reads the content, scans to the 04 01 XX OER, and stops (#413).
+    from seerdb.server.query import (
+        _oci_lob_data,
+        encode_lob_read_response_thin,
+    )
+
+    content = 'grüße'.encode('utf-16-be')
+    reply = encode_lob_read_response_thin(content)
+    assert reply[0] == TTI_LOB
+    assert reply.startswith(_oci_lob_data(content))
+    # The trailing success OER the client scans for (04 01 <status>).
+    assert reply[len(_oci_lob_data(content)) :].startswith(b'\x04\x01')
+    assert encode_lob_read_response_thin(b'').startswith(_oci_lob_data(b''))
+
+
 def test_encode_dml_status_oci_carries_the_verb_and_rowcount() -> None:
     # Each DML verb has its own captured template (sqlplus reads the verb from the
     # statement-type fields), and the affected-row count is injected as a ub4-LE at

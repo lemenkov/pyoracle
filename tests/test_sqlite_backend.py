@@ -270,6 +270,38 @@ def test_large_values_round_trip() -> None:
     assert row == (big_str, big_raw)
 
 
+def test_thin_lob_read_round_trip() -> None:
+    # A thin (seerdb) client reads CLOB / BLOB columns from the Mirror: the row
+    # carries a locator and the driver auto-resolves it over TTI_LOBOPS (#413).
+    # Covers small, large (multi-chunk), NULL, and multiple LOB columns per row.
+    listen, server, result = _start_mirror()
+    conn = _connect(listen.getsockname()[1])
+    big_clob = 'seerdb-clob-' * 500  # 6000 chars
+    big_blob = bytes(range(256)) * 20  # 5120 bytes
+    try:
+        cur = conn.cursor()
+        cur.execute('create table t (id number, c clob, b blob)')
+        cur.execute(
+            'insert into t values (:1, :2, :3)', [1, 'hi-clob', b'\xca\xfe\xba\xbe']
+        )
+        cur.execute('insert into t values (:1, :2, :3)', [2, big_clob, big_blob])
+        cur.execute('insert into t values (:1, :2, :3)', [3, None, None])
+        cur.execute('select id, c, b from t order by id')
+        rows = cur.fetchall()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert rows[0] == (1, 'hi-clob', b'\xca\xfe\xba\xbe')
+    assert rows[1] == (2, big_clob, big_blob)  # large CLOB + BLOB, multiple per row
+    assert rows[2] == (3, None, None)  # NULL LOBs
+
+
 def test_executemany_array_dml() -> None:
     # executemany sends one execute carrying every row; the Mirror applies them
     # all and reports the total affected count.
