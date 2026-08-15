@@ -26,12 +26,10 @@ import struct
 from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
-    from seerdb.client.dialect import Dialect
     from seerdb.common.dbobject import DbObjectType
 
 from seerdb.client.connection import (
     _MAX_REDIRECTS,
-    _O8I_LONG_TYPES,
     _REDIRECT_CONNECT_ATTEMPTS,
     _REDIRECT_CONNECT_DELAY,
     Xid,
@@ -42,10 +40,16 @@ from seerdb.client.connection import (
     _parse_accept_eor,
     _parse_accept_sdu,
 )
+from seerdb.client.dialect import (
+    CAP_ARRAY_DML,
+    CAP_OWN_TXN,
+    Dialect,
+    Fv2Dialect,
+    O8iDialect,
+)
 from seerdb.common.crypto import validate
 from seerdb.common.exceptions import (
     DatabaseError,
-    DataError,
     InterfaceError,
     OperationalError,
 )
@@ -54,32 +58,16 @@ from seerdb.common.tns import (
     CCAP_FIELD_VERSION,
     FIELD_VERSION_10_2,
     FIELD_VERSION_12_1,
-    _scan_ora_message,
     assemble_packet,
-    decode_8i_block_out,
-    decode_8i_cursor_id,
-    decode_8i_dcb_describe,
-    decode_8i_dml_response,
-    decode_8i_exec_response,
-    decode_fv2_lob_chunks,
-    decode_fv2_opened_locator,
-    decode_o8i_bfile_getlen,
     decode_packet,
     decode_token_pro,
     decode_token_rpa,
-    encode_8i_lob_read,
-    encode_8i_oall8_dml,
-    encode_8i_oall8_fetch,
-    encode_8i_oall8_query,
     encode_close_cursors_piggyback,
     encode_data_packet,
     encode_dictionary,
     encode_dictionary_auth,
     encode_end_to_end_piggyback,
     encode_fast_auth,
-    encode_o8i_bfile_close,
-    encode_o8i_bfile_getlen,
-    encode_o8i_bfile_open,
     encode_packet,
     encode_pipeline_begin,
     encode_pipeline_end,
@@ -87,7 +75,6 @@ from seerdb.common.tns import (
     encode_tpc_switch,
     exec_oac_signature,
     find_fast_auth_rpa,
-    o8i_stmt_type,
     set_decode_dml_rowcounts,
     set_decode_prev_row,
     set_decode_return_binds,
@@ -497,7 +484,7 @@ class AsyncOracleConnect:
                                 # (the legacy OSESSKEY is rejected). See the sync
                                 # OracleConnect._fast_auth_login.
                                 return await self._fast_auth_login()
-                            if getattr(self, '_is_8i', False):
+                            if isinstance(self._dialect, O8iDialect):
                                 # 8i needs its own shorter DTY (§ _DTY_8I).
                                 Data = _DTY_8I
                             else:
@@ -506,7 +493,7 @@ class AsyncOracleConnect:
                                 )
                             await self.send(TNS_DATA, Data)
                         case p if p == TTI_DTY:
-                            if getattr(self, '_is_8i', False):
+                            if isinstance(self._dialect, O8iDialect):
                                 # Oracle 8i: O3LOGON via the OSESSKEY envelope.
                                 self._o3_phase = 1
                                 await self._send_8i_osesskey()
@@ -528,7 +515,7 @@ class AsyncOracleConnect:
                                 )
                                 await self.send(TNS_DATA, Data)
                         case p if p == TTI_RPA:
-                            if getattr(self, '_is_8i', False):
+                            if isinstance(self._dialect, O8iDialect):
                                 # 8i O3LOGON: phase-1 RPA (AUTH_SESSKEY) -> send the
                                 # proof; the phase-2 RPA means authenticated.
                                 if self._o3_phase == 1:
@@ -651,8 +638,8 @@ class AsyncOracleConnect:
             # OracleConnect._negotiate_capabilities).
             Banner = Pro.get('banner') or b''
             VerMatch = re.search(rb'(\d+)\.\d+\.\d+', Banner)
-            if VerMatch and VerMatch.group(1) == b'8':
-                self._is_8i = True
+            is_8i = bool(VerMatch and VerMatch.group(1) == b'8')
+            if is_8i:
                 self.field_version = FIELD_VERSION_9_2
             logger.debug(
                 'handle_login: PRO server_version=%s banner=%r field_version=%s',
@@ -660,19 +647,16 @@ class AsyncOracleConnect:
                 Pro['banner'],
                 self.field_version,
             )
-            self._select_dialect()
+            self._select_dialect(is_8i)
         except Exception:
             logger.debug('handle_login: could not parse PRO caps', exc_info=True)
 
-    def _select_dialect(self) -> None:
-        # Pick the wire dialect once the negotiated version is final (#369) — the
-        # colorless twin of OracleConnect._select_dialect. 9i (fv2) runs the sans-io
-        # Fv2Dialect via the async _drive; 8i keeps its inline methods; modern keeps
-        # _dialect None.
-        from seerdb.client.dialect import Fv2Dialect
-
-        if getattr(self, '_is_8i', False):
-            self._dialect = None
+    def _select_dialect(self, is_8i: bool = False) -> None:
+        # Pick the wire dialect once the negotiated version is final — the single
+        # discriminator the rest of the driver reads (#369). The colorless twin of
+        # OracleConnect._select_dialect.
+        if is_8i:
+            self._dialect = O8iDialect(self._next_seq)
         elif self.field_version < FIELD_VERSION_10_2:
             self._dialect = Fv2Dialect()
         else:
@@ -779,21 +763,11 @@ class AsyncOracleConnect:
         if Batch is None:
             Batch = []
         Head = Query.strip().upper()
-        # Oracle 8i speaks the 9.2-era OALL8 dialect (#244, PROTOCOL.md §19.9-15);
-        # SELECT / DML / DDL / PL/SQL each ride their own pre-10g path.
-        if getattr(self, '_is_8i', False):
-            if Head.startswith('SELECT'):
-                return await self._drain_cursor(
-                    await self._execute_8i_select(Query, Bind)
-                )
-            if Head.startswith('BEGIN') or Head.startswith('DECLARE'):
-                return await self._execute_8i_block(Query, Bind)
-            return await self._execute_8i_dml(Query, Bind)
-        # A pre-10g dialect (9i / fv2) runs as sans-io generators driven by the
-        # async _drive; the connection is a thin orchestrator (#369).
+        # A pre-10g dialect (9i / fv2 or 8i) runs as sans-io generators driven by
+        # the async _drive; the connection is a thin orchestrator (#369). Neither
+        # tier carries an autocommit bit, so commit is explicit.
         if self._dialect is not None:
             from seerdb.client.connection import _check_fv2_bind_sizes
-            from seerdb.client.dialect import CAP_ARRAY_DML
 
             _check_fv2_bind_sizes(Bind, Batch)
             if Batch and CAP_ARRAY_DML not in self._dialect.capabilities():
@@ -804,13 +778,14 @@ class AsyncOracleConnect:
                 )
             if Head.startswith('SELECT'):
                 return await self._drain_cursor(
-                    await self._drive(self._dialect.execute_query(Query, Bind))
+                    await self._drive(
+                        self._dialect.execute_query(Query, Bind, self.fetch)
+                    )
                 )
             if Head.startswith('BEGIN') or Head.startswith('DECLARE'):
                 Result = await self._drive(self._dialect.execute_block(Query, Bind))
             else:  # DML (INSERT/UPDATE/DELETE)
                 Result = await self._drive(self._dialect.execute_dml(Query, Bind))
-            # fv2's parse doesn't carry an autocommit bit, so commit explicitly.
             if self.autocommit:
                 await self.commit()
             return Result
@@ -1014,226 +989,6 @@ class AsyncOracleConnect:
         from seerdb.client.dialect import fv2_raise_for_error
 
         fv2_raise_for_error(Packet)
-
-    async def _execute_8i_select(self, Query: str, Bind: list | None = None) -> object:
-        # Async port of OracleConnect._execute_8i_select (#244, §19.9-10).
-        await self.send(
-            TNS_DATA,
-            encode_8i_oall8_query(
-                self._next_seq(), Query.encode('latin-1'), Bind or None
-            ),
-        )
-        Received = await self._next_data_packet(b'', b'')
-        if Received is False:
-            raise Exception('Connection closed during 8i query response')
-        Packet = Received[1]
-        # A rejected SELECT comes back as a TTI_OER (0x04) error status, not the
-        # TTI_DCB describe; surface the mapped ORA error rather than feeding the
-        # OER to decode_8i_dcb_describe (which would IndexError) (#384).
-        if Packet[:1] == bytes([TTI_OER]):
-            (ErrCode, Message) = _scan_ora_message(Packet)
-            if ErrCode:
-                from seerdb.common.exceptions import from_ora_code
-
-                raise from_ora_code(ErrCode)(
-                    Message or f'ORA-{ErrCode:05d}', code=ErrCode
-                )
-            raise DatabaseError('Oracle 8i rejected the query (no ORA code)')
-        (Columns, Rest) = decode_8i_dcb_describe(Packet)
-        # A LONG / LONG RAW column forces single-row fetches capped at the fetch
-        # request's long-size field; ask for the whole value (#377, §19.16).
-        HasLong = any(Col.get('data_type') in _O8I_LONG_TYPES for Col in Columns)
-        (Rows, Terminal, LastRow) = await self._recv_8i_rows(Rest, Columns, None)
-        Cursor = decode_8i_cursor_id(Terminal)
-        RowCount = 1 if HasLong else self.fetch
-        LongSize = 0x7FFFFFFF if HasLong else self.fetch
-        while Cursor:
-            await self.send(
-                TNS_DATA,
-                encode_8i_oall8_fetch(self._next_seq(), Cursor, RowCount, LongSize),
-            )
-            (More, _, LastRow) = await self._recv_8i_rows(b'', Columns, LastRow)
-            if not More:
-                break
-            Rows.extend(More)
-        await self._resolve_8i_lobs(Rows, Columns)
-        return (0, 0, 0, (len(Rows), Columns), Rows, None, None, [], None)
-
-    async def _recv_8i_rows(
-        self, Buf: bytes, Columns: list, LastRow: list | None
-    ) -> tuple[list, bytes, list | None]:
-        # Async port of OracleConnect._recv_8i_rows (#377): accumulate DATA
-        # packets into one logical 8i response until the row stream decodes
-        # cleanly and leaves a non-empty terminal (a LONG larger than the SDU
-        # spans several packets with no end-of-message flag; a truncated value
-        # raises and an exact row-boundary split leaves nothing — both read more).
-        while True:
-            try:
-                (Rows, Terminal, Last) = decode_8i_exec_response(Buf, Columns, LastRow)
-                if Terminal:
-                    return (Rows, Terminal, Last)
-            except (DataError, IndexError):
-                pass
-            Received = await self._next_data_packet(b'', b'')
-            if Received is False:
-                try:
-                    return decode_8i_exec_response(Buf, Columns, LastRow)
-                except (DataError, IndexError):
-                    return ([], b'', LastRow)
-            Buf += Received[1]
-
-    async def _lob_read_8i(self, Locator: bytes) -> bytes:
-        # Async port of OracleConnect._lob_read_8i (#364, §19.15).
-        from seerdb.common.tns_consts import TTI_LOB
-
-        await self.send(
-            TNS_DATA, encode_8i_lob_read(self._next_seq(), Locator, 1 << 30)
-        )
-        Data = b''
-        while True:
-            Received = await self._next_data_packet(b'', b'')
-            if Received is False:
-                raise Exception('Connection closed during 8i LOB read')
-            Data += Received[1]
-            # An empty LOB has no TTI_LOB (0x0e) content block (bare 0x08
-            # piggyback reply); report it as empty rather than looping (#387).
-            if Data[0] != TTI_LOB:
-                return b''
-            (Content, Complete) = decode_fv2_lob_chunks(Data)
-            if Complete:
-                return Content
-
-    async def _resolve_8i_lobs(self, Rows: list, Columns: list) -> None:
-        # Async port of OracleConnect._resolve_8i_lobs (#364).
-        from seerdb.common.lob import LOB
-        from seerdb.common.types import decode_fv2_lob
-
-        for Row in Rows:
-            for I, Val in enumerate(Row):
-                if isinstance(Val, LOB):
-                    if Val.data_type == 114:  # BFILE — external file pointer
-                        Row[I] = await self._bfile_read_8i(Val.raw)
-                        continue
-                    Content = await self._lob_read_8i(Val.raw)
-                    Row[I] = decode_fv2_lob(
-                        Columns[I].get('data_type'),
-                        Content,
-                        Columns[I].get('charset') or 0,
-                    )
-
-    async def _bfile_read_8i(self, Locator: bytes) -> bytes:
-        # Async port of OracleConnect._bfile_read_8i (#401, PROTOCOL.md §19.17):
-        # native FILE_OPEN -> GETLEN -> READ -> FILE_CLOSE over TTI_LOBOPS, no
-        # DBMS_LOB helper. FILE_OPEN returns the open-flagged locator the rest use.
-        await self.send(TNS_DATA, encode_o8i_bfile_open(self._next_seq(), Locator))
-        Resp = await self._next_data_packet(b'', b'')
-        if Resp is False:
-            raise Exception('Connection closed during 8i BFILE FILE_OPEN')
-        self._fv2_raise_for_error(Resp[1])  # e.g. ORA-22285 (file not found)
-        Opened = decode_fv2_opened_locator(Resp[1])
-        if Opened is None:
-            raise Exception('Unexpected 8i BFILE FILE_OPEN reply', Resp[1][:8].hex())
-        try:
-            await self.send(TNS_DATA, encode_o8i_bfile_getlen(self._next_seq(), Opened))
-            Resp = await self._next_data_packet(b'', b'')
-            if Resp is False:
-                raise Exception('Connection closed during 8i BFILE GETLEN')
-            Amount = decode_o8i_bfile_getlen(Resp[1])
-            if Amount <= 0:
-                return b''
-            await self.send(
-                TNS_DATA, encode_8i_lob_read(self._next_seq(), Opened, Amount)
-            )
-            return await self._read_fv2_lob_content()
-        finally:
-            await self.send(TNS_DATA, encode_o8i_bfile_close(self._next_seq(), Opened))
-            await self._next_data_packet(b'', b'')  # drain FILE_CLOSE RPA + OER
-
-    async def _read_fv2_lob_content(self) -> bytes:
-        # Accumulate a fv2/8i TTI_LOBOPS READ reply until decode_fv2_lob_chunks
-        # reports the zero-length terminator. Still used by the inline 8i BFILE
-        # read; the fv2 path now uses the dialect's twin (#369).
-        Data = b''
-        while True:
-            Received = await self._next_data_packet(b'', b'')
-            if Received is False:
-                raise Exception('Connection closed during 8i LOB READ')
-            Data += Received[1]
-            (Content, Complete) = decode_fv2_lob_chunks(Data)
-            if Complete:
-                return Content
-
-    async def _execute_8i_dml(self, Query: str, Bind: list | None = None) -> object:
-        # Async port of OracleConnect._execute_8i_dml (#360, §19.12).
-        StmtType = o8i_stmt_type(Query.strip().upper())
-        await self.send(
-            TNS_DATA,
-            encode_8i_oall8_dml(
-                self._next_seq(), Query.encode('latin-1'), StmtType, Bind or None
-            ),
-        )
-        Received = await self._next_data_packet(b'', b'')
-        if Received is False:
-            raise Exception('Connection closed during 8i DML')
-        (RowCount, ErrCode, Message) = decode_8i_dml_response(Received[1])
-        if ErrCode:
-            from seerdb.common.exceptions import from_ora_code
-
-            raise from_ora_code(ErrCode)(Message or f'ORA-{ErrCode:05d}', code=ErrCode)
-        if self.autocommit:
-            await self.commit()
-        return (0, 0, 0, (RowCount, None), [], None, None, [], None)
-
-    async def _execute_8i_block(self, Query: str, Bind: list | None = None) -> object:
-        # Async port of OracleConnect._execute_8i_block (#361/#362, §19.13-14).
-        from seerdb.common.datatypes import Var
-
-        Bind = Bind or []
-        OutPositions = [I for I, B in enumerate(Bind) if isinstance(B, Var)]
-        StmtType = o8i_stmt_type(Query.strip().upper())
-        await self.send(
-            TNS_DATA,
-            encode_8i_oall8_dml(
-                self._next_seq(), Query.encode('latin-1'), StmtType, Bind or None
-            ),
-        )
-        Received = await self._next_data_packet(b'', b'')
-        if Received is False:
-            raise Exception('Connection closed during 8i PL/SQL block')
-        Packet = Received[1]
-        (_, ErrCode, Message) = decode_8i_dml_response(Packet)
-        if ErrCode:
-            from seerdb.common.exceptions import from_ora_code
-
-            raise from_ora_code(ErrCode)(Message or f'ORA-{ErrCode:05d}', code=ErrCode)
-        if self.autocommit:
-            await self.commit()
-        if OutPositions:
-            OutValues = decode_8i_block_out(Packet, len(OutPositions))
-            Record = {'out_positions': OutPositions, 'out_values': OutValues}
-            return (0, 0, 0, (None, None), [Record], None, None, [], None)
-        return (0, 0, 0, (0, None), [], None, None, [], None)
-
-    async def _txn_control_8i(self, Statement: str) -> None:
-        # Async port of OracleConnect._txn_control_8i (#360): COMMIT / ROLLBACK
-        # ride the OALL8 as ordinary statements (8i has no TTI_COMMIT).
-        from seerdb.common.tns import O8I_STMT_TXN
-
-        await self.send(
-            TNS_DATA,
-            encode_8i_oall8_dml(
-                self._next_seq(), Statement.encode('latin-1'), O8I_STMT_TXN
-            ),
-        )
-        Received = await self._next_data_packet(b'', b'')
-        if Received is False:
-            raise Exception(f'Connection closed during 8i {Statement}')
-        (_, ErrCode, Message) = decode_8i_dml_response(Received[1])
-        if ErrCode:
-            from seerdb.common.exceptions import from_ora_code
-
-            raise from_ora_code(ErrCode)(Message or f'ORA-{ErrCode:05d}', code=ErrCode)
-        self._sessionless_txn_active = False
 
     async def _drain_cursor(self, Result: object) -> object:
         """Mirror of the sync drain loop: pulls follow-up FETCH packets
@@ -1686,8 +1441,9 @@ class AsyncOracleConnect:
     # ----- transaction control -----
 
     async def commit(self) -> None:
-        if getattr(self, '_is_8i', False):
-            await self._txn_control_8i('COMMIT')
+        if self._dialect is not None and CAP_OWN_TXN in self._dialect.capabilities():
+            await self._drive(self._dialect.txn_control('COMMIT'))  # 8i: OALL8 stmt
+            self._sessionless_txn_active = False
             return
         from seerdb.common.tns_consts import TTI_COMMIT
 
@@ -1698,8 +1454,9 @@ class AsyncOracleConnect:
         self._sessionless_txn_active = False
 
     async def rollback(self) -> None:
-        if getattr(self, '_is_8i', False):
-            await self._txn_control_8i('ROLLBACK')
+        if self._dialect is not None and CAP_OWN_TXN in self._dialect.capabilities():
+            await self._drive(self._dialect.txn_control('ROLLBACK'))
+            self._sessionless_txn_active = False
             return
         from seerdb.common.tns_consts import TTI_ROLLBACK
 

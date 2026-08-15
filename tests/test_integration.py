@@ -131,6 +131,13 @@ def _8i_skip_reason(test_method_name: str) -> str | None:
 _TARGET_IS_8I: bool | None = None
 
 
+def _conn_is_8i(conn) -> bool:
+    # 8i is now identified by its dialect object, not a flag (#369).
+    from seerdb.client.dialect import O8iDialect
+
+    return isinstance(getattr(conn, '_dialect', None), O8iDialect)
+
+
 def _target_is_8i() -> bool:
     global _TARGET_IS_8I
     if _TARGET_IS_8I is None:
@@ -139,7 +146,7 @@ def _target_is_8i() -> bool:
         else:
             try:
                 Conn = _connect()
-                _TARGET_IS_8I = bool(getattr(Conn, '_is_8i', False))
+                _TARGET_IS_8I = _conn_is_8i(Conn)
                 Conn.close()
             except Exception:
                 _TARGET_IS_8I = False
@@ -336,7 +343,7 @@ class _IntegrationBase(unittest.TestCase):
         if self.conn.field_version >= FIELD_VERSION_10_2:
             return
         Reason = _fv2_skip_reason(self._testMethodName)
-        if Reason is None and getattr(self.conn, '_is_8i', False):
+        if Reason is None and _conn_is_8i(self.conn):
             # 8i is fv2 too but lacks more than 9i; layer its extra skips on top.
             Reason = _8i_skip_reason(self._testMethodName)
         if Reason is not None:
@@ -4433,7 +4440,7 @@ class O8iSelectIntegration(unittest.TestCase):
     # env points at is actually an 8i server, so it is inert on every other tier.
     def setUp(self):
         self.conn = _connect()
-        if not getattr(self.conn, '_is_8i', False):
+        if not _conn_is_8i(self.conn):
             self.conn.close()
             self.skipTest('not an Oracle 8i server')
         self.cur = self.conn.cursor()
@@ -4531,7 +4538,7 @@ class O8iDmlIntegration(unittest.TestCase):
 
     def setUp(self):
         self.conn = _connect()
-        if not getattr(self.conn, '_is_8i', False):
+        if not _conn_is_8i(self.conn):
             self.conn.close()
             self.skipTest('not an Oracle 8i server')
         self.conn.autocommit = False
@@ -4757,7 +4764,7 @@ class AsyncO8iIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def _connect_8i(self):
         conn = await seerdb.connect_async(**self._kwargs())
-        if not getattr(conn, '_is_8i', False):
+        if not _conn_is_8i(conn):
             await conn.close()
             self.skipTest('not an Oracle 8i server')
         return conn
