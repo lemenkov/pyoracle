@@ -33,6 +33,11 @@ from seerdb.common.tns import (
     encode_token_num,
 )
 from seerdb.common.tns_consts import (
+    TNS_LOB_OP_CLOSE,
+    TNS_LOB_OP_FREE_TEMP,
+    TNS_LOB_OP_GET_CHUNK_SIZE,
+    TNS_LOB_OP_OPEN,
+    TNS_LOB_OP_TRIM,
     TNS_LOB_OP_WRITE,
     TNS_TYPE_BDOUBLE,
     TNS_TYPE_BFLOAT,
@@ -1382,17 +1387,42 @@ def _decode_lobops_chunked(data: bytes) -> bytes:
     return bytes(out)
 
 
-def parse_lobops_request(body: bytes) -> LobOpsRequest:
-    """Classify a TTI_LOBOPS message (``body`` from ``read_packet``) (#412/#413).
+# The opcodes the Mirror acknowledges with a content-free RPA+OER but does not
+# yet act on (#417): OPEN / CLOSE bracket a write, TRIM truncates. Recognising
+# them (instead of mis-routing to the READ path) is what keeps a programmatic
+# client from desyncing. FREE_TEMP is handled apart (it drops the temp buffer).
+# The value-returning form of GET_CHUNK_SIZE / TRIM is a #421 follow-up.
+_LOBOPS_ACK_OPS = frozenset(
+    {TNS_LOB_OP_OPEN, TNS_LOB_OP_CLOSE, TNS_LOB_OP_TRIM, TNS_LOB_OP_GET_CHUNK_SIZE}
+)
 
-    CREATE_TEMP and WRITE drive the temp-LOB write flow; anything else (a READ of
-    an emitted column locator) is served by the #413 read path."""
+
+def _lobops_locator_after_operation(rest: bytes) -> bytes:
+    # From just past the operation code, walk the shared §14.1 tail to the
+    # ub2-length-prefixed locator (WRITE / FREE_TEMP / OPEN / CLOSE / TRIM /
+    # GET_CHUNK_SIZE all carry it identically; only what follows differs).
+    rest = rest[2:]  # scn-array pointer + length
+    _src_offset, rest = decode_ub4(rest)
+    _dest_offset, rest = decode_ub4(rest)
+    rest = rest[1:]  # amount pointer flag
+    rest = rest[6:]  # three reserved ub2 array-LOB slots
+    loc_len = struct.unpack('>H', rest[:2])[0]
+    return rest[2 : 2 + loc_len]
+
+
+def parse_lobops_request(body: bytes) -> LobOpsRequest:
+    """Classify a TTI_LOBOPS message (``body`` from ``read_packet``).
+
+    CREATE_TEMP / WRITE drive the temp-LOB write flow (#412); FREE_TEMP releases a
+    temp LOB and the OPEN / CLOSE / TRIM / GET_CHUNK_SIZE state ops are
+    acknowledged (#417); anything else (a READ of an emitted column locator) is
+    served by the #413 read path."""
     payload = body[3:]  # skip TTI_FUN, TTI_LOBOPS, seq
     if payload[:3] == _CREATE_TEMP_PREFIX:
         # CLOB vs BLOB is the LOB type byte (0x70 / 0x71) in the fixed block.
         return LobOpsRequest(kind='create_temp', is_blob=0x71 in payload)
-    # The common request layout (§14.1); walk the fields to the operation and,
-    # for a WRITE, on to the ub2-prefixed locator and the 0x0E payload.
+    # The common request layout (§14.1); walk the fields to the operation, then to
+    # the ub2-prefixed locator (and, for a WRITE, the 0x0E payload).
     rest = payload[1:]  # source_pointer_flag
     _loc_len_plus2, rest = decode_ub4(rest)
     rest = rest[1:]  # dest_pointer_flag
@@ -1401,22 +1431,30 @@ def parse_lobops_request(body: bytes) -> LobOpsRequest:
     _short_dst_off, rest = decode_ub4(rest)
     rest = rest[3:]  # charset / short-amount / null-lob pointer flags
     operation, rest = decode_ub4(rest)
-    if operation != TNS_LOB_OP_WRITE:
-        return LobOpsRequest(kind='read')
-    rest = rest[2:]  # scn-array pointer + length
-    _src_offset, rest = decode_ub4(rest)
-    _dest_offset, rest = decode_ub4(rest)
-    rest = rest[1:]  # amount pointer flag
-    rest = rest[6:]  # three reserved ub2 array-LOB slots
-    loc_len = struct.unpack('>H', rest[:2])[0]
-    rest = rest[2:]
-    locator = rest[:loc_len]
-    rest = rest[loc_len:]
-    if rest and rest[0] == 0x0E:
-        rest = rest[1:]
-    return LobOpsRequest(
-        kind='write', locator=locator, payload=_decode_lobops_chunked(rest)
-    )
+    if operation == TNS_LOB_OP_WRITE:
+        rest = rest[2:]  # scn-array pointer + length
+        _src_offset, rest = decode_ub4(rest)
+        _dest_offset, rest = decode_ub4(rest)
+        rest = rest[1:]  # amount pointer flag
+        rest = rest[6:]  # three reserved ub2 array-LOB slots
+        loc_len = struct.unpack('>H', rest[:2])[0]
+        rest = rest[2:]
+        locator = rest[:loc_len]
+        rest = rest[loc_len:]
+        if rest and rest[0] == 0x0E:
+            rest = rest[1:]
+        return LobOpsRequest(
+            kind='write', locator=locator, payload=_decode_lobops_chunked(rest)
+        )
+    if operation == TNS_LOB_OP_FREE_TEMP:
+        return LobOpsRequest(
+            kind='free_temp', locator=_lobops_locator_after_operation(rest)
+        )
+    if operation in _LOBOPS_ACK_OPS:
+        return LobOpsRequest(kind='ack', locator=_lobops_locator_after_operation(rest))
+    # READ (the #413 column-LOB read) and anything else fall through to the read
+    # path — unchanged, so an unrecognised op behaves as before rather than worse.
+    return LobOpsRequest(kind='read')
 
 
 def encode_create_temp_response(locator: bytes) -> bytes:
@@ -1425,10 +1463,12 @@ def encode_create_temp_response(locator: bytes) -> bytes:
     return bytes([TTI_RPA]) + struct.pack('>H', len(locator)) + locator
 
 
-def encode_lobops_write_response(locator: bytes) -> bytes:
-    """The WRITE reply (#412): a TTI_RPA echoing the (ub2-prefixed) locator then a
-    success OER. The client skips the locator via its length prefix and walks to
-    the OER (``decode_lobops_oer``), so no real content is needed."""
+def encode_lobops_ack(locator: bytes) -> bytes:
+    """A content-free TTI_LOBOPS reply: a TTI_RPA echoing the (ub2-prefixed)
+    locator then a success OER. The client skips the locator via its length prefix
+    and walks to the OER (``decode_lobops_oer``), so no real content is carried.
+    Used for WRITE (#412) and for the FREE_TEMP / OPEN / CLOSE / TRIM /
+    GET_CHUNK_SIZE state ops the Mirror acknowledges (#417)."""
     rpa = bytes([TTI_RPA]) + struct.pack('>H', len(locator)) + locator
     return rpa + _encode_oer(1, 0, 0, b'')
 

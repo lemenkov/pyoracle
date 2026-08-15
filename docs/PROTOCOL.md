@@ -2086,9 +2086,28 @@ primitives (the auto-promotion is `12.1`+/PL/SQL-gated and the Mirror pins 11g, 
 the test calls `create_temp_lob` / `write_temp_lob` directly, as a thick client
 would): a multi-chunk CLOB (~72 KB) + BLOB (~77 KB) and a single-chunk CLOB
 round-trip byte-for-byte, with a NULL LOB alongside
-(`tests/test_sqlite_backend.py`). No `FREE_TEMP` is required — a real client
-releases the temp LOB at session end, and the Mirror's buffers die with the
-session.
+(`tests/test_sqlite_backend.py`). A `FREE_TEMP` is not required for correctness —
+a real client releases the temp LOB at session end and the Mirror's buffers die
+with the session — but the Mirror honours it anyway (below).
+
+**The remaining `TTI_LOBOPS` state ops (the Mirror, #417).** A programmatic client
+brackets its temp-LOB work with more opcodes than `CREATE_TEMP` / `WRITE` /
+`READ`. The Mirror recognises them off the operation field (walking the same
+§14.1 block to the `ub2`-prefixed locator) and answers with the content-free
+`TTI_RPA` + success OER ack — the same reply `WRITE` uses, which the client reads
+via `decode_lobops_oer`. This is what keeps such a client from **desyncing**: an
+unrecognised op used to fall through to the READ path and get a LOB-content reply
+of the wrong shape.
+
+- **`FREE_TEMP`** (`0x0111`) — the Mirror drops the temp LOB's buffer (freeing it
+  early rather than at session end) and acks.
+- **`OPEN`** (`0x8000`) / **`CLOSE`** (`0x10000`) / **`TRIM`** (`0x0020`) /
+  **`GET_CHUNK_SIZE`** (`0x4000`) — acked. Their *value-returning* forms (a real
+  server-preferred chunk size, applying `TRIM`'s new length, `GET_LENGTH` /
+  `IS_OPEN`) are deferred to #421: pinning those reply bytes needs a capture from
+  a client that actually sends them (the thin client doesn't, and thick needs
+  Instant Client), and the ack already keeps the wire in sync. `READ` (and any
+  unrecognised op) still routes to the #413 read path, unchanged.
 
 ## 15. TNS Marker Protocol
 
