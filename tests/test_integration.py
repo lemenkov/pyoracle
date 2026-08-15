@@ -4660,11 +4660,12 @@ class O8iDmlIntegration(unittest.TestCase):
         self.assertEqual(rows[2], (3, None, None))
 
     def test_bfile_read(self):
-        # 8i BFILE read (#396) via the server-side BFILE -> temp-BLOB helper.
-        # There is no writable UTL_FILE directory on the 8i testbed, so use the
-        # instance's own background-dump directory + alert log (always present)
-        # as a read-only fixture. A plain SELECT of a BFILE column must return
-        # the file bytes (Cursor auto-resolve -> _bfile_read_8i).
+        # 8i BFILE read (#401) over the native FILE_OPEN -> GETLEN -> READ ->
+        # FILE_CLOSE TTI_LOBOPS wire (no DBMS_LOB helper). There is no writable
+        # UTL_FILE directory on the 8i testbed, so use the instance's own
+        # background-dump directory + alert log (always present) as a read-only
+        # fixture. A plain SELECT of a BFILE column must return the file bytes
+        # (Cursor auto-resolve -> _bfile_read_8i).
         self.conn.autocommit = True
         (DumpDir,) = (
             self.conn.cursor()
@@ -4781,6 +4782,30 @@ class AsyncO8iIntegration(unittest.IsolatedAsyncioTestCase):
             # LOB read
             await cur.execute(f'select id, c from {self.TABLE}')
             self.assertEqual(await cur.fetchall(), [(7, 'async-clob')])
+            # BFILE read (#401): native FILE_OPEN -> GETLEN -> READ -> FILE_CLOSE,
+            # using the instance's own bdump directory + alert log as the fixture
+            # (mirrors the sync O8iDmlIntegration.test_bfile_read).
+            await cur.execute(
+                "select value from v$parameter where name = 'background_dump_dest'"
+            )
+            (DumpDir,) = await cur.fetchone()
+            await cur.execute(
+                f"create or replace directory zz_seerdb_bd as '{DumpDir}'"
+            )
+            for Cand in ('ORCLALRT.LOG', 'alert_ORCL.log', 'alert_orcl.log'):
+                await cur.execute(
+                    "select dbms_lob.fileexists(bfilename('ZZ_SEERDB_BD', :f)) from dual",
+                    {'f': Cand},
+                )
+                (Exists,) = await cur.fetchone()
+                if Exists == 1:
+                    await cur.execute(
+                        "select bfilename('ZZ_SEERDB_BD', :f) from dual", {'f': Cand}
+                    )
+                    (Got,) = await cur.fetchone()
+                    self.assertIsInstance(Got, bytes)
+                    self.assertTrue(Got.startswith(b'Dump file'))
+                    break
             await conn.commit()
         finally:
             try:

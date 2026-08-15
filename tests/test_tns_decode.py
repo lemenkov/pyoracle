@@ -6446,5 +6446,84 @@ class TestFv2Bfile(unittest.TestCase):
         self.assertEqual(content, b'BFILE-9i-content' + bytes.fromhex('cafebabe'))
 
 
+class TestO8iBfile(unittest.TestCase):
+    """Oracle 8i native BFILE read (#401, PROTOCOL §19.17): FILE_OPEN -> GETLEN
+    -> READ -> FILE_CLOSE over TTI_LOBOPS in the 8i envelope (ub4-LE lengths +
+    25-byte op middle, §19.15) — no DBMS_LOB helper. Fixtures are real frames
+    captured from a 9.2 OCI client -> 8.1.7 reading BFILENAME('BDUMP',
+    'ORCLALRT.LOG') (the alert log; first 32 bytes 'Dump file C:\\oracle\\admin
+    \\ORCL\\b')."""
+
+    # Unopened locator (from the FILE_OPEN request) and the open-flagged locator
+    # the FILE_OPEN reply hands back (byte at offset 11 flips 00 -> 01).
+    LOC = bytes.fromhex(
+        '0023000108080000000100000000000000054244554d50000c4f52434c414c52542e4c4f47'
+    )
+    FOPEN_REQ = bytes.fromhex(
+        '036006012500000000000000000000000000000000000100000100000000000000'
+        '0023000108080000000100000000000000054244554d50000c4f52434c414c5254'
+        '2e4c4f470b000000'
+    )
+    FOPEN_RESP = bytes.fromhex(
+        '080023000108080000000100010000000000054244554d50000c4f52434c414c52'
+        '542e4c4f470b000000040100000000000000000000000000030060000000000000'
+        '000000000000000000000000000000060000010000000000000000000000000000'
+        '000000'
+    )
+    GETLEN_REQ = bytes.fromhex(
+        '036007012500000000000000000000000000000000000100010000000000000000'
+        '0023000108080000000100010000000000054244554d50000c4f52434c414c5254'
+        '2e4c4f4700000000'
+    )
+    GETLEN_RESP = bytes.fromhex(
+        '080023000108080000000100010000000000054244554d50000c4f52434c414c52'
+        '542e4c4f47e4850000040100000000000000000000000000030060000000000000'
+        '000000000000000000000000000000070000010000000000000000000000000000'
+        '000000'
+    )
+    READ_RESP = bytes.fromhex(
+        '0efe2044756d702066696c6520433a5c6f7261636c655c61646d696e5c4f52434c'
+        '5c6200080023000108080000000100010000000000054244554d50000c4f52434c'
+        '414c52542e4c4f4720000000'
+    )
+    FCLOSE_REQ = bytes.fromhex(
+        '036009012500000000000000000000000000000000000000000200000000000000'
+        '0023000108080000000100010000000000054244554d50000c4f52434c414c5254'
+        '2e4c4f47'
+    )
+
+    def test_file_open_request_matches_capture(self):
+        from seerdb.common.tns import encode_o8i_bfile_open
+
+        self.assertEqual(encode_o8i_bfile_open(6, self.LOC), self.FOPEN_REQ)
+
+    def test_opened_locator_then_getlen_read_close(self):
+        from seerdb.common.tns import (
+            decode_fv2_opened_locator,
+            decode_o8i_bfile_getlen,
+            encode_8i_lob_read,
+            encode_o8i_bfile_close,
+            encode_o8i_bfile_getlen,
+        )
+
+        # FILE_OPEN reply returns the open-flagged locator (shared 9i decoder).
+        opened = decode_fv2_opened_locator(self.FOPEN_RESP)
+        self.assertEqual(opened[11], 1)  # open flag set (was 0 in LOC)
+        self.assertEqual(self.LOC[11], 0)
+        self.assertEqual(encode_o8i_bfile_getlen(7, opened), self.GETLEN_REQ)
+        self.assertEqual(decode_o8i_bfile_getlen(self.GETLEN_RESP), 34276)
+        # READ reuses the 8i CLOB/BLOB read encoder (encode_8i_lob_read) with the
+        # opened locator; its middle is covered by the CLOB/BLOB read tests.
+        self.assertEqual(encode_8i_lob_read(8, opened, 32)[:4], b'\x03\x60\x08\x01')
+        self.assertEqual(encode_o8i_bfile_close(9, opened), self.FCLOSE_REQ)
+
+    def test_read_response_content(self):
+        from seerdb.common.tns import decode_fv2_lob_chunks
+
+        content, done = decode_fv2_lob_chunks(self.READ_RESP)
+        self.assertTrue(done)
+        self.assertEqual(content, b'Dump file C:\\oracle\\admin\\ORCL\\b')
+
+
 if __name__ == '__main__':
     unittest.main()

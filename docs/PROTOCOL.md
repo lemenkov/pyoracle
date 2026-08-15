@@ -2928,7 +2928,7 @@ truncated, and a complete response ends on a terminal token (`0x08` piggyback /
 `0x04` OER, ≥ 12 bytes for the cursor id). `_recv_8i_rows` reads until that holds.
 Driver: `_execute_8i_select` / `_recv_8i_rows`; encoder: `encode_8i_oall8_fetch`.
 
-### 19.17 Oracle 8i BFILE read — the server-side helper (#396)
+### 19.17 Oracle 8i BFILE read — the native TTI_LOBOPS wire (#401)
 
 A **BFILE** (TNS type 114) is a pointer to an external OS file, not inline LOB
 content. `decode_8i_exec_response` turns the column into a `LOB` whose locator
@@ -2936,38 +2936,36 @@ parses into `directory_name` / `filename` (a length-prefixed directory-object
 name then file name — e.g. `… 05 "BDUMP" 0c "ORCLALRT.LOG"`), the same as the
 10g+ locator.
 
-Reading the bytes needs a `TTI_LOBOPS` **FILE_OPEN → GETLEN → READ → FILE_CLOSE**
-sequence. 8i's LOBOPS envelope differs from 9i's (a **fixed 4-byte little-endian**
-length + a **25-byte** op-middle, vs 9i's `encode_sb4` length + 13-byte middle —
-the same divergence as the CLOB/BLOB read §19.15 and the SQL length §19.9), and
-its BFILE op-middles have **not** been reverse-engineered: no available 8i client
-reads BFILE content over the wire, so there is nothing to capture (`sqlplus`
-shows only the locator). Reusing the 9i `encode_o7_bfile_open` request draws no
-reply (the request hangs).
+Reading the bytes is a `TTI_LOBOPS` **FILE_OPEN → GETLEN → READ → FILE_CLOSE**
+sequence, natively — no `DBMS_LOB` helper. Every op rides the **8i LOBOPS
+envelope** (the same family as the CLOB/BLOB read §19.15): `03 60 <seq> 01` + a
+**ub4-LE locator length** + a **25-byte op middle** + the locator + an
+op-specific trailer. Reverse-engineered from a 9.2 OCI client → 8.1.7 capture
+(`OCILobFileOpen/GetLength/Read/FileClose`; `sqlplus` alone shows only the
+locator, so the capture came from a linked OCI program):
 
-So — pragmatically — the driver **mimics** the read with a **server-side helper**
-instead of the native wire (a future native RE could replace it). On the first 8i
-BFILE read it installs, lazily, a PL/SQL function that loads the file into a
-temporary BLOB with `DBMS_LOB`:
+| op | 25-byte middle (hex) | trailer | reply |
+|----|----------------------|---------|-------|
+| FILE_OPEN | `00000000000000000000000000000100000100000000000000` | `0b000000` (ub4-LE open mode `0x0b`, read-only) | `08` + **opened locator** + OER |
+| GETLEN | `00000000000000000000000000000100010000000000000000` | `00000000` | `08` + locator + **ub4-LE length** + OER |
+| READ | `00000000000100000000000000000100020000000000000000` (= the CLOB/BLOB read middle) | ub4-LE amount | `0e fe <chunks> 00` (§19.15) + RPA + OER |
+| FILE_CLOSE | `00000000000000000000000000000000000200000000000000` | *(none)* | `08` + locator + OER |
 
-```sql
-CREATE OR REPLACE FUNCTION seerdb_bfile_to_blob(d VARCHAR2, f VARCHAR2) RETURN BLOB IS
-  bf BFILE := BFILENAME(d, f); bl BLOB; ln NUMBER;
-BEGIN
-  DBMS_LOB.CREATETEMPORARY(bl, TRUE);
-  DBMS_LOB.FILEOPEN(bf, DBMS_LOB.FILE_READONLY);
-  ln := DBMS_LOB.GETLENGTH(bf);
-  IF ln > 0 THEN DBMS_LOB.LOADFROMFILE(bl, bf, ln); END IF;
-  DBMS_LOB.FILECLOSE(bf);
-  RETURN bl;
-END;
-```
+**FILE_OPEN returns an updated locator** with the open flag set (the byte at
+locator offset 11 flips `00 → 01`); GETLEN / READ / FILE_CLOSE must use *that*
+locator, exactly like the 9i path — so the same `decode_fv2_opened_locator`
+extracts it. GETLEN's reply carries the file length as a `ub4-LE` right after the
+echoed locator (`decode_o8i_bfile_getlen`). READ's content is the shared
+`0e fe <chunks> 00` form (`decode_fv2_lob_chunks`), so a large file streams across
+packets and terminates on the zero-length chunk. A missing file surfaces the
+server's `ORA-22285` at FILE_OPEN.
 
-`_bfile_read_8i` then runs `SELECT seerdb_bfile_to_blob(:dir, :file) FROM dual`;
-the returned temp BLOB comes back as bytes over the ordinary 8i BLOB path
-(§19.15, `_lob_read_8i`). A missing file surfaces the server's `ORA-22288`.
-Requires `CREATE PROCEDURE` + `EXECUTE` on `DBMS_LOB` for the connecting user.
-Driver: `_resolve_8i_lobs` → `_bfile_read_8i`; helper: `_O8I_BFILE_HELPER`.
+Encoders: `encode_o8i_bfile_open` / `encode_o8i_bfile_getlen` /
+`encode_o8i_bfile_close` (+ `encode_8i_lob_read` for the READ), all built on the
+shared `_encode_o8i_lobop` envelope. Driver: `_resolve_8i_lobs` →
+`_bfile_read_8i` (sync + async). This replaced an earlier `DBMS_LOB`
+temp-BLOB helper, removing its `CREATE PROCEDURE` requirement and the stored
+function it left in the user's schema — the same win #46 brought to 10g+/21c.
 
 ## 20. Oracle 23ai field version 24 — fast-auth + the fv24 framing (#89)
 

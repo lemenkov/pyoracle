@@ -30,7 +30,6 @@ if TYPE_CHECKING:
 
 from seerdb.client.connection import (
     _MAX_REDIRECTS,
-    _O8I_BFILE_HELPER,
     _O8I_LONG_TYPES,
     _REDIRECT_CONNECT_ATTEMPTS,
     _REDIRECT_CONNECT_DELAY,
@@ -69,6 +68,7 @@ from seerdb.common.tns import (
     decode_fv2_lob_getlen,
     decode_fv2_oer_error,
     decode_fv2_opened_locator,
+    decode_o8i_bfile_getlen,
     decode_packet,
     decode_token_pro,
     decode_token_rpa,
@@ -92,6 +92,9 @@ from seerdb.common.tns import (
     encode_o7_lob_read,
     encode_o7_open,
     encode_o7_parse,
+    encode_o8i_bfile_close,
+    encode_o8i_bfile_getlen,
+    encode_o8i_bfile_open,
     encode_packet,
     encode_pipeline_begin,
     encode_pipeline_end,
@@ -1189,9 +1192,7 @@ class AsyncOracleConnect:
             for I, Val in enumerate(Row):
                 if isinstance(Val, LOB):
                     if Val.data_type == 114:  # BFILE — external file pointer
-                        Row[I] = await self._bfile_read_8i(
-                            Val.directory_name, Val.filename
-                        )
+                        Row[I] = await self._bfile_read_8i(Val.raw)
                         continue
                     Content = await self._lob_read_8i(Val.raw)
                     Row[I] = decode_fv2_lob(
@@ -1200,25 +1201,33 @@ class AsyncOracleConnect:
                         Columns[I].get('charset') or 0,
                     )
 
-    async def _bfile_read_8i(
-        self, DirectoryName: str | None, FileName: str | None
-    ) -> bytes:
-        # Async port of OracleConnect._bfile_read_8i (#396, PROTOCOL.md §19.17):
-        # read a BFILE via the server-side BFILE -> temp-BLOB helper, since 8i's
-        # native BFILE wire is not RE'd. Installs the helper lazily on first use.
-        if DirectoryName is None or FileName is None:
-            raise DataError('8i BFILE locator carries no directory / file name')
-        if not getattr(self, '_o8i_bfile_helper_ready', False):
-            Setup = self.cursor()
-            await Setup.execute(_O8I_BFILE_HELPER)
-            self._o8i_bfile_helper_ready = True
-        Cur = self.cursor()
-        await Cur.execute(
-            'SELECT seerdb_bfile_to_blob(:d, :f) FROM DUAL',
-            {'d': DirectoryName, 'f': FileName},
-        )
-        Row = await Cur.fetchone()
-        return Row[0]
+    async def _bfile_read_8i(self, Locator: bytes) -> bytes:
+        # Async port of OracleConnect._bfile_read_8i (#401, PROTOCOL.md §19.17):
+        # native FILE_OPEN -> GETLEN -> READ -> FILE_CLOSE over TTI_LOBOPS, no
+        # DBMS_LOB helper. FILE_OPEN returns the open-flagged locator the rest use.
+        await self.send(TNS_DATA, encode_o8i_bfile_open(self._next_seq(), Locator))
+        Resp = await self._next_data_packet(b'', b'')
+        if Resp is False:
+            raise Exception('Connection closed during 8i BFILE FILE_OPEN')
+        self._fv2_raise_for_error(Resp[1])  # e.g. ORA-22285 (file not found)
+        Opened = decode_fv2_opened_locator(Resp[1])
+        if Opened is None:
+            raise Exception('Unexpected 8i BFILE FILE_OPEN reply', Resp[1][:8].hex())
+        try:
+            await self.send(TNS_DATA, encode_o8i_bfile_getlen(self._next_seq(), Opened))
+            Resp = await self._next_data_packet(b'', b'')
+            if Resp is False:
+                raise Exception('Connection closed during 8i BFILE GETLEN')
+            Amount = decode_o8i_bfile_getlen(Resp[1])
+            if Amount <= 0:
+                return b''
+            await self.send(
+                TNS_DATA, encode_8i_lob_read(self._next_seq(), Opened, Amount)
+            )
+            return await self._read_fv2_lob_content()
+        finally:
+            await self.send(TNS_DATA, encode_o8i_bfile_close(self._next_seq(), Opened))
+            await self._next_data_packet(b'', b'')  # drain FILE_CLOSE RPA + OER
 
     async def _execute_8i_dml(self, Query: str, Bind: list | None = None) -> object:
         # Async port of OracleConnect._execute_8i_dml (#360, §19.12).
