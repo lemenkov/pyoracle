@@ -5,20 +5,19 @@
 
 seerdb is a *client*: it decodes what an Oracle server puts on the wire. This
 subpackage is the inverse — it *answers* that protocol for real Oracle clients
-(sqlplus, python-oracledb, SeerODBC), so a non-Oracle backend (e.g. PostgreSQL)
-can sit behind it. See the Tier-A design proposal.
+(sqlplus, python-oracledb, SeerODBC), so a non-Oracle backend (e.g. SQLite or
+PostgreSQL) can sit behind it.
 
-Bring-up is staged. Today this provides:
+**Experimental and unstable.** Unlike the client (DB-API 2.0) surface, which
+follows semantic versioning, the Mirror's API may change or break in any release.
+Treat :func:`~seerdb.server.service.serve` / :class:`~seerdb.server.service.Server`
+and everything under ``seerdb.server`` accordingly.
 
-* :class:`~seerdb.server.framing.PacketStream` — the read/write mirror of the
-  client's ``recv()`` / ``send()``, so the server and client share one framing
-  implementation.
-* an observation listener (:func:`~seerdb.server.listener.serve`) that decodes
-  and logs what a client puts on the wire — the capture tool that drives the
-  rest of the bring-up.
-
-Not yet: the ACCEPT / PRO / DTY handshake replies, auth, describe, or rows —
-those land in later increments, each authored against a real-Oracle capture.
+A live client logs in and runs SQL end-to-end against a pluggable
+:class:`~seerdb.server.backend.Backend`: the handshake, O5LOGON auth (both the
+thin and the sqlplus/OCI dialects), describe, rows, bind variables, DML / DDL,
+transactions, batched fetch, and LOBs. ``python -m seerdb.server`` still runs the
+observation listener that decodes and logs what a client puts on the wire.
 """
 
 from __future__ import annotations

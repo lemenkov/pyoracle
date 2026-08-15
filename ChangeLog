@@ -2,7 +2,16 @@ Entries are sorted chronologically from oldest to youngest within each release,
 releases are sorted from youngest to oldest.
 
 version 2.1.0:
-- Fix high-precision Decimal NUMBER values being truncated on encode: a `Decimal` with more than ~15 significant digits was routed through `float` and lost precision. It is now encoded exactly in Oracle's base-100 form, preserving all significant digits up to Oracle's ~38-digit limit. Affects NUMBER binds and OSON (JSON) numbers (#281)
+- **Oracle 8i (8.1.7) support**, on both the sync and async clients: login (the OSESSKEY-envelope O3LOGON), SELECT over the 9.2-era OALL8 + fixed-field describe/row wire, IN bind variables and PL/SQL OUT binds (callproc / callfunc), INSERT/UPDATE/DELETE, DDL and transactions, anonymous PL/SQL blocks, CLOB / BLOB and LONG / LONG RAW reads, BFILE reads, and ROWID / UROWID columns — with cursor.description precision & scale. seerdb now spans Oracle 8i through 23ai.
+- cursor.description is now byte-for-byte compatible with python-oracledb — the type code, display size, internal size, precision, scale and null-ok all match (#305)
+- Fix login against servers configured with non-default O5LOGON parameters: honour the server's PBKDF2 iteration counts (#309) and select the key-derivation scheme by the account's verifier-type flag (#311)
+- Sync the Oracle session time zone to the client's own UTC offset on 12c+ (#307)
+- Encode high-precision NUMBER values exactly in Oracle's base-100 form instead of detouring through `float` (a `Decimal` with more than ~15 significant digits previously lost precision); all significant digits up to Oracle's ~38-digit limit are preserved. Affects NUMBER binds and OSON (JSON) numbers (#281). Also encode integral NUMBERs >= 10**40 instead of raising (#316)
+- Decode TIMESTAMP WITH TIME ZONE values whose named-region id is a multiple of 64 (#320)
+- Carry bit-vector "reused column" values across fetch-batch boundaries, fixing wrong values on a large result set that repeats a column from the previous row (#326)
+- Retry the redirect-follow connect when the redirected listener refuses the first attempt (#399)
+- Send an informative client banner in the TTI_PRO handshake (#381)
+- **Experimental — the "Mirror" server** (`seerdb.serve()` / `seerdb.Server`): a server that answers Oracle's TNS/TTC wire protocol, so real Oracle clients (sqlplus, python-oracledb, seerdb itself) can run SQL against a pluggable non-Oracle backend (SQLite / PostgreSQL demos included). **This server-side API is experimental and may change or break in any release.** The client (DB-API 2.0) surface follows semantic versioning and remains stable.
 
 version 2.0.0:
 - Renamed the project to **seerdb**. The import package is now `seerdb` (was `oracle`): change `import oracle` / `from oracle...` to `import seerdb` / `from seerdb...`, and `oracle.connect(...)` to `seerdb.connect(...)`. The PyPI distribution is `seerdb`. Test env vars are now `SEERDB_TEST_*`. No functional or protocol changes — purely the rename. (breaking)
