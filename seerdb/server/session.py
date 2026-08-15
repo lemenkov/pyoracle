@@ -82,7 +82,7 @@ from seerdb.server.query import (
     encode_lob_fetch_rows_oci,
     encode_lob_read_response_oci,
     encode_lob_read_response_thin,
-    encode_lobops_write_response,
+    encode_lobops_ack,
     encode_logoff_status_oci,
     encode_long_fetch_row_oci,
     encode_out_bind_response_oci,
@@ -553,8 +553,10 @@ def _answer_lobops(
     temp_lobs: dict[bytes, bytearray],
 ) -> list[tuple[bytes, bool]]:
     # Dispatch a thin TTI_LOBOPS message. CREATE_TEMP / WRITE drive the temp-LOB
-    # write flow (#412); a plain READ drains the content of a column locator the
-    # Mirror emitted (#413). Returns the (possibly shortened) read queue.
+    # write flow (#412); FREE_TEMP / OPEN / CLOSE / TRIM / GET_CHUNK_SIZE are
+    # acknowledged so a programmatic client doesn't desync (#417); a plain READ
+    # drains the content of a column locator the Mirror emitted (#413). Returns
+    # the (possibly shortened) read queue.
     request = parse_lobops_request(body)
     if request.kind == 'create_temp':
         locator = mint_temp_lob_locator(len(temp_lobs), request.is_blob)
@@ -567,7 +569,19 @@ def _answer_lobops(
         temp_lobs.setdefault(bytes(request.locator), bytearray()).extend(
             request.payload
         )
-        stream.write_packet(TNS_DATA, encode_lobops_write_response(request.locator))
+        stream.write_packet(TNS_DATA, encode_lobops_ack(request.locator))
+        return lobs
+    if request.kind == 'free_temp':
+        # Release the temp LOB now rather than at session end; the buffer may not
+        # exist (a client can free a locator we never saw written) — that's fine.
+        temp_lobs.pop(bytes(request.locator), None)
+        stream.write_packet(TNS_DATA, encode_lobops_ack(request.locator))
+        return lobs
+    if request.kind == 'ack':
+        # OPEN / CLOSE / TRIM / GET_CHUNK_SIZE: acknowledge with the content-free
+        # reply the client accepts. The value-returning form (a real chunk size,
+        # applying TRIM's length) is deferred (#421) — no test client needs it.
+        stream.write_packet(TNS_DATA, encode_lobops_ack(request.locator))
         return lobs
     # A READ of an emitted column locator: hand back the next queued LOB whole,
     # row-major, matching the order the locators went out (#413).

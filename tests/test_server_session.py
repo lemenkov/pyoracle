@@ -191,3 +191,53 @@ def test_unsupported_query_errors_but_keeps_connection() -> None:
 
     assert result.get('error') is None, result.get('error')
     assert row == ('X',)
+
+
+def test_free_temp_drops_the_buffer_and_state_ops_ack() -> None:
+    # A programmatic client's FREE_TEMP releases the temp LOB (the Mirror drops
+    # its buffer) and OPEN / CLOSE / TRIM / GET_CHUNK_SIZE are acknowledged rather
+    # than mis-routed to the read path — no desync (#417). Driven at the handler
+    # level: no client in the matrix sends these against the Mirror.
+    import struct
+
+    from seerdb.common.tns import _fun_header, decode_lobops_oer, encode_sb4
+    from seerdb.common.tns_consts import (
+        FIELD_VERSION_11_2,
+        TNS_DATA,
+        TNS_LOB_OP_FREE_TEMP,
+        TNS_LOB_OP_OPEN,
+        TTI_LOBOPS,
+    )
+    from seerdb.server.session import _answer_lobops
+
+    def op_request(operation: int, locator: bytes) -> bytes:
+        body = _fun_header(TTI_LOBOPS, 1, FIELD_VERSION_11_2)
+        body += bytes([1]) + encode_sb4(len(locator) + 2) + bytes([0])
+        body += encode_sb4(0) * 3 + bytes([0, 0, 0]) + encode_sb4(operation)
+        body += bytes([0, 0]) + encode_sb4(0) * 2 + bytes([0])
+        body += struct.pack('>HHH', 0, 0, 0)
+        body += struct.pack('>H', len(locator)) + locator
+        return body
+
+    class _FakeStream:
+        def __init__(self) -> None:
+            self.sent: list[bytes] = []
+
+        def write_packet(self, packet_type: int, body: bytes) -> None:
+            assert packet_type == TNS_DATA
+            self.sent.append(body)
+
+    locator = b'\x00seerdb-mirror-temp-lob-\x00\x00\x00\x00\x01'
+    temp_lobs = {bytes(locator): bytearray(b'written-bytes')}
+    stream = _FakeStream()
+
+    # FREE_TEMP drops the buffer and replies with a success ack.
+    _answer_lobops(stream, op_request(TNS_LOB_OP_FREE_TEMP, locator), [], temp_lobs)
+    assert bytes(locator) not in temp_lobs
+    assert decode_lobops_oer(stream.sent[-1], 6)[0] in (0, 1403)
+
+    # A state op (OPEN) is acknowledged, buffer untouched, no desync.
+    temp_lobs[bytes(locator)] = bytearray(b'x')
+    _answer_lobops(stream, op_request(TNS_LOB_OP_OPEN, locator), [], temp_lobs)
+    assert bytes(locator) in temp_lobs  # OPEN doesn't free
+    assert decode_lobops_oer(stream.sent[-1], 6)[0] in (0, 1403)

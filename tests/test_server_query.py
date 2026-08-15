@@ -907,12 +907,12 @@ def test_parse_lobops_request_extracts_the_write_locator_and_payload() -> None:
 
 def test_temp_lob_responses_round_trip_through_the_client_decoders() -> None:
     # The Mirror's CREATE_TEMP / WRITE replies must parse with the client's own
-    # readers: CREATE_TEMP returns the minted locator in a bare RPA, WRITE an RPA
-    # (skipped by its ub2 length) then a success OER (#412).
+    # readers: CREATE_TEMP returns the minted locator in a bare RPA, the content-
+    # free ack an RPA (skipped by its ub2 length) then a success OER (#412).
     from seerdb.common.tns import decode_lobops_oer
     from seerdb.server.query import (
         encode_create_temp_response,
-        encode_lobops_write_response,
+        encode_lobops_ack,
         mint_temp_lob_locator,
     )
 
@@ -923,9 +923,64 @@ def test_temp_lob_responses_round_trip_through_the_client_decoders() -> None:
     assert int.from_bytes(create[1:3], 'big') == len(locator)
     assert create[3:] == locator
 
-    write = encode_lobops_write_response(locator)
-    err_code, _msg = decode_lobops_oer(write, 6)
+    ack = encode_lobops_ack(locator)
+    err_code, _msg = decode_lobops_oer(ack, 6)
     assert err_code in (0, 1403)  # a success OER, not a real error
+
+
+def _lobops_op_request(operation: int, locator: bytes, *, seq: int = 1) -> bytes:
+    # A TTI_LOBOPS request for a state op (FREE_TEMP / OPEN / CLOSE / TRIM /
+    # GET_CHUNK_SIZE), built in the shared §14.1 layout with the ub2-prefixed
+    # locator — the same field block the client's WRITE / FILE_OPEN encoders use.
+    import struct
+
+    from seerdb.common.tns import _fun_header, encode_sb4
+    from seerdb.common.tns_consts import FIELD_VERSION_11_2, TTI_LOBOPS
+
+    body = _fun_header(TTI_LOBOPS, seq, FIELD_VERSION_11_2)
+    body += bytes([1])  # source pointer present
+    body += encode_sb4(len(locator) + 2)  # source locator length (+ub2)
+    body += bytes([0])  # dest pointer absent
+    body += encode_sb4(0)  # dest_length
+    body += encode_sb4(0)  # short source offset
+    body += encode_sb4(0)  # short dest offset
+    body += bytes([0, 0, 0])  # charset / short-amount / null-lob pointer flags
+    body += encode_sb4(operation)  # operation code
+    body += bytes([0, 0])  # scn-array pointer + length
+    body += encode_sb4(0)  # source offset (ub8)
+    body += encode_sb4(0)  # dest offset (ub8)
+    body += bytes([0])  # amount pointer flag
+    body += struct.pack('>HHH', 0, 0, 0)  # three reserved ub2 array-LOB slots
+    body += struct.pack('>H', len(locator)) + locator  # ub2-prefixed locator
+    return body
+
+
+def test_parse_lobops_request_classifies_the_state_opcodes() -> None:
+    # FREE_TEMP releases a temp LOB (its own kind, so the session drops the
+    # buffer); OPEN / CLOSE / TRIM / GET_CHUNK_SIZE are acknowledged; each carries
+    # the locator so the reply can echo it (#417).
+    from seerdb.common.tns_consts import (
+        TNS_LOB_OP_CLOSE,
+        TNS_LOB_OP_FREE_TEMP,
+        TNS_LOB_OP_GET_CHUNK_SIZE,
+        TNS_LOB_OP_OPEN,
+        TNS_LOB_OP_TRIM,
+    )
+    from seerdb.server.query import parse_lobops_request
+
+    locator = b'\x00seerdb-mirror-temp-lob-\x00\x00\x00\x00\x01'
+    req = parse_lobops_request(_lobops_op_request(TNS_LOB_OP_FREE_TEMP, locator))
+    assert req.kind == 'free_temp'
+    assert req.locator == locator
+    for op in (
+        TNS_LOB_OP_OPEN,
+        TNS_LOB_OP_CLOSE,
+        TNS_LOB_OP_TRIM,
+        TNS_LOB_OP_GET_CHUNK_SIZE,
+    ):
+        req = parse_lobops_request(_lobops_op_request(op, locator))
+        assert req.kind == 'ack', op
+        assert req.locator == locator, op
 
 
 def test_parse_exec_decodes_a_temp_lob_bind_as_a_reference() -> None:
