@@ -321,14 +321,17 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
                     # the last fetch drawing the 1403 terminator below (#407).
                     parked = _serve_oci_long_row(stream, parked, reexecute=False)
                 elif parked is not None and _is_lob_result(parked[0]):
-                    # A LOB result: deliver the locator row(s) with a non-terminator
-                    # status (the content still comes over TTI_LOBOPS); the next
-                    # fetch, once the LOBs are read, draws the 1403 terminator (#405).
+                    # A LOB result streams ONE row per fetch (sqlplus reads that
+                    # row's LOB locators over TTI_LOBOPS before fetching the next —
+                    # delivering every row at once desyncs it once a row carries
+                    # more than one LOB column). Each row ends with a non-terminator
+                    # status; the final empty fetch draws the 1403 terminator. The
+                    # row-major LOB queue drains in the order the locators go out (#405).
                     columns, rows = parked
                     stream.write_packet(
-                        TNS_DATA, encode_lob_fetch_rows_oci(columns, rows)
+                        TNS_DATA, encode_lob_fetch_rows_oci(columns, rows[:1])
                     )
-                    parked = None
+                    parked = (columns, rows[1:]) if len(rows) > 1 else None
                 elif parked is not None:
                     columns, rows = parked
                     stream.write_packet(TNS_DATA, encode_fetch_batch_oci(columns, rows))
