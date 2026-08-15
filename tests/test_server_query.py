@@ -19,6 +19,7 @@ from seerdb.common.tns_consts import (
     TNS_TYPE_NUMBER,
     TNS_TYPE_VARCHAR,
     TTI_DCB,
+    TTI_LOB,
     TTI_STA,
 )
 from seerdb.server.query import (
@@ -713,6 +714,103 @@ def test_long_row_replies_carry_the_right_status() -> None:
     fetch = encode_long_fetch_row_oci([col], ('hi',))
     assert fetch[0] == 0x06  # TTI_RXH
     assert fetch[-136:][:2] == b'\x04\x01'  # OER "more rows" status, no 1403 body
+
+
+def test_lob_locator_carries_the_content_byte_size() -> None:
+    # The row locator's size field is the content BYTE count (big-endian): a CLOB
+    # is UTF-16 (2 bytes per char), a BLOB is its raw bytes. NULL is a lone 0x00
+    # (no read). This unit is what makes sqlplus accept the locator (#405).
+    from seerdb.server.query import (
+        _OCI_LOB_ROW_SIZE_OFF,
+        encode_lob_locator_oci,
+    )
+
+    off = _OCI_LOB_ROW_SIZE_OFF
+    clob = encode_lob_locator_oci('A' * 2000, is_clob=True)
+    assert int.from_bytes(clob[off : off + 4], 'big') == 4000  # 2000 chars * 2
+    blob = encode_lob_locator_oci(b'\x00' * 2500, is_clob=False)
+    assert int.from_bytes(blob[off : off + 4], 'big') == 2500  # raw bytes
+    assert encode_lob_locator_oci(None, is_clob=True) == b'\x00'
+
+
+def test_parse_lobops_read_extracts_offset_and_amount() -> None:
+    # sqlplus's TTI_LOBOPS READ carries a 1-based source offset (ub8-LE @91) and an
+    # amount (ub8-LE @269); the Mirror serves exactly that slice so the read loop
+    # terminates (#405). A short/garbled request falls back to read-all.
+    from seerdb.server.query import (
+        _OCI_LOBOPS_AMOUNT_OFF,
+        _OCI_LOBOPS_OFFSET_OFF,
+        parse_lobops_read,
+    )
+
+    body = bytearray(300)
+    body[_OCI_LOBOPS_OFFSET_OFF : _OCI_LOBOPS_OFFSET_OFF + 8] = (501).to_bytes(
+        8, 'little'
+    )
+    body[_OCI_LOBOPS_AMOUNT_OFF : _OCI_LOBOPS_AMOUNT_OFF + 8] = (500).to_bytes(
+        8, 'little'
+    )
+    assert parse_lobops_read(bytes(body)) == (501, 500)
+    # A zero offset normalises to 1 (1-based).
+    body[_OCI_LOBOPS_OFFSET_OFF : _OCI_LOBOPS_OFFSET_OFF + 8] = (0).to_bytes(
+        8, 'little'
+    )
+    assert parse_lobops_read(bytes(body))[0] == 1
+    # Too short → read the whole LOB from the start.
+    assert parse_lobops_read(b'\x03\x60\x01') == (1, 2**31)
+
+
+def test_encode_lob_describe_oci_omits_the_dcb_tail() -> None:
+    # The LOB execute reply is a describe with a distinct 33-byte tail + LOB status,
+    # NOT the ordinary inline-row DCB tail (which carries the 0x06 0x01 0x22 marker)
+    # — this is what makes sqlplus accept the locator row (#405).
+    from seerdb.common.tns_consts import TNS_TYPE_CLOB
+    from seerdb.server.query import ColumnMeta, encode_lob_describe_oci
+
+    col = ColumnMeta(name=b'C', data_type=TNS_TYPE_CLOB, data_length=4000, max_size=0)
+    reply = encode_lob_describe_oci([col])
+    assert reply[0] == TTI_DCB
+    assert bytes.fromhex('060122') not in reply  # no DCB-tail marker
+    assert b'\x08\x06\x00' in reply  # LOB execute status present
+
+
+def test_encode_lob_read_response_slices_and_reports_totals() -> None:
+    # The READ reply carries the requested slice as LOB_DATA and reports the whole
+    # LOB's byte size in the echoed locator plus this read's amount (#405).
+    from seerdb.server.query import (
+        _OCI_LOB_TAIL_AMOUNT_OFF,
+        _OCI_LOB_TAIL_SIZE_OFF,
+        encode_lob_read_response_oci,
+    )
+
+    content = 'Hello'.encode('utf-16-be')  # a 5-char slice, 10 bytes
+    reply = encode_lob_read_response_oci(content, amount=5, total_bytes=4000)
+    assert reply[0] == TTI_LOB
+    tail = reply[-251:]
+    assert (
+        int.from_bytes(tail[_OCI_LOB_TAIL_SIZE_OFF : _OCI_LOB_TAIL_SIZE_OFF + 4], 'big')
+        == 4000
+    )
+    assert (
+        int.from_bytes(
+            tail[_OCI_LOB_TAIL_AMOUNT_OFF : _OCI_LOB_TAIL_AMOUNT_OFF + 4], 'little'
+        )
+        == 5
+    )
+
+
+def test_oci_lob_contents_reports_type_and_wire_bytes() -> None:
+    # Each non-NULL LOB cell yields (wire-content, is_clob): CLOB is UTF-16BE, BLOB
+    # is raw; NULL LOBs are skipped (they draw no read) (#405).
+    from seerdb.common.tns_consts import TNS_TYPE_BLOB, TNS_TYPE_CLOB
+    from seerdb.server.query import ColumnMeta, oci_lob_contents
+
+    cols = [
+        ColumnMeta(name=b'C', data_type=TNS_TYPE_CLOB, data_length=4000, max_size=0),
+        ColumnMeta(name=b'B', data_type=TNS_TYPE_BLOB, data_length=4000, max_size=0),
+    ]
+    got = oci_lob_contents(cols, [('hi', b'\xca\xfe'), (None, None)])
+    assert got == [('hi'.encode('utf-16-be'), True), (b'\xca\xfe', False)]
 
 
 def test_encode_dml_status_oci_carries_the_verb_and_rowcount() -> None:

@@ -1160,13 +1160,41 @@ def _oci_lob_data(content: bytes) -> bytes:
     return bytes(out)
 
 
-def encode_lob_read_response_oci(content: bytes, amount: int) -> bytes:
-    """The TTI_LOBOPS READ reply (#405): the LOB content (LOB_DATA) then the
-    captured TTI_RPA + OER tail. ``content`` is UTF-16BE for a CLOB, raw for a
-    BLOB; the echoed locator's byte size is ``len(content)`` and ``amount`` is the
-    amount read (characters for a CLOB, bytes for a BLOB)."""
+# A TTI_LOBOPS READ request carries the slice sqlplus wants: a 1-based source
+# offset and an amount, both counts (characters for a CLOB, bytes for a BLOB),
+# at these fixed ub8-LE offsets in the OCI request. sqlplus loops over them (in
+# SET LONGCHUNKSIZE-sized steps) until a read returns fewer than it asked for.
+_OCI_LOBOPS_OFFSET_OFF = 91
+_OCI_LOBOPS_AMOUNT_OFF = 269
+
+
+def parse_lobops_read(body: bytes) -> tuple[int, int]:
+    """Extract ``(source_offset, amount)`` from an OCI TTI_LOBOPS READ (#405) —
+    both 1-based counts (characters for a CLOB, bytes for a BLOB). A malformed /
+    short request falls back to reading the whole LOB from the start."""
+    if len(body) < _OCI_LOBOPS_AMOUNT_OFF + 8:
+        return 1, 2**31
+    offset = int.from_bytes(
+        body[_OCI_LOBOPS_OFFSET_OFF : _OCI_LOBOPS_OFFSET_OFF + 8], 'little'
+    )
+    amount = int.from_bytes(
+        body[_OCI_LOBOPS_AMOUNT_OFF : _OCI_LOBOPS_AMOUNT_OFF + 8], 'little'
+    )
+    return max(offset, 1), amount
+
+
+def encode_lob_read_response_oci(
+    content: bytes, amount: int, total_bytes: int | None = None
+) -> bytes:
+    """The TTI_LOBOPS READ reply (#405): the LOB content slice (LOB_DATA) then the
+    captured TTI_RPA + OER tail. ``content`` is the UTF-16BE (CLOB) / raw (BLOB)
+    bytes read this call; ``amount`` is that read's count (characters for a CLOB,
+    bytes for a BLOB); ``total_bytes`` is the whole LOB's byte size the echoed
+    locator reports (defaults to this slice, for a single read-it-all call)."""
+    if total_bytes is None:
+        total_bytes = len(content)
     tail = bytearray(_OCI_LOB_READ_TAIL)
-    tail[_OCI_LOB_TAIL_SIZE_OFF : _OCI_LOB_TAIL_SIZE_OFF + 4] = len(content).to_bytes(
+    tail[_OCI_LOB_TAIL_SIZE_OFF : _OCI_LOB_TAIL_SIZE_OFF + 4] = total_bytes.to_bytes(
         4, 'big'
     )
     tail[_OCI_LOB_TAIL_AMOUNT_OFF : _OCI_LOB_TAIL_AMOUNT_OFF + 4] = amount.to_bytes(
@@ -1177,24 +1205,23 @@ def encode_lob_read_response_oci(content: bytes, amount: int) -> bytes:
 
 def oci_lob_contents(
     columns: list[ColumnMeta], rows: list[tuple]
-) -> list[tuple[bytes, int]]:
-    """The (wire-content, amount) of each non-NULL LOB cell, row-major (#405).
+) -> list[tuple[bytes, bool]]:
+    """The (wire-content, is_clob) of each non-NULL LOB cell, row-major (#405).
 
     The order matches the locators :func:`_encode_oci_value` emits, so the session
-    answers sqlplus's TTI_LOBOPS reads from this queue in sequence. CLOB content is
-    UTF-16BE and the amount is its character count; BLOB content is raw bytes and
-    the amount is the byte count."""
-    out: list[tuple[bytes, int]] = []
+    reads this queue in sequence as sqlplus issues TTI_LOBOPS calls. CLOB content
+    is UTF-16BE (``is_clob`` True — offsets/amounts count characters, 2 bytes
+    each); BLOB content is raw bytes (counts bytes). The session slices this per
+    the offset/amount each read requests."""
+    out: list[tuple[bytes, bool]] = []
     for row in rows:
         for value, col in zip(row, columns):
             if col.data_type not in _OCI_LOB_TYPES or value is None:
                 continue
             if col.data_type == TNS_TYPE_CLOB:
-                text = str(value)
-                out.append((text.encode('utf-16-be'), len(text)))
+                out.append((str(value).encode('utf-16-be'), True))
             else:
-                raw = bytes(value)
-                out.append((raw, len(raw)))
+                out.append((bytes(value), False))
     return out
 
 

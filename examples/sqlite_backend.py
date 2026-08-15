@@ -38,19 +38,20 @@ from seerdb.common.tns_consts import (
 )
 
 # A simple single-table SELECT, for looking a column's declared type back up.
-# SQLite infers a result column's type from its value, which can't tell a LONG
-# from a VARCHAR2 (both are text) — so for the legacy LONG / LONG RAW types the
-# backend consults the table's declared types instead (#407).
+# SQLite infers a result column's Oracle type from its value, which can't tell a
+# LONG from a VARCHAR2 or a CLOB from either (all text), nor a BLOB from a RAW
+# (both bytes) — so for these the backend consults the table's declared types.
+# A LONG / LONG RAW streams inline (#407); a CLOB / BLOB is fetched over the
+# TTI_LOBOPS locator path (#405). Keying off the declared type (not the value
+# size) keeps a plain VARCHAR2 / RAW value inline for thin clients, which have no
+# Mirror-side LOB emit yet.
 _SELECT_FROM = re.compile(r'\bfrom\s+"?(\w+)"?', re.IGNORECASE)
-_DECLARED_LONG_TYPES = {'LONG': TNS_TYPE_LONG, 'LONG RAW': TNS_TYPE_LONGRAW}
-
-# Oracle's inline limits: a VARCHAR2 holds ≤ 4000 bytes, a RAW ≤ 2000. SQLite
-# keeps no column type, so the Mirror infers a value wider than these as a LOB —
-# a CLOB (text) / BLOB (bytes) delivered over the TTI_LOBOPS locator path (#405),
-# exactly where Oracle would need one. A LOB column describes with data_length 0
-# (unbounded); the content size travels in the locator.
-_VARCHAR2_MAX = 4000
-_RAW_MAX = 2000
+_DECLARED_STREAMED_TYPES = {
+    'LONG': (TNS_TYPE_LONG, 0),
+    'LONG RAW': (TNS_TYPE_LONGRAW, 0),
+    'CLOB': (TNS_TYPE_CLOB, 4000),  # a LOB describes with data_length 4000
+    'BLOB': (TNS_TYPE_BLOB, 4000),
+}
 from seerdb.server import (
     BackendError,
     Capability,
@@ -114,12 +115,16 @@ def _column_meta(name: str, values: list, declared: str | None = None) -> Column
     # Infer an Oracle column type from the first non-NULL value. Oracle folds
     # unquoted identifiers to upper-case, so match that on the name.
     ident = name.upper().encode('utf-8')
-    # A LONG / LONG RAW column can't be told from a VARCHAR2 / RAW by its value, so
-    # honour the declared type when the SELECT let us recover it — the value is
-    # streamed inline over the LONG path (#407). data_length 0: unbounded.
-    long_type = _DECLARED_LONG_TYPES.get((declared or '').upper())
-    if long_type is not None:
-        return ColumnMeta(name=ident, data_type=long_type, data_length=0, max_size=0)
+    # A LONG / LONG RAW (streamed, #407) or CLOB / BLOB (LOB locator, #405) can't
+    # be told from a VARCHAR2 / RAW by its value, so honour the declared type when
+    # the SELECT let us recover it. A LOB describes with data_length 4000; a LONG
+    # with 0 (unbounded); both leave max_size 0.
+    streamed = _DECLARED_STREAMED_TYPES.get((declared or '').upper())
+    if streamed is not None:
+        data_type, data_length = streamed
+        return ColumnMeta(
+            name=ident, data_type=data_type, data_length=data_length, max_size=0
+        )
     sample = next((v for v in values if v is not None), None)
     if isinstance(sample, bool):
         # bool is an int subclass; a NUMBER either way, matched first for clarity.
@@ -142,18 +147,10 @@ def _column_meta(name: str, values: list, declared: str | None = None) -> Column
         )
     if isinstance(sample, bytes):
         width = max((len(v) for v in values if isinstance(v, bytes)), default=1)
-        if width > _RAW_MAX:  # too wide for RAW → BLOB over the LOB path (#405)
-            return ColumnMeta(
-                name=ident, data_type=TNS_TYPE_BLOB, data_length=4000, max_size=0
-            )
         return ColumnMeta(
             name=ident, data_type=TNS_TYPE_RAW, data_length=width, max_size=width
         )
     width = max((len(str(v)) for v in values if v is not None), default=1)
-    if width > _VARCHAR2_MAX:  # too wide for VARCHAR2 → CLOB over the LOB path (#405)
-        return ColumnMeta(
-            name=ident, data_type=TNS_TYPE_CLOB, data_length=4000, max_size=0
-        )
     return ColumnMeta(
         name=ident, data_type=TNS_TYPE_VARCHAR, data_length=width, max_size=width
     )

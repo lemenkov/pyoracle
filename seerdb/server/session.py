@@ -93,6 +93,7 @@ from seerdb.server.query import (
     parse_exec,
     parse_exec_oci,
     parse_fetch,
+    parse_lobops_read,
     strip_oci_piggyback,
 )
 
@@ -262,9 +263,11 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
     # Rows a multi-row execute delivered only the first of; the rest wait here
     # for the follow-up fetch (the OCI analogue of the thin _Cursors).
     parked: tuple[list[ColumnMeta], list[tuple]] | None = None
-    # LOB contents (wire bytes + amount) the current statement's rows carry, in the
-    # order their locators went out; sqlplus drains them with TTI_LOBOPS reads (#405).
-    lobs: list[tuple[bytes, int]] = []
+    # LOB contents (wire bytes + is_clob) the current statement's rows carry, in the
+    # order their locators went out; sqlplus drains them with TTI_LOBOPS reads,
+    # slicing the current LOB per each read's offset/amount (#405).
+    lobs: list[tuple[bytes, bool]] = []
+    current_lob: tuple[bytes, bool] | None = None
     while True:
         received = stream.read_packet()
         if received is None:
@@ -288,14 +291,26 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
                     parked = _serve_oci_long_row(stream, parked, reexecute=True)
                     continue
                 parked, lobs = _answer_query_oci(stream, backend, body)
+                current_lob = None
                 continue
             if body[1] == TTI_LOBOPS:
-                # sqlplus reads a LOB column's content: hand back the next queued
-                # LOB (row-major, matching the locators we emitted). An unexpected
-                # read (empty queue) gets an empty LOB so the client stays in sync.
-                content, amount = lobs.pop(0) if lobs else (b'', 0)
+                # sqlplus reads a LOB column's content, looping over the LOB in
+                # SET LONGCHUNKSIZE-sized slices. A read that starts at offset 1 is
+                # the first read of the next LOB (row-major); later offsets continue
+                # the current one. Serve exactly the slice requested so the client's
+                # read loop terminates when a read returns less than it asked (#405).
+                offset, amount = parse_lobops_read(body)
+                if offset <= 1 or current_lob is None:
+                    current_lob = lobs.pop(0) if lobs else (b'', True)
+                content, is_clob = current_lob
+                unit = 2 if is_clob else 1  # bytes per counted unit (CLOB is UTF-16)
+                total = len(content) // unit
+                start = offset - 1
+                count = max(0, min(amount, total - start))
+                chunk = content[start * unit : (start + count) * unit]
                 stream.write_packet(
-                    TNS_DATA, encode_lob_read_response_oci(content, amount)
+                    TNS_DATA,
+                    encode_lob_read_response_oci(chunk, count, len(content)),
                 )
                 continue
             if body[1] == TTI_FETCH:
@@ -383,7 +398,7 @@ def _oci_no_row_status(sql: str, rowcount: int) -> bytes:
 
 def _answer_query_oci(
     stream: PacketStream, backend: Backend, body: bytes
-) -> tuple[tuple[list[ColumnMeta], list[tuple]] | None, list[tuple[bytes, int]]]:
+) -> tuple[tuple[list[ColumnMeta], list[tuple]] | None, list[tuple[bytes, bool]]]:
     # Answer one sqlplus / thick-OCI execute. sqlplus fires a chain of setup
     # statements (PL/SQL blocks, PRODUCT_PRIVS selects) before the user's query;
     # each needs an acceptable reply or sqlplus never reaches the prompt. Returns
