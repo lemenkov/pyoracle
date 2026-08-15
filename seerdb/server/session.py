@@ -310,7 +310,9 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
                 chunk = content[start * unit : (start + count) * unit]
                 stream.write_packet(
                     TNS_DATA,
-                    encode_lob_read_response_oci(chunk, count, len(content)),
+                    encode_lob_read_response_oci(
+                        chunk, count, len(content), is_clob=is_clob
+                    ),
                 )
                 continue
             if body[1] == TTI_FETCH:

@@ -731,6 +731,24 @@ def test_lob_locator_carries_the_content_byte_size() -> None:
     blob = encode_lob_locator_oci(b'\x00' * 2500, is_clob=False)
     assert int.from_bytes(blob[off : off + 4], 'big') == 2500  # raw bytes
     assert encode_lob_locator_oci(None, is_clob=True) == b'\x00'
+    # CLOB and BLOB use different locator templates: the type bytes and the charset
+    # differ (a CLOB is AL32UTF8 characters, a BLOB is binary) so sqlplus does not
+    # decode a BLOB's raw bytes as text (#406).
+    assert clob[9] == 0x02 and blob[9] == 0x01  # LOB type byte
+    assert clob[37] == 0x03 and blob[37] == 0x00  # charset (873 vs binary 0)
+
+
+def test_lob_read_response_selects_clob_or_blob_locator() -> None:
+    # The READ reply echoes the character (CLOB) or binary (BLOB) locator template,
+    # matching the row locator so sqlplus renders the content correctly (#406).
+    from seerdb.server.query import encode_lob_read_response_oci
+
+    clob_reply = encode_lob_read_response_oci(b'\x00A', 1, 2, is_clob=True)
+    blob_reply = encode_lob_read_response_oci(b'\xca\xfe', 2, 2, is_clob=False)
+    # The echoed locator carries the same type/charset split as the row locator.
+    assert bytes.fromhex('0001020c88') in clob_reply  # CLOB locator signature
+    assert bytes.fromhex('0001010c08') in blob_reply  # BLOB locator signature
+    assert bytes.fromhex('0001020c88') not in blob_reply
 
 
 def test_parse_lobops_read_extracts_offset_and_amount() -> None:
