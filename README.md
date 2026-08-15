@@ -48,7 +48,7 @@ What works:
   `first` / `last` repositions the cursor and the next `fetchone()` returns
   the row at the new position (out-of-range raises `IndexError`). On 10g+
   the cursor is opened server-side and rows are fetched on demand as you
-  scroll; 9i uses a client-buffered fallback. Sync and async
+  scroll; pre-10g (9i, 8i) uses a client-buffered fallback. Sync and async
 - Bind variables: `cur.execute(sql, [v1, v2])` (positional) or
   `cur.execute(sql, {"name": v})` (named, `:name` placeholders, case-
   insensitive); accepted bind types are `int`, `float`, `Decimal`,
@@ -174,8 +174,8 @@ profile with the benchmark harness (#166) and optimize the Python — or ship an
 
 ## Compatibility
 
-The driver negotiates the TTC field version per connection, so a single build
-speaks to every supported server:
+The driver negotiates the wire dialect per connection, so a single build speaks
+to every supported server — from Oracle **8i (8.1.7) through 23ai**:
 
 | Oracle Database | Status | Notes |
 | --- | --- | --- |
@@ -185,10 +185,11 @@ speaks to every supported server:
 | 11g (11.2) | ✅ supported | primary reference tier |
 | 10g (10.2) | ✅ supported | |
 | 9i (9.2) | ✅ common surface | the legacy field-version-2 (`TTI_ALL7`) dialect — see the matrix note |
+| 8i (8.1.7) | ✅ common surface | the 9.2-era `OALL8` dialect; the oldest and most limited tier — see the matrix note. 8.1.7 is the floor (Oracle 8.0 is unsupported) |
 
-CI runs the offline suite on Python 3.10–3.13 and the integration suite against
-live 11g, 21c and 23ai; 10g and 9i are validated locally, and 12c–19c share the
-12c+ protocol the 21c tier exercises.
+CI runs the offline suite on Python 3.10–3.14 and the integration suite against
+live 11g, 21c and 23ai; 10g, 9i and 8i are validated locally, and 12c–19c share
+the 12c+ protocol the 21c tier exercises.
 
 ## Feature matrix
 
@@ -225,6 +226,14 @@ layer on top: `BINARY_FLOAT` / `BINARY_DOUBLE`, large streamed LOB / LONG binds,
 array DML, REF CURSOR, the cursor cache, and `changepassword`. Its DB charset
 also can't store text it doesn't cover, so use `DB_TYPE_NVARCHAR` / `NCHAR` for
 full Unicode there rather than a plain `str` bind.
+
+**Oracle 8i** (8.1.7, the 9.2-era `OALL8` dialect) is the oldest and most limited
+tier. It runs connect (`O3LOGON`), SELECT, single-row DML / DDL, PL/SQL blocks
+with IN / OUT binds, CLOB / BLOB and native BFILE reads, LONG / LONG RAW, ROWID /
+UROWID, and transactions — sync and async. On top of the 9i gaps above it predates
+`TIMESTAMP` and `INTERVAL` (only `DATE`), the AL16UTF16 national charset
+(`WE8ISO8859P1` only), and returns a single row for `CONNECT BY LEVEL`. Oracle
+**8.0** (pre-8i) is out of scope — 8.1.7 is the floor.
 
 ### Intentional differences from python-oracledb
 
