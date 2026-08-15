@@ -75,6 +75,7 @@ from seerdb.server.query import (
     encode_fetch_batch_oci,
     encode_fetch_response,
     encode_fetch_terminator_oci,
+    encode_lob_describe_oci,
     encode_lob_fetch_rows_oci,
     encode_lob_read_response_oci,
     encode_logoff_status_oci,
@@ -426,7 +427,15 @@ def _answer_query_oci(
     has_lob = any(
         col.data_type in (TNS_TYPE_CLOB, TNS_TYPE_BLOB) for col in result.columns
     )
-    if (has_long or has_lob) and rows:
+    if has_lob and rows:
+        # A LOB result: sqlplus sets up its LOB define from the describe, then
+        # fetches the locator rows. The LOB describe reply has its own shape (a
+        # 33-byte tail + a LOB execute status, not the ordinary inline-row DCB
+        # tail) — matching it is what makes sqlplus accept the locator row rather
+        # than break (#405).
+        stream.write_packet(TNS_DATA, encode_lob_describe_oci(result.columns))
+        return (result.columns, rows), lobs
+    if has_long and rows:
         # sqlplus fetches a LONG / LONG RAW row separately from the describe — it
         # sets up the streaming define buffer on the describe, then issues a fetch
         # — so deliver no row inline (an inline LONG row segfaults it): describe +

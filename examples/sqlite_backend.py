@@ -144,7 +144,7 @@ def _column_meta(name: str, values: list, declared: str | None = None) -> Column
         width = max((len(v) for v in values if isinstance(v, bytes)), default=1)
         if width > _RAW_MAX:  # too wide for RAW → BLOB over the LOB path (#405)
             return ColumnMeta(
-                name=ident, data_type=TNS_TYPE_BLOB, data_length=0, max_size=0
+                name=ident, data_type=TNS_TYPE_BLOB, data_length=4000, max_size=0
             )
         return ColumnMeta(
             name=ident, data_type=TNS_TYPE_RAW, data_length=width, max_size=width
@@ -152,7 +152,7 @@ def _column_meta(name: str, values: list, declared: str | None = None) -> Column
     width = max((len(str(v)) for v in values if v is not None), default=1)
     if width > _VARCHAR2_MAX:  # too wide for VARCHAR2 → CLOB over the LOB path (#405)
         return ColumnMeta(
-            name=ident, data_type=TNS_TYPE_CLOB, data_length=0, max_size=0
+            name=ident, data_type=TNS_TYPE_CLOB, data_length=4000, max_size=0
         )
     return ColumnMeta(
         name=ident, data_type=TNS_TYPE_VARCHAR, data_length=width, max_size=width

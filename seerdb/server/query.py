@@ -700,12 +700,36 @@ def encode_query_response_oci(
     return bytes(out)
 
 
-def encode_describe_only_oci(columns: list[ColumnMeta], *, more: bool = False) -> bytes:
-    """A describe-only execute reply (no DCB tail, no rows): the TTI_DCB block then
-    the status. A live 11g LOB / streamed describe omits the DCB tail that
-    :func:`encode_query_response_oci` emits — sqlplus sets up its LOB / streaming
-    define from this and fetches the rows separately (#405)."""
-    return bytes(encode_describe_oci(columns)) + _oci_row_status(more=more)
+# The execute reply for a LOB SELECT is a describe with NO row inline — sqlplus
+# sets up its LOB define from it and fetches the locator rows separately. It is
+# NOT the ordinary describe: instead of the 83-byte DCB tail that precedes inline
+# rows it carries a 33-byte describe tail (a describe-timestamp form, no DCB
+# marker), and its own execute status/OER. Both are reduced from a live 11g CLOB
+# describe with the instance-specific bytes (the timestamp, the SCN) zeroed (#405).
+_OCI_LOB_DESCRIBE_TAIL = bytes.fromhex(
+    '0007000000070000000000000000000000e81f0000000000000000000000000000'
+)
+_OCI_LOB_DESCRIBE_STATUS = bytes.fromhex(
+    '08060000000000000000000200000000000000000000000000000000000000000000'
+    '0004010000000f00010000000000000000000002000e000300000000000000000000'
+    '00000000000000000000000000000000110000010000003601000000000000000000'
+    '000000000020f6310a00000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000000000'
+    '00'
+)
+
+
+def encode_lob_describe_oci(columns: list[ColumnMeta]) -> bytes:
+    """The execute reply for a LOB (CLOB/BLOB) SELECT (#405): the TTI_DCB block +
+    a 33-byte describe tail + the LOB execute status — describe only, no row (the
+    locator rows come on the follow-up fetch). Matching this exactly is what makes
+    sqlplus set up its LOB define correctly and accept the locator row rather than
+    break (an ordinary describe, with the inline-row DCB tail, is rejected)."""
+    return (
+        bytes(encode_describe_oci(columns))
+        + _OCI_LOB_DESCRIBE_TAIL
+        + _OCI_LOB_DESCRIBE_STATUS
+    )
 
 
 # The reply for a statement that returns no rows — a PL/SQL block or DDL. Same
@@ -1041,37 +1065,42 @@ def encode_long_value_oci(value: object) -> bytes:
 
 
 # --- OCI LOB read round-trip (CLOB / BLOB SELECT, #405) ---
-# STATUS: still parked — see #405. This retry cracked several layers (below), but
-# sqlplus still breaks on the locator row. What is now KNOWN good, all verified
-# against live 11g out-of-line CLOB captures at multiple sizes:
+# STATUS: WORKING — sqlplus displays CLOB and BLOB values over the Mirror
+# (single-packet and multi-packet content, session stays clean afterward). The
+# load-bearing pieces, verified against live 11g out-of-line CLOB captures:
 #   * the locator's size field is the content BYTE count (2× characters for a
 #     CLOB, raw bytes for a BLOB), big-endian — NOT the character count the first
 #     attempt used (the core unit bug);
-#   * a LOB fetch reply ends with a non-terminator "more" OER status
-#     (encode_lob_fetch_rows_oci / _OCI_LOB_FETCH_STATUS), not the 1403 terminator;
-#     a following empty fetch draws the 1403;
-#   * a LOB fetch carries its own row header (_oci_lob_rxh), not the ordinary one.
-# What is NOT yet solved: even a BYTE-IDENTICAL real locator (injected verbatim)
-# is rejected, so the remaining fault is the surrounding context, not the locator.
-# The prime suspect is the describe: a live 11g LOB describe (303 B) is neither the
-# full describe+DCB-tail this code sends (353 B) nor a describe-only reply (270 B) —
-# it has a specific ~33 B tail still to reverse. Kept wired so the RE is not lost;
-# the SqliteBackend only routes >4000-char / >2000-byte values here.
+#   * the LOB execute reply is a describe with a distinct 33-byte tail + LOB
+#     status (encode_lob_describe_oci) and data_length 4000, NOT the ordinary
+#     inline-row DCB tail — THE UNLOCK; with the wrong describe sqlplus rejects
+#     even a byte-perfect locator row;
+#   * the locator row is fetched (_oci_lob_rxh) and ends with a non-terminator
+#     "more" OER (encode_lob_fetch_rows_oci); a following fetch draws the 1403;
+#   * the READ reply's LOB_DATA uses 0xFF-byte chunks (matches 11g).
+# The row locator template and the READ reply tail below come from ONE live 11g
+# out-of-line CLOB capture (2000 chars → 4000 content bytes), so they echo the
+# same opaque locator and stay mutually consistent.
+#
+# KNOWN LIMITATION (follow-up): the read returns the WHOLE LOB regardless of the
+# amount sqlplus requested in the TTI_LOBOPS call, so the client must read it in
+# one go — works when SET LONGCHUNKSIZE covers the content, but a default-settings
+# read (80-char chunks, looping) over-reads. Honoring the request's amount/offset
+# for a proper read loop is the next step.
 #
 # A LOB column is not sent inline: the row carries an opaque locator, and sqlplus
-# fetches the content with a separate TTI_LOBOPS READ (§14). Both the row locator
-# and the READ reply below are reduced from live 11g out-of-line CLOB captures.
-# The locator is opaque to sqlplus (it echoes it back verbatim in the READ), so
-# the Mirror mints it from this one template, patching the content **byte** size
-# (ub4 big-endian) that sqlplus reads to size its READ — a CLOB counts UTF-16
-# bytes (2× characters), a BLOB counts its raw bytes. The content never rides in
-# the locator (out-of-line): it returns in the READ reply's LOB_DATA. A ub4-LE
-# num_bytes frames the locator in the row; a NULL LOB is num_bytes 0, no READ.
+# fetches the content with a separate TTI_LOBOPS READ (§14). The locator is opaque
+# to sqlplus (it echoes it back verbatim in the READ), so the Mirror mints it from
+# this one template, patching the content **byte** size (ub4 big-endian) that
+# sqlplus reads to size its READ — a CLOB counts UTF-16 bytes (2× characters), a
+# BLOB counts its raw bytes. The content never rides in the locator (out-of-line):
+# it returns in the READ reply's LOB_DATA. A ub4-LE num_bytes frames the locator
+# in the row; a NULL LOB is num_bytes 0, no READ.
 _OCI_LOB_ROW_VALUE = bytes.fromhex(
-    '6a0000006a00680001020c88000002000000010000005643030001b5870001b58600'
-    '020002036900020040b4e3000000000000000000000000005bf38900000000000000'
-    '000000000000000000000000000001b5860040b4d9000000140500000000001f4000'
-    '00000000020040b4e3'
+    '6a0000006a00680001020c88000002000000010000005643350001b58f0001b58e00'
+    '020002036900020040b523000000000000000000000000005bfd6e00000000000000'
+    '000000000000000000000000000001b58e0040b519000000140500000000000fa000'
+    '00000000020040b523'
 )
 _OCI_LOB_ROW_SIZE_OFF = 97  # ub4 BE content byte size inside the row locator value
 # The TTI_LOBOPS READ reply tail after the LOB_DATA content: TTI_RPA (the echoed
@@ -1079,18 +1108,18 @@ _OCI_LOB_ROW_SIZE_OFF = 97  # ub4 BE content byte size inside the row locator va
 # OER, but the echoed locator's byte size and the amount are patched so they stay
 # consistent with the content delivered.
 _OCI_LOB_READ_TAIL = bytes.fromhex(
-    '0800680001020c88000002000000010000005643030001b5870001b5860002000203'
-    '6900020040b4e3000000000000000000000000005bf3890000000000000000000000'
-    '0000000000000000000001b5860040b4d9000000140500000000001f400000000000'
-    '020040b4e3a00f000097000006000000000000000000000401000000110001010000'
+    '0800680001020c88000002000000010000005643350001b58f0001b58e0002000203'
+    '6900020040b523000000000000000000000000005bfd6e0000000000000000000000'
+    '0000000000000000000001b58e0040b519000000140500000000000fa00000000000'
+    '020040b523d007000000000000040100000011000101000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000130000010000'
+    '003601000000000000000000000000000020f6310a00000000000000000000000000'
     '00000000000000000000000000000000000000000000000000000000000000000000'
-    '00000000130000010000003601000000000000000000000000000020f6310a000000'
-    '00000000000000000000000000000000000000000000000000000000000000000000'
-    '0000000000000000000000000000000000000000000000'
+    '00000000000000000000000000'
 )
 _OCI_LOB_TAIL_SIZE_OFF = 93  # ub4 BE byte size in the echoed locator
 _OCI_LOB_TAIL_AMOUNT_OFF = 107  # ub4 LE amount read (characters for CLOB / bytes)
-_OCI_LOB_CHUNK = 0xFC  # max content bytes per 11g LOB_DATA chunk
+_OCI_LOB_CHUNK = 0xFF  # content bytes per 11g LOB_DATA chunk (matches live 11g)
 
 
 def _oci_lob_byte_size(value: object, is_clob: bool) -> int:
