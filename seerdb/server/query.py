@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime
 import re
+import struct
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -32,6 +33,7 @@ from seerdb.common.tns import (
     encode_token_num,
 )
 from seerdb.common.tns_consts import (
+    TNS_LOB_OP_WRITE,
     TNS_TYPE_BDOUBLE,
     TNS_TYPE_BFLOAT,
     TNS_TYPE_BLOB,
@@ -89,11 +91,48 @@ class ExecRequest:
     autocommit: bool = False
 
 
+@dataclass(frozen=True)
+class TempLobRef:
+    """A bind that arrived as a temp-LOB locator, not an inline value (#412).
+
+    A programmatic client that wrote a large LOB over ``TTI_LOBOPS`` binds the
+    minted locator instead of the bytes. The session resolves ``locator`` to the
+    content accumulated by the WRITE calls before handing it to the backend."""
+
+    locator: bytes
+    is_blob: bool
+
+
+# The LOB-descriptor prefix a temp-LOB locator bind carries (shared with the
+# native VECTOR / JSON binds): 01 28 28 then a ub2 locator length + locator.
+_TEMP_LOB_BIND_PREFIX = b'\x01\x28\x28'
+
+
+def _read_bind_value(data_type: int, after: bytes) -> tuple[object, bytes]:
+    # One RXD bind value and the bytes past it. A CLOB / BLOB bind is a temp-LOB
+    # descriptor (#412), not a plain DALC: 01 28 28 | ub2 loclen | locator, with
+    # no outer length — the server reads it by type (the descriptor's leading
+    # 0x01 would otherwise be mistaken for a DALC length). Everything else is the
+    # ordinary DALC value decoded by its OAC type.
+    if (
+        data_type in (TNS_TYPE_CLOB, TNS_TYPE_BLOB)
+        and after[:3] == _TEMP_LOB_BIND_PREFIX
+    ):
+        loclen = (after[3] << 8) | after[4]
+        locator = after[5 : 5 + loclen]
+        # Kept as a reference; the session swaps in the bytes streamed over
+        # TTI_LOBOPS WRITE (the backend never sees a locator, only the value).
+        return TempLobRef(locator, data_type == TNS_TYPE_BLOB), after[5 + loclen :]
+    raw, after = decode_dalc(after)
+    return _decode_bind_value(data_type, raw), after
+
+
 def _decode_bind_value(data_type: int, raw: bytes | list) -> object:
     # A bind value from the RXD, decoded by its OAC type. An empty/NULL DALC
     # (reported as a list by decode_dalc) is None.
     if isinstance(raw, list) or not raw:
         return None
+    raw = bytes(raw)
     column = {
         'data_type': data_type,
         'data_length': 0,
@@ -148,15 +187,20 @@ def parse_exec(payload: bytes) -> ExecRequest:
         types = []
         for _ in range(bind_count):
             data_type, _maxlen, _scale, _charset, after = decode_token_oac(after, ())
+            if data_type in (TNS_TYPE_CLOB, TNS_TYPE_BLOB):
+                # A thin CLOB / BLOB bind is the temp-LOB locator form (#412),
+                # whose OAC appends a trailing oaccolid field that the shared
+                # decoder stops short of — swallow it so the next OAC aligns.
+                after = after[1:]
             types.append(data_type)
-        # Each row is a TTI_RXD token followed by one DALC per bind column; loop
+        # Each row is a TTI_RXD token followed by one value per bind column; loop
         # until the rows run out (executemany sends N, a plain execute sends 1).
         while after and after[0] == TTI_RXD:
             after = after[1:]
             row = []
             for data_type in types:
-                raw, after = decode_dalc(after)
-                row.append(_decode_bind_value(data_type, raw))
+                value, after = _read_bind_value(data_type, after)
+                row.append(value)
             bind_rows.append(row)
         if bind_rows:
             binds = bind_rows[0]
@@ -1277,6 +1321,116 @@ def encode_lob_read_response_thin(content: bytes) -> bytes:
     then a success OER (the client reads the content, skips to the OER, and stops).
     ``content`` is UTF-16BE for a CLOB, raw for a BLOB."""
     return _oci_lob_data(content) + _encode_oer(1, 0, 0, b'')
+
+
+# --- Temp-LOB WRITE flow (the Mirror's server side, #412) --------------------
+#
+# A programmatic client writing a LOB too large for an inline bind does
+# CREATE_TEMP (allocate a temp LOB) -> WRITE (stream bytes into it) -> bind the
+# temp locator on execute. The Mirror mints a locator, accumulates the WRITE
+# bytes, and resolves the bound locator to those bytes for the backend. The
+# request layout mirrors docs/PROTOCOL.md §14.1/§14.2 (the client encoders in
+# seerdb/common/tns.py); this is the inverse.
+
+
+@dataclass(frozen=True)
+class LobOpsRequest:
+    """A parsed TTI_LOBOPS request: which op, and the fields it carries (#412)."""
+
+    kind: str  # 'create_temp' | 'write' | 'read'
+    is_blob: bool = False
+    locator: bytes = b''
+    payload: bytes = b''
+
+
+# CREATE_TEMP sends a fixed field block (no source locator), captured from the
+# thin client: it opens 01 01 28 and CLOB / BLOB differ only in the LOB type byte
+# (0x70 / 0x71). That opener is unmistakable against the WRITE / READ layout,
+# whose second field is a locator length (~40-86), never 0x01.
+_CREATE_TEMP_PREFIX = b'\x01\x01\x28'
+_TEMP_LOB_LOCATOR_PREFIX = b'\x00seerdb-mirror-temp-lob-'
+
+
+def mint_temp_lob_locator(index: int, is_blob: bool) -> bytes:
+    """A unique opaque locator for the ``index``-th temp LOB of a session (#412).
+
+    The value is echoed back verbatim on WRITE and on the bind, so it only has to
+    be stable and distinct per temp LOB — the Mirror keys its buffer on it."""
+    return (
+        _TEMP_LOB_LOCATOR_PREFIX
+        + struct.pack('>I', index)
+        + (b'\x01' if is_blob else b'\x00')
+    )
+
+
+def _decode_lobops_chunked(data: bytes) -> bytes:
+    # The WRITE payload after the 0x0E marker: a single <ub1 len><bytes> when the
+    # data is <= 0xFC bytes, else a 0xFE marker then <sb4 len><chunk> repeated
+    # until a zero-length terminator (§14.2). Inverse of the client encoder.
+    if not data:
+        return b''
+    if data[0] != 0xFE:
+        return data[1 : 1 + data[0]]
+    rest = data[1:]
+    out = bytearray()
+    while rest:
+        chunk_len, rest = decode_ub4(rest)
+        if chunk_len == 0:
+            break
+        out += rest[:chunk_len]
+        rest = rest[chunk_len:]
+    return bytes(out)
+
+
+def parse_lobops_request(body: bytes) -> LobOpsRequest:
+    """Classify a TTI_LOBOPS message (``body`` from ``read_packet``) (#412/#413).
+
+    CREATE_TEMP and WRITE drive the temp-LOB write flow; anything else (a READ of
+    an emitted column locator) is served by the #413 read path."""
+    payload = body[3:]  # skip TTI_FUN, TTI_LOBOPS, seq
+    if payload[:3] == _CREATE_TEMP_PREFIX:
+        # CLOB vs BLOB is the LOB type byte (0x70 / 0x71) in the fixed block.
+        return LobOpsRequest(kind='create_temp', is_blob=0x71 in payload)
+    # The common request layout (§14.1); walk the fields to the operation and,
+    # for a WRITE, on to the ub2-prefixed locator and the 0x0E payload.
+    rest = payload[1:]  # source_pointer_flag
+    _loc_len_plus2, rest = decode_ub4(rest)
+    rest = rest[1:]  # dest_pointer_flag
+    _dest_length, rest = decode_ub4(rest)
+    _short_src_off, rest = decode_ub4(rest)
+    _short_dst_off, rest = decode_ub4(rest)
+    rest = rest[3:]  # charset / short-amount / null-lob pointer flags
+    operation, rest = decode_ub4(rest)
+    if operation != TNS_LOB_OP_WRITE:
+        return LobOpsRequest(kind='read')
+    rest = rest[2:]  # scn-array pointer + length
+    _src_offset, rest = decode_ub4(rest)
+    _dest_offset, rest = decode_ub4(rest)
+    rest = rest[1:]  # amount pointer flag
+    rest = rest[6:]  # three reserved ub2 array-LOB slots
+    loc_len = struct.unpack('>H', rest[:2])[0]
+    rest = rest[2:]
+    locator = rest[:loc_len]
+    rest = rest[loc_len:]
+    if rest and rest[0] == 0x0E:
+        rest = rest[1:]
+    return LobOpsRequest(
+        kind='write', locator=locator, payload=_decode_lobops_chunked(rest)
+    )
+
+
+def encode_create_temp_response(locator: bytes) -> bytes:
+    """The CREATE_TEMP reply (#412): a bare TTI_RPA carrying the minted locator —
+    0x08, ub2 length, then the locator bytes (what the client reads back)."""
+    return bytes([TTI_RPA]) + struct.pack('>H', len(locator)) + locator
+
+
+def encode_lobops_write_response(locator: bytes) -> bytes:
+    """The WRITE reply (#412): a TTI_RPA echoing the (ub2-prefixed) locator then a
+    success OER. The client skips the locator via its length prefix and walks to
+    the OER (``decode_lobops_oer``), so no real content is needed."""
+    rpa = bytes([TTI_RPA]) + struct.pack('>H', len(locator)) + locator
+    return rpa + _encode_oer(1, 0, 0, b'')
 
 
 def _encode_oci_value(value: object, col: ColumnMeta) -> bytes:

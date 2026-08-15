@@ -302,6 +302,57 @@ def test_thin_lob_read_round_trip() -> None:
     assert rows[2] == (3, None, None)  # NULL LOBs
 
 
+def test_temp_lob_write_round_trip() -> None:
+    # A programmatic client writes a LOB too large for an inline bind the way
+    # python-oracledb / OCI apps do: CREATE_TEMP -> WRITE -> bind the temp locator
+    # (#412). The Mirror mints the locator, accumulates the WRITE bytes, and
+    # resolves the bound locator to the value for the backend. Driven here through
+    # the client's own primitives (its auto-promotion is 12.1+/PL/SQL-gated and
+    # the Mirror pins 11g). Covers a multi-chunk CLOB + BLOB and a small CLOB.
+    from seerdb.common.datatypes import TempLob
+
+    listen, server, result = _start_mirror()
+    conn = _connect(listen.getsockname()[1])
+    big_clob = 'temp-clob-Ω-' * 6000  # ~72k chars, multi-chunk on the wire
+    big_blob = bytes(range(256)) * 300  # 76800 bytes, multi-chunk
+    try:
+        cur = conn.cursor()
+        cur.execute('create table t (id number, c clob, b blob)')
+
+        cloc = conn.create_temp_lob()
+        conn.write_temp_lob(cloc, big_clob)
+        bloc = conn.create_temp_lob(is_blob=True)
+        conn.write_temp_lob(bloc, big_blob, is_blob=True)
+        cur.execute(
+            'insert into t values (:1, :2, :3)',
+            [
+                1,
+                TempLob(cloc, False, len(big_clob) * 4),
+                TempLob(bloc, True, len(big_blob)),
+            ],
+        )
+
+        sloc = conn.create_temp_lob()  # a single-chunk WRITE
+        conn.write_temp_lob(sloc, 'hi-temp')
+        cur.execute(
+            'insert into t values (:1, :2, :3)', [2, TempLob(sloc, False, 28), None]
+        )
+
+        cur.execute('select id, c, b from t order by id')
+        rows = cur.fetchall()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert rows[0] == (1, big_clob, big_blob)  # multi-chunk CLOB + BLOB
+    assert rows[1] == (2, 'hi-temp', None)  # small temp CLOB, NULL BLOB
+
+
 def test_executemany_array_dml() -> None:
     # executemany sends one execute carrying every row; the Mirror applies them
     # all and reports the total affected count.

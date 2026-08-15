@@ -2050,6 +2050,46 @@ streamed-LONG path. **11g is excluded** — it rejects `CREATE_TEMP` outright
 against, and a large PL/SQL LOB bind there keeps its prior ORA-01460 behaviour;
 the feature is gated on `field_version >= 12.1`.
 
+### 14.5 Temp-LOB WRITE (the Mirror, server side, #412)
+
+The Mirror answers the *server* half of the temp-LOB write flow above, so a
+programmatic client (python-oracledb thick, OCI apps, or seerdb's own
+`create_temp_lob` / `write_temp_lob` primitives) can write a LOB too large for an
+inline bind. It is the inverse of §14.1/§14.2:
+
+1. **`CREATE_TEMP`** (op `0x0110`). Recognised by the client's fixed field block,
+   which opens `01 01 28` — unmistakable against the WRITE / READ layout, whose
+   second field is a locator length (~40-86 bytes), never `0x01`. CLOB vs BLOB is
+   the LOB type byte (`0x70` / `0x71`) in the block. The Mirror mints a unique
+   opaque locator (it only has to be stable and distinct — the client keeps it
+   opaque and echoes it back) and returns it in a bare `TTI_RPA`: `08`, `ub2`
+   length, then the locator bytes.
+2. **`WRITE`** (op `0x0040`). The Mirror walks the §14.1 field block to the
+   operation, then to the `ub2`-length-prefixed locator and the `0x0E` chunked
+   payload (`ub1` len ≤ `0xFC`, else `0xFE` + `sb4`-length chunks + a zero
+   terminator), and appends the bytes to that locator's buffer. It replies with a
+   `TTI_RPA` echoing the (`ub2`-prefixed) locator then a **success OER** — the
+   client skips the locator by its length prefix and walks to the OER
+   (`decode_lobops_oer`), so no real content is needed.
+3. **Bind on execute.** The bound value arrives as OAC type `0x70` / `0x71`
+   (cont-flag `0x02000000`) with the RXD value `01 28 28 | ub2 loclen | locator`
+   — the LOB descriptor, **not** a plain DALC: the descriptor's leading `0x01`
+   would otherwise be mistaken for a DALC length. The Mirror reads it by type,
+   resolves the locator to the accumulated bytes (CLOB → UTF-16BE decoded to
+   `str`, BLOB → raw), and hands the real value to the backend. The temp-LOB
+   OAC also carries a trailing `oaccolid` field the shared OAC decoder stops
+   short of, so the server swallows one byte after a CLOB / BLOB bind OAC to keep
+   the next descriptor aligned.
+
+Verified over the SQLite-backed Mirror driven by the seerdb thin client's temp-LOB
+primitives (the auto-promotion is `12.1`+/PL/SQL-gated and the Mirror pins 11g, so
+the test calls `create_temp_lob` / `write_temp_lob` directly, as a thick client
+would): a multi-chunk CLOB (~72 KB) + BLOB (~77 KB) and a single-chunk CLOB
+round-trip byte-for-byte, with a NULL LOB alongside
+(`tests/test_sqlite_backend.py`). No `FREE_TEMP` is required — a real client
+releases the temp LOB at session end, and the Mirror's buffers die with the
+session.
+
 ## 15. TNS Marker Protocol
 
 TNS_MARKER packets serve as break/attention signals. The marker body is 3 bytes:

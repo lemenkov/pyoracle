@@ -18,6 +18,7 @@ usernames match case-insensitively); a backend-mapped auth API comes later.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from secrets import token_bytes
 from typing import NoReturn
 
@@ -67,7 +68,9 @@ from seerdb.server.query import (
     ColumnMeta,
     ExecRequest,
     FetchRequest,
+    TempLobRef,
     encode_commit_status_oci,
+    encode_create_temp_response,
     encode_ddl_status_oci,
     encode_dml_status_oci,
     encode_error,
@@ -79,6 +82,7 @@ from seerdb.server.query import (
     encode_lob_fetch_rows_oci,
     encode_lob_read_response_oci,
     encode_lob_read_response_thin,
+    encode_lobops_write_response,
     encode_logoff_status_oci,
     encode_long_fetch_row_oci,
     encode_out_bind_response_oci,
@@ -90,11 +94,13 @@ from seerdb.server.query import (
     encode_version_banner_oci,
     is_reexecute_oci,
     is_version_call_oci,
+    mint_temp_lob_locator,
     oci_lob_contents,
     parse_exec,
     parse_exec_oci,
     parse_fetch,
     parse_lobops_read,
+    parse_lobops_request,
     strip_oci_piggyback,
 )
 
@@ -228,6 +234,10 @@ def serve_session(stream: PacketStream, backend: Backend) -> str:
     # the order their locators went out; the thin client drains them with
     # TTI_LOBOPS reads (it reads each LOB whole, row-major) (#413).
     lobs: list[tuple[bytes, bool]] = []
+    # Bytes streamed into each session temp LOB via TTI_LOBOPS WRITE, keyed by the
+    # locator the Mirror minted on CREATE_TEMP; resolved into the bind value on the
+    # following execute (#412).
+    temp_lobs: dict[bytes, bytearray] = {}
     while True:
         received = stream.read_packet()
         if received is None:
@@ -239,12 +249,10 @@ def serve_session(stream: PacketStream, backend: Backend) -> str:
         if len(body) < 2 or body[0] != TTI_FUN:
             continue
         if body[1] == TTI_ALL8:
-            lobs = _answer_query(stream, backend, parse_exec(body), cursors)
+            request = _resolve_temp_lob_binds(parse_exec(body), temp_lobs)
+            lobs = _answer_query(stream, backend, request, cursors)
         elif body[1] == TTI_LOBOPS:
-            # The client reads a LOB column's content whole — hand back the next
-            # queued LOB (row-major, matching the locators we emitted) (#413).
-            content, _is_clob = lobs.pop(0) if lobs else (b'', True)
-            stream.write_packet(TNS_DATA, encode_lob_read_response_thin(content))
+            lobs = _answer_lobops(stream, body, lobs, temp_lobs)
         elif body[1] == TTI_FETCH:
             _answer_fetch(stream, parse_fetch(body), cursors)
         elif body[1] == TTI_COMMIT:
@@ -536,6 +544,54 @@ class _Cursors:
 
     def has(self, cursor_id: int) -> bool:
         return cursor_id in self._open
+
+
+def _answer_lobops(
+    stream: PacketStream,
+    body: bytes,
+    lobs: list[tuple[bytes, bool]],
+    temp_lobs: dict[bytes, bytearray],
+) -> list[tuple[bytes, bool]]:
+    # Dispatch a thin TTI_LOBOPS message. CREATE_TEMP / WRITE drive the temp-LOB
+    # write flow (#412); a plain READ drains the content of a column locator the
+    # Mirror emitted (#413). Returns the (possibly shortened) read queue.
+    request = parse_lobops_request(body)
+    if request.kind == 'create_temp':
+        locator = mint_temp_lob_locator(len(temp_lobs), request.is_blob)
+        temp_lobs[bytes(locator)] = bytearray()
+        stream.write_packet(TNS_DATA, encode_create_temp_response(locator))
+        return lobs
+    if request.kind == 'write':
+        # Append at the write offset the client streamed (it writes from the
+        # start and appends, so a plain concat matches every real client).
+        temp_lobs.setdefault(bytes(request.locator), bytearray()).extend(
+            request.payload
+        )
+        stream.write_packet(TNS_DATA, encode_lobops_write_response(request.locator))
+        return lobs
+    # A READ of an emitted column locator: hand back the next queued LOB whole,
+    # row-major, matching the order the locators went out (#413).
+    content, _is_clob = lobs.pop(0) if lobs else (b'', True)
+    stream.write_packet(TNS_DATA, encode_lob_read_response_thin(content))
+    return lobs
+
+
+def _resolve_temp_lob_binds(
+    request: ExecRequest, temp_lobs: dict[bytes, bytearray]
+) -> ExecRequest:
+    # Swap any temp-LOB locator bind for the bytes streamed into it over
+    # TTI_LOBOPS WRITE, so the backend sees a plain str / bytes value (#412). A
+    # CLOB's content is UTF-16BE on the wire; a BLOB's is raw.
+    def resolve(value: object) -> object:
+        if isinstance(value, TempLobRef):
+            data = bytes(temp_lobs.get(bytes(value.locator), b''))
+            return data if value.is_blob else data.decode('utf-16-be')
+        return value
+
+    if not any(isinstance(v, TempLobRef) for row in request.bind_rows for v in row):
+        return request
+    rows = [[resolve(v) for v in row] for row in request.bind_rows]
+    return replace(request, binds=rows[0], bind_rows=rows)
 
 
 def _answer_query(

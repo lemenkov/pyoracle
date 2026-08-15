@@ -866,6 +866,102 @@ def test_encode_lob_read_response_thin_carries_content_then_a_success_oer() -> N
     assert encode_lob_read_response_thin(b'').startswith(_oci_lob_data(b''))
 
 
+def test_parse_lobops_request_classifies_create_temp() -> None:
+    # CREATE_TEMP drives the temp-LOB write flow (#412): the Mirror recognises the
+    # client's fixed block and the CLOB / BLOB type byte in it.
+    from seerdb.common.tns import encode_dictionary_lobops
+    from seerdb.server.query import parse_lobops_request
+
+    for is_blob in (False, True):
+        body = encode_dictionary_lobops(
+            {'seq': 1, 'create_temp': True, 'is_blob': is_blob}
+        )
+        req = parse_lobops_request(body)
+        assert req.kind == 'create_temp'
+        assert req.is_blob is is_blob
+
+
+def test_parse_lobops_request_extracts_the_write_locator_and_payload() -> None:
+    # WRITE carries the ub2-prefixed locator and a 0x0E chunked payload; the Mirror
+    # pulls both out to append to the temp LOB (#412). Cover both the single-chunk
+    # (<= 0xFC) and the multi-chunk (0xFE-marked) payload forms.
+    from seerdb.common.tns import encode_dictionary_lobops
+    from seerdb.common.tns_consts import TNS_LOB_OP_WRITE
+    from seerdb.server.query import parse_lobops_request
+
+    locator = b'\x00seerdb-mirror-temp-lob-\x00\x00\x00\x00\x00'
+    for payload in (b'short-payload', bytes(range(256)) * 200):  # 51200 B multi-chunk
+        body = encode_dictionary_lobops(
+            {
+                'seq': 1,
+                'operation': TNS_LOB_OP_WRITE,
+                'locator': locator,
+                'data': payload,
+            }
+        )
+        req = parse_lobops_request(body)
+        assert req.kind == 'write'
+        assert req.locator == locator
+        assert req.payload == payload
+
+
+def test_temp_lob_responses_round_trip_through_the_client_decoders() -> None:
+    # The Mirror's CREATE_TEMP / WRITE replies must parse with the client's own
+    # readers: CREATE_TEMP returns the minted locator in a bare RPA, WRITE an RPA
+    # (skipped by its ub2 length) then a success OER (#412).
+    from seerdb.common.tns import decode_lobops_oer
+    from seerdb.server.query import (
+        encode_create_temp_response,
+        encode_lobops_write_response,
+        mint_temp_lob_locator,
+    )
+
+    locator = mint_temp_lob_locator(3, is_blob=True)
+    create = encode_create_temp_response(locator)
+    # The client reads: 0x08, ub2 length, then the locator bytes.
+    assert create[0] == 0x08  # TTI_RPA
+    assert int.from_bytes(create[1:3], 'big') == len(locator)
+    assert create[3:] == locator
+
+    write = encode_lobops_write_response(locator)
+    err_code, _msg = decode_lobops_oer(write, 6)
+    assert err_code in (0, 1403)  # a success OER, not a real error
+
+
+def test_parse_exec_decodes_a_temp_lob_bind_as_a_reference() -> None:
+    # A CLOB / BLOB bind is the temp-LOB descriptor 01 28 28 | ub2 len | locator,
+    # not a plain DALC — parse_exec keeps it as a TempLobRef for the session to
+    # resolve (#412). Built with the client's own execute encoder.
+    from seerdb.common.datatypes import TempLob
+    from seerdb.common.tns import encode_dictionary_exec
+    from seerdb.server.query import TempLobRef, parse_exec
+
+    locator = b'\x00seerdb-mirror-temp-lob-\x00\x00\x00\x00\x01'
+    payload = encode_dictionary_exec(
+        {
+            'seq': 4,
+            'field_version': 6,
+            'query': {
+                'type': 'select',
+                'auto': 0,
+                'fetch': 0,
+                'server_version': 186647040,
+                'cursor': 0,
+                'query': 'insert into t values (:1, :2)',
+                'bind': [7, TempLob(locator, True, 4096)],
+                'batch': [],
+                'def': [],
+            },
+        }
+    )
+    request = parse_exec(payload)
+    assert request.binds[0] == 7
+    ref = request.binds[1]
+    assert isinstance(ref, TempLobRef)
+    assert ref.locator == locator
+    assert ref.is_blob is True
+
+
 def test_encode_dml_status_oci_carries_the_verb_and_rowcount() -> None:
     # Each DML verb has its own captured template (sqlplus reads the verb from the
     # statement-type fields), and the affected-row count is injected as a ub4-LE at
