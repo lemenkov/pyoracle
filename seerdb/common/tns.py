@@ -3740,26 +3740,79 @@ def _encode_8i_bind_value(Value: object) -> bytes:
     return encode_token_rxd(Value)
 
 
-# The op-specific middle (25 bytes) of the 8i TTI_LOBOPS READ request, captured
-# verbatim from a 9.2-client -> 8.1.7 CLOB read (docs/PROTOCOL.md §19.15).
+# The op-specific middles (25 bytes) of the 8i TTI_LOBOPS requests, captured
+# verbatim from a 9.2-client -> 8.1.7 session (docs/PROTOCOL.md §19.15 / §19.17):
+# the CLOB/BLOB READ, and the BFILE FILE_OPEN / GETLEN / FILE_CLOSE (#401). The
+# op family shares one envelope; only the middle and trailer vary.
 _O8I_LOBOP_READ_MID = bytes.fromhex(
     '00000000000100000000000000000100020000000000000000'
 )
+_O8I_LOBOP_FOPEN_MID = bytes.fromhex(
+    '00000000000000000000000000000100000100000000000000'
+)
+_O8I_LOBOP_GETLEN_MID = bytes.fromhex(
+    '00000000000000000000000000000100010000000000000000'
+)
+_O8I_LOBOP_FCLOSE_MID = bytes.fromhex(
+    '00000000000000000000000000000000000200000000000000'
+)
 
 
-def encode_8i_lob_read(Seq: int, Locator: bytes, Amount: int) -> bytes:
-    # 8i TTI_LOBOPS (0x60) single READ: unlike 9i's GETLEN + READ pair, 8i reads
-    # the whole value in one call whose reply is the shared `0e fe <chunks> 00`
-    # LOB content (decode_fv2_lob_chunks). The locator length and read amount ride
-    # LITTLE-endian (8i is x86). `Amount` is chars for a CLOB, bytes for a BLOB;
-    # pass a large value to read the whole LOB (the server returns what exists).
+def _encode_o8i_lobop(Seq: int, Locator: bytes, Middle: bytes, Trailer: bytes) -> bytes:
+    # An 8i TTI_LOBOPS (0x60) request: `03 60 seq 01` + ub4-LE locator length +
+    # the 25-byte op middle + the locator + an op-specific trailer. Lengths ride
+    # LITTLE-endian (8i is x86). The whole envelope is captured ground truth.
     return (
         bytes([TTI_FUN, TTI_LOBOPS, Seq & 0xFF, 0x01])
         + len(Locator).to_bytes(4, 'little')
-        + _O8I_LOBOP_READ_MID
+        + Middle
         + Locator
-        + Amount.to_bytes(4, 'little')
+        + Trailer
     )
+
+
+def encode_8i_lob_read(Seq: int, Locator: bytes, Amount: int) -> bytes:
+    # 8i CLOB/BLOB/BFILE READ: unlike 9i's GETLEN + READ pair, 8i reads the value
+    # in one call whose reply is the shared `0e fe <chunks> 00` LOB content
+    # (decode_fv2_lob_chunks). `Amount` is chars for a CLOB, bytes for a BLOB /
+    # BFILE; the trailer is the ub4-LE read amount.
+    return _encode_o8i_lobop(
+        Seq, Locator, _O8I_LOBOP_READ_MID, Amount.to_bytes(4, 'little')
+    )
+
+
+def encode_o8i_bfile_open(Seq: int, Locator: bytes) -> bytes:
+    # 8i BFILE FILE_OPEN (#401): open the external file read-only. The trailer is
+    # the ub4-LE open mode 0x0b (read-only). The reply's RPA carries an *updated*
+    # locator with the open flag set — GETLEN / READ / CLOSE must use that one
+    # (decode_fv2_opened_locator, shared with the 9i path). §19.17.
+    return _encode_o8i_lobop(
+        Seq, Locator, _O8I_LOBOP_FOPEN_MID, (0x0B).to_bytes(4, 'little')
+    )
+
+
+def encode_o8i_bfile_getlen(Seq: int, Locator: bytes) -> bytes:
+    # 8i BFILE GETLEN (#401): ask for the file length. Trailer is a ub4-LE 0. The
+    # reply carries the length as a ub4-LE after the locator (decode_o8i_bfile_getlen).
+    return _encode_o8i_lobop(
+        Seq, Locator, _O8I_LOBOP_GETLEN_MID, (0).to_bytes(4, 'little')
+    )
+
+
+def encode_o8i_bfile_close(Seq: int, Locator: bytes) -> bytes:
+    # 8i BFILE FILE_CLOSE (#401): close the opened file. No trailer.
+    return _encode_o8i_lobop(Seq, Locator, _O8I_LOBOP_FCLOSE_MID, b'')
+
+
+def decode_o8i_bfile_getlen(Packet: bytes) -> int:
+    # Pull the file length out of an 8i BFILE GETLEN reply (#401): TTI_RPA (08),
+    # then the echoed `<ub1 len><body>` locator, then the ub4-LE length. The
+    # locator's inner ub1 length sits at Packet[2], so the length starts at
+    # 3 + that (the RPA byte + the leading 0 + the ub1-length-led body).
+    if not Packet or Packet[0] != TTI_RPA or len(Packet) < 3:
+        return 0
+    off = 3 + Packet[2]
+    return int.from_bytes(Packet[off : off + 4], 'little')
 
 
 def decode_8i_block_out(Data: bytes, NumOut: int) -> list:
