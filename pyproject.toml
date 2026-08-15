@@ -33,6 +33,12 @@ Homepage = "https://github.com/seerdb/seerdb"
 
 [tool.setuptools.packages.find]
 include = ["seerdb*"]
+# The Mirror server (seerdb.server) is a development/reference component that
+# ships in the repository but NOT in the published distribution — the released
+# package is the client driver only (a pip-installable Oracle-wire *server* is a
+# profile we keep off PyPI). seerdb/__init__.py imports it lazily so `import
+# seerdb` still works without it; run the Mirror from a source checkout (#301).
+exclude = ["seerdb.server*"]
 
 [tool.setuptools.package-data]
 # PEP 561 marker so type checkers (mypy, pyright) treat seerdb as typed.

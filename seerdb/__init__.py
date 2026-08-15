@@ -6,6 +6,8 @@ apilevel = '2.0'
 threadsafety = 1  # threads may share the module, not connections
 paramstyle = 'named'  # bind variables not yet wired through Cursor
 
+from typing import TYPE_CHECKING
+
 from seerdb.client.aconnection import AsyncOracleConnect
 from seerdb.client.apool import AsyncPool
 from seerdb.client.aq import DeqOptions, EnqOptions, MessageProperties, Queue
@@ -78,7 +80,13 @@ from seerdb.common.tns_consts import (
     TPC_END_SUSPEND,
 )
 from seerdb.common.vector import SparseVector
-from seerdb.server import Server, serve
+
+if TYPE_CHECKING:
+    # Type-checker view only. At runtime `seerdb.serve` / `seerdb.Server` are
+    # resolved lazily by __getattr__ below, so importing seerdb never requires
+    # the Mirror — and the client-only distribution (which omits seerdb.server)
+    # still imports cleanly.
+    from seerdb.server import Server, serve  # noqa: F401 (runtime: __getattr__)
 
 
 def connect(*args, **kwargs) -> OracleConnect:
@@ -129,14 +137,28 @@ def create_pool(*args, **kwargs) -> Pool:
     return Pool(*args, **kwargs)
 
 
+# The Mirror server API (`seerdb.serve` / `seerdb.Server`) is resolved on first
+# access rather than imported eagerly, so `import seerdb` never pulls in
+# seerdb.server. The released distribution omits that subpackage (it is the
+# client driver only); accessing these there raises a clear ModuleNotFoundError.
+# The Mirror is available when run from a source checkout (#301).
+_LAZY = frozenset({'serve', 'Server'})
+
+
+def __getattr__(name: str):
+    if name in _LAZY:
+        from seerdb import server
+
+        return getattr(server, name)
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+
+
 __all__ = [
     'apilevel',
     'threadsafety',
     'paramstyle',
     'connect',
     'connect_async',
-    'serve',
-    'Server',
     'create_pool',
     'create_pool_async',
     'OracleConnect',

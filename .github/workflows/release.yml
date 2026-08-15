@@ -14,12 +14,14 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+'
 
 permissions:
-  contents: write   # required by `gh release create`
+  contents: read
 
 jobs:
   release:
-    name: Build and publish release
+    name: Build and create the GitHub Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # required by `gh release create`
     steps:
       - uses: actions/checkout@v7
         with:
@@ -47,6 +49,8 @@ jobs:
                 tests.test_connection
 
       - name: Build sdist + wheel
+        # The published distribution is the client driver only — the Mirror
+        # server (seerdb.server) is excluded in pyproject (#301).
         run: python -m build
 
       - name: Verify build artifacts
@@ -54,6 +58,12 @@ jobs:
           ls -la dist/
           python -m pip install --user twine
           python -m twine check dist/*
+
+      - name: Upload the distribution for the PyPI publish job
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
 
       - name: Create GitHub Release
         env:
@@ -69,3 +79,27 @@ jobs:
             --generate-notes \
             --verify-tag \
             dist/*
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: release
+    runs-on: ubuntu-latest
+    # Trusted Publishing (OIDC) — no long-lived token. On PyPI, the `seerdb`
+    # project's trusted publisher must match: owner/repo `seerdb/seerdb`,
+    # workflow `release.yml`, and this environment name. Add a required reviewer
+    # to the `pypi` GitHub environment to gate each (irreversible) publish behind
+    # a manual approval. (#420)
+    environment:
+      name: pypi
+      url: https://pypi.org/p/seerdb
+    permissions:
+      id-token: write   # mint the OIDC token PyPI verifies
+    steps:
+      - name: Download the built distribution
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
