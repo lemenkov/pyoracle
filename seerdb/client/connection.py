@@ -4,6 +4,7 @@
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
+    from seerdb.client.dialect import Dialect
     from seerdb.common.dbobject import DbObjectType
 
 import logging
@@ -34,13 +35,7 @@ from seerdb.common.tns import (
     decode_8i_dcb_describe,
     decode_8i_dml_response,
     decode_8i_exec_response,
-    decode_fv2_block_out,
-    decode_fv2_describe,
-    decode_fv2_dml_response,
-    decode_fv2_exec_response,
     decode_fv2_lob_chunks,
-    decode_fv2_lob_getlen,
-    decode_fv2_oer_error,
     decode_fv2_opened_locator,
     decode_o8i_bfile_getlen,
     decode_packet,
@@ -59,23 +54,12 @@ from seerdb.common.tns import (
     encode_dictionary_auth,
     encode_end_to_end_piggyback,
     encode_fast_auth,
-    encode_o7_bfile_close,
-    encode_o7_bfile_open,
-    encode_o7_block,
-    encode_o7_close,
-    encode_o7_describe,
-    encode_o7_exec,
-    encode_o7_lob_getlen,
-    encode_o7_lob_read,
-    encode_o7_open,
-    encode_o7_parse,
     encode_o8i_bfile_close,
     encode_o8i_bfile_getlen,
     encode_o8i_bfile_open,
     encode_packet,
     encode_pipeline_begin,
     encode_pipeline_end,
-    encode_tokens_rxd,
     encode_tpc_change_state,
     encode_tpc_switch,
     exec_oac_signature,
@@ -639,6 +623,9 @@ class OracleConnect:
         self._supports_oob = False  # set from the accept (#144)
         self._supports_eor = False  # end-of-response framing (#155/#132)
         self._large_packets = False  # 4-byte packet length (#155, ver >= 315)
+        # The pre-10g wire dialect selected after login (sans-io generators driven
+        # by _drive), or None for the modern 10g→23ai path (#369).
+        self._dialect: Dialect | None = None
         # End-to-end application tracing (#183): current module / action /
         # client_identifier values, and the subset changed since the last flush
         # (sent as a SET_END_TO_END_ATTR piggyback in front of the next execute).
@@ -1088,9 +1075,45 @@ class OracleConnect:
                 Pro['banner'],
                 self.field_version,
             )
+            self._select_dialect()
         except Exception:
             # Unknown PRO layout — keep the default field version (11.2).
             logger.debug('handle_login: could not parse PRO caps', exc_info=True)
+
+    def _select_dialect(self) -> None:
+        # Pick the wire dialect once the negotiated version is final (#369). 9i
+        # (fv2) runs the sans-io Fv2Dialect via _drive; 8i still uses its inline
+        # methods (migrated in a follow-up); modern (10g→23ai) keeps _dialect None
+        # and takes the TTI_ALL8 path in execute().
+        from seerdb.client.dialect import Fv2Dialect
+
+        if getattr(self, '_is_8i', False):
+            self._dialect = None
+        elif self.field_version < FIELD_VERSION_10_2:
+            self._dialect = Fv2Dialect()
+        else:
+            self._dialect = None
+
+    def _drive(self, gen: object) -> object:
+        # Run a sans-io dialect generator (#369): a yielded Send(data) is written
+        # as a TNS_DATA packet; a yielded RECV is answered with the next data
+        # packet; the generator's return value is the result. Exceptions (ORA
+        # errors) propagate. The async connection has the awaited twin of this.
+        from seerdb.client.dialect import RECV, Send
+
+        to_send: object = None
+        try:
+            while True:
+                intent = gen.send(to_send)  # type: ignore[attr-defined]
+                if intent is RECV:
+                    to_send = self._next_data_packet()
+                elif isinstance(intent, Send):
+                    self.send(TNS_DATA, intent.data)
+                    to_send = None
+                else:  # pragma: no cover - defensive
+                    raise TypeError(f'unknown dialect intent: {intent!r}')
+        except StopIteration as done:
+            return done.value
 
     def _handle_rpa(self, Data: bytes) -> int | None:
         Result = decode_token_rpa(Data, ())
@@ -1248,31 +1271,33 @@ class OracleConnect:
             if Head.startswith('BEGIN') or Head.startswith('DECLARE'):
                 return self._execute_8i_block(Query, Bind)
             return self._execute_8i_dml(Query, Bind)
-        # Oracle 9i (field version < 10g) speaks the old TTI_ALL7 query dialect,
-        # not the TTI_ALL8 the rest of execute() builds. Route SELECTs through
-        # the dedicated four-call fv2 path (#97, PROTOCOL.md §19).
-        if self.field_version < FIELD_VERSION_10_2 and not getattr(
-            self, '_is_8i', False
-        ):
+        # A pre-10g dialect (9i / fv2) speaks its own request dialect, not the
+        # TTI_ALL8 the rest of execute() builds. It runs as sans-io generators
+        # driven by _drive; the connection is a thin orchestrator (#369).
+        if self._dialect is not None:
+            from seerdb.client.dialect import CAP_ARRAY_DML
+
             _check_fv2_bind_sizes(Bind, Batch)
-            if Batch:
-                # Array DML (executemany) is not implemented on the fv2 / TTI_ALL7
-                # path — it would silently apply only the first row. Fail loudly
-                # instead of corrupting data (#168).
+            if Batch and CAP_ARRAY_DML not in self._dialect.capabilities():
+                # Array DML (executemany) would silently apply only the first row
+                # on this tier. Fail loudly instead of corrupting data (#168).
                 from seerdb.common.exceptions import NotSupportedError
 
                 raise NotSupportedError(
                     'executemany (array DML) is not supported on Oracle 9i'
                 )
             if Head.startswith('SELECT'):
-                return self._drain_cursor(self._execute_fv2(Query, Bind))
-            # Anonymous PL/SQL blocks (BEGIN/DECLARE) over the fv2 block path
-            # (#102, IN binds only) — they need their own ALL7 option word, not
-            # the DML one (which the server rejects with ORA-00600).
+                return self._drain_cursor(
+                    self._drive(self._dialect.execute_query(Query, Bind))
+                )
             if Head.startswith('BEGIN') or Head.startswith('DECLARE'):
-                return self._execute_fv2_block(Query, Bind)
-            # DML (INSERT/UPDATE/DELETE) over the fv2 TTI_ALL7 path (#101).
-            return self._execute_fv2_dml(Query, Bind)
+                Result = self._drive(self._dialect.execute_block(Query, Bind))
+            else:  # DML (INSERT/UPDATE/DELETE)
+                Result = self._drive(self._dialect.execute_dml(Query, Bind))
+            # fv2's parse doesn't carry an autocommit bit, so commit explicitly.
+            if self.autocommit:
+                self.commit()
+            return Result
         if Head.startswith('SELECT'):
             Type = 'select'
         elif Head.startswith('BEGIN') or Head.startswith('DECLARE'):
@@ -1469,65 +1494,11 @@ class OracleConnect:
         return (list(Rows or []), AtEof, ServerRowCount)
 
     def _fv2_raise_for_error(self, Packet: bytes) -> None:
-        # Raise the server's error if `Packet` is a 9i OER carrying a real ORA
-        # code (not success/end-of-fetch). Lets a parse-time failure surface as
-        # its true code + message instead of a downstream desync (#102).
-        (ErrCode, Message) = decode_fv2_oer_error(Packet)
-        if ErrCode and ErrCode not in (0, 1403):
-            from seerdb.common.exceptions import from_ora_code
+        # Thin delegate to the shared colorless helper — still used by the inline
+        # 8i methods until they migrate to a dialect (#369).
+        from seerdb.client.dialect import fv2_raise_for_error
 
-            raise from_ora_code(ErrCode)(Message or f'ORA-{ErrCode:05d}', code=ErrCode)
-
-    def _execute_fv2(self, Query: str, Bind: list | None = None) -> object:
-        # Oracle 9i (field version 2) SELECT: the four-call TTI_ALL7 sequence
-        # (PROTOCOL.md §19) — parse, describe columns, execute+fetch, close.
-        # Returns the same tuple shape as a normal execute response so the
-        # cursor/_drain_cursor machinery is unchanged.
-        self.send(TNS_DATA, encode_o7_open(0))  # allocate a server cursor
-        self._next_data_packet()  # OOPEN RPA (cursor id)
-        self.send(TNS_DATA, encode_o7_parse(0, Query, Bind))
-        Resp = self._next_data_packet()  # parse RPA ack — or an OER
-        if Resp is not False:  # surface a parse error
-            self._fv2_raise_for_error(Resp[1])  # (e.g. ORA-00942)
-        self.send(TNS_DATA, encode_o7_describe(0))
-        Resp = self._next_data_packet()
-        if Resp is False:
-            raise Exception('Connection closed during 9i describe')
-        (_, Packet) = Resp
-        Columns = decode_fv2_describe(Packet)
-        # CLOB (112) / BLOB (113) are read by the two-call TTI_LOBOPS GETLEN +
-        # READ, BFILE (114) by FILE_OPEN/READ/CLOSE — all resolved before the
-        # cursor close, see _resolve_fv2_lobs. (LONG / LONG RAW are handled inline
-        # in decode_fv2_exec_response.) (#102)
-        # Execute, then fetch in batches: each batch is the SAME exec+fetch
-        # TTI_ALL7 re-sent; the server continues the cursor and signals the end
-        # with ORA-01403 (#99). A batch with no rows also terminates the loop so
-        # a malformed response can't spin forever.
-        AllRows: list = []
-        ErrCode = 0
-        while True:
-            self.send(TNS_DATA, encode_o7_exec(0, Columns))
-            Resp = self._next_data_packet()
-            if Resp is False:
-                raise Exception('Connection closed during 9i fetch')
-            (_, Packet) = Resp
-            (Rows, ErrCode) = decode_fv2_exec_response(Packet, Columns)
-            AllRows.extend(Rows)
-            if ErrCode == 1403 or not Rows:
-                break
-        # Resolve any LOB cells while the cursor is still open — JDBC reads the
-        # locators before the close, and so do we (#102). decode_fv2_exec_response
-        # left LOB objects in the rows; replace each with its content.
-        self._resolve_fv2_lobs(AllRows, Columns)
-        self.send(TNS_DATA, encode_o7_close(0))
-        self._next_data_packet()  # close STA
-        if ErrCode and ErrCode not in (0, 1403):
-            from seerdb.common.exceptions import from_ora_code
-
-            raise from_ora_code(ErrCode)(f'ORA-{ErrCode:05d}', code=ErrCode)
-        # (call_status, ora_code, cursor_id, (rowcount, row_format), rows, ...)
-        # call_status 0 + ora_code 0 => _drain_cursor won't issue TTI_FETCHes.
-        return (0, 0, 0, (len(AllRows), Columns), AllRows, None, None, [], None)
+        fv2_raise_for_error(Packet)
 
     def _execute_8i_select(self, Query: str, Bind: list | None = None) -> object:
         # Oracle 8i SELECT (#244 task #4, PROTOCOL.md §19.9-10). 8i speaks the
@@ -1538,7 +1509,7 @@ class OracleConnect:
         # describe (decode_8i_dcb_describe) followed by the 9i-style RXH/RXD row
         # stream (decode_8i_exec_response). Row values are WE8ISO8859P1 (latin-1);
         # the column charset drives decoding. Returns the same 9-tuple as
-        # _execute_fv2 so the cursor/_drain_cursor path is unchanged.
+        # Fv2Dialect.execute_query so the cursor/_drain_cursor path is unchanged.
         self.send(
             TNS_DATA,
             encode_8i_oall8_query(
@@ -1695,11 +1666,25 @@ class OracleConnect:
             self.send(TNS_DATA, encode_o8i_bfile_close(self._next_seq(), Opened))
             self._next_data_packet(b'', b'')  # drain FILE_CLOSE RPA + OER
 
+    def _read_fv2_lob_content(self) -> bytes:
+        # Accumulate a fv2/8i TTI_LOBOPS READ reply's packets until
+        # decode_fv2_lob_chunks reports the zero-length terminator. Still used by
+        # the inline 8i BFILE read; the fv2 path now uses the dialect's twin (#369).
+        Data = b''
+        while True:
+            Received = self._next_data_packet(b'', b'')
+            if Received is False:
+                raise Exception('Connection closed during 8i LOB READ')
+            Data += Received[1]
+            (Content, Complete) = decode_fv2_lob_chunks(Data)
+            if Complete:
+                return Content
+
     def _execute_8i_dml(self, Query: str, Bind: list | None = None) -> object:
         # Oracle 8i INSERT/UPDATE/DELETE and DDL (#360, PROTOCOL.md §19.12): the
         # same 9.2-era OALL8 as a SELECT but with the statement-type option word
         # and no fetch. The affected-row count comes back in the response OER.
-        # Returns the same 9-tuple shape as _execute_fv2_dml (rowcount in slot 3).
+        # Returns the same 9-tuple shape as the fv2 DML path (rowcount in slot 3).
         StmtType = o8i_stmt_type(Query.strip().upper())
         self.send(
             TNS_DATA,
@@ -1756,162 +1741,6 @@ class OracleConnect:
             Record = {'out_positions': OutPositions, 'out_values': OutValues}
             return (0, 0, 0, (None, None), [Record], None, None, [], None)
         return (0, 0, 0, (0, None), [], None, None, [], None)
-
-    def _lob_read_fv2(self, Locator: bytes) -> bytes:
-        # 9i (fv2) LOB content read: the two-call TTI_LOBOPS GETLEN + READ
-        # (PROTOCOL.md §19.5). GETLEN returns the length; READ pulls that many
-        # chars/bytes. Returns raw bytes (CLOB decoding happens in the caller
-        # with the column charset). An empty LOB (amount 0) reads nothing.
-        self.send(TNS_DATA, encode_o7_lob_getlen(0, Locator))
-        Resp = self._next_data_packet(b'', b'')
-        if Resp is False:
-            raise Exception('Connection closed during 9i LOB GETLEN')
-        Amount = decode_fv2_lob_getlen(Resp[1])
-        if Amount <= 0:
-            return b''
-        self.send(TNS_DATA, encode_o7_lob_read(0, Locator, Amount))
-        return self._read_fv2_lob_content()
-
-    def _bfile_read_fv2(self, Locator: bytes) -> bytes:
-        # 9i (fv2) BFILE read: FILE_OPEN → GETLEN → READ → FILE_CLOSE over
-        # TTI_LOBOPS (PROTOCOL §19.8). FILE_OPEN returns an *updated* locator
-        # (open flag set); GETLEN/READ/CLOSE must use that one. Returns the file
-        # bytes. The FILE_CLOSE runs in a finally so an opened file is always
-        # closed even if the read fails.
-        self.send(TNS_DATA, encode_o7_bfile_open(0, Locator))
-        Resp = self._next_data_packet(b'', b'')
-        if Resp is False:
-            raise Exception('Connection closed during 9i BFILE FILE_OPEN')
-        self._fv2_raise_for_error(Resp[1])  # e.g. ORA-22285
-        Opened = decode_fv2_opened_locator(Resp[1])
-        if Opened is None:
-            raise Exception('Unexpected 9i BFILE FILE_OPEN reply', Resp[1][:8].hex())
-        try:
-            self.send(TNS_DATA, encode_o7_lob_getlen(0, Opened))
-            Resp = self._next_data_packet(b'', b'')
-            if Resp is False:
-                raise Exception('Connection closed during 9i BFILE GETLEN')
-            Amount = decode_fv2_lob_getlen(Resp[1])
-            if Amount <= 0:
-                return b''
-            self.send(TNS_DATA, encode_o7_lob_read(0, Opened, Amount))
-            return self._read_fv2_lob_content()
-        finally:
-            self.send(TNS_DATA, encode_o7_bfile_close(0, Opened))
-            self._next_data_packet(b'', b'')  # drain FILE_CLOSE RPA + OER
-
-    def _read_fv2_lob_content(self) -> bytes:
-        # Read the content of a 9i (fv2) TTI_LOBOPS READ reply by accumulating
-        # packets and re-parsing with decode_fv2_lob_chunks until it reports the
-        # zero-length terminator. The fv2 reply carries no OER call-status, so
-        # that terminator (not an OER) is the stop signal. (#102)
-        Data = b''
-        while True:
-            Received = self._next_data_packet(b'', b'')
-            if Received is False:
-                raise Exception('Connection closed during 9i LOB READ')
-            Data += Received[1]
-            (Content, Complete) = decode_fv2_lob_chunks(Data)
-            if Complete:
-                return Content
-
-    def _resolve_fv2_lobs(self, Rows: list, Columns: list) -> None:
-        # Replace LOB objects left by decode_fv2_exec_response with their
-        # content, in place, by round-tripping each locator (#102). Done while
-        # the 9i cursor is still open.
-        from seerdb.common.lob import LOB
-        from seerdb.common.types import decode_fv2_lob
-
-        for Row in Rows:
-            for I, Val in enumerate(Row):
-                if isinstance(Val, LOB):
-                    if Val.data_type == 114:  # BFILE: open / read / close
-                        Content = self._bfile_read_fv2(Val.raw)
-                    else:  # CLOB / BLOB: GETLEN + READ
-                        Content = self._lob_read_fv2(Val.raw)
-                    Row[I] = decode_fv2_lob(
-                        Columns[I].get('data_type'),
-                        Content,
-                        Columns[I].get('charset') or 0,
-                    )
-
-    def _execute_fv2_dml(self, Query: str, Bind: list | None = None) -> object:
-        # Oracle 9i DML over TTI_ALL7 (#101): OOPEN, then a single parse that
-        # also executes the statement (option 02 80 21) — no describe/fetch. The
-        # affected-row count comes back in the response OER. Commit explicitly
-        # when autocommit is on (9i's parse doesn't carry an autocommit bit).
-        self.send(TNS_DATA, encode_o7_open(0))
-        self._next_data_packet()  # OOPEN RPA
-        self.send(TNS_DATA, encode_o7_parse(0, Query, Bind))
-        Resp = self._next_data_packet()
-        if Resp is False:
-            raise Exception('Connection closed during 9i DML')
-        (_, Packet) = Resp
-        self._fv2_raise_for_error(Packet)  # e.g. ORA-00942 / constraint
-        (RowCount, ErrCode) = decode_fv2_dml_response(Packet)
-        self.send(TNS_DATA, encode_o7_close(0))
-        self._next_data_packet()  # close STA
-        if ErrCode and ErrCode not in (0, 1403):
-            from seerdb.common.exceptions import from_ora_code
-
-            raise from_ora_code(ErrCode)(f'ORA-{ErrCode:05d}', code=ErrCode)
-        if self.autocommit:
-            self.commit()
-        return (0, 0, 0, (RowCount, None), [], None, None, [], None)
-
-    def _execute_fv2_block(self, Query: str, Bind: list | None = None) -> object:
-        # Anonymous PL/SQL block over the fv2 TTI_ALL7 block path (#102,
-        # PROTOCOL §19.6 / §19.7). OOPEN, then encode_o7_block parse-executes the
-        # block carrying an OAC per bind (no inline values — blocks don't use the
-        # DML 0x8000 inline-values mode). The server then replies with a bind
-        # prompt; the client sends the INPUT values (IN + IN OUT binds, in
-        # position order) as a standalone RXD, and the reply carries any OUT /
-        # IN OUT return values (an RXD before the RPA + OER). A pure-OUT block
-        # packs the prompt, the return values and the status into one packet and
-        # expects no input; a no-bind block returns the RPA + OER directly. OUT
-        # values are handed back as an {out_positions, out_values} record the
-        # cursor's _assign_out_binds decodes into the Var objects.
-        from seerdb.common.datatypes import Var
-
-        Bind = Bind or []
-        # IN + IN OUT binds carry an input value to send; every Var is an OUT
-        # (its returned value comes back). IN OUT = a Var with has_value set.
-        InputValues = [
-            (B._value if isinstance(B, Var) else B)
-            for B in Bind
-            if not isinstance(B, Var) or B.has_value
-        ]
-        OutPositions = [I for I, B in enumerate(Bind) if isinstance(B, Var)]
-        self.send(TNS_DATA, encode_o7_open(0))
-        self._next_data_packet()  # OOPEN RPA
-        self.send(TNS_DATA, encode_o7_block(0, Query, Bind))
-        Resp = self._next_data_packet()
-        if Resp is False:
-            raise Exception('Connection closed during 9i PL/SQL block')
-        (_, Packet) = Resp
-        if InputValues:
-            # `Packet` is the bind prompt (or an OER on a compile error). Send
-            # the input values; the reply carries OUT values + RPA + OER.
-            self._fv2_raise_for_error(Packet)
-            self.send(TNS_DATA, encode_tokens_rxd(InputValues, b''))
-            Resp = self._next_data_packet()
-            if Resp is False:
-                raise Exception('Connection closed during 9i PL/SQL bind send')
-            (_, Packet) = Resp
-        self._fv2_raise_for_error(Packet)  # runtime error (ORA-06512 …)
-        (OutValues, RowCount, ErrCode) = decode_fv2_block_out(Packet, len(OutPositions))
-        self.send(TNS_DATA, encode_o7_close(0))
-        self._next_data_packet()  # close STA
-        if ErrCode and ErrCode not in (0, 1403):
-            from seerdb.common.exceptions import from_ora_code
-
-            raise from_ora_code(ErrCode)(f'ORA-{ErrCode:05d}', code=ErrCode)
-        if self.autocommit:
-            self.commit()
-        if OutPositions:
-            Record = {'out_positions': OutPositions, 'out_values': OutValues}
-            return (0, 0, 0, (None, None), [Record], None, None, [], None)
-        return (0, 0, 0, (RowCount, None), [], None, None, [], None)
 
     def _drain_cursor(self, Result: object) -> object:
         # The EXEC response either bundles all rows inline (small SELECTs,

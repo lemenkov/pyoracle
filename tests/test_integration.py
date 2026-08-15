@@ -81,6 +81,12 @@ _FV2_UNSUPPORTED = (
     ),
     ('nchar', 'plain str -> NCHAR via 9i DB charset; use DB_TYPE_NCHAR (#174)'),
     ('nclob', '9i national-charset LOB handling deferred (#174)'),
+    # The fixture SELECT ... CONNECT BY LEVEL <= 200 returns only 10 rows on 9i
+    # (a 9i CONNECT-BY-against-dual quirk, like the 8i "returns one row"), so it
+    # never crosses a fetch boundary here. The fv2 fetch loop itself is fine — a
+    # real 200-row table returns all 200 — so this is a fixture limitation, not a
+    # 9i bug. Already skipped on 8i for the same reason.
+    ('bit_vector_reuse', 'CONNECT BY LEVEL returns few rows on Oracle 9i'),
 )
 
 

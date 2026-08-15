@@ -4331,8 +4331,8 @@ def decode_fv2_exec_response(Data: bytes, Columns: list) -> tuple[list, int]:
                     # CLOB / BLOB / BFILE. A present cell is a LOB locator (ub4
                     # num_bytes + DALC locator) followed by a 1-byte 0x00
                     # indicator; _read_lob_column extracts the locator and the
-                    # connection round-trips it via TTI_LOBOPS (_lob_read_fv2 for
-                    # CLOB/BLOB; _bfile_read_fv2 — FILE_OPEN/READ/CLOSE — for
+                    # connection round-trips it via TTI_LOBOPS (the fv2 dialect lob_read for
+                    # CLOB/BLOB; bfile_read — FILE_OPEN/READ/CLOSE — for
                     # BFILE). A NULL LOB uses the scalar empty-value form instead
                     # — `00 81 01` (an empty DALC then the `81 01` null
                     # indicator). A present locator's num_bytes is always >= its
