@@ -1151,7 +1151,13 @@ The full server side, reduced from live 11g out-of-line CLOB captures:
    (`encode_lob_fetch_rows_oci`) — the content still has to come over `TTI_LOBOPS`,
    so the cursor is not drained; a *following* fetch draws the 1403 terminator.
    The minted locator's **size field is the content BYTE count** (2× characters
-   for a CLOB — UTF-16 on the wire — raw bytes for a BLOB), big-endian.
+   for a CLOB — UTF-16 on the wire — raw bytes for a BLOB), big-endian. A **CLOB**
+   and a **BLOB** use *different* locator templates: they differ in the LOB type
+   bytes (row offsets 9/11/14) and the **charset** (offset 37 — `03 69` = 873
+   AL32UTF8 for a CLOB, `00 00` binary for a BLOB). The charset is load-bearing —
+   with a CLOB locator sqlplus decodes a BLOB's raw bytes *as characters* and
+   mangles them (`CA FE BA BE` → `??`), so the Mirror keys the template on the
+   column type (#406).
 3. **`TTI_LOBOPS` READ → LOB_DATA.** sqlplus loops over the LOB in
    `SET LONGCHUNKSIZE`-sized slices, each read carrying a 1-based **source offset**
    (`ub8`-LE at request offset 91) and **amount** (`ub8`-LE at offset 269), both
@@ -1167,6 +1173,17 @@ under default sqlplus settings (the 80-char read loop) and with a large
 afterward. The demo backend types a column as a CLOB / BLOB from its **declared**
 type (via `PRAGMA table_info`), not its value size, so a plain VARCHAR2 / RAW
 value stays inline (thin clients have no Mirror-side LOB emit yet).
+
+**LOB write (the Mirror, OCI dialect, #406).** For sqlplus, `INSERT` / `UPDATE`
+of a CLOB / BLOB value that fits an inline literal or bind is an **ordinary DML**
+— the value rides in the execute (no `TTI_LOBOPS` WRITE), the backend stores it,
+and a following `SELECT` returns it via the read path above. So the write round-
+trips for free once the read is correct; #406 is really the BLOB half of the read
+(a BLOB needs the binary locator, above, or its bytes come back mangled). Verified
+live: `INSERT` / `UPDATE` of CLOB and BLOB values round-trip byte-for-byte
+(`x'deadbeefcafe'` comes back `DEADBEEFCAFE`). A `TTI_LOBOPS` WRITE / temp-LOB
+path (for values too large for an inline bind, used by programmatic OCI clients)
+is a follow-up.
 
 ### 6.1 Row Header (TTI_RXH)
 

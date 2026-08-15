@@ -1096,27 +1096,53 @@ def encode_long_value_oci(value: object) -> bytes:
 # BLOB counts its raw bytes. The content never rides in the locator (out-of-line):
 # it returns in the READ reply's LOB_DATA. A ub4-LE num_bytes frames the locator
 # in the row; a NULL LOB is num_bytes 0, no READ.
-_OCI_LOB_ROW_VALUE = bytes.fromhex(
-    '6a0000006a00680001020c88000002000000010000005643350001b58f0001b58e00'
-    '020002036900020040b523000000000000000000000000005bfd6e00000000000000'
-    '000000000000000000000000000001b58e0040b519000000140500000000000fa000'
-    '00000000020040b523'
-)
+# CLOB and BLOB locators are the same shape but differ in the LOB **type** bytes
+# (offsets 9/11/14 in the row value) and the **charset** (offset 37: `03 69` =
+# 873 AL32UTF8 for a CLOB, `00 00` binary for a BLOB). The charset is load-bearing:
+# with the CLOB template, sqlplus decodes a BLOB's content as characters and
+# mangles it (raw `CA FE BA BE` → `??`). Both are captured from live 11g
+# out-of-line reads (a 2000-char CLOB / a 4000-byte BLOB), keyed by is_clob.
+_OCI_LOB_ROW_VALUE = {
+    True: bytes.fromhex(
+        '6a0000006a00680001020c88000002000000010000005643350001b58f0001b58e00'
+        '020002036900020040b523000000000000000000000000005bfd6e00000000000000'
+        '000000000000000000000000000001b58e0040b519000000140500000000000fa000'
+        '00000000020040b523'
+    ),
+    False: bytes.fromhex(
+        '6a0000006a00680001010c080000010000000100000056471d0001b6490001b64800'
+        '020002000000020040b583000000000000000000000000005d0d5e00000000000000'
+        '000000000000000000000000000001b6480040b579000000140500000000000fa000'
+        '00000000020040b583'
+    ),
+}
 _OCI_LOB_ROW_SIZE_OFF = 97  # ub4 BE content byte size inside the row locator value
 # The TTI_LOBOPS READ reply tail after the LOB_DATA content: TTI_RPA (the echoed
 # locator + amount read) then the OER call status. sqlplus skips the RPA to the
 # OER, but the echoed locator's byte size and the amount are patched so they stay
-# consistent with the content delivered.
-_OCI_LOB_READ_TAIL = bytes.fromhex(
-    '0800680001020c88000002000000010000005643350001b58f0001b58e0002000203'
-    '6900020040b523000000000000000000000000005bfd6e0000000000000000000000'
-    '0000000000000000000001b58e0040b519000000140500000000000fa00000000000'
-    '020040b523d007000000000000040100000011000101000000000000000000000000'
-    '00000000000000000000000000000000000000000000000000000000130000010000'
-    '003601000000000000000000000000000020f6310a00000000000000000000000000'
-    '00000000000000000000000000000000000000000000000000000000000000000000'
-    '00000000000000000000000000'
-)
+# consistent with the content delivered. Same CLOB/BLOB split as the row value.
+_OCI_LOB_READ_TAIL = {
+    True: bytes.fromhex(
+        '0800680001020c88000002000000010000005643350001b58f0001b58e0002000203'
+        '6900020040b523000000000000000000000000005bfd6e0000000000000000000000'
+        '0000000000000000000001b58e0040b519000000140500000000000fa00000000000'
+        '020040b523d007000000000000040100000011000101000000000000000000000000'
+        '00000000000000000000000000000000000000000000000000000000130000010000'
+        '003601000000000000000000000000000020f6310a00000000000000000000000000'
+        '00000000000000000000000000000000000000000000000000000000000000000000'
+        '00000000000000000000000000'
+    ),
+    False: bytes.fromhex(
+        '0800680001010c080000010000000100000056471d0001b6490001b6480002000200'
+        '0000020040b583000000000000000000000000005d0d5e0000000000000000000000'
+        '0000000000000000000001b6480040b579000000140500000000000fa00000000000'
+        '020040b583a00f000000000000040100000011000101000000000000000000000000'
+        '00000000000000000000000000000000000000000000000000000000130000010000'
+        '003601000000000000000000000000000020f6310a00000000000000000000000000'
+        '00000000000000000000000000000000000000000000000000000000000000000000'
+        '00000000000000000000000000'
+    ),
+}
 _OCI_LOB_TAIL_SIZE_OFF = 93  # ub4 BE byte size in the echoed locator
 _OCI_LOB_TAIL_AMOUNT_OFF = 107  # ub4 LE amount read (characters for CLOB / bytes)
 _OCI_LOB_CHUNK = 0xFF  # content bytes per 11g LOB_DATA chunk (matches live 11g)
@@ -1139,7 +1165,7 @@ def encode_lob_locator_oci(value: object, is_clob: bool) -> bytes:
     if value is None:
         return bytes([0])
     byte_size = _oci_lob_byte_size(value, is_clob)
-    loc = bytearray(_OCI_LOB_ROW_VALUE)
+    loc = bytearray(_OCI_LOB_ROW_VALUE[is_clob])
     loc[_OCI_LOB_ROW_SIZE_OFF : _OCI_LOB_ROW_SIZE_OFF + 4] = byte_size.to_bytes(
         4, 'big'
     )
@@ -1184,16 +1210,17 @@ def parse_lobops_read(body: bytes) -> tuple[int, int]:
 
 
 def encode_lob_read_response_oci(
-    content: bytes, amount: int, total_bytes: int | None = None
+    content: bytes, amount: int, total_bytes: int | None = None, *, is_clob: bool = True
 ) -> bytes:
     """The TTI_LOBOPS READ reply (#405): the LOB content slice (LOB_DATA) then the
     captured TTI_RPA + OER tail. ``content`` is the UTF-16BE (CLOB) / raw (BLOB)
     bytes read this call; ``amount`` is that read's count (characters for a CLOB,
     bytes for a BLOB); ``total_bytes`` is the whole LOB's byte size the echoed
-    locator reports (defaults to this slice, for a single read-it-all call)."""
+    locator reports (defaults to this slice, for a single read-it-all call).
+    ``is_clob`` selects the echoed-locator template (character vs binary, #406)."""
     if total_bytes is None:
         total_bytes = len(content)
-    tail = bytearray(_OCI_LOB_READ_TAIL)
+    tail = bytearray(_OCI_LOB_READ_TAIL[is_clob])
     tail[_OCI_LOB_TAIL_SIZE_OFF : _OCI_LOB_TAIL_SIZE_OFF + 4] = total_bytes.to_bytes(
         4, 'big'
     )
