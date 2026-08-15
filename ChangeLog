@@ -1,6 +1,12 @@
 Entries are sorted chronologically from oldest to youngest within each release,
 releases are sorted from youngest to oldest.
 
+version 2.2.0:
+- **Oracle 8i BFILE reads now use the native `TTI_LOBOPS` wire** (`FILE_OPEN` → `GETLEN` → `READ` → `FILE_CLOSE`) instead of a server-side `DBMS_LOB` helper. The connecting user needs only READ on the `DIRECTORY` object — no `CREATE PROCEDURE` privilege, and nothing is installed in the schema (#401)
+- The published PyPI distribution is now the **client driver only**: the experimental server-side "Mirror" (`seerdb.serve` / `seerdb.Server`) is excluded from the wheel / sdist and is no longer part of the public API surface. `import seerdb` and the whole DB-API client work unchanged; the Mirror stays available when running from a source checkout (#301)
+- Releases now publish to PyPI automatically via GitHub Actions Trusted Publishing — no stored token (#420)
+- Internal: the pre-10g wire paths (9i and 8i) were unified behind a single sans-io wire-dialect strategy, removing ~1000 lines of sync/async duplication — no change to behaviour or the public API (#369)
+
 version 2.1.0:
 - **Oracle 8i (8.1.7) support**, on both the sync and async clients: login (the OSESSKEY-envelope O3LOGON), SELECT over the 9.2-era OALL8 + fixed-field describe/row wire, IN bind variables and PL/SQL OUT binds (callproc / callfunc), INSERT/UPDATE/DELETE, DDL and transactions, anonymous PL/SQL blocks, CLOB / BLOB and LONG / LONG RAW reads, BFILE reads, and ROWID / UROWID columns — with cursor.description precision & scale. seerdb now spans Oracle 8i through 23ai.
 - cursor.description is now byte-for-byte compatible with python-oracledb — the type code, display size, internal size, precision, scale and null-ok all match (#305)
