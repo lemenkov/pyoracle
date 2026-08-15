@@ -78,6 +78,7 @@ from seerdb.server.query import (
     encode_lob_describe_oci,
     encode_lob_fetch_rows_oci,
     encode_lob_read_response_oci,
+    encode_lob_read_response_thin,
     encode_logoff_status_oci,
     encode_long_fetch_row_oci,
     encode_out_bind_response_oci,
@@ -223,6 +224,10 @@ def serve_session(stream: PacketStream, backend: Backend) -> str:
     if sqlplus:
         return _serve_oci_session(stream, backend, user)
     cursors = _Cursors()
+    # LOB contents (wire bytes + is_clob) the current statement's rows carry, in
+    # the order their locators went out; the thin client drains them with
+    # TTI_LOBOPS reads (it reads each LOB whole, row-major) (#413).
+    lobs: list[tuple[bytes, bool]] = []
     while True:
         received = stream.read_packet()
         if received is None:
@@ -234,7 +239,12 @@ def serve_session(stream: PacketStream, backend: Backend) -> str:
         if len(body) < 2 or body[0] != TTI_FUN:
             continue
         if body[1] == TTI_ALL8:
-            _answer_query(stream, backend, parse_exec(body), cursors)
+            lobs = _answer_query(stream, backend, parse_exec(body), cursors)
+        elif body[1] == TTI_LOBOPS:
+            # The client reads a LOB column's content whole — hand back the next
+            # queued LOB (row-major, matching the locators we emitted) (#413).
+            content, _is_clob = lobs.pop(0) if lobs else (b'', True)
+            stream.write_packet(TNS_DATA, encode_lob_read_response_thin(content))
         elif body[1] == TTI_FETCH:
             _answer_fetch(stream, parse_fetch(body), cursors)
         elif body[1] == TTI_COMMIT:
@@ -530,10 +540,13 @@ class _Cursors:
 
 def _answer_query(
     stream: PacketStream, backend: Backend, request: ExecRequest, cursors: _Cursors
-) -> None:
+) -> list[tuple[bytes, bool]]:
     # Run the query and reply. Any failure becomes an ORA error on a healthy
     # connection — the Mirror must never desync, so even a backend that leaks a
     # native exception is caught and reported rather than dropping the wire.
+    # Returns the LOB contents the result's rows carry (row-major), which the thin
+    # loop drains as the client issues its TTI_LOBOPS reads (#413).
+    lobs: list[tuple[bytes, bool]] = []
     try:
         if len(request.bind_rows) > 1:
             # Array DML (executemany): apply each bind row and report the total
@@ -561,6 +574,10 @@ def _answer_query(
         # describe — the client expects one or the other, not both.
         if result.columns:
             rows = list(result.rows)
+            # A LOB result's rows carry locators; the client reads their content
+            # row-major over TTI_LOBOPS, so queue every cell's content in that
+            # order for the loop to drain (#413).
+            lobs = oci_lob_contents(result.columns, rows)
             # Send the first `fetch` rows now; park any remainder on a cursor for
             # the client's follow-up TTI_FETCH calls. A non-positive fetch (or a
             # result that fits) is delivered whole, ending with ORA-01403.
@@ -576,6 +593,7 @@ def _answer_query(
         else:
             response = encode_status(result.rowcount)
     stream.write_packet(TNS_DATA, response)
+    return lobs
 
 
 def _answer_fetch(

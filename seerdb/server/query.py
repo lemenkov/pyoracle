@@ -998,10 +998,15 @@ def _encode_temporal(value: datetime.date, data_type: int) -> bytes:
 def _encode_value(value: object, data_type: int) -> bytes:
     # A scalar column value as a DALC (1-byte length + data). NULL is the empty
     # DALC; text is UTF-8; a number is Oracle's base-100 NUMBER encoding; a
-    # datetime/date is encoded per the column's temporal type. Other types (LOB,
-    # …) carry their own wire formats and land with later work.
+    # datetime/date is encoded per the column's temporal type.
     if value is None:
         return bytes([0])
+    if data_type in _OCI_LOB_TYPES:
+        # A thin (seerdb / oracledb-thin) CLOB / BLOB value is delivered as an
+        # opaque locator, not inline; the content follows over TTI_LOBOPS. The
+        # session registers each cell's content row-major and answers the reads
+        # in order (#413).
+        return encode_lob_locator_thin()
     if isinstance(value, bool):
         # No 11g BOOLEAN type; a bool is a NUMBER 0/1 (bool is an int subclass,
         # so match it before the int branch would silently swallow it).
@@ -1250,6 +1255,28 @@ def oci_lob_contents(
             else:
                 out.append((bytes(value), False))
     return out
+
+
+# --- Thin (seerdb / oracledb-thin) LOB read (#413) ---
+# The thin client keeps the RXD LOB locator opaque and hands it straight back in a
+# TTI_LOBOPS READ (it asks for the whole LOB at once — amount 0x40000000 — so no
+# read loop). The Mirror therefore mints a fixed placeholder locator and answers
+# the reads from a row-major queue in order, matching the locators the row emits.
+# The RXD block is `ub4 num_bytes | DALC(locator)` (a NULL LOB is a lone 0x00).
+_THIN_LOB_LOCATOR = b'\x00seerdb-mirror-lob-locator-0000000000\x00'
+
+
+def encode_lob_locator_thin() -> bytes:
+    """The RXD value for a thin LOB column (#413): a minted opaque locator the
+    client echoes back over TTI_LOBOPS. The content follows in the read reply."""
+    return encode_sb4(len(_THIN_LOB_LOCATOR)) + _bytes_with_length(_THIN_LOB_LOCATOR)
+
+
+def encode_lob_read_response_thin(content: bytes) -> bytes:
+    """The thin TTI_LOBOPS READ reply (#413): the whole LOB content as LOB_DATA
+    then a success OER (the client reads the content, skips to the OER, and stops).
+    ``content`` is UTF-16BE for a CLOB, raw for a BLOB."""
+    return _oci_lob_data(content) + _encode_oer(1, 0, 0, b'')
 
 
 def _encode_oci_value(value: object, col: ColumnMeta) -> bytes:
