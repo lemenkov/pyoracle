@@ -34,7 +34,9 @@ from seerdb.common.tns import (
 from seerdb.common.tns_consts import (
     TNS_TYPE_BDOUBLE,
     TNS_TYPE_BFLOAT,
+    TNS_TYPE_BLOB,
     TNS_TYPE_CHAR,
+    TNS_TYPE_CLOB,
     TNS_TYPE_DATE,
     TNS_TYPE_LONG,
     TNS_TYPE_LONGRAW,
@@ -47,6 +49,7 @@ from seerdb.common.tns_consts import (
     TTI_DCB,
     TTI_FETCH,
     TTI_FUN,
+    TTI_LOB,
     TTI_OER,
     TTI_RPA,
     TTI_RXD,
@@ -422,11 +425,19 @@ _OCI_DCB_PREAMBLE_LEN = 23  # cursor-uuid preamble (zeroed; the client skips it)
 _OCI_DCB_COL_PRENAME = 48
 _OCI_DCB_COL_POSTNAME = 13
 # A char type carries a charset + form-of-use and sets the pre-name char flag.
-# LONG is a character type (charset + form-of-use, like VARCHAR2); LONG RAW is
-# binary. Both are streamed inline with no fixed width — a live 11g LONG /
-# LONG RAW describe reports data_length / max_size / max-row-size all 0 (#407).
-_OCI_CHAR_TYPES = frozenset({TNS_TYPE_VARCHAR, TNS_TYPE_CHAR, TNS_TYPE_LONG})
+# LONG (#407) and CLOB (#405) are character types (charset + form-of-use, like
+# VARCHAR2); LONG RAW and BLOB are binary. LONG / LONG RAW stream inline, LOBs
+# are fetched by locator — but neither has a fixed width, so a live 11g describe
+# reports data_length / max_size / max-row-size all 0 for both.
+_OCI_CHAR_TYPES = frozenset(
+    {TNS_TYPE_VARCHAR, TNS_TYPE_CHAR, TNS_TYPE_LONG, TNS_TYPE_CLOB}
+)
 _OCI_LONG_TYPES = frozenset({TNS_TYPE_LONG, TNS_TYPE_LONGRAW})
+_OCI_LOB_TYPES = frozenset({TNS_TYPE_CLOB, TNS_TYPE_BLOB})
+# Types with no fixed row width: excluded from the column max size and the
+# describe max-row-size (their value is a locator or an inline stream, not a
+# fixed-width buffer).
+_OCI_UNSIZED_TYPES = _OCI_LONG_TYPES | _OCI_LOB_TYPES
 _OCI_DCB_CHAR_FLAG = 0x80
 
 
@@ -443,10 +454,11 @@ def _encode_dcb_column_oci(col: ColumnMeta, position: int, first: bool) -> bytes
     if is_char:
         pre[30:32] = int(col.charset).to_bytes(2, 'little')
         pre[32] = col.csfrm
-    # A LONG / LONG RAW carries no fixed max size — the value is streamed inline
-    # and unbounded, so a live 11g describe leaves this zero (like the data length
-    # the backend already sets to 0). Only fixed-width columns fill it (#407).
-    if col.data_type not in _OCI_LONG_TYPES:
+    # A LONG / LONG RAW / LOB carries no fixed max size — the value is a locator or
+    # an inline stream, unbounded — so a live 11g describe leaves this zero (like
+    # the data length the backend already sets to 0). Only fixed-width columns fill
+    # it (#405, #407).
+    if col.data_type not in _OCI_UNSIZED_TYPES:
         pre[34:38] = _oci_ub4(col.max_size)
     pre[42] = col.null_ok
     pre[43] = len(col.name)
@@ -469,12 +481,12 @@ def encode_describe_oci(columns: list[ColumnMeta]) -> bytes:
     out += _oci_ub4(_OCI_DCB_PREAMBLE_LEN) + bytes(_OCI_DCB_PREAMBLE_LEN)
     # Max row size: the thick/OCI client allocates a row buffer of this many
     # bytes, so it must cover the widest row — a zero here overflows and crashes
-    # sqlplus (unlike the thin client, which skips the field). A LONG / LONG RAW
-    # is streamed inline and unbounded, so it contributes nothing to the fixed row
-    # buffer (its data_length is 0 anyway); it is excluded to match a live 11g
-    # describe, which reports max-row-size 0 for a LONG-only result (#407).
+    # sqlplus (unlike the thin client, which skips the field). A LONG / LONG RAW /
+    # LOB is a locator or an inline stream, unbounded, so it contributes nothing to
+    # the fixed row buffer (its data_length is 0 anyway); it is excluded to match a
+    # live 11g describe, which reports max-row-size 0 for such a result (#405, #407).
     out += _oci_ub4(
-        sum(c.data_length for c in columns if c.data_type not in _OCI_LONG_TYPES)
+        sum(c.data_length for c in columns if c.data_type not in _OCI_UNSIZED_TYPES)
     )
     out += _oci_ub4(len(columns))
     for position, col in enumerate(columns, start=1):
@@ -686,6 +698,38 @@ def encode_query_response_oci(
         )
     out += _oci_row_status(more=more)
     return bytes(out)
+
+
+# The execute reply for a LOB SELECT is a describe with NO row inline — sqlplus
+# sets up its LOB define from it and fetches the locator rows separately. It is
+# NOT the ordinary describe: instead of the 83-byte DCB tail that precedes inline
+# rows it carries a 33-byte describe tail (a describe-timestamp form, no DCB
+# marker), and its own execute status/OER. Both are reduced from a live 11g CLOB
+# describe with the instance-specific bytes (the timestamp, the SCN) zeroed (#405).
+_OCI_LOB_DESCRIBE_TAIL = bytes.fromhex(
+    '0007000000070000000000000000000000e81f0000000000000000000000000000'
+)
+_OCI_LOB_DESCRIBE_STATUS = bytes.fromhex(
+    '08060000000000000000000200000000000000000000000000000000000000000000'
+    '0004010000000f00010000000000000000000002000e000300000000000000000000'
+    '00000000000000000000000000000000110000010000003601000000000000000000'
+    '000000000020f6310a00000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000000000'
+    '00'
+)
+
+
+def encode_lob_describe_oci(columns: list[ColumnMeta]) -> bytes:
+    """The execute reply for a LOB (CLOB/BLOB) SELECT (#405): the TTI_DCB block +
+    a 33-byte describe tail + the LOB execute status — describe only, no row (the
+    locator rows come on the follow-up fetch). Matching this exactly is what makes
+    sqlplus set up its LOB define correctly and accept the locator row rather than
+    break (an ordinary describe, with the inline-row DCB tail, is rejected)."""
+    return (
+        bytes(encode_describe_oci(columns))
+        + _OCI_LOB_DESCRIBE_TAIL
+        + _OCI_LOB_DESCRIBE_STATUS
+    )
 
 
 # The reply for a statement that returns no rows — a PL/SQL block or DDL. Same
@@ -1020,12 +1064,215 @@ def encode_long_value_oci(value: object) -> bytes:
     return bytes(out) + _OCI_LONG_TRAILER
 
 
+# --- OCI LOB read round-trip (CLOB / BLOB SELECT, #405) ---
+# STATUS: WORKING — sqlplus displays CLOB and BLOB values over the Mirror
+# (single-packet and multi-packet content, session stays clean afterward). The
+# load-bearing pieces, verified against live 11g out-of-line CLOB captures:
+#   * the locator's size field is the content BYTE count (2× characters for a
+#     CLOB, raw bytes for a BLOB), big-endian — NOT the character count the first
+#     attempt used (the core unit bug);
+#   * the LOB execute reply is a describe with a distinct 33-byte tail + LOB
+#     status (encode_lob_describe_oci) and data_length 4000, NOT the ordinary
+#     inline-row DCB tail — THE UNLOCK; with the wrong describe sqlplus rejects
+#     even a byte-perfect locator row;
+#   * the locator row is fetched (_oci_lob_rxh) and ends with a non-terminator
+#     "more" OER (encode_lob_fetch_rows_oci); a following fetch draws the 1403;
+#   * the READ reply's LOB_DATA uses 0xFF-byte chunks (matches 11g).
+# The row locator template and the READ reply tail below come from ONE live 11g
+# out-of-line CLOB capture (2000 chars → 4000 content bytes), so they echo the
+# same opaque locator and stay mutually consistent.
+#
+# KNOWN LIMITATION (follow-up): the read returns the WHOLE LOB regardless of the
+# amount sqlplus requested in the TTI_LOBOPS call, so the client must read it in
+# one go — works when SET LONGCHUNKSIZE covers the content, but a default-settings
+# read (80-char chunks, looping) over-reads. Honoring the request's amount/offset
+# for a proper read loop is the next step.
+#
+# A LOB column is not sent inline: the row carries an opaque locator, and sqlplus
+# fetches the content with a separate TTI_LOBOPS READ (§14). The locator is opaque
+# to sqlplus (it echoes it back verbatim in the READ), so the Mirror mints it from
+# this one template, patching the content **byte** size (ub4 big-endian) that
+# sqlplus reads to size its READ — a CLOB counts UTF-16 bytes (2× characters), a
+# BLOB counts its raw bytes. The content never rides in the locator (out-of-line):
+# it returns in the READ reply's LOB_DATA. A ub4-LE num_bytes frames the locator
+# in the row; a NULL LOB is num_bytes 0, no READ.
+_OCI_LOB_ROW_VALUE = bytes.fromhex(
+    '6a0000006a00680001020c88000002000000010000005643350001b58f0001b58e00'
+    '020002036900020040b523000000000000000000000000005bfd6e00000000000000'
+    '000000000000000000000000000001b58e0040b519000000140500000000000fa000'
+    '00000000020040b523'
+)
+_OCI_LOB_ROW_SIZE_OFF = 97  # ub4 BE content byte size inside the row locator value
+# The TTI_LOBOPS READ reply tail after the LOB_DATA content: TTI_RPA (the echoed
+# locator + amount read) then the OER call status. sqlplus skips the RPA to the
+# OER, but the echoed locator's byte size and the amount are patched so they stay
+# consistent with the content delivered.
+_OCI_LOB_READ_TAIL = bytes.fromhex(
+    '0800680001020c88000002000000010000005643350001b58f0001b58e0002000203'
+    '6900020040b523000000000000000000000000005bfd6e0000000000000000000000'
+    '0000000000000000000001b58e0040b519000000140500000000000fa00000000000'
+    '020040b523d007000000000000040100000011000101000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000130000010000'
+    '003601000000000000000000000000000020f6310a00000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000'
+)
+_OCI_LOB_TAIL_SIZE_OFF = 93  # ub4 BE byte size in the echoed locator
+_OCI_LOB_TAIL_AMOUNT_OFF = 107  # ub4 LE amount read (characters for CLOB / bytes)
+_OCI_LOB_CHUNK = 0xFF  # content bytes per 11g LOB_DATA chunk (matches live 11g)
+
+
+def _oci_lob_byte_size(value: object, is_clob: bool) -> int:
+    # The LOB content byte count sqlplus reads from the locator: a CLOB is UTF-16
+    # on the wire (2 bytes per character), a BLOB is its raw bytes.
+    if is_clob:
+        return len(str(value)) * 2
+    if isinstance(value, (bytes, bytearray)):
+        return len(value)
+    return len(str(value))
+
+
+def encode_lob_locator_oci(value: object, is_clob: bool) -> bytes:
+    """The RXD value for a LOB column (#405): a minted opaque locator carrying the
+    content **byte** size so sqlplus issues a TTI_LOBOPS READ. NULL is a zero
+    num_bytes and draws no read."""
+    if value is None:
+        return bytes([0])
+    byte_size = _oci_lob_byte_size(value, is_clob)
+    loc = bytearray(_OCI_LOB_ROW_VALUE)
+    loc[_OCI_LOB_ROW_SIZE_OFF : _OCI_LOB_ROW_SIZE_OFF + 4] = byte_size.to_bytes(
+        4, 'big'
+    )
+    return bytes(loc)
+
+
+def _oci_lob_data(content: bytes) -> bytes:
+    # TTI_LOB content: token + single-byte-length chunks (the 11g form). Content up
+    # to one chunk is a plain <len><data>; larger content uses the 0xFE chunked
+    # form, a run of <ub1 len><bytes> terminated by a zero-length chunk.
+    if len(content) <= _OCI_LOB_CHUNK:
+        return bytes([TTI_LOB, len(content)]) + content
+    out = bytearray([TTI_LOB, 0xFE])
+    for start in range(0, len(content), _OCI_LOB_CHUNK):
+        chunk = content[start : start + _OCI_LOB_CHUNK]
+        out += bytes([len(chunk)]) + chunk
+    out += bytes([0])  # zero-length chunk terminates the run
+    return bytes(out)
+
+
+# A TTI_LOBOPS READ request carries the slice sqlplus wants: a 1-based source
+# offset and an amount, both counts (characters for a CLOB, bytes for a BLOB),
+# at these fixed ub8-LE offsets in the OCI request. sqlplus loops over them (in
+# SET LONGCHUNKSIZE-sized steps) until a read returns fewer than it asked for.
+_OCI_LOBOPS_OFFSET_OFF = 91
+_OCI_LOBOPS_AMOUNT_OFF = 269
+
+
+def parse_lobops_read(body: bytes) -> tuple[int, int]:
+    """Extract ``(source_offset, amount)`` from an OCI TTI_LOBOPS READ (#405) —
+    both 1-based counts (characters for a CLOB, bytes for a BLOB). A malformed /
+    short request falls back to reading the whole LOB from the start."""
+    if len(body) < _OCI_LOBOPS_AMOUNT_OFF + 8:
+        return 1, 2**31
+    offset = int.from_bytes(
+        body[_OCI_LOBOPS_OFFSET_OFF : _OCI_LOBOPS_OFFSET_OFF + 8], 'little'
+    )
+    amount = int.from_bytes(
+        body[_OCI_LOBOPS_AMOUNT_OFF : _OCI_LOBOPS_AMOUNT_OFF + 8], 'little'
+    )
+    return max(offset, 1), amount
+
+
+def encode_lob_read_response_oci(
+    content: bytes, amount: int, total_bytes: int | None = None
+) -> bytes:
+    """The TTI_LOBOPS READ reply (#405): the LOB content slice (LOB_DATA) then the
+    captured TTI_RPA + OER tail. ``content`` is the UTF-16BE (CLOB) / raw (BLOB)
+    bytes read this call; ``amount`` is that read's count (characters for a CLOB,
+    bytes for a BLOB); ``total_bytes`` is the whole LOB's byte size the echoed
+    locator reports (defaults to this slice, for a single read-it-all call)."""
+    if total_bytes is None:
+        total_bytes = len(content)
+    tail = bytearray(_OCI_LOB_READ_TAIL)
+    tail[_OCI_LOB_TAIL_SIZE_OFF : _OCI_LOB_TAIL_SIZE_OFF + 4] = total_bytes.to_bytes(
+        4, 'big'
+    )
+    tail[_OCI_LOB_TAIL_AMOUNT_OFF : _OCI_LOB_TAIL_AMOUNT_OFF + 4] = amount.to_bytes(
+        4, 'little'
+    )
+    return _oci_lob_data(content) + bytes(tail)
+
+
+def oci_lob_contents(
+    columns: list[ColumnMeta], rows: list[tuple]
+) -> list[tuple[bytes, bool]]:
+    """The (wire-content, is_clob) of each non-NULL LOB cell, row-major (#405).
+
+    The order matches the locators :func:`_encode_oci_value` emits, so the session
+    reads this queue in sequence as sqlplus issues TTI_LOBOPS calls. CLOB content
+    is UTF-16BE (``is_clob`` True — offsets/amounts count characters, 2 bytes
+    each); BLOB content is raw bytes (counts bytes). The session slices this per
+    the offset/amount each read requests."""
+    out: list[tuple[bytes, bool]] = []
+    for row in rows:
+        for value, col in zip(row, columns):
+            if col.data_type not in _OCI_LOB_TYPES or value is None:
+                continue
+            if col.data_type == TNS_TYPE_CLOB:
+                out.append((str(value).encode('utf-16-be'), True))
+            else:
+                out.append((bytes(value), False))
+    return out
+
+
 def _encode_oci_value(value: object, col: ColumnMeta) -> bytes:
-    # A row value in the OCI dialect: a LONG / LONG RAW column streams inline via
-    # the chunked form (#407); everything else is the ordinary inline DALC value.
+    # A row value in the OCI dialect: a LOB column emits its locator (content comes
+    # later over TTI_LOBOPS, #405); a LONG / LONG RAW column streams inline via the
+    # chunked form (#407); everything else is the ordinary inline DALC value.
+    if col.data_type in _OCI_LOB_TYPES:
+        return encode_lob_locator_oci(value, col.data_type == TNS_TYPE_CLOB)
     if col.data_type in _OCI_LONG_TYPES:
         return encode_long_value_oci(value)
     return _encode_value(value, col.data_type)
+
+
+# The OER status that trails a LOB locator row on the fetch — NOT the 1403
+# terminator: the LOB content still has to come over TTI_LOBOPS, so the cursor is
+# not drained. Captured from a live 11g out-of-line CLOB fetch; a following fetch
+# (after the LOBOPS reads) draws the 1403 terminator (#405).
+_OCI_LOB_FETCH_STATUS = bytes.fromhex(
+    '04010000001000010100000000000000000002000000030000000000000000000000'
+    '00000000000000000000000000000012000001000000360100000000000000000000'
+    '0000000020f6310a0000000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000000000'
+)
+
+
+# The row header that leads a LOB locator fetch differs from the ordinary fetch
+# RXH — a live 11g LOB fetch carries this fixed frame (verified constant across
+# CLOB sizes). Using the ordinary RXH makes sqlplus break on the locator row.
+_OCI_LOB_RXH_NONZERO = {0: 0x06, 1: 0x01, 2: 0x22, 3: 0xFD, 4: 0x01, 10: 0x01}
+
+
+def _oci_lob_rxh() -> bytes:
+    rxh = bytearray(_OCI_RXH_LEN)
+    for off, value in _OCI_LOB_RXH_NONZERO.items():
+        rxh[off] = value
+    return bytes(rxh)
+
+
+def encode_lob_fetch_rows_oci(columns: list[ColumnMeta], rows: list[tuple]) -> bytes:
+    """The fetch reply carrying LOB locator row(s) (#405): a row header + the rows,
+    then a non-terminator OER status. The LOB content still comes over TTI_LOBOPS,
+    so the cursor is not yet drained; a following fetch draws the 1403 terminator."""
+    out = bytearray(_oci_lob_rxh())
+    for row in rows:
+        if len(row) != len(columns):
+            raise InterfaceError('row width does not match the column count')
+        out += bytes([TTI_RXD]) + b''.join(
+            _encode_oci_value(v, col) for v, col in zip(row, columns)
+        )
+    return bytes(out) + _OCI_LOB_FETCH_STATUS
 
 
 def encode_rows(

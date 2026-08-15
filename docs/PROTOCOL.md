@@ -1134,6 +1134,40 @@ other DDL verbs and the non-`TABLE` object variants (`Index created.`,
 classifier recognises as neither DML nor DDL still get the generic `08 06 00`
 171-byte `encode_status_oci` tail.
 
+**LOB read round-trip (the Mirror, OCI dialect, #405).** A `SELECT` of a CLOB /
+BLOB column doesn't return the value inline: the row carries an opaque **locator**
+and sqlplus fetches the content with follow-up `TTI_LOBOPS` reads (§11.9, §14).
+The full server side, reduced from live 11g out-of-line CLOB captures:
+
+1. **Execute → LOB describe.** The reply is *not* an ordinary describe. The LOB
+   column reports **`data_length` 4000** and the describe carries a distinct
+   **33-byte tail** (a describe-timestamp form, *without* the `06 01 22` DCB
+   marker) followed by a LOB execute status — `encode_lob_describe_oci`, not the
+   inline-row `encode_query_response_oci`. This is load-bearing: with the ordinary
+   describe sqlplus sets up its LOB define wrong and **breaks on the locator row**
+   even when that row is byte-identical to Oracle's.
+2. **Fetch → locator row.** Delivered with the LOB row header (`_oci_lob_rxh`,
+   `06 01 22 fd 01 …`) and ending with a **non-terminator "more" OER**
+   (`encode_lob_fetch_rows_oci`) — the content still has to come over `TTI_LOBOPS`,
+   so the cursor is not drained; a *following* fetch draws the 1403 terminator.
+   The minted locator's **size field is the content BYTE count** (2× characters
+   for a CLOB — UTF-16 on the wire — raw bytes for a BLOB), big-endian.
+3. **`TTI_LOBOPS` READ → LOB_DATA.** sqlplus loops over the LOB in
+   `SET LONGCHUNKSIZE`-sized slices, each read carrying a 1-based **source offset**
+   (`ub8`-LE at request offset 91) and **amount** (`ub8`-LE at offset 269), both
+   counts (characters for a CLOB, bytes for a BLOB). The Mirror
+   (`parse_lobops_read`) serves exactly that slice as `LOB_DATA` (`0e` + `0xFF`-byte
+   chunks) + the echoed-locator RPA + OER; a read returning fewer units than
+   requested ends the loop. The row locator and the READ reply come from one
+   capture, so they echo the same opaque locator and stay consistent.
+
+Verified live on 11g over the SQLite-backed Mirror: CLOB and BLOB values display
+under default sqlplus settings (the 80-char read loop) and with a large
+`LONGCHUNKSIZE` (single read, multi-packet), single- and multi-row, session clean
+afterward. The demo backend types a column as a CLOB / BLOB from its **declared**
+type (via `PRAGMA table_info`), not its value size, so a plain VARCHAR2 / RAW
+value stays inline (thin clients have no Mirror-side LOB emit yet).
+
 ### 6.1 Row Header (TTI_RXH)
 
 Precedes row data in SELECT results. All numeric fields use Oracle's
