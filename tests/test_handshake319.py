@@ -129,5 +129,54 @@ class TestAcceptParse(unittest.TestCase):
         self.assertEqual(_parse_accept_sdu(313, self._ACCEPT, 0x2000), 0x2000)
 
 
+class TestShortAcceptParse(unittest.TestCase):
+    # A pre-315 server (e.g. 11g) replies with a 32-byte accept that ends right
+    # after the reconnect-address fields — the large-SDU (offset 24) and
+    # end-of-response flags2 (offset 33) fields only exist in the longer accepts
+    # newer servers send. Parsing the short form must not read past its end.
+    # (#439 — the go-ora accept_packet short-packet scenario, reused as fact.)
+
+    @staticmethod
+    def _short_accept_body() -> bytes:
+        # The 24-byte accept body (the 8-byte TNS header handle_login strips):
+        # version 314, options, SDU 8192, TDU 32767, NT chars, data len 0,
+        # data offset 32; the tail is zero, exactly as the wire short form.
+        packet = bytearray(32)
+        struct.pack_into('>H', packet, 0, 32)  # packet length
+        packet[4] = 2  # TNS_ACCEPT
+        struct.pack_into('>H', packet, 8, 314)  # protocol version
+        struct.pack_into('>H', packet, 10, 0x0801)  # negotiated options
+        struct.pack_into('>H', packet, 12, 8192)  # session data unit
+        struct.pack_into('>H', packet, 14, 32767)  # transport data unit
+        struct.pack_into('>H', packet, 16, 0x7F08)  # NT characteristics
+        struct.pack_into('>H', packet, 18, 0)  # accept data length
+        struct.pack_into('>H', packet, 20, 32)  # accept data offset
+        return bytes(packet[8:])  # body, header stripped
+
+    def test_version_and_legacy_sdu(self):
+        body = self._short_accept_body()
+        (ver,) = struct.unpack('>H', body[:2])
+        self.assertEqual(ver, 314)
+        # 314 < 315: the large-SDU field (offset 24) is absent, so the legacy SDU
+        # the caller already read is kept — and no read past the 24-byte body.
+        self.assertEqual(_parse_accept_sdu(ver, body, 8192), 8192)
+
+    def test_short_accept_disables_eor(self):
+        # The flags2 field (offset 33) does not exist in the short form, so EOR
+        # negotiation must fall back to off rather than overrun.
+        body = self._short_accept_body()
+        self.assertFalse(_parse_accept_eor(314, body))
+
+    def test_short_accept_does_not_advertise_ano(self):
+        # handle_login reads ACFL0/ACFL1 at body offsets 14/15 for the ANO gate;
+        # on the short accept those bytes are zero, so no ANO negotiation is
+        # triggered and the reads stay in bounds.
+        body = self._short_accept_body()
+        self.assertGreater(len(body), 15)
+        acfl0 = body[14]
+        acfl1 = body[15]
+        self.assertFalse((acfl0 & 0x01) and not (acfl0 & 0x04) and not (acfl1 & 0x08))
+
+
 if __name__ == '__main__':
     unittest.main()
