@@ -160,7 +160,13 @@ class AsyncOracleConnect:
         wallet_password: str | None = None,
         config_dir: str | None = None,
         dsn: str | None = None,
+        negotiation_cache: bool = False,
     ):
+        # Negotiation cache (#438): opt-in reconnect optimization, sharing the
+        # process-level cache with the sync connection.
+        self.negotiation_cache = negotiation_cache
+        self._used_nego_cache = False
+        self._skip_nego_cache = False
         self.host = host
         self.port = port
         # Proxy auth (#126): split proxy_user[schema] (see OracleConnect).
@@ -222,6 +228,7 @@ class AsyncOracleConnect:
         self.session_id = None
         # Negotiated TTC field version; see OracleConnect for the full note.
         self.field_version = field_version
+        self._field_version_requested = field_version  # for the nego-cache retry
         self.cursors: dict[int, int] = {}
         # Cursor cache — same shape as the sync `OracleConnect`. DML only.
         # Keyed on (SQL, bind OAC signature); see OracleConnect for why the
@@ -339,13 +346,45 @@ class AsyncOracleConnect:
         Data = encode_dictionary(self._make_dict(DictionaryType.login))
         await self.send(TNS_CONNECT, Data)
 
+    def _nego_cache_key(self) -> tuple[str, int, str]:
+        return (self.host, self.port, self.service_name or self.sid or '')
+
     async def connect(self) -> bool:
         """Open the TCP (optionally TLS) connection and run the
         TNS / TTC / O5LOGON handshake."""
         self._redirects = 0
         await self._open_transport()
-        await self.handle_login()
+        try:
+            result = await self.handle_login()
+        except OperationalError:
+            # Stale negotiation cache (#438): invalidate and retry with a full
+            # negotiation. Mirror of OracleConnect.connect.
+            if self._used_nego_cache:
+                await self._retry_without_negotiation_cache()
+                return True
+            raise
+        if result not in (0, None) and self._used_nego_cache:
+            await self._retry_without_negotiation_cache()
         return True
+
+    async def _retry_without_negotiation_cache(self) -> None:
+        from seerdb.client.connection import _nego_cache_del
+
+        _nego_cache_del(self._nego_cache_key())
+        self._used_nego_cache = False
+        self._skip_nego_cache = True
+        await self.disconnect()
+        self.seq = 1
+        self._pending = b''
+        self._in_break = False
+        self.conn_state = CONN_STATE_DISCONNECTED
+        self.field_version = self._field_version_requested
+        self._dialect = None
+        self._ano = None
+        self.conn_key = None
+        self._o3_phase = 0
+        await self._open_transport()
+        await self.handle_login()
 
     def _ssl_kwarg(self):
         """Resolve `self.ssl` into something `asyncio.open_connection`
@@ -573,6 +612,16 @@ class AsyncOracleConnect:
                     Acfl1 = Packet[15] if len(Packet) > 15 else 0
                     if (Acfl0 & 0x01) and not (Acfl0 & 0x04) and not (Acfl1 & 0x08):
                         await self._negotiate_ano()
+                    # Negotiation cache (#438): skip the bare PRO probe on a
+                    # reconnect to a target with a cached fast-auth field version.
+                    if self.negotiation_cache and not self._skip_nego_cache:
+                        from seerdb.client.connection import _nego_cache_get
+
+                        Cached = _nego_cache_get(self._nego_cache_key())
+                        if Cached is not None and Cached > FIELD_VERSION_23_1:
+                            self.field_version = Cached
+                            self._used_nego_cache = True
+                            return await self._fast_auth_login()
                     Data = encode_dictionary(self._make_dict(DictionaryType.pro))
                     await self.send(TNS_DATA, Data)
                     continue
@@ -890,6 +939,10 @@ class AsyncOracleConnect:
                 self.server_version = Ver
                 self.session_id = SessId
                 self.conn_state = CONN_STATE_AUTHENTICATED
+                if self.negotiation_cache and self.field_version > FIELD_VERSION_23_1:
+                    from seerdb.client.connection import _nego_cache_put
+
+                    _nego_cache_put(self._nego_cache_key(), self.field_version)
                 return 0
             await self.disconnect()
             return 1
