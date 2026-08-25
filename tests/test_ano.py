@@ -81,14 +81,59 @@ class TestServices(unittest.TestCase):
         (_t, Ids) = Parsed['subpackets'][1]
         (_t, Flag) = Parsed['subpackets'][2]
         self.assertEqual(Version, ano.ANO_VERSION)
-        self.assertEqual(list(Ids), [1, 8, 10, 6, 2, 15, 16, 17])
+        # The offered list is prefixed with the null algorithm (ID 0).
+        self.assertEqual(list(Ids), [0, 1, 8, 10, 6, 2, 15, 16, 17])
         self.assertEqual(Flag, 1)
 
     def test_data_integrity_service_offers_expected_ids(self):
         Svc = ano.data_integrity_service(['SHA256', 'SHA512', 'SHA384', 'SHA1', 'MD5'])
         Parsed = ano.decode_ano(ano.encode_ano([Svc]))['services'][0]
         (_t, Ids) = Parsed['subpackets'][1]
-        self.assertEqual(list(Ids), [5, 4, 6, 3, 1])
+        # Prefixed with the null algorithm (ID 0).
+        self.assertEqual(list(Ids), [0, 5, 4, 6, 3, 1])
+
+
+class TestGoOraReference(unittest.TestCase):
+    # The exact ANO negotiation container a working go-ora client sends to a
+    # 26ai server that requires AES/SHA (captured on the wire). Our encoder must
+    # reproduce it byte-for-byte — the definitive validation of the request side.
+    GOORA_REQUEST = bytes.fromhex(
+        'deadbeef00971700000000040000040003000000000004000517000000000800'
+        '010000101c66ec28ea00120001deadbeef0003000000040004000100020003000'
+        '1000300000000000400051700000000020003e0e100020006fcff000200030000'
+        '00000004000517000000000900010001080a06020f10110001000201000300020'
+        '0000000000400051700000000060001000103040506'.replace(' ', '')
+    )
+
+    def test_encoder_matches_captured_client(self):
+        Ours = ano.encode_ano(
+            [
+                ano.supervisor_service(),
+                ano.auth_service(),
+                ano.encryption_service(
+                    [
+                        'RC4_40',
+                        'RC4_56',
+                        'RC4_128',
+                        'RC4_256',
+                        'DES56C',
+                        'AES128',
+                        'AES192',
+                        'AES256',
+                    ]
+                ),
+                ano.data_integrity_service(
+                    ['MD5', 'SHA1', 'SHA512', 'SHA256', 'SHA384']
+                ),
+            ]
+        )
+        self.assertEqual(Ours, self.GOORA_REQUEST)
+
+    def test_auth_service_markers(self):
+        Parsed = ano.decode_ano(ano.encode_ano([ano.auth_service()]))['services'][0]
+        self.assertEqual(Parsed['type'], ano.SERVICE_AUTH)
+        self.assertEqual(Parsed['subpackets'][1], (ano.SP_UB2, ano.AUTH_MARKER))
+        self.assertEqual(Parsed['subpackets'][2], (ano.SP_STATUS, ano.AUTH_STATUS_NONE))
 
 
 class TestContainer(unittest.TestCase):
