@@ -31,6 +31,12 @@ What works:
 - TNS transport layer (packet framing, fragmentation, SDU negotiation)
 - TTC presentation layer (token encoding/decoding)
 - Authentication handshake (O3LOGON, O5LOGON with 128/192/256-bit keys)
+- Token-based authentication: pass `access_token=` instead of a password to
+  authenticate with an OAuth2 bearer JWT or an OCI IAM token (for Autonomous
+  Database). Accepts a token `str`, a `(token, private_key_pem)` tuple (IAM
+  signs the request header with RSA-SHA256), or a zero-arg callable returning
+  either — so a short-lived token can be refreshed per connection. Sync and
+  async. Needs the `token` extra — `pip install seerdb[token]`
 - Session setup and teardown
 - SQL statement execution, full result-set decoding (DCB / RXH / RXD / BVC)
 - DB-API 2.0 surface: `seerdb.connect()`, `Connection.cursor()`,
@@ -106,6 +112,17 @@ What works:
   `tnsnames.ora` / `sqlnet.ora` (`SSL_SERVER_DN_MATCH` is enforced after
   the handshake). Needs the `wallet` extra — `pip install seerdb[wallet]`
   — which pulls in `cryptography` for the X.509 / PKCS#12 decode
+- Native network encryption (Advanced Networking / ANO): when the server sets
+  `SQLNET.ENCRYPTION_SERVER` and/or `SQLNET.CRYPTO_CHECKSUM_SERVER`, the
+  connection negotiates a cipher and data-integrity algorithm at connect time
+  and transparently encrypts every packet — AES (128 / 192 / 256-bit CBC) plus
+  an SHA-2 MAC — using pycryptodome, no extra dependency. Negotiated and
+  validated live against a 26ai server that *requires* AES256 + SHA256. Sync
+  and async
+- Negotiation cache (opt-in): pass `negotiation_cache=True` to remember a
+  server's field-version protocol negotiation (keyed by host / port / service)
+  so reconnects to the same target skip the bare-protocol probe round trip;
+  a stale entry is detected and transparently retried from scratch
 - DML rowcount and full server error messages: `cursor.rowcount`
   reflects the rows affected by `INSERT` / `UPDATE` / `DELETE` (read
   from the OER block); `DatabaseError(code=NNN)` carries the full
@@ -216,11 +233,16 @@ the 12c+ protocol the 21c tier exercises.
 | **Result handling** — large-result `TTI_FETCH` drain, server-side scrollable cursors (`scroll()`, with a client-buffered fallback), `rowfactory`, `lastrowid` | ✅ |
 | **Arrow / DataFrame fetch** — `cursor.fetch_df_all` / `fetch_df_batches` (pyarrow `Table` / record batches) | ✅ |
 | **SODA** — document store over `DBMS_SODA`: collections, documents, query-by-example (with streaming), insert / read / upsert / update / delete / bulk, indexing + data guide (18c+) | ✅ |
-| **Connection** — pool (warm sessions + idle health-check), statement cache, `changepassword`, TLS | ✅ |
-| **Authentication** — O3LOGON (8i / 9i) and O5LOGON (10g+, 128 / 192 / 256-bit) | ✅ |
+| **Connection** — pool (warm sessions + idle health-check), statement cache, `changepassword`, TLS, wallet mTLS, DRCP (`cclass` / `purity`), proxy auth, an opt-in negotiation cache that skips a round trip on fast-auth reconnects | ✅ |
+| **Authentication** — O3LOGON (8i / 9i) and O5LOGON (10g+, 128 / 192 / 256-bit); token-based auth — OAuth2 (bare JWT) and OCI IAM (signed) for Autonomous Database | ✅ |
+| **Native network encryption** — Advanced Networking (ANO): AES-CBC encryption + SHA-2 data-integrity negotiated at connect, for a server with `SQLNET.ENCRYPTION_SERVER` / `CRYPTO_CHECKSUM_SERVER` set | ✅ |
+| **Advanced Queuing (AQ)** — enqueue / dequeue over `DBMS_AQ`, including JSON payloads | ✅ |
+| **Implicit result sets** — `DBMS_SQL.RETURN_RESULT` (`getimplicitresults`) | ✅ |
+| **Two-phase commit / XA** — `tpc_begin` / `tpc_prepare` / `tpc_commit` / `tpc_rollback` with an `Xid` | ✅ |
+| **Request pipelining** — `create_pipeline()` batches operations into one round trip (23ai) | ✅ |
 | **Async** — full `asyncio` API (connection, cursor, pool) at parity with the sync API | ✅ |
 | **Character sets** — AL32UTF8 and others; national-charset (`DB_TYPE_NVARCHAR` / `NCHAR`) binds | ✅ |
-| Advanced Queuing (AQ), Continuous Query Notification (CQN), implicit results, DRCP, sharding, XA / distributed transactions | ❌ not implemented |
+| Continuous Query Notification (CQN), sharding keys | ❌ not implemented (cloud / testbed-blocked) |
 
 Most of the above works across every supported server version; a few features
 are inherently version-scoped: the **23ai types** need 23ai (`VECTOR` /
@@ -275,13 +297,26 @@ empty-string / empty-bytes bind stores — and reads back — as `None`.)
 
 ## Requirements
 
+Core (installed automatically):
+
 - Python >= 3.10
 - [pycryptodome](https://pypi.org/project/pycryptodome/) — login/auth crypto
+  (O3LOGON / O5LOGON) and the AES + SHA-2 of native network encryption (ANO)
 - [tzdata](https://pypi.org/project/tzdata/) — IANA time-zone database for
   named-region `TIMESTAMP WITH TIME ZONE` values (a no-op where the OS ships
   system zoneinfo)
 - [pyarrow](https://pypi.org/project/pyarrow/) — backs the Arrow / DataFrame
   bulk fetch (`cursor.fetch_df_all` / `fetch_df_batches`)
+
+Optional — [cryptography](https://pypi.org/project/cryptography/) is the only
+extra dependency, needed by two features that pycryptodome can't cover. It is
+imported lazily, so the core install stays lean and `import seerdb` works without
+it; install the matching extra only if you use the feature:
+
+- `pip install "seerdb[token]"` — **token-based auth** (`access_token=`): OAuth2 /
+  OCI IAM sign the auth header with RSA-SHA256.
+- `pip install "seerdb[wallet]"` — **wallet mutual TLS**: decoding an Oracle / ADB
+  wallet (X.509 / PKCS#12).
 
 ## Installation
 
