@@ -169,5 +169,91 @@ class TestErrors(unittest.TestCase):
             ano.decode_ano(b'\x00\x01')
 
 
+# RFC 2409 Second Oakley Group (1024-bit MODP), generator 2 — a realistic stand-in
+# for the DH parameters an Oracle server sends (which vary but are this magnitude).
+_MODP_1024 = bytes.fromhex(
+    'FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD1'
+    '29024E088A67CC74020BBEA63B139B22514A08798E3404DD'
+    'EF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245'
+    'E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7ED'
+    'EE386BFB5A899FA5AE9F24117C4B1FE649286651ECE65381'
+    'FFFFFFFFFFFFFFFF'
+)
+_GEN_2 = b'\x02'
+
+
+class TestDiffieHellman(unittest.TestCase):
+    def test_both_sides_agree_on_the_shared_secret(self):
+        P = int.from_bytes(_MODP_1024, 'big')
+        ByteLen = len(_MODP_1024)  # 128
+        # Server picks a private key and publishes g^a mod p.
+        ServerPriv = (2**900 + 7).to_bytes(ByteLen, 'big')
+        ServerPublic = pow(2, int.from_bytes(ServerPriv, 'big'), P).to_bytes(
+            ByteLen, 'big'
+        )
+        # Client runs its half against the server's public key.
+        ClientPriv = (2**777 + 99).to_bytes(ByteLen, 'big')
+        Result = ano.compute_dh(_GEN_2, _MODP_1024, ServerPublic, Private=ClientPriv)
+        # The DH invariant: (g^a)^b == (g^b)^a.
+        ServerShared = pow(
+            int.from_bytes(Result.public_key, 'big'),
+            int.from_bytes(ServerPriv, 'big'),
+            P,
+        ).to_bytes(ByteLen, 'big')
+        self.assertEqual(Result.session_key, ServerShared)
+
+    def test_key_lengths_and_iv(self):
+        ServerPublic = pow(2, 123456789, int.from_bytes(_MODP_1024, 'big')).to_bytes(
+            len(_MODP_1024), 'big'
+        )
+        Result = ano.compute_dh(
+            _GEN_2, _MODP_1024, ServerPublic, Private=(2**500).to_bytes(128, 'big')
+        )
+        # Keys are left-padded to the prime's byte length; IV is session_key[32:64].
+        self.assertEqual(len(Result.public_key), 128)
+        self.assertEqual(len(Result.session_key), 128)
+        self.assertEqual(len(Result.iv), 32)
+        self.assertEqual(Result.iv, Result.session_key[0x20:0x40])
+
+    def test_random_private_key_still_agrees(self):
+        # Omitting Private draws a random one; agreement must still hold.
+        P = int.from_bytes(_MODP_1024, 'big')
+        ServerPriv = 424242
+        ServerPublic = pow(2, ServerPriv, P).to_bytes(128, 'big')
+        Result = ano.compute_dh(_GEN_2, _MODP_1024, ServerPublic)
+        ServerShared = pow(
+            int.from_bytes(Result.public_key, 'big'), ServerPriv, P
+        ).to_bytes(128, 'big')
+        self.assertEqual(Result.session_key, ServerShared)
+
+    def test_extract_dh_params_from_service_reply(self):
+        # A data-integrity reply carrying the 8-subpacket DH tail.
+        Svc = ano.encode_service(
+            ano.SERVICE_DATA_INTEGRITY,
+            [
+                ano.sp_version(),
+                ano.sp_ub1(5),  # chosen integrity algo
+                ano.sp_ub2(1024),  # generator bit-length
+                ano.sp_ub2(1024),  # prime bit-length
+                ano.sp_bytes(_GEN_2),
+                ano.sp_bytes(_MODP_1024),
+                ano.sp_bytes(b'\xab' * 128),  # server public key
+                ano.sp_bytes(b'\x01' * 16),  # old IV
+            ],
+        )
+        Service = ano.decode_ano(ano.encode_ano([Svc]))['services'][0]
+        (Gen, Prime, ServerPub, OldIv) = ano.extract_dh_params(Service)
+        self.assertEqual(Gen, _GEN_2)
+        self.assertEqual(Prime, _MODP_1024)
+        self.assertEqual(ServerPub, b'\xab' * 128)
+        self.assertEqual(OldIv, b'\x01' * 16)
+
+    def test_extract_requires_full_dh_tail(self):
+        Svc = ano.data_integrity_service(['SHA256'])  # only 2 sub-packets
+        Service = ano.decode_ano(ano.encode_ano([Svc]))['services'][0]
+        with self.assertRaises(ano.AnoError):
+            ano.extract_dh_params(Service)
+
+
 if __name__ == '__main__':
     unittest.main()

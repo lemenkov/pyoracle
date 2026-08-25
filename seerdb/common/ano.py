@@ -33,6 +33,8 @@ Sultan); they are protocol facts the Oracle server enforces on the wire.
 """
 
 import struct
+from dataclasses import dataclass
+from secrets import token_bytes
 
 ANO_MAGIC = 0xDEADBEEF
 # The "version" advertised in the container header and echoed per service.
@@ -256,3 +258,73 @@ def decode_ano(Data: bytes) -> dict:
             SubPackets.append((Type, Value))
         Services.append({'type': SType, 'error': SErr, 'subpackets': SubPackets})
     return {'version': Version, 'services': Services}
+
+
+# --------------------------------------------------------------------------- #
+# Diffie-Hellman key exchange (carried in the data-integrity service).
+# --------------------------------------------------------------------------- #
+#
+# When the server's data-integrity service reply has 8 sub-packets, the tail
+# carries a DH exchange: after (version, algo-id) come the generator bit-length
+# and prime bit-length (UB2), then the generator, the prime, the server's public
+# key, and the old IV (all `bytes`). The client picks a random private key of the
+# same byte length, and computes:
+#
+#     public_key = generator ** private       (mod prime)   -> sent back
+#     session_key = server_public ** private   (mod prime)   -> the shared secret
+#     iv = session_key[32:64]
+#
+# The session key then folds into the crypto/MAC key (a later phase).
+
+
+@dataclass
+class DiffieHellman:
+    """The result of the client-side DH computation."""
+
+    # The client public key to send back, left-padded to the prime's byte length.
+    public_key: bytes
+    # The shared secret — the negotiation session key.
+    session_key: bytes
+    # The initial IV: bytes 32..64 of the session key.
+    iv: bytes
+
+
+def extract_dh_params(Service: dict) -> tuple[bytes, bytes, bytes, bytes]:
+    """Pull ``(generator, prime, server_public, old_iv)`` from a decoded
+    data-integrity service that carried a DH exchange (8 sub-packets)."""
+    Sub = Service['subpackets']
+    if len(Sub) < 8:
+        raise AnoError('data-integrity service carries no DH exchange')
+    # Sub = version, algo-id, gen-bitlen, prime-bitlen, gen, prime, server-pub, iv.
+    return (Sub[4][1], Sub[5][1], Sub[6][1], Sub[7][1])
+
+
+def compute_dh(
+    Generator: bytes,
+    Prime: bytes,
+    ServerPublic: bytes,
+    Private: bytes | None = None,
+) -> DiffieHellman:
+    """Run the client half of the DH exchange.
+
+    ``Private`` (the client's random secret, one prime-length block) is generated
+    when omitted; pass it only for deterministic tests. Keys are left-padded to
+    the prime's byte length, matching what the server expects on the wire.
+    """
+    ByteLen = len(Prime)
+    if ByteLen == 0:
+        raise AnoError('empty DH prime')
+    G = int.from_bytes(Generator, 'big')
+    P = int.from_bytes(Prime, 'big')
+    if Private is None:
+        Private = token_bytes(ByteLen)
+    Priv = int.from_bytes(Private, 'big')
+    ServerPub = int.from_bytes(ServerPublic, 'big')
+    Public = pow(G, Priv, P)
+    Shared = pow(ServerPub, Priv, P)
+    SessionKey = Shared.to_bytes(ByteLen, 'big')
+    return DiffieHellman(
+        public_key=Public.to_bytes(ByteLen, 'big'),
+        session_key=SessionKey,
+        iv=SessionKey[0x20:0x40],
+    )
