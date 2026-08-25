@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2019 Peter Lemenkov <lemenkov@gmail.com>
+# SPDX-License-Identifier: CC0-1.0
+#
+# sqlnet.ora for the self-hosted TCPS mutual-TLS test bed (#127).
+# See docs/wallet_mtls_live_testing.md. Copy to $ORACLE_HOME/network/admin.
+#
+# Points the server at its TLS wallet and requires a client certificate, so the
+# handshake is genuinely mutual. TLS 1.2 floor matches the client.
+
+WALLET_LOCATION =
+  (SOURCE =
+    (METHOD = FILE)
+    (METHOD_DATA = (DIRECTORY = /opt/oracle/tls_wallet)))
+
+SSL_CLIENT_AUTHENTICATION = TRUE
+SSL_VERSION = 1.2
