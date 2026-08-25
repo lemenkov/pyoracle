@@ -16,7 +16,7 @@ import unittest
 from seerdb.common import ano
 from seerdb.common.ano_cipher import AnoAESCipher
 from seerdb.common.ano_mac import AnoMac
-from seerdb.common.ano_session import make_cipher, make_mac
+from seerdb.common.ano_session import AnoChannel, make_cipher, make_mac
 
 # The constant DH IV a real server supplies for the MAC (negotiation's 8th
 # data-integrity sub-packet), used to key the data-integrity MAC.
@@ -98,6 +98,19 @@ class TestSessionBridge(unittest.TestCase):
         Ours = make_cipher(ano.ENCRYPTION_ALGO_IDS['AES256'], Key)
         Ref = AnoAESCipher(Key[:32], bytes(16))
         self.assertEqual(Ours.encrypt(b'x' * 20), Ref.encrypt(b'x' * 20))
+
+    def test_client_and_server_channels_interoperate(self):
+        # A server channel (ClientSide=False) and a client channel decrypt each
+        # other's packets — the crux of the Mirror's server-side ANO (#448). The
+        # MAC keystreams are stateful, so each pair must advance in lock-step.
+        Key = self._session_key()
+        Client = AnoChannel(17, 5, Key, _SERVER_IV, ClientSide=True)
+        Server = AnoChannel(17, 5, Key, _SERVER_IV, ClientSide=False)
+        for i in range(3):
+            c2s = f'client says {i}'.encode()
+            self.assertEqual(Server.unwrap(Client.wrap(c2s)), c2s)
+            s2c = f'server says {i}'.encode()
+            self.assertEqual(Client.unwrap(Server.wrap(s2c)), s2c)
 
 
 if __name__ == '__main__':

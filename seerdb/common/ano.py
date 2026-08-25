@@ -359,3 +359,151 @@ def compute_dh(
         session_key=SessionKey,
         iv=SessionKey[0x20:0x40],
     )
+
+
+# --------------------------------------------------------------------------- #
+# Server side — the DH group + negotiation response (the Mirror, #448).
+# --------------------------------------------------------------------------- #
+#
+# A server that offers encryption emits the group (generator 2, the RFC 3526
+# 2048-bit MODP prime), its own public key, and the fixed IV constant; the client
+# replies with its public key and both derive the same shared secret. This is the
+# inverse of the client half above.
+
+# The 2048-bit MODP prime (RFC 3526 group 14) a real Oracle server sends.
+DH_PRIME = bytes.fromhex(
+    'ffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74'
+    '020bbea63b139b22514a08798e3404ddef9519b3cd3a431b302b0a6df25f1437'
+    '4fe1356d6d51c245e485b576625e7ec6f44c42e9a637ed6b0bff5cb6f406b7ed'
+    'ee386bfb5a899fa5ae9f24117c4b1fe649286651ece45b3dc2007cb8a163bf05'
+    '98da48361c55d39a69163fa8fd24cf5f83655d23dca3ad961c62f356208552bb'
+    '9ed529077096966d670c354e4abc9804f1746c08ca18217c32905e462e36ce3b'
+    'e39e772c180e86039b2783a2ec07a28fb5c55df06f4c52c9de2bcbf695581718'
+    '3995497cea956ae515d2261898fa051015728e5a8aacaa68ffffffffffffffff'
+)
+DH_GROUP_BITS = len(DH_PRIME) * 8  # 2048; both bit-length fields carry this
+DH_GENERATOR = (2).to_bytes(len(DH_PRIME), 'big')  # generator 2, prime-padded
+# The constant IV a real server supplies as the 8th data-integrity sub-packet;
+# it keys the data-integrity MAC (not the cipher). ASCII, 20 bytes.
+DH_SERVER_IV = b'foo bar baz bat quux'
+
+# The per-service version a real server echoes in its negotiation response. The
+# client ignores it, but a faithful Mirror sends what the wire showed.
+_RESPONSE_VERSION = 0x171A2000
+
+
+@dataclass
+class ServerDiffieHellman:
+    """The server-side DH result: the public key to advertise + the shared key
+    once the client's public key arrives."""
+
+    private: int
+    public_key: bytes  # sent to the client in the round-1 response
+    session_key: bytes | None = None  # filled by :meth:`derive` at round 2
+
+    def derive(self, ClientPublic: bytes) -> bytes:
+        """Compute the shared secret from the client's public key (round 2)."""
+        P = int.from_bytes(DH_PRIME, 'big')
+        Shared = pow(int.from_bytes(ClientPublic, 'big'), self.private, P)
+        self.session_key = Shared.to_bytes(len(DH_PRIME), 'big')
+        return self.session_key
+
+
+def server_dh_keypair(Private: bytes | None = None) -> ServerDiffieHellman:
+    """Generate the server's DH keypair over the standard group.
+
+    ``Private`` (one prime-length block) is random when omitted; pass it only for
+    deterministic tests. The shared key is derived later via
+    :meth:`ServerDiffieHellman.derive` once the client's public key arrives.
+    """
+    ByteLen = len(DH_PRIME)
+    if Private is None:
+        Private = token_bytes(ByteLen)
+    Priv = int.from_bytes(Private, 'big')
+    Public = pow(
+        int.from_bytes(DH_GENERATOR, 'big'), Priv, int.from_bytes(DH_PRIME, 'big')
+    )
+    return ServerDiffieHellman(private=Priv, public_key=Public.to_bytes(ByteLen, 'big'))
+
+
+def encryption_service_response(AlgoId: int) -> bytes:
+    """The server's encryption-service reply: version + the selected algorithm."""
+    return encode_service(
+        SERVICE_ENCRYPTION, [sp_version(_RESPONSE_VERSION), sp_ub1(AlgoId)]
+    )
+
+
+def data_integrity_service_response(AlgoId: int, ServerPublic: bytes) -> bytes:
+    """The server's data-integrity reply carrying the DH exchange (8 sub-packets):
+    version, selected algorithm, the two bit-length fields, then generator, prime,
+    the server public key, and the IV constant."""
+    return encode_service(
+        SERVICE_DATA_INTEGRITY,
+        [
+            sp_version(_RESPONSE_VERSION),
+            sp_ub1(AlgoId),
+            sp_ub2(DH_GROUP_BITS),
+            sp_ub2(DH_GROUP_BITS),
+            sp_bytes(DH_GENERATOR),
+            sp_bytes(DH_PRIME),
+            sp_bytes(ServerPublic),
+            sp_bytes(DH_SERVER_IV),
+        ],
+    )
+
+
+def supervisor_service_response() -> bytes:
+    """The server's supervisor reply: version, an OK status, and the service
+    list (mirrors what a real 11g/26ai server sends)."""
+    return encode_service(
+        SERVICE_SUPERVISOR,
+        [
+            sp_version(_RESPONSE_VERSION),
+            sp_status(SUPERVISOR_STATUS_OK),
+            sp_ub2_array([SERVICE_SUPERVISOR, SERVICE_AUTH]),
+        ],
+    )
+
+
+def auth_service_response() -> bytes:
+    """The server's authentication reply: version + the no-method status."""
+    return encode_service(
+        SERVICE_AUTH, [sp_version(_RESPONSE_VERSION), sp_status(AUTH_STATUS_NONE)]
+    )
+
+
+def encode_ano_response(EncId: int, IntId: int, ServerPublic: bytes) -> bytes:
+    """Assemble the full server negotiation response advertising the selected
+    encryption + data-integrity algorithms and the DH exchange (#448)."""
+    return encode_ano(
+        [
+            supervisor_service_response(),
+            auth_service_response(),
+            encryption_service_response(EncId),
+            data_integrity_service_response(IntId, ServerPublic),
+        ]
+    )
+
+
+def offered_algorithm_ids(Request: dict, ServiceType: int) -> list[int]:
+    """The algorithm IDs a client offered for a service in its round-1 request
+    (the service's second sub-packet is the id list, null-prefixed)."""
+    ByType = {S['type']: S for S in Request['services']}
+    Service = ByType.get(ServiceType)
+    if Service is None or len(Service['subpackets']) < 2:
+        return []
+    (_Type, Ids) = Service['subpackets'][1]
+    return list(Ids) if isinstance(Ids, bytes | bytearray) else []
+
+
+def client_public_key(Round2: dict) -> bytes:
+    """Pull the client's DH public key from a decoded round-2 container (a lone
+    data-integrity service whose first sub-packet is the key bytes)."""
+    ByType = {S['type']: S for S in Round2['services']}
+    Service = ByType.get(SERVICE_DATA_INTEGRITY)
+    if Service is None or not Service['subpackets']:
+        raise AnoError('round-2 container carries no client public key')
+    (_Type, Key) = Service['subpackets'][0]
+    if not isinstance(Key, bytes | bytearray):
+        raise AnoError('client public key is not a byte string')
+    return bytes(Key)

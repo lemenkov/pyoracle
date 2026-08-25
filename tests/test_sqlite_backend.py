@@ -27,13 +27,17 @@ from sqlite_backend import SqliteBackend  # noqa: E402
 _CREDS = {'PYO': 'pyo123'}
 
 
-def _serve_sqlite(listen: socket.socket, result: dict) -> None:
+def _serve_sqlite(
+    listen: socket.socket, result: dict, encryption: str = 'accepted'
+) -> None:
     conn, _ = listen.accept()
     # The backend is created in THIS thread: sqlite3 objects are thread-affine,
     # which is exactly the per-session backend model (one DB session per client).
     try:
         result['user'] = serve_session(
-            PacketStream(conn), SqliteBackend(':memory:', credentials=_CREDS)
+            PacketStream(conn),
+            SqliteBackend(':memory:', credentials=_CREDS),
+            encryption=encryption,
         )
     except Exception as exc:  # noqa: BLE001 - surfaced to the test thread
         result['error'] = exc
@@ -41,13 +45,17 @@ def _serve_sqlite(listen: socket.socket, result: dict) -> None:
         conn.close()
 
 
-def _start_mirror() -> tuple[socket.socket, threading.Thread, dict]:
+def _start_mirror(
+    encryption: str = 'accepted',
+) -> tuple[socket.socket, threading.Thread, dict]:
     listen = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listen.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listen.bind(('127.0.0.1', 0))
     listen.listen(1)
     result: dict = {}
-    server = threading.Thread(target=_serve_sqlite, args=(listen, result), daemon=True)
+    server = threading.Thread(
+        target=_serve_sqlite, args=(listen, result, encryption), daemon=True
+    )
     server.start()
     return listen, server, result
 
@@ -140,6 +148,64 @@ def test_real_sql_round_trip() -> None:
     # NUMBER: integers stay int, non-integers become Decimal (Oracle semantics).
     assert rows == [(1, 'alice', Decimal('9.5')), (2, 'bob', -3)]
     assert second == ('bob',)  # the post-fetch statement was answered
+
+
+def test_encrypted_round_trip() -> None:
+    # The Mirror requires ANO, so the client negotiates AES256 + SHA256 and the
+    # whole login + query runs encrypted end to end (#448) — the server half on
+    # par with the client half validated live on 26ai.
+    listen, server, result = _start_mirror(encryption='required')
+    conn = _connect(listen.getsockname()[1])
+    try:
+        assert conn._ano is not None and conn._ano.active  # the session is encrypted
+        cur = conn.cursor()
+        cur.execute('create table t (id number, name varchar2(20))')
+        cur.execute("insert into t values (1, 'alice')")
+        cur.execute("insert into t values (2, 'bob')")
+        cur.execute('select id, name from t order by id')
+        rows = cur.fetchall()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert rows == [(1, 'alice'), (2, 'bob')]
+
+
+def test_encrypted_round_trip_async() -> None:
+    import asyncio
+
+    async def run(port: int):
+        conn = await seerdb.connect_async(
+            host='127.0.0.1',
+            port=port,
+            user='PYO',
+            password='pyo123',
+            service_name='XE',
+            timeout=5000,
+        )
+        assert conn._ano is not None and conn._ano.active
+        cur = conn.cursor()
+        await cur.execute('create table t (id number, name varchar2(20))')
+        await cur.execute("insert into t values (3, 'carol')")
+        await cur.execute('select id, name from t order by id')
+        rows = await cur.fetchall()
+        await conn.close()
+        return rows
+
+    listen, server, result = _start_mirror(encryption='required')
+    try:
+        rows = asyncio.run(run(listen.getsockname()[1]))
+    finally:
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert rows == [(3, 'carol')]
 
 
 def test_bad_sql_is_an_ora_error_not_a_desync() -> None:

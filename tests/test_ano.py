@@ -300,5 +300,63 @@ class TestDiffieHellman(unittest.TestCase):
             ano.extract_dh_params(Service)
 
 
+class TestServerSide(unittest.TestCase):
+    """The Mirror's server half of the negotiation (#448)."""
+
+    def test_group_is_modp_2048_generator_2(self):
+        self.assertEqual(len(ano.DH_PRIME), 256)
+        self.assertEqual(ano.DH_GROUP_BITS, 2048)
+        self.assertEqual(int.from_bytes(ano.DH_GENERATOR, 'big'), 2)
+        self.assertTrue(
+            ano.DH_PRIME.hex().upper().startswith('FFFFFFFFFFFFFFFFC90FDAA2')
+        )
+        self.assertEqual(ano.DH_SERVER_IV, b'foo bar baz bat quux')
+
+    def test_server_and_client_derive_the_same_secret(self):
+        # The server advertises its public key; the client computes DH against
+        # it; the server derives from the client's public key — both agree.
+        server = ano.server_dh_keypair()
+        response = ano.encode_ano_response(
+            ano.ENCRYPTION_ALGO_IDS['AES256'],
+            ano.INTEGRITY_ALGO_IDS['SHA256'],
+            server.public_key,
+        )
+        decoded = ano.decode_ano(response)
+        by_type = {s['type']: s for s in decoded['services']}
+        self.assertEqual(by_type[ano.SERVICE_ENCRYPTION]['subpackets'][1][1], 17)
+        self.assertEqual(by_type[ano.SERVICE_DATA_INTEGRITY]['subpackets'][1][1], 5)
+        (Gen, Prime, ServerPub, Iv) = ano.extract_dh_params(
+            by_type[ano.SERVICE_DATA_INTEGRITY]
+        )
+        self.assertEqual(ServerPub, server.public_key)
+        self.assertEqual(Iv, ano.DH_SERVER_IV)
+        client = ano.compute_dh(Gen, Prime, ServerPub)
+        self.assertEqual(server.derive(client.public_key), client.session_key)
+
+    def test_offered_algorithm_ids(self):
+        req = ano.decode_ano(
+            ano.encode_ano(
+                [
+                    ano.supervisor_service(),
+                    ano.auth_service(),
+                    ano.encryption_service(['AES256', 'AES128']),
+                    ano.data_integrity_service(['SHA256']),
+                ]
+            )
+        )
+        # Null (0) is prefixed to each offered list.
+        self.assertEqual(
+            ano.offered_algorithm_ids(req, ano.SERVICE_ENCRYPTION), [0, 17, 15]
+        )
+        self.assertEqual(
+            ano.offered_algorithm_ids(req, ano.SERVICE_DATA_INTEGRITY), [0, 5]
+        )
+
+    def test_client_public_key_roundtrips(self):
+        Key = bytes(range(256))
+        parsed = ano.client_public_key(ano.decode_ano(ano.dh_public_key_round(Key)))
+        self.assertEqual(parsed, Key)
+
+
 if __name__ == '__main__':
     unittest.main()
