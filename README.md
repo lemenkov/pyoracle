@@ -98,6 +98,14 @@ What works:
 - TLS connections (pass `ssl=True` to `seerdb.connect` for the system
   trust store; or `ssl={"ca_certs": ..., "certfile": ..., ...}` for a
   custom configuration; or hand in an `ssl.SSLContext` directly)
+- Wallet-based mutual TLS (Oracle / ADB connection wallet): pass
+  `wallet_location="/path/to/wallet"` (with `wallet_password=...` for a
+  password-protected `ewallet.p12`, or none for an auto-login
+  `ewallet.pem`) and, optionally, `dsn="mydb_high"` to resolve the
+  host / port / service and the server-certificate DN from the wallet's
+  `tnsnames.ora` / `sqlnet.ora` (`SSL_SERVER_DN_MATCH` is enforced after
+  the handshake). Needs the `wallet` extra — `pip install seerdb[wallet]`
+  — which pulls in `cryptography` for the X.509 / PKCS#12 decode
 - DML rowcount and full server error messages: `cursor.rowcount`
   reflects the rows affected by `INSERT` / `UPDATE` / `DELETE` (read
   from the OER block); `DatabaseError(code=NNN)` carries the full

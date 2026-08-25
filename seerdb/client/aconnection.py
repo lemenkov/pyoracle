@@ -155,6 +155,10 @@ class AsyncOracleConnect:
         field_version: int = FIELD_VERSION_23_4,
         cclass: str | None = None,
         purity: int = PURITY_DEFAULT,
+        wallet_location: str | None = None,
+        wallet_password: str | None = None,
+        config_dir: str | None = None,
+        dsn: str | None = None,
     ):
         self.host = host
         self.port = port
@@ -178,6 +182,12 @@ class AsyncOracleConnect:
         self.charset = charset
         self.prelim = prelim
         self.app_name = app_name
+
+        # Wallet-based mutual TLS (#127); see OracleConnect for the full note.
+        # The DN check runs in _open_transport once the TLS handshake completes.
+        self._wallet_server_dn: str | None = None
+        if wallet_location is not None or config_dir is not None:
+            self._apply_wallet(wallet_location, wallet_password, config_dir, dsn)
 
         # asyncio StreamReader / StreamWriter pair, set by `connect()`.
         self._reader: asyncio.StreamReader | None = None
@@ -314,6 +324,13 @@ class AsyncOracleConnect:
             ssl=SslArg,
             server_hostname=self.host if SslArg else None,
         )
+        if SslArg is not None:
+            SslObj = self._writer.get_extra_info('ssl_object')
+            try:
+                self._check_server_dn(SslObj.getpeercert() if SslObj else None)
+            except BaseException:
+                self._writer.close()
+                raise
         Data = encode_dictionary(self._make_dict(DictionaryType.login))
         await self.send(TNS_CONNECT, Data)
 
@@ -351,6 +368,48 @@ class AsyncOracleConnect:
                 raise ValueError(f'unknown ssl options: {sorted(Opts)}')
             return Ctx
         return True
+
+    def _apply_wallet(
+        self,
+        WalletLocation: str | None,
+        WalletPassword: str | None,
+        ConfigDir: str | None,
+        Dsn: str | None,
+    ) -> None:
+        # Wallet resolution (#127); a verbatim copy of OracleConnect._apply_wallet
+        # — the codebase keeps the sync/async pair duplicated rather than shared.
+        from seerdb.client import wallet as _wallet
+
+        Location = WalletLocation or ConfigDir
+        if not Location:
+            raise _wallet.WalletError('wallet_location or config_dir is required')
+        Wal = _wallet.open_wallet(Location, WalletPassword, Dsn)
+        Info = Wal.connect
+        if Info is not None:
+            if self.host == 'localhost':
+                self.host = Info.host
+            if self.port == 1521:
+                self.port = Info.port
+            if not self.service_name and Info.service_name:
+                self.service_name = Info.service_name
+            if not self.sid and Info.sid:
+                self.sid = Info.sid
+            if Info.dn_match and Info.server_dn:
+                self._wallet_server_dn = Info.server_dn
+        self.ssl = _wallet.build_client_context(Wal)
+
+    def _check_server_dn(self, PeerCert: dict | None) -> None:
+        # SSL_SERVER_DN_MATCH (#127); mirrors OracleConnect._check_server_dn.
+        if self._wallet_server_dn is None:
+            return
+        import ssl as _ssl
+
+        from seerdb.client import wallet as _wallet
+
+        if not _wallet.server_dn_matches(self._wallet_server_dn, PeerCert):
+            raise _ssl.SSLError(
+                f'server certificate DN does not match {self._wallet_server_dn!r}'
+            )
 
     async def send(self, Type: int, Data: bytes | None) -> None:
         """Iterative split-and-send; mirrors `OracleConnect.send`."""

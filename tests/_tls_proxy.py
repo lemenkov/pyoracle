@@ -6,6 +6,11 @@
 # listener. Accepts TLS on a local port, decrypts, and pipes the cleartext
 # both directions to a plaintext Oracle listener.
 #
+# Passing client_ca_path turns on *mutual* TLS (#127): the proxy then demands
+# and verifies a client certificate against that CA, and records each verified
+# client's subject DN in `client_dns` so a test can assert the expected wallet
+# identity was actually presented.
+#
 # It is a test fixture, not a production component. Each connection gets a
 # pair of pump threads; the proxy stops cleanly when stop() is called.
 
@@ -18,6 +23,27 @@ FIXTURES_DIR = os.path.join(os.path.dirname(__file__), 'fixtures')
 CERT_PATH = os.path.join(FIXTURES_DIR, 'proxy_cert.pem')
 KEY_PATH = os.path.join(FIXTURES_DIR, 'proxy_key.pem')
 
+# Short OIDs for the RDN attribute names getpeercert() hands back.
+_RDN_SHORT = {
+    'commonName': 'CN',
+    'organizationName': 'O',
+    'organizationalUnitName': 'OU',
+    'countryName': 'C',
+    'stateOrProvinceName': 'ST',
+    'localityName': 'L',
+}
+
+
+def _format_subject(cert: dict | None) -> str | None:
+    """Render a getpeercert() subject as a ``CN=..., O=...`` DN string."""
+    if not cert:
+        return None
+    parts = []
+    for rdn in cert.get('subject', ()):
+        for name, value in rdn:
+            parts.append(f'{_RDN_SHORT.get(name, name)}={value}')
+    return ', '.join(parts) if parts else None
+
 
 class TLSProxy:
     """TLS terminator that forwards plaintext to a backend host:port."""
@@ -29,11 +55,17 @@ class TLSProxy:
         cert_path: str = CERT_PATH,
         key_path: str = KEY_PATH,
         listen_host: str = '127.0.0.1',
+        client_ca_path: str | None = None,
     ):
         self.backend = (backend_host, backend_port)
         self.cert_path = cert_path
         self.key_path = key_path
         self.listen_host = listen_host
+        # When set, require + verify a client certificate against this CA
+        # (mutual TLS). Left None, the proxy does ordinary server-only TLS.
+        self.client_ca_path = client_ca_path
+        # Subject DNs of clients that completed the mTLS handshake, in order.
+        self.client_dns: list[str] = []
         self.listen_port: int | None = None
         self._sock: socket.socket | None = None
         self._ctx: ssl.SSLContext | None = None
@@ -44,6 +76,9 @@ class TLSProxy:
     def start(self) -> None:
         self._ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self._ctx.load_cert_chain(self.cert_path, self.key_path)
+        if self.client_ca_path is not None:
+            self._ctx.verify_mode = ssl.CERT_REQUIRED
+            self._ctx.load_verify_locations(self.client_ca_path)
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind((self.listen_host, 0))
@@ -90,6 +125,12 @@ class TLSProxy:
                 # Best-effort: the handshake already failed; just drop it.
                 pass
             return
+        if self.client_ca_path is not None:
+            # mTLS: the handshake only got here because the client cert verified
+            # against our CA. Record its subject DN for test assertions.
+            dn = _format_subject(tls_client.getpeercert())
+            if dn is not None:
+                self.client_dns.append(dn)
         try:
             backend = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             backend.connect(self.backend)
