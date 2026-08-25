@@ -29,12 +29,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Wallet-based mutual TLS (#127): reading an Oracle/ADB wallet needs X.509 /
-# PKCS#12 decoding, which pycryptodome does not provide. `cryptography` is the
-# same library python-oracledb-thin uses for this. Kept optional so the core
-# install stays lean; `seerdb.client.wallet` is imported lazily only when a
-# wallet connection is requested.
+# Both extras below pull in `cryptography` — the same library python-oracledb-thin
+# uses — for the two features pycryptodome can't cover. It is kept OPTIONAL so the
+# core install stays lean, and every module that needs it (`seerdb.client.wallet`,
+# `seerdb.common.token_auth`) is imported lazily, only when that connection kind is
+# actually requested — so `import seerdb` still works without it installed.
+#
+# Wallet-based mutual TLS (#127): reading an Oracle/ADB wallet needs X.509 / PKCS#12
+# decoding.
 wallet = ["cryptography>=3.3"]
+# Token-based auth (#125): OAuth2 / OCI IAM sign the auth header with RSA-SHA256.
+token = ["cryptography>=3.3"]
 
 [project.urls]
 Homepage = "https://github.com/seerdb/seerdb"
