@@ -224,6 +224,15 @@ def auth_service() -> bytes:
     )
 
 
+def dh_public_key_round(PublicKey: bytes) -> bytes:
+    """The second negotiation round: the client's DH public key.
+
+    A one-service container (data-integrity, a single ``bytes`` sub-packet) that
+    the client sends after the server's response supplies the DH parameters.
+    """
+    return encode_ano([encode_service(SERVICE_DATA_INTEGRITY, [sp_bytes(PublicKey)])])
+
+
 # --------------------------------------------------------------------------- #
 # Parsing a negotiation response.
 # --------------------------------------------------------------------------- #

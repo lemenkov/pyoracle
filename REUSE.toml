@@ -33,3 +33,10 @@ path = ["seerdb/py.typed"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Peter Lemenkov <lemenkov@gmail.com>"
 SPDX-License-Identifier = "CC0-1.0"
+
+[[annotations]]
+# Captured ANO negotiation response from a real Oracle server (#437), test data.
+path = ["tests/fixtures/ano_server_response.bin"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Peter Lemenkov <lemenkov@gmail.com>"
+SPDX-License-Identifier = "CC0-1.0"
