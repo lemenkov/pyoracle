@@ -121,6 +121,10 @@ password path is the simpler smoke test.)
   PKCS#12 import used the fixture identity.
 - **`ORA-12560` / no TCPS** — the listener has no TCPS address; confirm
   `listener.ora` landed in the active `TNS_ADMIN` and reload.
+- **`ORA-12514` right after setup** — the instance has not re-registered its
+  services with the just-restarted listener yet. The setup script forces
+  `ALTER SYSTEM REGISTER` and waits, but if you restart the listener by hand,
+  give it a moment (or run `ALTER SYSTEM REGISTER`) before connecting.
 
 ## Toward CI
 

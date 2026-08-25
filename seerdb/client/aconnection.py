@@ -647,8 +647,23 @@ class AsyncOracleConnect:
                     await self._open_transport()
                     continue
                 case t if t == TNS_REFUSE:
+                    # Mirror OracleConnect: a refusal is terminal, so raise the
+                    # listener's ORA error rather than return a half-open
+                    # connection. See connection.py for the full note.
+                    from seerdb.client.connection import _parse_refuse_code
+
+                    Code = _parse_refuse_code(Packet)
                     await self.disconnect()
-                    return 1
+                    if Code:
+                        from seerdb.common.exceptions import from_ora_code
+
+                        raise from_ora_code(Code)(
+                            f'ORA-{Code:05d}: connection refused by the listener',
+                            code=Code,
+                        )
+                    raise OperationalError(
+                        'connection refused by the listener during login'
+                    )
                 case t if t == TNS_RESEND:
                     self.conn_state = CONN_STATE_AUTH_NEGOTIATE
                     Data = encode_dictionary(self._make_dict(DictionaryType.login))
