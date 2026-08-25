@@ -107,12 +107,16 @@ class AnoChannel:
         IntegrityAlgoId: int,
         SharedSecret: bytes,
         ServerIv: bytes,
+        ClientSide: bool = True,
     ):
+        # ``ClientSide`` swaps the MAC send/recv keystreams so a server channel
+        # (``ClientSide=False``) inter-operates with a client one — its send
+        # keystream equals the peer's receive keystream. The cipher is symmetric.
         self._enc_id = EncAlgoId
         self._mac_id = IntegrityAlgoId
         self._cipher: AnoAESCipher | None = make_cipher(EncAlgoId, SharedSecret)
         self._mac: AnoMac | None = make_mac(
-            IntegrityAlgoId, SharedSecret, ServerIv, ClientSide=True
+            IntegrityAlgoId, SharedSecret, ServerIv, ClientSide=ClientSide
         )
 
     @property

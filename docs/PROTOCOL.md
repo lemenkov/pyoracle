@@ -3710,9 +3710,31 @@ after authentication for this server.
 ### 33.5 Server side (the Mirror)
 
 Real 11g and 26ai advertise ANO in the ACCEPT (`ACFL0 & 0x01`), so a modern thin
-client negotiates against them. The Mirror (§4.1) answers a modern client's
-round-1 (version `0x0B200200`) with the captured null-algorithm response — every
-service selects id 0, so no cipher/MAC is activated and the session stays
-plaintext. The classic sqlplus / thick-OCI client also negotiates ANO but stamps
-version `0x00000000`; that path is handled inline by the `deadbeef` dialect
-(§4.1.1).
+client negotiates against them, and the Mirror runs the inverse of the client
+half (#448). Its behaviour follows a per-Mirror **stance**:
+
+- **`accepted`** (default) — answer a modern client's round-1 (version
+  `0x0B200200`) with the null-algorithm response (every service selects id 0),
+  so no cipher/MAC is activated and the session stays plaintext. This is the
+  both-sides-ACCEPTED outcome (Oracle only encrypts when a side asks for it), and
+  it keeps every existing plaintext / sqlplus test unchanged.
+- **`requested` / `required`** — select the strongest AES the client offered
+  (AES256 ▷ AES192 ▷ AES128) plus a SHA-2 checksum, and reply with the DH
+  exchange: the server emits generator 2, the RFC 3526 2048-bit MODP prime, its
+  own public key, and the IV constant. It then reads the client's round-2 public
+  key, derives the same shared secret, and switches the stream to encrypted
+  framing before reading the (now encrypted) PRO. `required` fails the login if
+  the client offered no algorithm the Mirror implements; `requested` falls back
+  to plaintext.
+
+The server channel is the same `AnoChannel` as the client's but built
+`ClientSide=False` — the cipher is symmetric and the MAC's send/receive
+keystreams swap, so the two ends decrypt each other. Every DATA packet from PRO
+onward (including the captured-template PRO/DTY replies, re-framed through the
+encrypted path) is encrypted + MAC'd. Validated end-to-end: a seerdb client
+(sync and async) connects, authenticates, and queries a `required` Mirror over
+AES256 + SHA256.
+
+The classic sqlplus / thick-OCI client also negotiates ANO but stamps version
+`0x00000000`; that path is handled inline by the `deadbeef` dialect (§4.1.1) and
+is unaffected by the stance.

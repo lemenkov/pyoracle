@@ -128,12 +128,87 @@ def _expect(stream: PacketStream, want: int, what: str) -> bytes:
     return body
 
 
-def handle_login(stream: PacketStream, backend: Backend) -> tuple[str, bool]:
+# The Mirror's algorithm preference, strongest first — intersected with what the
+# client offered. Only the AES ciphers and SHA-2 checksums are implemented.
+_SERVER_ENC_PREF = ('AES256', 'AES192', 'AES128')
+_SERVER_INT_PREF = ('SHA256', 'SHA384', 'SHA512')
+
+
+def _select_algorithm(
+    offered: list[int], preference: tuple[str, ...], table: dict
+) -> int:
+    # The first of our preferences the client also offered; 0 (null) if none.
+    offered_set = set(offered)
+    for name in preference:
+        if table[name] in offered_set:
+            return table[name]
+    return 0
+
+
+def _negotiate_ano_server(
+    stream: PacketStream, request_body: bytes, encryption: str
+) -> None:
+    # Server half of the ANO negotiation (#448). `request_body` is the client's
+    # round-1 container (already read). Select a cipher per our stance; when one
+    # is chosen, emit the DH exchange, take the client's public key, derive the
+    # shared secret, and switch the stream to encrypted framing.
+    from seerdb.common import ano
+    from seerdb.common.ano_session import AnoChannel
+
+    if encryption not in ('requested', 'required'):
+        # Plaintext stance: the null-algorithm reply, session stays clear.
+        stream.send_raw(encode_ano_null_reply(sdu=stream.sdu))
+        return
+    request = ano.decode_ano(request_body[request_body.index(b'\xde\xad\xbe\xef') :])
+    enc_id = _select_algorithm(
+        ano.offered_algorithm_ids(request, ano.SERVICE_ENCRYPTION),
+        _SERVER_ENC_PREF,
+        ano.ENCRYPTION_ALGO_IDS,
+    )
+    if enc_id == 0:
+        # The client offered nothing we implement. REQUIRED can't proceed;
+        # REQUESTED falls back to plaintext.
+        if encryption == 'required':
+            raise InterfaceError('ANO: no mutually supported encryption algorithm')
+        stream.send_raw(encode_ano_null_reply(sdu=stream.sdu))
+        return
+    int_id = _select_algorithm(
+        ano.offered_algorithm_ids(request, ano.SERVICE_DATA_INTEGRITY),
+        _SERVER_INT_PREF,
+        ano.INTEGRITY_ALGO_IDS,
+    )
+    sdh = ano.server_dh_keypair()
+    stream.write_packet(
+        TNS_DATA, ano.encode_ano_response(enc_id, int_id, sdh.public_key)
+    )
+    round2 = stream.read_packet()
+    if round2 is None:
+        raise InterfaceError('client closed during ANO key exchange')
+    (_type, r2_body) = round2
+    client_pub = ano.client_public_key(
+        ano.decode_ano(r2_body[r2_body.index(b'\xde\xad\xbe\xef') :])
+    )
+    shared = sdh.derive(client_pub)
+    stream.activate_ano(
+        AnoChannel(enc_id, int_id, shared, ano.DH_SERVER_IV, ClientSide=False)
+    )
+    logger.debug(
+        'handle_login (server): ANO active (enc=%d integrity=%d)', enc_id, int_id
+    )
+
+
+def handle_login(
+    stream: PacketStream, backend: Backend, *, encryption: str = 'accepted'
+) -> tuple[str, bool]:
     """Run the server side of the handshake + O5LOGON.
 
     Returns ``(username, is_sqlplus)`` — the second flag says whether the client
     speaks the classic sqlplus / thick-OCI (deadbeef) dialect, so the query loop
     can answer it in the right marshalling (#265).
+
+    ``encryption`` is the Mirror's ANO stance (§33): ``'accepted'`` (default)
+    stays plaintext unless the client forces it; ``'required'`` selects AES + a
+    SHA-2 checksum and encrypts every DATA packet from PRO onward (#448).
 
     The O5LOGON secret comes from ``backend.authenticate(user)`` — auth lives
     with the backend, not the Mirror. Raises :class:`InterfaceError` on a
@@ -145,13 +220,15 @@ def handle_login(stream: PacketStream, backend: Backend) -> tuple[str, bool]:
     request = parse_connect(_expect(stream, TNS_CONNECT, 'CONNECT'))
     stream.send_raw(encode_accept(request))
     # A modern thin client (seerdb/go-ora/oracledb) runs an ANO negotiation
-    # before PRO now that our ACCEPT advertises ANO-capable (#437). We support no
-    # encryption, so answer the null-algorithm negotiation and read the real PRO
-    # that follows. The sqlplus/OCI client's ANO uses a different version and is
-    # handled inline by the `deadbeef` dialect path below, so it is left alone.
+    # before PRO now that our ACCEPT advertises ANO-capable (#437). Run the server
+    # half (#448): select a cipher per our stance — or the null algorithm — and,
+    # when a cipher is selected, run the DH exchange and switch the stream to
+    # encrypted framing before reading the (now encrypted) PRO. The sqlplus/OCI
+    # client's ANO uses a different version and is handled inline by the
+    # `deadbeef` dialect path below, so it is left alone.
     first = _expect(stream, TNS_DATA, 'PRO')
     if is_ano_negotiation(first):
-        stream.send_raw(encode_ano_null_reply())
+        _negotiate_ano_server(stream, first, encryption)
         first = _expect(stream, TNS_DATA, 'PRO')
     # A thin (oracledb/seerdb) client leads its PRO with TTI_PRO; classic
     # sqlplus / thick OCI leads with the `deadbeef` magic and needs the matching
@@ -225,7 +302,9 @@ def _deny_login(stream: PacketStream, reason: str) -> NoReturn:
     raise InterfaceError(f'authentication rejected — {reason}')
 
 
-def serve_session(stream: PacketStream, backend: Backend) -> str:
+def serve_session(
+    stream: PacketStream, backend: Backend, *, encryption: str = 'accepted'
+) -> str:
     """Log a client in, then answer its queries until it disconnects.
 
     After :func:`handle_login`, each OALL8 execute is parsed, handed to
@@ -235,9 +314,10 @@ def serve_session(stream: PacketStream, backend: Backend) -> str:
     larger than the requested fetch count is returned in batches: the first on
     the execute, the rest on follow-up ``TTI_FETCH`` calls (:class:`_Cursors`
     holds the undelivered rows). A logoff (or EOF) ends the session and returns
-    the authenticated username.
+    the authenticated username. ``encryption`` is the Mirror's ANO stance,
+    forwarded to :func:`handle_login` (§33 / #448).
     """
-    user, sqlplus = handle_login(stream, backend)
+    user, sqlplus = handle_login(stream, backend, encryption=encryption)
     if sqlplus:
         return _serve_oci_session(stream, backend, user)
     cursors = _Cursors()
