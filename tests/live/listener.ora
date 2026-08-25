@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2019 Peter Lemenkov <lemenkov@gmail.com>
+# SPDX-License-Identifier: CC0-1.0
+#
+# Listener config for the self-hosted TCPS mutual-TLS test bed (#127).
+# See docs/wallet_mtls_live_testing.md. Copy to $ORACLE_HOME/network/admin.
+#
+# A TCP endpoint (1521, unchanged) plus a TCPS endpoint (2484) that terminates
+# TLS using the server wallet built from the committed fixture identity.
+
+SSL_CLIENT_AUTHENTICATION = TRUE
+
+WALLET_LOCATION =
+  (SOURCE =
+    (METHOD = FILE)
+    (METHOD_DATA = (DIRECTORY = /opt/oracle/tls_wallet)))
+
+LISTENER =
+  (DESCRIPTION_LIST =
+    (DESCRIPTION =
+      (ADDRESS = (PROTOCOL = TCP)(HOST = 0.0.0.0)(PORT = 1521))
+      (ADDRESS = (PROTOCOL = TCPS)(HOST = 0.0.0.0)(PORT = 2484))))

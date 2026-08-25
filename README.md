@@ -391,6 +391,12 @@ table.
 > with *no* pre-connect pause at all still trips the raw listener throttle,
 > which now shows up as dropped connections rather than `ORA-01013`.
 
+A third, opt-in suite exercises **wallet-based mutual TLS** against a real
+TCPS (TLS) Oracle listener. It is skipped unless `SEERDB_WALLET_LIVE` is
+set; [`docs/wallet_mtls_live_testing.md`](docs/wallet_mtls_live_testing.md)
+walks through standing up a self-hosted 23ai Free + TCPS test bed (reusing
+the committed fixture wallet) and running `tests/test_wallet_live.py`.
+
 ## Contributing
 
 Pull requests are welcome. Please read
