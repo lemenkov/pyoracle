@@ -557,6 +557,10 @@ class OracleConnect:
         field_version: int = FIELD_VERSION_23_4,
         cclass: str | None = None,
         purity: int = PURITY_DEFAULT,
+        wallet_location: str | None = None,
+        wallet_password: str | None = None,
+        config_dir: str | None = None,
+        dsn: str | None = None,
     ):
         # field_version is the highest TTC field version seerdb advertises;
         # the server negotiates it down (min(client, server)). The default is the
@@ -588,6 +592,14 @@ class OracleConnect:
         self.charset = charset
         self.prelim = prelim
         self.app_name = app_name
+
+        # Wallet-based mutual TLS (#127). When a wallet is given, resolve the
+        # DSN (if any) into host/port/service and build the client SSLContext
+        # from the wallet identity; the expected server certificate DN is kept
+        # for the post-handshake SSL_SERVER_DN_MATCH check in _wrap_socket_tls.
+        self._wallet_server_dn: str | None = None
+        if wallet_location is not None or config_dir is not None:
+            self._apply_wallet(wallet_location, wallet_password, config_dir, dsn)
 
         self.sock: socket.socket | None = None
         self.seq = 1
@@ -774,6 +786,39 @@ class OracleConnect:
         self.handle_login()
         return True
 
+    def _apply_wallet(
+        self,
+        WalletLocation: str | None,
+        WalletPassword: str | None,
+        ConfigDir: str | None,
+        Dsn: str | None,
+    ) -> None:
+        # Resolve an Oracle wallet into connect parameters + a client SSLContext
+        # (#127). Imported lazily so the `cryptography` dependency is only needed
+        # when a wallet connection is actually requested.
+        from seerdb.client import wallet as _wallet
+
+        Location = WalletLocation or ConfigDir
+        if not Location:
+            raise _wallet.WalletError('wallet_location or config_dir is required')
+        Wal = _wallet.open_wallet(Location, WalletPassword, Dsn)
+        Info = Wal.connect
+        if Info is not None:
+            # A resolved DSN supplies host/port/service — but an explicitly
+            # passed host/port/service still wins (left at the constructor
+            # defaults means "take it from the wallet").
+            if self.host == 'localhost':
+                self.host = Info.host
+            if self.port == 1521:
+                self.port = Info.port
+            if not self.service_name and Info.service_name:
+                self.service_name = Info.service_name
+            if not self.sid and Info.sid:
+                self.sid = Info.sid
+            if Info.dn_match and Info.server_dn:
+                self._wallet_server_dn = Info.server_dn
+        self.ssl = _wallet.build_client_context(Wal)
+
     def _wrap_socket_tls(self, RawSock: socket.socket) -> socket.socket:
         # Promote the freshly-connected TCP socket to TLS before any TNS bytes
         # are exchanged. The ``ssl`` constructor argument accepts:
@@ -807,7 +852,28 @@ class OracleConnect:
         else:
             Ctx = _ssl.create_default_context()
             Ctx.minimum_version = _ssl.TLSVersion.TLSv1_2
-        return Ctx.wrap_socket(RawSock, server_hostname=Server)
+        Wrapped = Ctx.wrap_socket(RawSock, server_hostname=Server)
+        try:
+            self._check_server_dn(Wrapped.getpeercert())
+        except BaseException:
+            Wrapped.close()
+            raise
+        return Wrapped
+
+    def _check_server_dn(self, PeerCert: dict | None) -> None:
+        # Oracle SSL_SERVER_DN_MATCH (#127): the server is authenticated by its
+        # certificate subject DN, not its hostname. The chain was already
+        # verified by the TLS stack against the wallet CA; here we assert the DN.
+        if self._wallet_server_dn is None:
+            return
+        import ssl as _ssl
+
+        from seerdb.client import wallet as _wallet
+
+        if not _wallet.server_dn_matches(self._wallet_server_dn, PeerCert):
+            raise _ssl.SSLError(
+                f'server certificate DN does not match {self._wallet_server_dn!r}'
+            )
 
     def handle_login(self) -> int | None:
         # Iterative login state machine. Each round either: completes the

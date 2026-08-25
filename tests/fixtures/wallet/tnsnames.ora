@@ -1,0 +1,8 @@
+# Committed wallet fixture for the mutual-TLS tests (#127).
+# The port is nominal; the integration test overrides it with the proxy's
+# ephemeral listen port. Host and server DN are what matter here.
+seerdb_test =
+  (description =
+    (address = (protocol = tcps)(host = localhost)(port = 1522))
+    (connect_data = (service_name = seerdb_test_svc))
+    (security = (ssl_server_dn_match = yes)(ssl_server_cert_dn = "CN=seerdb-test-server")))
