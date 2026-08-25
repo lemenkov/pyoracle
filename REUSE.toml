@@ -7,7 +7,7 @@ SPDX-PackageSupplier = "Peter Lemenkov <lemenkov@gmail.com>"
 SPDX-PackageDownloadLocation = "https://github.com/seerdb/seerdb"
 
 [[annotations]]
-path = ["README.md", "docs/PROTOCOL.md", "CONTRIBUTING.md", "ChangeLog"]
+path = ["README.md", "docs/PROTOCOL.md", "CONTRIBUTING.md", "ChangeLog", "AGENTS.md"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2019-2026 Peter Lemenkov <lemenkov@gmail.com>"
 SPDX-License-Identifier = "MIT"
