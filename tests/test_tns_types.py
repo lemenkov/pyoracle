@@ -191,6 +191,83 @@ class TestVarOacTypes(unittest.TestCase):
         self.assertEqual(Var(IntervalYM).dbtype, DB_TYPE_INTERVAL_YM)
 
 
+class TestOtherTypeVectors(unittest.TestCase):
+    """Known-answer vectors for BINARY_FLOAT/DOUBLE and INTERVAL YM/DS (#439).
+
+    Each row's bytes were produced by ``SELECT dump(cast(<literal> as <type>))``
+    against a live Oracle, so they are exactly what Oracle puts on the wire. The
+    *choice* of literals follows the coverage of the go-ora driver's other-types
+    test table (MIT, Copyright 2020 Samy Sultan) — a scenario reused as fact; the
+    Oracle-output bytes are authoritative and the assertions are original. Both
+    directions are checked: decode (bytes → value) and encode (value → bytes).
+    """
+
+    def test_binary_float(self):
+        # dump(cast(134.45 as binary_float)) → 195,6,115,51 (Typ=100 Len=4).
+        cases = [
+            (134.45, bytes([195, 6, 115, 51])),
+            (-134.45, bytes([60, 249, 140, 204])),
+        ]
+        for value, raw in cases:
+            self.assertEqual(encode_token_binary_float(value), raw)
+            # BINARY_FLOAT is IEEE single, so the decode lands at float32 precision.
+            self.assertAlmostEqual(decode_binary_float(raw), value, places=2)
+
+    def test_binary_double(self):
+        # dump(cast(134.45 as binary_double)) → 192,96,206,102,102,102,102,102.
+        cases = [
+            (134.45, bytes([192, 96, 206, 102, 102, 102, 102, 102])),
+            (-134.45, bytes([63, 159, 49, 153, 153, 153, 153, 153])),
+        ]
+        for value, raw in cases:
+            self.assertEqual(encode_token_binary_double(value), raw)
+            self.assertEqual(decode_binary_double(raw), value)
+
+    def test_interval_year_to_month(self):
+        # dump(cast(TO_YMINTERVAL('2021-10') as INTERVAL YEAR TO MONTH)) → 128,0,7,229,70.
+        cases = [
+            (IntervalYM(2021, 10), bytes([128, 0, 7, 229, 70])),  # +2021-10
+            (IntervalYM(-2021, -10), bytes([127, 255, 248, 27, 50])),  # -2021-10
+            (IntervalYM(-5, -10), bytes([127, 255, 255, 251, 50])),  # -05-10
+            (IntervalYM(-5, -3), bytes([127, 255, 255, 251, 57])),  # -05-03
+            (IntervalYM(0, 10), bytes([128, 0, 0, 0, 70])),  # +00-10
+            (IntervalYM(0, -3), bytes([128, 0, 0, 0, 57])),  # -00-03
+        ]
+        for value, raw in cases:
+            self.assertEqual(decode_interval_ym(raw), value)
+            self.assertEqual(encode_token_interval_ym(value), raw)
+
+    def test_interval_day_to_second(self):
+        # dump(cast(TO_DSINTERVAL('2 12:23:34.456') as INTERVAL DAY TO SECOND))
+        #   → 128,0,0,2,72,83,94,155,46,2,0.
+        td = datetime.timedelta
+        cases = [
+            (
+                td(days=2, hours=12, minutes=23, seconds=34, microseconds=456000),
+                bytes([128, 0, 0, 2, 72, 83, 94, 155, 46, 2, 0]),
+            ),  # +02 12:23:34.456000
+            (
+                -td(days=2, hours=12, minutes=23, seconds=34, microseconds=456789),
+                bytes([127, 255, 255, 254, 48, 37, 26, 100, 197, 243, 248]),
+            ),  # -02 ...456789
+            (
+                td(hours=10, minutes=20, seconds=30, microseconds=456789),
+                bytes([128, 0, 0, 0, 70, 80, 90, 155, 58, 12, 8]),
+            ),  # +00 10:20:30.456789
+            (
+                -td(hours=10, minutes=20, seconds=30, microseconds=456789),
+                bytes([128, 0, 0, 0, 50, 40, 30, 100, 197, 243, 248]),
+            ),  # -00 10:20:30.456789
+            (
+                -td(hours=10, minutes=20, seconds=30),
+                bytes([128, 0, 0, 0, 50, 40, 30, 128, 0, 0, 0]),
+            ),  # -00 10:20:30.000000
+        ]
+        for value, raw in cases:
+            self.assertEqual(decode_interval_ds(raw), value)
+            self.assertEqual(encode_token_interval_ds(value), raw)
+
+
 class TestExecOacSignature(unittest.TestCase):
     # The DML cursor-cache key includes this signature so a cached cursor is
     # only reused for binds matching the OAC it was parsed with. Two binds that
