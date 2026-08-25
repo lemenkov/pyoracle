@@ -161,6 +161,7 @@ class AsyncOracleConnect:
         config_dir: str | None = None,
         dsn: str | None = None,
         negotiation_cache: bool = False,
+        access_token: object = None,
     ):
         # Negotiation cache (#438): opt-in reconnect optimization, sharing the
         # process-level cache with the sync connection.
@@ -189,6 +190,9 @@ class AsyncOracleConnect:
         self.charset = charset
         self.prelim = prelim
         self.app_name = app_name
+        # Token auth (#125), resolved at connect time.
+        self.access_token = access_token
+        self._token_auth = False
 
         # Wallet-based mutual TLS (#127); see OracleConnect for the full note.
         # The DN check runs in _open_transport once the TLS handshake completes.
@@ -305,6 +309,25 @@ class AsyncOracleConnect:
         }
         d.update(extra)
         return d
+
+    async def _send_token_auth(self) -> None:
+        # Async port of OracleConnect._send_token_auth (#125).
+        from seerdb.common.tns import encode_dictionary_token_auth
+        from seerdb.common.token_auth import (
+            normalize_access_token,
+            sign_token_header,
+            token_auth_header,
+        )
+
+        (Token, PrivateKey) = normalize_access_token(self.access_token)
+        Dict = self._make_dict(DictionaryType.description)
+        Dict['token'] = Token
+        if PrivateKey is not None:
+            Service = self.service_name or self.sid or ''
+            AuthHeader = token_auth_header(self.host, Service, self.port)
+            Dict['token_header'] = AuthHeader
+            Dict['token_signature'] = sign_token_header(AuthHeader, PrivateKey)
+        await self.send(TNS_DATA, encode_dictionary_token_auth(Dict))
 
     # ----- I/O primitives -----
 
@@ -659,6 +682,11 @@ class AsyncOracleConnect:
                                         self._next_seq(), self.user.encode('utf-8')
                                     ),
                                 )
+                            elif self.access_token is not None:
+                                # Token auth (#125): skip OSESSKEY, send the token
+                                # AUTH; the reply is the auth result (no proof).
+                                self._token_auth = True
+                                await self._send_token_auth()
                             else:
                                 Data = encode_dictionary(
                                     self._make_dict(DictionaryType.sess)
@@ -934,6 +962,12 @@ class AsyncOracleConnect:
         elif Result[0] == TTI_AUTH:
             # Second RPA: auth result.
             (_, Resp, Ver, SessId) = Result
+            if self._token_auth:
+                # Token auth (#125): no server proof / ConnKey; accept directly.
+                self.server_version = Ver
+                self.session_id = SessId
+                self.conn_state = CONN_STATE_AUTHENTICATED
+                return 0
             assert self.conn_key is not None
             if validate(bytes.fromhex(Resp.decode('utf-8')), self.conn_key):
                 self.server_version = Ver

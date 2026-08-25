@@ -47,11 +47,14 @@ from seerdb.server.auth import (
     encode_challenge_oci,
     encode_result,
     encode_result_oci,
+    encode_token_result,
+    is_token_auth,
     make_challenge,
     parse_auth_response,
     parse_auth_response_oci,
     parse_osesskey,
     parse_osesskey_oci,
+    parse_token_auth,
     verify_password,
 )
 from seerdb.server.backend import Backend, BackendError, Result
@@ -197,8 +200,31 @@ def _negotiate_ano_server(
     )
 
 
+def _handle_token_login(
+    stream: PacketStream, payload: bytes, token_public_key: bytes
+) -> str:
+    # Server half of token auth (#125): verify the OCI IAM request-header
+    # signature (offline-checkable), then grant the session. The JWT itself is
+    # validated by the real IAM service — the Mirror accepts it and labels the
+    # session by its subject claim. Returns the username.
+    from seerdb.common.token_auth import token_subject, verify_token_header
+
+    token, header, signature = parse_token_auth(payload)
+    if header is not None and signature is not None:
+        if not verify_token_header(
+            header.decode('utf-8'), signature.decode('utf-8'), token_public_key
+        ):
+            _deny_login(stream, 'token signature verification failed')
+    stream.write_packet(TNS_DATA, encode_token_result())
+    return token_subject(token.decode('utf-8')) or 'TOKEN_USER'
+
+
 def handle_login(
-    stream: PacketStream, backend: Backend, *, encryption: str = 'accepted'
+    stream: PacketStream,
+    backend: Backend,
+    *,
+    encryption: str = 'accepted',
+    token_public_key: bytes | None = None,
 ) -> tuple[str, bool]:
     """Run the server side of the handshake + O5LOGON.
 
@@ -251,6 +277,12 @@ def handle_login(
     # (write_packet); the deadbeef/OCI form (#265) exchanges full packets built
     # from captured 11g templates (send_raw), so sqlplus / thick OCI logs in too.
     osesskey = _expect(stream, TNS_DATA, 'OSESSKEY')
+    # Token auth (#125): a thin client with an access token sends a single token
+    # AUTH here instead of OSESSKEY. When the Mirror is configured to accept
+    # tokens, verify the OCI IAM signature (offline-checkable) and grant the
+    # session — there is no O5LOGON challenge, proof, or ConnKey.
+    if token_public_key is not None and is_token_auth(osesskey):
+        return _handle_token_login(stream, osesskey, token_public_key), sqlplus
     parse_osesskey_fn = parse_osesskey_oci if sqlplus else parse_osesskey
     user = parse_osesskey_fn(osesskey).decode('utf-8')
     secret = backend.authenticate(user)
@@ -303,7 +335,11 @@ def _deny_login(stream: PacketStream, reason: str) -> NoReturn:
 
 
 def serve_session(
-    stream: PacketStream, backend: Backend, *, encryption: str = 'accepted'
+    stream: PacketStream,
+    backend: Backend,
+    *,
+    encryption: str = 'accepted',
+    token_public_key: bytes | None = None,
 ) -> str:
     """Log a client in, then answer its queries until it disconnects.
 
@@ -317,7 +353,9 @@ def serve_session(
     the authenticated username. ``encryption`` is the Mirror's ANO stance,
     forwarded to :func:`handle_login` (§33 / #448).
     """
-    user, sqlplus = handle_login(stream, backend, encryption=encryption)
+    user, sqlplus = handle_login(
+        stream, backend, encryption=encryption, token_public_key=token_public_key
+    )
     if sqlplus:
         return _serve_oci_session(stream, backend, user)
     cursors = _Cursors()
