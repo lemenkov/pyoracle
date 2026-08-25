@@ -4,6 +4,7 @@
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
+    from seerdb.common.ano_session import AnoChannel
     from seerdb.common.dbobject import DbObjectType
 
 import logging
@@ -656,6 +657,11 @@ class OracleConnect:
         # a keyword-201 sync pair piggybacked on subsequent call responses.
         self._sessionless_txn_active = False
         self.conn_key: bytes | None = None
+        # Native network encryption / data integrity (#437). Set by the ANO
+        # negotiation after the accept when the server requires it; once active,
+        # each TNS_DATA payload is encrypted + MAC'd on the way out and verified
+        # on the way in. None (the common case) means plaintext TTC.
+        self._ano: AnoChannel | None = None
         self.server_version = 0
         self.session_id = None
         # Negotiated TTC field version. Starts at the client's advertised max
@@ -931,6 +937,18 @@ class OracleConnect:
                     logger.debug(
                         'handle_login: Ver=%s, Opts=%s, Sdu=%s', Ver, Opts, Sdu
                     )
+                    # Native network encryption (#437): once the CONNECT
+                    # advertised ANO-capable, a server that supports ANO expects
+                    # the negotiation as the first post-accept packet — skipping
+                    # it makes the server close on our PRO. Gate on the accept's
+                    # ANO-supported flag exactly as a real client does: ACFL0
+                    # (body offset 14) bit 0 set, bit 2 clear, ACFL1 bit 3 clear.
+                    # The negotiation is plaintext and only activates the cipher
+                    # if the server actually selects an encryption algorithm.
+                    Acfl0 = Packet[14] if len(Packet) > 14 else 0
+                    Acfl1 = Packet[15] if len(Packet) > 15 else 0
+                    if (Acfl0 & 0x01) and not (Acfl0 & 0x04) and not (Acfl1 & 0x08):
+                        self._negotiate_ano()
                     Data = encode_dictionary(self._make_dict(DictionaryType.pro))
                     self.send(TNS_DATA, Data)
                     continue
@@ -2185,7 +2203,12 @@ class OracleConnect:
         # cross more than a few SDU boundaries (test_basic crashed with
         # RecursionError on the auth handshake).
         while Data is not None:
-            (Packet, Rest) = encode_packet(Type, Data, self.sdu, self._large_packets)
+            if Type == TNS_DATA and self._ano is not None and self._ano.active:
+                (Packet, Rest) = self._encode_ano_packet(Data)
+            else:
+                (Packet, Rest) = encode_packet(
+                    Type, Data, self.sdu, self._large_packets
+                )
             try:
                 self._sock.send(Packet)
             except TimeoutError as exc:
@@ -2193,6 +2216,76 @@ class OracleConnect:
             Data = Rest
         logger.debug('Send OK')
         return True
+
+    def _encode_ano_packet(self, Data: bytes) -> tuple[bytes, bytes | None]:
+        # One encrypted TNS_DATA packet (#437): a plaintext chunk small enough
+        # that, after the MAC + cipher padding + fold flag, the framed packet
+        # still fits the SDU. Non-final packets carry data flags 0x0020.
+        from seerdb.common.tns import _packet_header
+
+        assert self._ano is not None  # only called while the ANO cipher is active
+        MaxPlain = self.sdu - 64
+        Chunk = Data[:MaxPlain]
+        Rest = Data[MaxPlain:] or None
+        Payload = self._ano.wrap(Chunk)
+        DataFlag = 0x0000 if Rest is None else 0x0020
+        Header = _packet_header(len(Payload) + 10, TNS_DATA, self._large_packets)
+        return (Header + struct.pack('>H', DataFlag) + Payload, Rest)
+
+    def _negotiate_ano(self) -> None:
+        # Run the ANO negotiation (plaintext) after the accept, then activate the
+        # per-packet cipher + MAC. See seerdb.common.ano / ano_session (#437).
+        from seerdb.common import ano
+        from seerdb.common.ano_session import AnoChannel
+
+        Request = ano.encode_ano(
+            [
+                ano.supervisor_service(),
+                ano.auth_service(),
+                ano.encryption_service(
+                    [
+                        'RC4_40',
+                        'RC4_56',
+                        'RC4_128',
+                        'RC4_256',
+                        'DES56C',
+                        'AES128',
+                        'AES192',
+                        'AES256',
+                    ]
+                ),
+                ano.data_integrity_service(
+                    ['MD5', 'SHA1', 'SHA512', 'SHA256', 'SHA384']
+                ),
+            ]
+        )
+        self.send(TNS_DATA, Request)
+        Received = self.recv(b'', b'')
+        if Received is False:
+            raise OperationalError('ANO negotiation: connection closed by server')
+        (_Type, Payload) = Received
+        Start = Payload.index(b'\xde\xad\xbe\xef')
+        Response = ano.decode_ano(Payload[Start:])
+        ByType = {S['type']: S for S in Response['services']}
+        EncId = ByType[ano.SERVICE_ENCRYPTION]['subpackets'][1][1]
+        IntId = ByType[ano.SERVICE_DATA_INTEGRITY]['subpackets'][1][1]
+        Integrity = ByType[ano.SERVICE_DATA_INTEGRITY]
+        # A server that only *supports* ANO (encryption not required/configured)
+        # selects the null algorithm and carries no Diffie-Hellman exchange in
+        # its reply — the negotiation completes but the session stays plaintext
+        # (go-ora activates no cipher when publicKey is empty). Leave self._ano
+        # None so send()/recv() take the ordinary TTC path.
+        if EncId == 0 or len(Integrity['subpackets']) < 8:
+            logger.debug(
+                'handle_login: ANO negotiated, no encryption selected (enc=%d)',
+                EncId,
+            )
+            return
+        (Gen, Prime, ServerPub, ServerIv) = ano.extract_dh_params(Integrity)
+        Dh = ano.compute_dh(Gen, Prime, ServerPub)
+        self.send(TNS_DATA, ano.dh_public_key_round(Dh.public_key))
+        self._ano = AnoChannel(EncId, IntId, Dh.session_key, ServerIv)
+        logger.debug('handle_login: ANO active (enc=%d integrity=%d)', EncId, IntId)
 
     def _timeout_error(self, op: str) -> OperationalError:
         return OperationalError(
@@ -2767,6 +2860,11 @@ class OracleConnect:
                         # _next_data_packet drives the reset handshake.
                         self._pending = Rest
                         return (TNS_MARKER, b'')
+                    # Native network encryption (#437): each DATA packet's body
+                    # is independently encrypted + MAC'd, so decrypt/verify per
+                    # packet, before reassembly concatenates the plaintext.
+                    if Type == TNS_DATA and self._ano is not None and self._ano.active:
+                        Body = self._ano.unwrap(Body)
                     if Rest == b'':
                         return (Type, Data + Body)
                     Acc = Rest
@@ -2777,6 +2875,8 @@ class OracleConnect:
                     # extracted. Consume the body and keep reading; the
                     # next packet's header is in Rest (may be empty,
                     # in which case the outer loop will read more).
+                    if self._ano is not None and self._ano.active:
+                        Body = self._ano.unwrap(Body)
                     Acc = Rest or b''
                     Data = Data + Body
                     continue

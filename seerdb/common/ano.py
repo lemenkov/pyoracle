@@ -37,8 +37,13 @@ from dataclasses import dataclass
 from secrets import token_bytes
 
 ANO_MAGIC = 0xDEADBEEF
-# The "version" advertised in the container header and echoed per service.
-ANO_VERSION = 0x17000000
+# The ANO protocol version advertised in the container header and echoed per
+# service. The server keys its data-packet wire format off this value: it must
+# match what a real client sends (0x0B200200) byte-for-byte, or the server
+# completes the negotiation but then closes the connection when it decodes the
+# first encrypted packet with a different (unexpected) format. Verified against
+# a live 26ai server requiring AES256 (#437).
+ANO_VERSION = 0x0B200200
 
 # Service types.
 SERVICE_AUTH = 1

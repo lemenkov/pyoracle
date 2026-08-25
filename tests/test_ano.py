@@ -27,7 +27,7 @@ class TestSubpackets(unittest.TestCase):
         self.assertEqual(ano.sp_ub4(0xDEADBEEF), bytes.fromhex('00040004deadbeef'))
 
     def test_version(self):
-        self.assertEqual(ano.sp_version(), bytes.fromhex('0004000517000000'))
+        self.assertEqual(ano.sp_version(), bytes.fromhex('000400050b200200'))
 
     def test_status(self):
         # length(2) | type(6) | status(2) = 0x001f (31).
@@ -54,7 +54,7 @@ class TestServices(unittest.TestCase):
     def test_supervisor_service_bytes(self):
         Expected = bytes.fromhex(
             '0004000300000000'  # service header: type 4, 3 sub-packets, err 0
-            '0004000517000000'  # version 0x17000000
+            '000400050b200200'  # version 0x0B200200
             '00080001'
             + ano.SUPERVISOR_CID.hex()  # control id (8 bytes)
             + '00120001deadbeef0003000000040004000100020003'  # service list {4,1,2,3}
@@ -98,11 +98,11 @@ class TestGoOraReference(unittest.TestCase):
     # 26ai server that requires AES/SHA (captured on the wire). Our encoder must
     # reproduce it byte-for-byte — the definitive validation of the request side.
     GOORA_REQUEST = bytes.fromhex(
-        'deadbeef00971700000000040000040003000000000004000517000000000800'
-        '010000101c66ec28ea00120001deadbeef0003000000040004000100020003000'
-        '1000300000000000400051700000000020003e0e100020006fcff000200030000'
-        '00000004000517000000000900010001080a06020f10110001000201000300020'
-        '0000000000400051700000000060001000103040506'.replace(' ', '')
+        'deadbeef00970b2002000004000004000300000000000400050b200200000800'
+        '010000101c66ec28ea00120001deadbeef000300000004000400010002000300'
+        '01000300000000000400050b20020000020003e0e100020006fcff0002000300'
+        '000000000400050b200200000900010001080a06020f10110001000201000300'
+        '0200000000000400050b20020000060001000103040506'
     )
 
     def test_encoder_matches_captured_client(self):

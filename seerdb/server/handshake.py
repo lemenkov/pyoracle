@@ -172,6 +172,35 @@ def encode_accept(request: ConnectRequest, *, sdu: int = DEFAULT_SDU) -> bytes:
     return packet
 
 
+# A modern thin client (seerdb, go-ora, python-oracledb) runs an ANO (native
+# network security) negotiation before PRO once the ACCEPT advertised ANO-capable
+# — its container leads with the DEADBEEF magic and carries the 0x0B200200 ANO
+# version at body offset 6. The classic sqlplus/thick-OCI client also negotiates
+# ANO but stamps version 0x00000000, and its whole login is handled by the
+# `deadbeef`-dialect path (#265) — so the modern version is what tells the two
+# apart here. (#437)
+_ANO_MAGIC = b'\xde\xad\xbe\xef'
+_ANO_MODERN_VERSION = bytes.fromhex('0b200200')
+
+
+def is_ano_negotiation(pro_body: bytes) -> bool:
+    """Whether a post-ACCEPT packet is a modern thin client's ANO negotiation
+    (vs a TTI_PRO or the sqlplus/OCI ANO, both handled by other paths)."""
+    return pro_body[:4] == _ANO_MAGIC and pro_body[6:10] == _ANO_MODERN_VERSION
+
+
+def encode_ano_null_reply(*, sdu: int = DEFAULT_SDU) -> bytes:
+    """Build the null-algorithm ANO negotiation reply — §ANO (#437).
+
+    Replays the real 11g server's response to a modern client's ANO request:
+    every service selects the null algorithm, so no cipher/MAC is activated and
+    the session stays plaintext. (These are the same bytes the sqlplus/OCI path
+    replays as its first `deadbeef` reply — it *is* the ANO response.)
+    """
+    packet, _ = encode_packet(TNS_DATA, PRO_REPLY_SQLPLUS[_DATA_PREFIX:], sdu)
+    return packet
+
+
 def encode_pro_reply(*, sqlplus: bool = False, sdu: int = DEFAULT_SDU) -> bytes:
     """Build the server's PRO (protocol negotiation) reply — §4.1.
 

@@ -16,7 +16,11 @@ import unittest
 from seerdb.common import ano
 from seerdb.common.ano_cipher import AnoAESCipher
 from seerdb.common.ano_mac import AnoMac
-from seerdb.common.ano_session import fold_key, make_cipher, make_mac
+from seerdb.common.ano_session import make_cipher, make_mac
+
+# The constant DH IV a real server supplies for the MAC (negotiation's 8th
+# data-integrity sub-packet), used to key the data-integrity MAC.
+_SERVER_IV = b'foo bar baz bat quux'
 
 _RESPONSE = open(
     os.path.join(os.path.dirname(__file__), 'fixtures', 'ano_server_response.bin'), 'rb'
@@ -74,30 +78,26 @@ class TestSessionBridge(unittest.TestCase):
 
     def test_make_mac_sha256_roundtrip(self):
         Key = self._session_key()
-        Client = make_mac(ano.INTEGRITY_ALGO_IDS['SHA256'], Key, ClientSide=True)
-        Server = make_mac(ano.INTEGRITY_ALGO_IDS['SHA256'], Key, ClientSide=False)
+        Client = make_mac(
+            ano.INTEGRITY_ALGO_IDS['SHA256'], Key, _SERVER_IV, ClientSide=True
+        )
+        Server = make_mac(
+            ano.INTEGRITY_ALGO_IDS['SHA256'], Key, _SERVER_IV, ClientSide=False
+        )
         self.assertIsInstance(Client, AnoMac)
         self.assertEqual(Server.validate(Client.sign(b'select 1')), b'select 1')
 
     def test_null_algorithm_yields_no_cipher_or_mac(self):
         self.assertIsNone(make_cipher(0, self._session_key()))
-        self.assertIsNone(make_mac(0, self._session_key()))
+        self.assertIsNone(make_mac(0, self._session_key(), _SERVER_IV))
 
-    def test_fold_key_xors_auth_key(self):
-        Key = bytes(range(32))
-        Auth = bytes([0xFF] * 8)
-        Folded = fold_key(Key, Auth)
-        self.assertEqual(Folded[:8], bytes(b ^ 0xFF for b in Key[:8]))
-        self.assertEqual(Folded[8:], Key[8:])  # beyond the auth key: unchanged
-
-    def test_fold_changes_derived_keystream(self):
+    def test_cipher_uses_zero_iv(self):
+        # The AES-CBC cipher runs with an all-zero IV (go-ora's nil IV), so it
+        # matches a fresh AnoAESCipher built with 16 zero bytes.
         Key = self._session_key()
-        Folded = fold_key(Key, b'\x5a' * 16)
-        self.assertNotEqual(Key, Folded)
-        # A cipher from the folded key differs from one from the original.
-        A = make_cipher(17, Key).encrypt(b'x' * 16)
-        B = make_cipher(17, Folded).encrypt(b'x' * 16)
-        self.assertNotEqual(A, B)
+        Ours = make_cipher(ano.ENCRYPTION_ALGO_IDS['AES256'], Key)
+        Ref = AnoAESCipher(Key[:32], bytes(16))
+        self.assertEqual(Ours.encrypt(b'x' * 20), Ref.encrypt(b'x' * 20))
 
 
 if __name__ == '__main__':

@@ -58,9 +58,11 @@ from seerdb.server.backend import Backend, BackendError, Result
 from seerdb.server.framing import PacketStream
 from seerdb.server.handshake import (
     encode_accept,
+    encode_ano_null_reply,
     encode_dty_reply,
     encode_pro_reply,
     encode_type_reply_sqlplus,
+    is_ano_negotiation,
     parse_connect,
     pro_is_sqlplus,
 )
@@ -142,11 +144,20 @@ def handle_login(stream: PacketStream, backend: Backend) -> tuple[str, bool]:
     # --- Handshake (§2, §4.1/§4.2) ---
     request = parse_connect(_expect(stream, TNS_CONNECT, 'CONNECT'))
     stream.send_raw(encode_accept(request))
+    # A modern thin client (seerdb/go-ora/oracledb) runs an ANO negotiation
+    # before PRO now that our ACCEPT advertises ANO-capable (#437). We support no
+    # encryption, so answer the null-algorithm negotiation and read the real PRO
+    # that follows. The sqlplus/OCI client's ANO uses a different version and is
+    # handled inline by the `deadbeef` dialect path below, so it is left alone.
+    first = _expect(stream, TNS_DATA, 'PRO')
+    if is_ano_negotiation(first):
+        stream.send_raw(encode_ano_null_reply())
+        first = _expect(stream, TNS_DATA, 'PRO')
     # A thin (oracledb/seerdb) client leads its PRO with TTI_PRO; classic
     # sqlplus / thick OCI leads with the `deadbeef` magic and needs the matching
     # reply dialect (#265). Decide on the PRO request and hold it for the DTY
     # reply so both halves speak one dialect.
-    sqlplus = pro_is_sqlplus(_expect(stream, TNS_DATA, 'PRO'))
+    sqlplus = pro_is_sqlplus(first)
     stream.send_raw(encode_pro_reply(sqlplus=sqlplus))
     _expect(stream, TNS_DATA, 'DTY')
     stream.send_raw(encode_dty_reply(sqlplus=sqlplus))
