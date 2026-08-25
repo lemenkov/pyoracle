@@ -452,6 +452,34 @@ def _apply_rowfactory(rows, rowfactory):
     return [rowfactory(*r) for r in rows] if rowfactory else rows
 
 
+# Negotiation cache (#438): a process-level map from a connection target to the
+# field version a prior successful login negotiated on that server. When the
+# opt-in `negotiation_cache` is set, a reconnect to a target already in the cache
+# skips the bare PRO probe (which exists only to learn the field version) and
+# goes straight to the fast-auth bundle — one round trip fewer, the win most
+# visible for pools that churn connections. A stale entry (the server changed
+# behind the same address) makes the cached-path handshake fail; that is caught
+# in connect(), which invalidates the entry and retries a full negotiation. Only
+# fast-auth (fv >= 18) servers are cached — older servers must negotiate down.
+_NEGOTIATION_CACHE: dict[tuple[str, int, str], int] = {}
+_NEGOTIATION_CACHE_LOCK = threading.Lock()
+
+
+def _nego_cache_get(key: tuple[str, int, str]) -> int | None:
+    with _NEGOTIATION_CACHE_LOCK:
+        return _NEGOTIATION_CACHE.get(key)
+
+
+def _nego_cache_put(key: tuple[str, int, str], field_version: int) -> None:
+    with _NEGOTIATION_CACHE_LOCK:
+        _NEGOTIATION_CACHE[key] = field_version
+
+
+def _nego_cache_del(key: tuple[str, int, str]) -> None:
+    with _NEGOTIATION_CACHE_LOCK:
+        _NEGOTIATION_CACHE.pop(key, None)
+
+
 # Oracle 9i (fv2 / TTI_ALL7) binds a value inline with no piecewise LONG/LOB
 # send protocol, so a bind can be no larger than the SQL inline limits: 2000
 # bytes for RAW (a `bytes` value) and 4000 bytes for VARCHAR2 (a `str` value).
@@ -580,6 +608,7 @@ class OracleConnect:
         wallet_password: str | None = None,
         config_dir: str | None = None,
         dsn: str | None = None,
+        negotiation_cache: bool = False,
     ):
         # field_version is the highest TTC field version seerdb advertises;
         # the server negotiates it down (min(client, server)). The default is the
@@ -662,6 +691,12 @@ class OracleConnect:
         # each TNS_DATA payload is encrypted + MAC'd on the way out and verified
         # on the way in. None (the common case) means plaintext TTC.
         self._ano: AnoChannel | None = None
+        # Negotiation cache (#438): opt-in reconnect optimization; _used_nego_cache
+        # records whether the current login took the cached (bare-PRO-skipping)
+        # path, so connect() knows to invalidate + retry on a stale-cache failure.
+        self.negotiation_cache = negotiation_cache
+        self._used_nego_cache = False
+        self._skip_nego_cache = False  # forced true on the invalidate-and-retry
         self.server_version = 0
         self.session_id = None
         # Negotiated TTC field version. Starts at the client's advertised max
@@ -672,6 +707,9 @@ class OracleConnect:
         # high default is transparent; pass field_version=FIELD_VERSION_11_2 to
         # force the legacy vector.
         self.field_version = field_version
+        # The client's requested field version, kept so the negotiation-cache
+        # retry can restore it before a full re-negotiation (#438).
+        self._field_version_requested = field_version
         self.cursors: dict[int, int] = {}
         # Cursor cache: (SQL text, bind OAC signature) → server-side cursor
         # handle. Lets repeat `execute()` of the same SQL skip the parse step
@@ -804,11 +842,48 @@ class OracleConnect:
         Data = encode_dictionary(self._make_dict(DictionaryType.login))
         self.send(TNS_CONNECT, Data)
 
+    def _nego_cache_key(self) -> tuple[str, int, str]:
+        # Identify the connection target for the negotiation cache (#438).
+        return (self.host, self.port, self.service_name or self.sid or '')
+
     def connect(self) -> bool:
         self._redirects = 0
         self._open_transport()
-        self.handle_login()
+        try:
+            result = self.handle_login()
+        except OperationalError:
+            # A connection-level failure on the cached (bare-PRO-skipping) path
+            # most likely means the cached field version is stale (the server
+            # changed). Invalidate and retry once with a full negotiation (#438).
+            if self._used_nego_cache:
+                self._retry_without_negotiation_cache()
+                return True
+            raise
+        if result not in (0, None) and self._used_nego_cache:
+            # handle_login reported a peer close on the cached path — same stale
+            # -cache signal, without an exception.
+            self._retry_without_negotiation_cache()
         return True
+
+    def _retry_without_negotiation_cache(self) -> None:
+        # Invalidate the stale entry, reset the per-connection handshake state to
+        # its fresh values (a partial cached login left the sequence counter and
+        # negotiated bits dirty), and run a full negotiation on a new socket.
+        _nego_cache_del(self._nego_cache_key())
+        self._used_nego_cache = False
+        self._skip_nego_cache = True  # force the full negotiation this attempt
+        self.disconnect()
+        self.seq = 1
+        self._pending = b''
+        self._in_break = False
+        self.conn_state = CONN_STATE_DISCONNECTED
+        self.field_version = self._field_version_requested
+        self._dialect = None
+        self._ano = None
+        self.conn_key = None
+        self._o3_phase = 0
+        self._open_transport()
+        self.handle_login()
 
     def _apply_wallet(
         self,
@@ -949,6 +1024,16 @@ class OracleConnect:
                     Acfl1 = Packet[15] if len(Packet) > 15 else 0
                     if (Acfl0 & 0x01) and not (Acfl0 & 0x04) and not (Acfl1 & 0x08):
                         self._negotiate_ano()
+                    # Negotiation cache (#438): a prior login on this target
+                    # recorded a fast-auth field version — skip the bare PRO probe
+                    # (it exists only to learn that) and go straight to the bundle.
+                    if self.negotiation_cache and not self._skip_nego_cache:
+                        Cached = _nego_cache_get(self._nego_cache_key())
+                        if Cached is not None and Cached > FIELD_VERSION_23_1:
+                            self.field_version = Cached
+                            self._used_nego_cache = True
+                            logger.debug('handle_login: negotiation cache hit')
+                            return self._fast_auth_login()
                     Data = encode_dictionary(self._make_dict(DictionaryType.pro))
                     self.send(TNS_DATA, Data)
                     continue
@@ -1256,6 +1341,10 @@ class OracleConnect:
                 self.session_id = SessId
                 self.conn_state = CONN_STATE_AUTHENTICATED
                 logger.debug('handle_login: authenticated')
+                # Negotiation cache (#438): record the fast-auth field version so
+                # the next reconnect to this target can skip the bare PRO probe.
+                if self.negotiation_cache and self.field_version > FIELD_VERSION_23_1:
+                    _nego_cache_put(self._nego_cache_key(), self.field_version)
                 return 0
             else:
                 logger.error('handle_login: server validation failed')

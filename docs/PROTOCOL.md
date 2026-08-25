@@ -3006,6 +3006,15 @@ whose decode yields a session key (the DTY datatype table contains `0x08` bytes,
 so a naive token scan mis-hits), then handed to the normal phase-two path. The
 23ai server tolerates the duplicate PRO that the bundle re-sends.
 
+Normally the client sends a bare PRO first (ACCEPT → PRO → PRO-reply → bundle)
+purely to learn whether the negotiated field version reaches the fast-auth
+threshold. With the opt-in **negotiation cache** (#438), a reconnect to a target
+whose prior login recorded a fast-auth field version skips that bare PRO and
+sends the bundle straight after the ACCEPT — one round trip fewer. If the cached
+value is stale (the server changed), the bundle is rejected; the client then
+invalidates the entry and retries a full negotiation. This changes only the
+client's packet *sequence*, not any wire format.
+
 ### 20.3 Phase two (OAUTH) and changepassword
 
 At fv > 17 the OAUTH header replicates oracledb byte-for-byte: the has-user
