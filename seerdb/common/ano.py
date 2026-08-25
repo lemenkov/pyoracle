@@ -190,8 +190,12 @@ def supervisor_service() -> bytes:
 
 
 def encryption_service(AlgoNames: list[str]) -> bytes:
-    """The encryption service: version, offered algorithm IDs, and a driver flag."""
-    Ids = bytes(ENCRYPTION_ALGO_IDS[Name] for Name in AlgoNames)
+    """The encryption service: version, offered algorithm IDs, and a driver flag.
+
+    The offered list is prefixed with the null algorithm (ID 0) — the "no
+    service" fallback the server expects at the head of the list.
+    """
+    Ids = bytes([0]) + bytes(ENCRYPTION_ALGO_IDS[Name] for Name in AlgoNames)
     return encode_service(
         SERVICE_ENCRYPTION,
         [sp_version(), sp_bytes(Ids), sp_ub1(1)],
@@ -200,10 +204,23 @@ def encryption_service(AlgoNames: list[str]) -> bytes:
 
 def data_integrity_service(AlgoNames: list[str]) -> bytes:
     """The data-integrity service: version and the offered checksum algorithm IDs."""
-    Ids = bytes(INTEGRITY_ALGO_IDS[Name] for Name in AlgoNames)
+    Ids = bytes([0]) + bytes(INTEGRITY_ALGO_IDS[Name] for Name in AlgoNames)
     return encode_service(
         SERVICE_DATA_INTEGRITY,
         [sp_version(), sp_bytes(Ids)],
+    )
+
+
+# Authentication service markers (no NTS/Kerberos selected by a thin client).
+AUTH_MARKER = 0xE0E1
+AUTH_STATUS_NONE = 0xFCFF
+
+
+def auth_service() -> bytes:
+    """The minimal authentication service — no NTS/Kerberos method offered."""
+    return encode_service(
+        SERVICE_AUTH,
+        [sp_version(), sp_ub2(AUTH_MARKER), sp_status(AUTH_STATUS_NONE)],
     )
 
 
