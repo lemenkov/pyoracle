@@ -26,6 +26,7 @@ import struct
 from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
+    from seerdb.common.ano_session import AnoChannel
     from seerdb.common.dbobject import DbObjectType
 
 from seerdb.client.connection import (
@@ -212,6 +213,10 @@ class AsyncOracleConnect:
         self._e2e_pending: dict = {}
         self._transaction_context: bytes | None = None  # two-phase commit (#131)
         self._sessionless_txn_active = False  # sessionless txns (#133)
+        # Native network encryption / data integrity (#437). Set by the ANO
+        # negotiation after the accept; once active each TNS_DATA payload is
+        # encrypted + MAC'd on the wire. None (the common case) means plaintext.
+        self._ano: AnoChannel | None = None
         self.conn_key: bytes | None = None
         self.server_version = 0
         self.session_id = None
@@ -414,11 +419,32 @@ class AsyncOracleConnect:
     async def send(self, Type: int, Data: bytes | None) -> None:
         """Iterative split-and-send; mirrors `OracleConnect.send`."""
         while Data is not None:
-            (Packet, Rest) = encode_packet(Type, Data, self.sdu, self._large_packets)
+            if Type == TNS_DATA and self._ano is not None and self._ano.active:
+                (Packet, Rest) = self._encode_ano_packet(Data)
+            else:
+                (Packet, Rest) = encode_packet(
+                    Type, Data, self.sdu, self._large_packets
+                )
             self._wr.write(Packet)
             Data = Rest
         await self._wr.drain()
         logger.debug('Send OK (async)')
+
+    def _encode_ano_packet(self, Data: bytes) -> tuple[bytes, bytes | None]:
+        # One encrypted TNS_DATA packet (#437) — mirror of
+        # OracleConnect._encode_ano_packet. A plaintext chunk small enough that,
+        # after the MAC + cipher padding + fold flag, the framed packet still fits
+        # the SDU; non-final packets carry data flags 0x0020.
+        from seerdb.common.tns import _packet_header
+
+        assert self._ano is not None  # only called while the ANO cipher is active
+        MaxPlain = self.sdu - 64
+        Chunk = Data[:MaxPlain]
+        Rest = Data[MaxPlain:] or None
+        Payload = self._ano.wrap(Chunk)
+        DataFlag = 0x0000 if Rest is None else 0x0020
+        Header = _packet_header(len(Payload) + 10, TNS_DATA, self._large_packets)
+        return (Header + struct.pack('>H', DataFlag) + Payload, Rest)
 
     @property
     def _wr(self) -> asyncio.StreamWriter:
@@ -459,12 +485,19 @@ class AsyncOracleConnect:
                     if Type == TNS_MARKER:
                         self._pending = Rest
                         return (TNS_MARKER, b'')
+                    # Native network encryption (#437): each DATA packet's body is
+                    # independently encrypted + MAC'd, so decrypt/verify per packet
+                    # before reassembly concatenates the plaintext.
+                    if Type == TNS_DATA and self._ano is not None and self._ano.active:
+                        Body = self._ano.unwrap(Body)
                     if Rest == b'':
                         return (Type, Data + Body)
                     Acc = Rest
                     Data = Data + Body
                     continue
                 if Body is not None:
+                    if self._ano is not None and self._ano.active:
+                        Body = self._ano.unwrap(Body)
                     Acc = Rest or b''
                     Data = Data + Body
                     continue
@@ -531,6 +564,15 @@ class AsyncOracleConnect:
                         Opts & TNS_GSO_CAN_RECV_ATTENTION
                     )
                     self.conn_state = CONN_STATE_CONNECTED
+                    # Native network encryption (#437): negotiate ANO whenever the
+                    # server advertises support (ACFL0 bit 0 set, bit 2 clear,
+                    # ACFL1 bit 3 clear) — the CONNECT advertised ANO-capable, so a
+                    # supporting server expects the negotiation before PRO. Mirror
+                    # of OracleConnect.handle_login.
+                    Acfl0 = Packet[14] if len(Packet) > 14 else 0
+                    Acfl1 = Packet[15] if len(Packet) > 15 else 0
+                    if (Acfl0 & 0x01) and not (Acfl0 & 0x04) and not (Acfl1 & 0x08):
+                        await self._negotiate_ano()
                     Data = encode_dictionary(self._make_dict(DictionaryType.pro))
                     await self.send(TNS_DATA, Data)
                     continue
@@ -672,6 +714,60 @@ class AsyncOracleConnect:
                 case _:
                     logger.debug('handle_login (async): unexpected %s', Type)
                     return 1
+
+    async def _negotiate_ano(self) -> None:
+        # Async port of OracleConnect._negotiate_ano (#437): run the plaintext ANO
+        # negotiation after the accept, then activate the per-packet cipher + MAC.
+        from seerdb.common import ano
+        from seerdb.common.ano_session import AnoChannel
+
+        Request = ano.encode_ano(
+            [
+                ano.supervisor_service(),
+                ano.auth_service(),
+                ano.encryption_service(
+                    [
+                        'RC4_40',
+                        'RC4_56',
+                        'RC4_128',
+                        'RC4_256',
+                        'DES56C',
+                        'AES128',
+                        'AES192',
+                        'AES256',
+                    ]
+                ),
+                ano.data_integrity_service(
+                    ['MD5', 'SHA1', 'SHA512', 'SHA256', 'SHA384']
+                ),
+            ]
+        )
+        await self.send(TNS_DATA, Request)
+        Received = await self.recv(b'', b'')
+        if Received is False:
+            raise OperationalError('ANO negotiation: connection closed by server')
+        (_Type, Payload) = Received
+        Start = Payload.index(b'\xde\xad\xbe\xef')
+        Response = ano.decode_ano(Payload[Start:])
+        ByType = {S['type']: S for S in Response['services']}
+        EncId = ByType[ano.SERVICE_ENCRYPTION]['subpackets'][1][1]
+        IntId = ByType[ano.SERVICE_DATA_INTEGRITY]['subpackets'][1][1]
+        Integrity = ByType[ano.SERVICE_DATA_INTEGRITY]
+        # A server that only *supports* ANO (encryption not required) selects the
+        # null algorithm and carries no DH — negotiation done, session plaintext.
+        if EncId == 0 or len(Integrity['subpackets']) < 8:
+            logger.debug(
+                'handle_login (async): ANO negotiated, no encryption selected (enc=%d)',
+                EncId,
+            )
+            return
+        (Gen, Prime, ServerPub, ServerIv) = ano.extract_dh_params(Integrity)
+        Dh = ano.compute_dh(Gen, Prime, ServerPub)
+        await self.send(TNS_DATA, ano.dh_public_key_round(Dh.public_key))
+        self._ano = AnoChannel(EncId, IntId, Dh.session_key, ServerIv)
+        logger.debug(
+            'handle_login (async): ANO active (enc=%d integrity=%d)', EncId, IntId
+        )
 
     async def _fast_auth_login(self) -> int | None:
         # Async port of OracleConnect._fast_auth_login (23ai fast-auth, #89):

@@ -178,7 +178,7 @@ The client sends a TNS_CONNECT packet containing a fixed header and a connect de
 | 16     | 2    | Connect data length          | (computed)        |
 | 18     | 2    | Connect data offset          | `0x004A` (74)     |
 | 20     | 4    | Max receivable connect data  | `0x00000000`      |
-| 24     | 2    | ANO flags                    | `0x8484` (ANO disabled) |
+| 24     | 2    | ANO flags                    | `0x0101` (ANO-capable; see §33) |
 | 26     | 24   | Reserved                     | `0x00...`         |
 | 50     | 4    | Session Data Unit (large)    | `0x00002000` (8192) |
 | 54     | 4    | Transport Data Unit (large)  | `0x00002000` (8192) |
@@ -3620,3 +3620,99 @@ oracledb-thin async-pipeline capture and seerdb's own capture on 23ai:
   marker (`01 00 01`) before an erroring op's response but does **not** wait for
   a reset and keeps streaming; the pipelined reader skips the marker silently
   (unlike the break/reset handshake of §27 / #45).
+
+## 33. Native network encryption / data integrity (ANO, #437)
+
+Oracle Advanced Networking (ANO) negotiates *native network encryption* and
+*data integrity* right after the ACCEPT and before PRO. Every field below is
+validated byte-for-byte against a live client's session on a 26ai server
+configured `SQLNET.ENCRYPTION_SERVER=REQUIRED` (AES256) +
+`CRYPTO_CHECKSUM_SERVER=REQUIRED` (SHA256), and end-to-end connect+query on that
+server.
+
+### 33.1 Advertising and the gate
+
+The CONNECT descriptor's ANO flags (§2.1, body offset 24) must be `0x0101`
+(ANO-capable); the legacy `0x8484` (disabled) makes an ANO server RESET after
+round 1. Once ANO-capable is advertised, whether to negotiate is gated on the
+**ACCEPT** body flags `ACFL0` (offset 14) and `ACFL1` (offset 15):
+
+    negotiate ⇔ (ACFL0 & 0x01) and not (ACFL0 & 0x04) and not (ACFL1 & 0x08)
+
+`ACFL0 & 0x01` = ANO supported (set on 10g→26ai); `ACFL0 & 0x10` additionally
+means encryption is *required*. The gate fires on every modern server, so the
+negotiation runs even when the server ultimately selects no encryption — a
+plaintext server just answers with the null algorithm and the session stays
+plaintext.
+
+### 33.2 The negotiation packets (`DEADBEEF` container)
+
+A negotiation packet is a container (`magic 0xDEADBEEF | length(2) |
+version(4) | service_count(2) | err(1)`) followed by N services (`type(2) |
+subpacket_count(2) | err(4) | subpackets`); each sub-packet is `length(2) |
+type(2) | payload`. All big-endian. The **version must be `0x0B200200`** — the
+server keys its data-packet wire format off it and closes on the first encrypted
+packet if it differs.
+
+- **Round 1 (C→S)** offers four services in order: supervisor (4), auth (1),
+  encryption (2, offering the RC4/DES/AES ids prefixed with the null id 0),
+  data-integrity (3, offering MD5/SHA1/SHA-2 prefixed with 0).
+- **Response (S→C)** selects one encryption id and one integrity id. When the
+  server selects encryption, its data-integrity service carries **8 sub-packets**
+  tailing a Diffie-Hellman exchange: `gen-bitlen, prime-bitlen (UB2), generator,
+  prime, server_public, server_iv (bytes)`. A plaintext server selects
+  encryption id 0 and carries no DH — the client stops here, plaintext.
+- **Round 2 (C→S)** is a one-service container (data-integrity, a single `bytes`
+  sub-packet) carrying the client's DH public key.
+
+DH is the classic modular exchange over the server's group (gen=2, 2048-bit
+prime): `client_public = gen^priv mod p`, `shared = server_public^priv mod p`,
+both left-padded to the prime's byte length. `server_iv` is the constant
+`b"foo bar baz bat quux"` (20 bytes).
+
+### 33.3 The encrypted data-packet wire format
+
+After round 2 the client activates a per-packet transform; the negotiation
+itself is plaintext. Each `TNS_DATA` payload (the bytes after the 8-byte header +
+2-byte data flags) becomes:
+
+    AES-CBC( plaintext ‖ MAC(plaintext) ) ‖ 0x00
+
+- **MAC** (present whenever a checksum algorithm is negotiated — SHA256 here):
+  computed over the plaintext and appended *before* encryption. It is *not* an
+  HMAC. Keying: `aes_key = shared[:5] ‖ 0xFF` (zero-filled to 16) drives one
+  AES-CBC pass over 32 zero bytes with IV `server_iv[:16]`, seeding a base key
+  (first 16 B) + base IV (next 16 B); the per-direction keystream key is that
+  base key with **byte 5** set to `90` (sender) / `180` (receiver), swapped
+  between client and server. Each packet advances the keystream one block; the
+  packet MAC is `SHA256(payload ‖ keystream_block)`. Stateful — identical
+  payloads get different MACs.
+- **Cipher**: AES-CBC, key = `shared[:keysize]` (16/24/32), **IV = 16 zero
+  bytes** (the DH IV is *not* used by the cipher). Oracle padding: zero-pad the
+  plaintext up to the 16-byte block (no block added when already aligned), and
+  append one trailing marker byte `padding_count + 1` (1..16) *after* the
+  ciphertext. A fresh CBC state per packet (no IV chaining across packets).
+- **Key-fold flag**: one trailing `0x00` byte. No auth-key folding happens on
+  the wire for this server (the byte is always 0).
+
+Receive reverses it: strip the flag byte, AES-CBC decrypt (removing the padding
+marker + padding), then verify and strip the trailing MAC. Each `TNS_DATA`
+packet on the wire is an independent encrypt+MAC unit, so multi-packet responses
+decrypt per packet before reassembly, and the MAC keystreams stay in lock-step.
+
+### 33.4 Login sequence with ANO active
+
+The negotiation completes before PRO. From there the ordinary handshake runs
+unchanged, but each `TNS_DATA` is wrapped as above: PRO → PRO reply →
+(fast-auth bundle at fv≥18, §20) → auth → result. There is no key re-keying
+after authentication for this server.
+
+### 33.5 Server side (the Mirror)
+
+Real 11g and 26ai advertise ANO in the ACCEPT (`ACFL0 & 0x01`), so a modern thin
+client negotiates against them. The Mirror (§4.1) answers a modern client's
+round-1 (version `0x0B200200`) with the captured null-algorithm response — every
+service selects id 0, so no cipher/MAC is activated and the session stays
+plaintext. The classic sqlplus / thick-OCI client also negotiates ANO but stamps
+version `0x00000000`; that path is handled inline by the `deadbeef` dialect
+(§4.1.1).

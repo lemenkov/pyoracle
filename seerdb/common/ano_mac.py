@@ -10,15 +10,19 @@ packet carries a MAC computed by this construction (re-expressed from go-ora's
 ``SHA(payload || keystream_block)``. The keystream is stateful — it advances one
 block per packet — so identical payloads get different MACs.
 
-Keying (from the DH session key + IV):
+Keying (from the DH shared secret + the server-supplied DH IV):
 
-  * ``aes_key = key[:keysize] || 0xFF`` (zero-filled to 16 bytes) drives an
-    AES-CBC pass over a 32-byte zero buffer; the result seeds a base key (first
-    16 bytes) and base IV (next 16),
-  * the per-direction keystream key is that base key with its ``keysize`` byte
-    set to **90** for the sender and **180** for the receiver — swapped between
-    client and server, so each side's *send* keystream equals the peer's
-    *receive* keystream.
+  * ``aes_key = secret[:5] || 0xFF`` (zero-filled to 16 bytes) drives an AES-CBC
+    pass over a 32-byte zero buffer; the result seeds a base key (first 16 bytes)
+    and base IV (next 16),
+  * the per-direction keystream key is that base key with byte **5** set to
+    **90** for the sender and **180** for the receiver — swapped between client
+    and server, so each side's *send* keystream equals the peer's *receive*
+    keystream.
+
+The 5-byte key prefix and the byte-5 tag position match go-ora's
+``OracleNetworkHash2`` exactly (both the legacy RC4 hash and this SHA-2 hash use
+a 5-byte prefix; an earlier 15-byte guess here was wrong).
 
 Only the SHA-2 (AES-keystream) path is implemented; the legacy MD5 / SHA-1 path
 uses an RC4 keystream and is deferred, as with the DES/RC4 ciphers.
@@ -50,7 +54,6 @@ class AnoMac:
         Key: bytes,
         Iv: bytes,
         Algorithm: str,
-        UseNew: bool = True,
         ClientSide: bool = True,
     ):
         if Algorithm not in _HASHES:
@@ -60,7 +63,7 @@ class AnoMac:
             )
         self._hash = _HASHES[Algorithm]
         self._size = self._hash().digest_size  # 32 / 48 / 64 — block-aligned
-        KeySize = 15 if UseNew else 5
+        KeySize = 5  # go-ora's OracleNetworkHash2 keys off the first 5 bytes
 
         # aes_key = key[:keysize] | 0xFF, zero-filled to 16 bytes.
         AesKey = bytearray(16)

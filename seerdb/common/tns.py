@@ -4630,7 +4630,7 @@ def encode_dictionary_login(Dictionary: dict) -> bytes:
     DataLength = struct.pack('>H', len(Data))  # Connect Data length
     CDO = struct.pack('>H', 74)  # Connect Data offset (legacy 58 + 16 trailing)
     MaxConnDataRecv = bytes(4)  # Max connect data that can be received
-    ANO = bytes([132, 132])  # ANO disabled
+    ANO = bytes([1, 1])  # advertise ANO (native encryption) capable (#437)
     Padding = bytes(24)
     # The 319-era trailing block before the connect data: 32-bit SDU and TDU,
     # then connect_flags_1 (0) and connect_flags_2 (1 = OOB check), per capture.
