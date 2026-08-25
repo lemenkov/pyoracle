@@ -204,6 +204,24 @@ import re as _re
 
 _AQ_ORA_RE = _re.compile(rb'ORA-(\d{5}):\s*([^\x00\n]*)')
 
+# A TNS_REFUSE body is an ASCII descriptor like
+# ``(DESCRIPTION=(TMP=)(VSNNUM=0)(ERR=12514)(ERROR_STACK=(ERROR=(CODE=12514)...))``.
+# Both ERR= and CODE= carry the listener's refusal reason (e.g. 12514 — the
+# requested service is not registered).
+_REFUSE_ERR_RE = _re.compile(rb'(?:ERR|CODE)=(\d+)')
+
+
+def _parse_refuse_code(Packet: bytes) -> int | None:
+    """Extract the ORA error code from a TNS_REFUSE body, or None if absent.
+
+    Prefers the first non-zero code (some refuse bodies carry ``ERR=0`` with the
+    real code in a later ``CODE=`` field)."""
+    for Digits in _REFUSE_ERR_RE.findall(Packet):
+        Code = int(Digits)
+        if Code:
+            return Code
+    return None
+
 
 def _aq_error_info(Packet: bytes):
     # Pull the ORA code + message out of an AQ error (TTI_OER) response. The OER
@@ -1062,8 +1080,22 @@ class OracleConnect:
                     continue
                 case t if t == TNS_REFUSE:
                     logger.debug('handle_login: refuse')
+                    Code = _parse_refuse_code(Packet)
                     self.disconnect()
-                    return 1
+                    # A refusal is terminal — surface it instead of returning a
+                    # half-open connection (sock=None) that only fails, opaquely,
+                    # on the next call. The listener's ORA code (e.g. 12514, the
+                    # service is not registered) is in the refuse body.
+                    if Code:
+                        from seerdb.common.exceptions import from_ora_code
+
+                        raise from_ora_code(Code)(
+                            f'ORA-{Code:05d}: connection refused by the listener',
+                            code=Code,
+                        )
+                    raise OperationalError(
+                        'connection refused by the listener during login'
+                    )
                 case t if t == TNS_RESEND:
                     logger.debug('handle_login: resend')
                     self.conn_state = CONN_STATE_AUTH_NEGOTIATE

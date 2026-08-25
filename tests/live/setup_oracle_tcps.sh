@@ -63,6 +63,19 @@ echo ">> Restarting the listener (now serving TCPS on 2484)"
 lsnrctl stop || true
 lsnrctl start
 
+echo ">> Forcing service registration and waiting for it"
+# After a listener restart the instance has not yet re-registered its services;
+# connecting in that window is refused with ORA-12514. Force registration and
+# wait for the PDB service to appear before anyone connects.
+sqlplus -s / as sysdba >/dev/null 2>&1 <<SQL || true
+ALTER SYSTEM REGISTER;
+EXIT
+SQL
+for _ in $(seq 1 30); do
+  if lsnrctl status 2>/dev/null | grep -qi "\"${PDB}\""; then break; fi
+  sleep 1
+done
+
 echo ">> Creating ${DB_USER} in ${PDB}"
 sqlplus -s / as sysdba <<SQL
 WHENEVER SQLERROR EXIT 1
