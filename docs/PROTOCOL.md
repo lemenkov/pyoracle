@@ -547,7 +547,22 @@ settles on field version **4**. seerdb advertises its highest version and
 gates the *older* wire formats on `field_version < FIELD_VERSION_11_2` — the
 pre-11g describe layout (§6.4) and the unsalted DES auth (§4.4) — so a single
 build speaks 10g through 23ai. (Reference field versions: 10.2 = 4, 11.2 = 6,
-12.1 = 7, 12.2 = 8, 19c = 12, 21c = 16, 23ai = 17.)
+12.1 = 7, 12.2 = 8, 19c = 12, 21c = 16, 23ai = 17, fast-auth-max = 24.)
+
+> **Oracle 26ai advertises field version 27 (#458).** The
+> `container-registry.oracle.com/database/free:latest` image — branded **26ai**
+> (`ORACLE_HOME=.../26ai/dbhomeFree`), though the engine still reports
+> `23.1.162.0.0` via `v$version` — sends `compile_caps[7] = 27` in its PRO,
+> above the 23ai fast-auth maximum of 24. seerdb caps its own advertised field
+> version at 24 (`FIELD_VERSION_23_4`) and so negotiates `min(24, 27) = 24`,
+> connecting and running the full 23ai surface (auth, ANO native encryption,
+> queries — all validated live). The capability arrays also grew: `compile_caps`
+> from 45 bytes (21c) to **54**, `runtime_caps` from 7 to **13**, with new bits
+> in `LOGON_TYPES` (#4 `0xEF`), `OCI3` (#35), `TTC4` (#40 `0xFF`), `LOB2` (#42),
+> `TTC5` (#44 `0xFF`), and 9 new trailing slots (45–53, incl. `FEATURE_BACKPORT2`
+> at 45 and `VECTOR_FEATURES` at 52). What those fv-25–27 additions actually
+> unlock is unknown from the capability bits alone and needs a fv-27-capable
+> reference-client capture — tracked as exploratory, non-blocking work in #458.
 
 > **12c+ support (issue #27) — RESOLVED.** Advertising a 12c+ field version is
 > necessary for 21c login but not sufficient: it changes how the server frames

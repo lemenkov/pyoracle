@@ -200,10 +200,11 @@ profile with the benchmark harness (#166) and optimize the Python — or ship an
 ## Compatibility
 
 The driver negotiates the wire dialect per connection, so a single build speaks
-to every supported server — from Oracle **8i (8.1.7) through 23ai**:
+to every supported server — from Oracle **8i (8.1.7) through 26ai**:
 
 | Oracle Database | Status | Notes |
 | --- | --- | --- |
+| 26ai | ✅ supported | validated live (auth, native encryption, queries). The `free:latest` "26ai" image advertises TTC field version 27; the driver negotiates it down to 24 and runs the full 23ai surface. Its engine reports `23.1.162` — a 23ai-lineage release — so it shares the 23ai row's feature set. Fv-25–27 additions are unexplored ([#458](https://github.com/seerdb/seerdb/issues/458)) |
 | 23ai | ✅ supported | fast-auth login at field version 24; JSON / OSON, native `BOOLEAN`, `VECTOR` (dense + sparse), column annotations |
 | 21c | ✅ supported | |
 | 19c · 18c · 12c | ✅ supported | same 12c+ wire protocol as 21c |
