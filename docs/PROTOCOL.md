@@ -3066,6 +3066,34 @@ Both must be consumed or the row stream desyncs (it surfaces as an unknown token
 value}` dict per annotated column (`''` value for a name-only annotation) or
 `None` for an unannotated column.
 
+### 20.6 Token auth — OAuth2 / OCI IAM (#125)
+
+Token auth (for Autonomous Database / OCI) **replaces** the O5LOGON
+challenge/response entirely: after PRO/DTY the client sends *no* OSESSKEY and no
+password. There is no session-key exchange, no `ConnKey`, and no server proof —
+just a single `TTI_AUTH` (func `0x73`) message, sent where OSESSKEY would be,
+with no username, logon mode `NoNewPass` (`0x1`), and the key/value pairs:
+
+- `AUTH_TOKEN` — the JWT (always).
+- `AUTH_HEADER` — OCI IAM only: `date:<RFC 1123 GMT>\n(request-target):<service>\nhost:<host>:<port>`.
+- `AUTH_SIGNATURE` — OCI IAM only: base64 of an RSA-SHA256 / PKCS#1 v1.5
+  signature over `AUTH_HEADER`, proving possession of the key paired with the
+  token. (OAuth2 / DB tokens are bare — `AUTH_TOKEN` only, no signature.)
+
+The server replies with the auth **result** RPA carrying `AUTH_VERSION_NO` +
+`AUTH_SESSION_ID` and **no `AUTH_SVR_RESPONSE`** — the client recognises a
+proof-less result (a `TTI_SESS` challenge always carries `AUTH_SESSKEY`; a result
+carries `AUTH_VERSION_NO`) and authenticates without validating a proof.
+
+Because the RSA signature is ~344 base64 bytes, this is the first auth pair whose
+value exceeds 253 bytes, so `encode_kv` uses the chunked
+`write_bytes_with_length` form (the `254` marker + ub4-length chunks) that the
+short single-byte-length form could not carry.
+
+Validated by a client↔Mirror round-trip (the Mirror verifies the IAM signature
+against a configured public key); the real ADB path needs cloud infra and is
+untested. Client + Mirror, both variants, sync + async.
+
 ## 21. SQL OBJECT / ADT decode (#115)
 
 A SQL object (ADT) column has TNS data type **109** (`TNS_TYPE_ADT`). Decoding a

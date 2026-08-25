@@ -41,8 +41,21 @@ from Crypto.Cipher import AES
 
 from seerdb.common.crypto import cat_key, conn_key, pad2
 from seerdb.common.exceptions import InterfaceError
-from seerdb.common.tns import decode_dalc, decode_kv, decode_ub4, encode_kv, encode_sb4
-from seerdb.common.tns_consts import TTI_AUTH, TTI_FUN, TTI_RPA, TTI_SESS
+from seerdb.common.tns import (
+    _DECODE_FIELD_VERSION,
+    decode_dalc,
+    decode_kv,
+    decode_ub4,
+    encode_kv,
+    encode_sb4,
+)
+from seerdb.common.tns_consts import (
+    FIELD_VERSION_12_2,
+    TTI_AUTH,
+    TTI_FUN,
+    TTI_RPA,
+    TTI_SESS,
+)
 from seerdb.server._handshake_11g import (
     CHALLENGE_TEMPLATE_SQLPLUS,
     RESULT_TEMPLATE_SQLPLUS,
@@ -377,3 +390,52 @@ def parse_auth_response(payload: bytes) -> tuple[bytes, bytes, bytes | None]:
     password = kvs.get(b'AUTH_PASSWORD')
     auth_password = unhexlify(password) if password else None
     return user, unhexlify(sesskey), auth_password
+
+
+# Token auth is a modern feature: its long values (the RSA signature, and real
+# JWTs) are written in the fv >= 12.2 chunked form (ub4-prefixed chunks). Decode
+# them with that field version, not the Mirror's pinned-11g default of 6.
+_TOKEN_DECODE_FV = FIELD_VERSION_12_2
+
+
+def is_token_auth(payload: bytes) -> bool:
+    """Whether a post-DTY auth message is a token AUTH (#125) rather than the
+    O5LOGON OSESSKEY (which is a ``TTI_SESS`` subtype). A token AUTH is a
+    ``TTI_AUTH`` carrying an ``AUTH_TOKEN`` pair, sent in place of OSESSKEY."""
+    if len(payload) < 2 or payload[0] != TTI_FUN or payload[1] != TTI_AUTH:
+        return False
+    _DECODE_FIELD_VERSION.set(_TOKEN_DECODE_FV)
+    try:
+        _subtype, _user, kvs = _parse_fun_auth(payload)
+    except InterfaceError:
+        return False
+    return b'AUTH_TOKEN' in kvs
+
+
+def parse_token_auth(payload: bytes) -> tuple[bytes, bytes | None, bytes | None]:
+    """Return ``(token, header, signature)`` from a token AUTH (#125).
+
+    ``header`` / ``signature`` are the OCI IAM signed-request pair (both ``None``
+    for the OAuth2 bare-token variant).
+    """
+    _DECODE_FIELD_VERSION.set(_TOKEN_DECODE_FV)
+    subtype, _user, kvs = _parse_fun_auth(payload)
+    if subtype != TTI_AUTH:
+        raise InterfaceError(f'expected token AUTH, got subtype {subtype}')
+    token = kvs.get(b'AUTH_TOKEN')
+    if token is None:
+        raise InterfaceError('token AUTH missing AUTH_TOKEN')
+    return token, kvs.get(b'AUTH_HEADER'), kvs.get(b'AUTH_SIGNATURE')
+
+
+def encode_token_result(
+    *, session_id: int = 0, version_no: int = _SERVER_VERSION_NO
+) -> bytes:
+    """The token-auth result RPA — version + session id, and no server proof
+    (token auth has no ConnKey, so there is nothing for the client to validate)."""
+    return (
+        bytes([TTI_RPA])
+        + encode_sb4(2)
+        + encode_kv(b'AUTH_VERSION_NO', str(version_no).encode('ascii'), 1)
+        + encode_kv(b'AUTH_SESSION_ID', str(session_id).encode('ascii'), 1)
+    )

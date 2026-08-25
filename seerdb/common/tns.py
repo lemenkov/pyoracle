@@ -991,8 +991,11 @@ def decode_token_rpa(Data: bytes, Acc: tuple) -> tuple:
     Salt = dict(KVs).get(b'AUTH_VFR_DATA')
     DerivedSalt = dict(KVs).get(b'AUTH_PBKDF2_CSK_SALT')
     Resp = dict(KVs).get(b'AUTH_SVR_RESPONSE')
-    if Resp:
-        Value = dict(KVs).get(b'AUTH_VERSION_NO')
+    Value = dict(KVs).get(b'AUTH_VERSION_NO')
+    # An auth *result* carries either the server proof (O5LOGON) or — for token
+    # auth (#125), which has no ConnKey and no proof — just the version + session
+    # id with no session-key challenge. A *challenge* always carries AUTH_SESSKEY.
+    if Resp or (SessKey is None and Value is not None):
         # Keep the full packed version number; the connection decodes the major
         # release (>> 24) for its protocol gate and the full dotted string for
         # the `version` property.
@@ -1752,6 +1755,45 @@ def encode_dictionary_auth(Dictionary: dict) -> tuple[bytes, bytes]:
     )
 
     return (Data, ConnKey)
+
+
+def encode_dictionary_token_auth(Dictionary: dict) -> bytes:
+    """Build the token-auth AUTH message (#125).
+
+    Token auth replaces the O5LOGON challenge/response entirely: there is no
+    OSESSKEY, no session key, and no server proof. This is a single TTI_AUTH
+    (func 0x73) message with no username, logon mode ``NoNewPass`` (0x1), and the
+    key/value pairs carrying the token — ``AUTH_TOKEN`` always, plus
+    ``AUTH_HEADER`` + ``AUTH_SIGNATURE`` for the OCI IAM (signed) variant — after
+    the standard session-context pairs. RE'd from go-ora (MIT); the wire shape
+    matches the ordinary AUTH header with the user fields zeroed.
+    """
+    Tseq = Dictionary['seq']
+    Role = Dictionary['env'].get('role', 0)
+    Prelim = Dictionary['env'].get('prelim', 0)
+    # NoNewPass (0x1) only — no UserAndPass (0x100), since there is no password.
+    Mode = encode_sb4((Role * 32) | (Prelim * 128) | 1)
+
+    Pairs = [encode_kv(b'AUTH_TOKEN', Dictionary['token'].encode('utf-8'))]
+    Header = Dictionary.get('token_header')
+    Signature = Dictionary.get('token_signature')
+    if Header is not None and Signature is not None:
+        Pairs.append(encode_kv(b'AUTH_HEADER', Header.encode('utf-8')))
+        Pairs.append(encode_kv(b'AUTH_SIGNATURE', Signature.encode('utf-8')))
+    SessionKvs = _auth_session_kvs(Dictionary)  # 5 pairs (charset..connect-string)
+    NumPairs = len(Pairs) + 5
+
+    # No user: the has-user pointer byte is 0 and the user length is 0.
+    HeaderBytes = bytes([TTI_FUN, TTI_AUTH, Tseq, 0]) + encode_sb4(0)
+    return (
+        HeaderBytes
+        + Mode
+        + bytes([1])
+        + encode_sb4(NumPairs)
+        + bytes([1, 1])
+        + b''.join(Pairs)
+        + SessionKvs
+    )
 
 
 # seerdb's advertised client version, packed the way python-oracledb encodes
@@ -5115,8 +5157,11 @@ def encode_kv(Key: bytes, Val: bytes, Padding: int = 0) -> bytes:
         Size = len(Data)
         if Size == 0:
             return bytes([0])
-        else:
-            return encode_sb4(Size) + bytes([Size]) + Data
+        # ub4 total length + the value in write_bytes_with_length form: a 1-byte
+        # length for short values, or the 254 chunked marker for values >= 254
+        # (e.g. an RSA token signature, #125) — the single-byte length prefix the
+        # old code used could not carry a value longer than 255 bytes.
+        return encode_sb4(Size) + _bytes_with_length(Data)
 
     return encode_to_bin(Key) + encode_to_bin(Val) + encode_sb4(Padding)
 

@@ -609,6 +609,7 @@ class OracleConnect:
         config_dir: str | None = None,
         dsn: str | None = None,
         negotiation_cache: bool = False,
+        access_token: object = None,
     ):
         # field_version is the highest TTC field version seerdb advertises;
         # the server negotiates it down (min(client, server)). The default is the
@@ -640,6 +641,10 @@ class OracleConnect:
         self.charset = charset
         self.prelim = prelim
         self.app_name = app_name
+        # Token-based auth (#125): a JWT str (OAuth2) or (token, private_key)
+        # (OCI IAM), resolved at connect time into the token + optional PEM key.
+        self.access_token = access_token
+        self._token_auth = False  # set once the token AUTH is sent
 
         # Wallet-based mutual TLS (#127). When a wallet is given, resolve the
         # DSN (if any) into host/port/service and build the client SSLContext
@@ -792,6 +797,27 @@ class OracleConnect:
 
     def state_to_dict(self, Type: DictionaryType) -> dict:
         return self._make_dict(Type)
+
+    def _send_token_auth(self) -> None:
+        # Token auth (#125): build and send the single token AUTH message. For
+        # the OCI IAM variant (a private key was supplied) sign the request header
+        # so the server can verify possession of the key that matches the token.
+        from seerdb.common.tns import encode_dictionary_token_auth
+        from seerdb.common.token_auth import (
+            normalize_access_token,
+            sign_token_header,
+            token_auth_header,
+        )
+
+        (Token, PrivateKey) = normalize_access_token(self.access_token)
+        Dict = self._make_dict(DictionaryType.description)
+        Dict['token'] = Token
+        if PrivateKey is not None:
+            Service = self.service_name or self.sid or ''
+            AuthHeader = token_auth_header(self.host, Service, self.port)
+            Dict['token_header'] = AuthHeader
+            Dict['token_signature'] = sign_token_header(AuthHeader, PrivateKey)
+        self.send(TNS_DATA, encode_dictionary_token_auth(Dict))
 
     def _apply_socket_timeout(self) -> None:
         # Bound every blocking socket operation (connect / send / recv) by the
@@ -1080,6 +1106,12 @@ class OracleConnect:
                                         self._next_seq(), self.user.encode('utf-8')
                                     ),
                                 )
+                            elif self.access_token is not None:
+                                # Token auth (#125): skip OSESSKEY entirely and
+                                # send the single token AUTH message; the reply is
+                                # the auth result (no challenge, no proof).
+                                self._token_auth = True
+                                self._send_token_auth()
                             else:
                                 Data = encode_dictionary(
                                     self._make_dict(DictionaryType.sess)
@@ -1335,6 +1367,15 @@ class OracleConnect:
             # Auth result: (TTI_AUTH, Resp, Ver, SessId)
             (_, Resp, Ver, SessId) = Result
             logger.debug('handle_login: auth result Ver=%s SessId=%s', Ver, SessId)
+            if self._token_auth:
+                # Token auth (#125): the server grants the session with no
+                # O5LOGON server proof (there is no conn_key), so accept the
+                # returned version + session id directly.
+                self.server_version = Ver
+                self.session_id = SessId
+                self.conn_state = CONN_STATE_AUTHENTICATED
+                logger.debug('handle_login: authenticated (token)')
+                return 0
             assert self.conn_key is not None
             if validate(bytes.fromhex(Resp.decode('utf-8')), self.conn_key):
                 self.server_version = Ver
