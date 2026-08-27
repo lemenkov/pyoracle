@@ -27,6 +27,7 @@ psycopg = pytest.importorskip('psycopg')
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'examples'))
 from postgres_backend import (  # noqa: E402
     PostgresBackend,
+    _reject_unsupported_ddl_types,
     _translate_ddl,
     _translate_idioms,
 )
@@ -534,3 +535,22 @@ def test_translate_idioms_binary_float_double_literals() -> None:
     # A decimal point is required, so a plain integer or identifier is untouched.
     assert _translate_idioms('SELECT id2 FROM t') == 'SELECT id2 FROM t'
     assert _translate_idioms('VALUES (100)') == 'VALUES (100)'
+
+
+# --- Oracle-only type rejection (#504) — a pure check, no live PG needed --------
+
+
+def test_reject_oracle_only_ddl_types_raises_ora_902() -> None:
+    from seerdb.server import BackendError
+
+    # JSON (21c+), VECTOR / BOOLEAN (23ai+) are invalid at the 11.2 version the
+    # Mirror advertises, so a CREATE TABLE using one is refused with ORA-00902 —
+    # which is exactly what the suite's version guards skip on.
+    for coltype in ('doc JSON', 'v VECTOR(3, FLOAT32)', 'flag BOOLEAN'):
+        with pytest.raises(BackendError) as exc:
+            _reject_unsupported_ddl_types(f'CREATE TABLE t (id NUMBER, {coltype})')
+        assert exc.value.ora_code == 902
+
+    # An ordinary CREATE TABLE — and any non-CREATE-TABLE statement — is fine.
+    _reject_unsupported_ddl_types('CREATE TABLE t (id NUMBER, v VARCHAR2(10))')
+    _reject_unsupported_ddl_types('SELECT json_col FROM t WHERE flag = 1')
