@@ -93,6 +93,17 @@ def test_translate_ddl_time_zone_variants() -> None:
     assert 'c timestamp' in sent and 'c ora_tstz' not in sent
 
 
+def test_translate_idioms_rewrites_connect_by_level_row_generator() -> None:
+    # FROM dual CONNECT BY LEVEL <= N maps to generate_series aliased `level`, so a
+    # bare LEVEL in the select list resolves to its column (#531).
+    simple = _translate_idioms('SELECT LEVEL FROM dual CONNECT BY LEVEL <= 5')
+    assert simple == 'SELECT LEVEL FROM generate_series(1, 5) AS level'
+    multi = _translate_idioms(
+        'SELECT 42 AS k, LEVEL AS n FROM dual CONNECT BY LEVEL <= 200'
+    )
+    assert multi == 'SELECT 42 AS k, LEVEL AS n FROM generate_series(1, 200) AS level'
+
+
 def test_translate_idioms_rewrites_offset_bearing_timestamp_literal() -> None:
     # TIMESTAMP '<ts> ±HH:MM' is a WITH TIME ZONE value — build the composite so
     # the offset survives, rather than PostgreSQL's WITHOUT-time-zone parse dropping

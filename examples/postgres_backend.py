@@ -270,6 +270,15 @@ _IDIOM_REWRITES = [
     # PostgreSQL has no such suffix, so drop it. A decimal point is required so
     # this never touches an identifier or a plain integer.
     (re.compile(r'\b(\d+\.\d+)[dfDF]\b'), r'\1'),
+    # FROM dual CONNECT BY LEVEL <= N — Oracle's row-generator idiom (LEVEL counts
+    # 1..N). PostgreSQL has no CONNECT BY, but this common counter form maps to
+    # generate_series aliased `level`, so a bare `LEVEL` in the select list resolves
+    # to its column. Only this literal-bound counter shape is handled; a general
+    # CONNECT BY hierarchical query stays Oracle-only (#531).
+    (
+        re.compile(r'\bFROM\s+dual\s+CONNECT\s+BY\s+LEVEL\s*<=\s*(\d+)', re.IGNORECASE),
+        r'FROM generate_series(1, \1) AS level',
+    ),
 ]
 
 
