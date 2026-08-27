@@ -120,6 +120,7 @@ from seerdb.server.query import (
     parse_fetch,
     parse_lobops_read,
     parse_lobops_request,
+    peek_exec_cursor,
     scroll_start_row,
     strip_oci_piggyback,
 )
@@ -393,7 +394,18 @@ def serve_session(
         if len(body) < 2 or body[0] != TTI_FUN:
             continue
         if body[1] == TTI_ALL8:
-            request = _resolve_temp_lob_binds(parse_exec(body), temp_lobs)
+            # A cached-cursor re-execute (cursor set, no SQL) omits the OACs; hand
+            # parse_exec the bind types the Mirror remembered for that cursor so
+            # its RXD decodes (#80/#486).
+            peek_cursor, peek_has_query = peek_exec_cursor(body)
+            cached_types = (
+                cursors.dml_bind_types(peek_cursor)
+                if peek_cursor and not peek_has_query
+                else None
+            )
+            request = _resolve_temp_lob_binds(
+                parse_exec(body, bind_types=cached_types), temp_lobs
+            )
             if request.scrollable:
                 lobs = _answer_scroll(stream, backend, request, cursors)
             else:
@@ -679,6 +691,29 @@ class _Cursors:
         # can revisit any row), unlike `_open`, which hands out and forgets
         # batches. Shares the `_next` id space so ids never collide.
         self._scroll: dict[int, tuple[list[ColumnMeta], list[tuple]]] = {}
+        # DML statement text + bind format keyed by the cursor id the Mirror
+        # returns for it, so the client's cursor cache can re-execute by id with an
+        # empty query and no OACs (the 11g parse-once optimization, #80/#486).
+        # Shares the `_next` id space.
+        self._dml: dict[int, tuple[str, list]] = {}
+
+    def open_dml(self, sql: str, bind_types: list) -> int:
+        cursor_id = self._next
+        self._next += 1
+        self._dml[cursor_id] = (sql, list(bind_types))
+        return cursor_id
+
+    def dml_sql(self, cursor_id: int) -> str | None:
+        # The SQL a cached-cursor re-execute (cursor id set, empty query) refers
+        # to, or None if the id isn't a known DML cursor.
+        state = self._dml.get(cursor_id)
+        return state[0] if state is not None else None
+
+    def dml_bind_types(self, cursor_id: int) -> list | None:
+        # The remembered bind format for a cached DML cursor, so its re-execute's
+        # OAC-less RXD decodes; None if the id isn't a known DML cursor.
+        state = self._dml.get(cursor_id)
+        return state[1] if state is not None else None
 
     def open(self, columns: list[ColumnMeta], rows: list[tuple]) -> int:
         cursor_id = self._next
@@ -829,6 +864,14 @@ def _answer_query(
     lobs: list[tuple[bytes, bool]] = []
     # Per-row failures collected in array-DML batcherrors mode (#18).
     batch_errors: list[tuple[int, int, str]] = []
+    # Cursor cache (#80/#486): a re-execute carries the cached cursor id and an
+    # empty query, so resolve the SQL the Mirror parked for that id and reuse the
+    # id in the reply. A fresh statement runs its own SQL and is assigned a new id
+    # below if it is DML.
+    reused_id = request.cursor if (request.cursor and not request.sql) else 0
+    sql = cursors.dml_sql(request.cursor) if reused_id else request.sql
+    if sql is None:
+        sql = request.sql
     try:
         if len(request.bind_rows) > 1:
             # Array DML (executemany): apply each bind row and report the total
@@ -838,14 +881,14 @@ def _answer_query(
             affected = 0
             for offset, row in enumerate(request.bind_rows):
                 try:
-                    affected += backend.execute(request.sql, row).rowcount
+                    affected += backend.execute(sql, row).rowcount
                 except BackendError as err:
                     if not request.batcherrors:
                         raise
                     batch_errors.append((offset, err.ora_code, err.ora_message))
             result = Result(rowcount=affected)
         else:
-            result = backend.execute(request.sql, _plsql_bind_vars(request))
+            result = backend.execute(sql, _plsql_bind_vars(request))
         # Autocommit mode: the client set the commit-on-success option, so
         # persist this statement before replying (an explicit-transaction client
         # leaves the bit clear and drives commit/rollback itself).
@@ -893,7 +936,14 @@ def _answer_query(
             else:
                 response = encode_query_response(result.columns, first)
         else:
-            response = encode_status(result.rowcount)
+            # DML / DDL success. Hand back a server cursor id (reused on a cached
+            # re-execute, freshly minted otherwise) so the client's cursor cache
+            # can re-run this DML by id — but not for a PL/SQL block, which the
+            # client never caches (#80/#486).
+            cursor_id = reused_id
+            if not cursor_id and not _is_plsql_block(sql):
+                cursor_id = cursors.open_dml(sql, request.bind_types)
+            response = encode_status(result.rowcount, cursor_id=cursor_id)
     stream.write_packet(TNS_DATA, response)
     return lobs
 

@@ -111,6 +111,10 @@ class ExecRequest:
     # Per-bind (tns_type, max_size) from the OACs, in bind order — the type +
     # return-buffer size a PL/SQL block's OUT binds need (#483).
     bind_meta: list = field(default_factory=list)
+    # Per-bind (tns_type, csfrm, max_size) — the bind format the Mirror remembers
+    # for a cursor so a cached re-execute (no OACs on the wire) can decode its RXD
+    # values (#80/#486).
+    bind_types: list = field(default_factory=list)
     autocommit: bool = False
     # Array-DML batcherrors mode (#18): apply the good rows and collect per-row
     # failures rather than aborting the whole executemany.
@@ -179,12 +183,32 @@ def _decode_bind_value(data_type: int, csfrm: int, raw: bytes | list) -> object:
     return decode_value(column, bytes(raw))
 
 
-def parse_exec(payload: bytes) -> ExecRequest:
+def peek_exec_cursor(payload: bytes) -> tuple[int, bool]:
+    """The cursor id and whether SQL is present, read from an OALL8 header without
+    a full parse (#80/#486). A cached re-execute (cursor set, no SQL) carries no
+    OACs, so the session uses this to supply the remembered bind types to
+    :func:`parse_exec`. Returns ``(0, True)`` for anything that isn't an OALL8."""
+    if len(payload) < 3 or payload[0] != TTI_FUN or payload[1] != TTI_ALL8:
+        return (0, True)
+    rest = payload[3:]
+    _options, rest = decode_ub4(rest)
+    cursor, rest = decode_ub4(rest)
+    query_flag = rest[0] if rest else 0
+    return (cursor, bool(query_flag))
+
+
+def parse_exec(payload: bytes, bind_types: list | None = None) -> ExecRequest:
     """Parse an OALL8 execute payload (the TTC message from ``read_packet``).
 
     Extracts the SQL text and any bind values (positional, decoded by their OAC
     type). Raises :class:`InterfaceError` if the message is not a TTI_ALL8
     execute.
+
+    A cached-cursor re-execute (#80/#486) carries the bind values but **no** OAC
+    descriptors — the server is expected to remember the bind format from the
+    first parse. Pass the remembered ``bind_types`` (the ``(data_type, csfrm,
+    max_size)`` list from that first parse, exposed as ``ExecRequest.bind_types``)
+    so the RXD values decode without re-reading OACs.
     """
     if len(payload) < 3 or payload[0] != TTI_FUN or payload[1] != TTI_ALL8:
         raise InterfaceError('not an OALL8 execute')
@@ -231,19 +255,31 @@ def parse_exec(payload: bytes) -> ExecRequest:
     if bind_count > 0:
         # After the al8 array (already consumed above): one OAC (type descriptor)
         # per bind column, then one RXD row of values per array-DML iteration
-        # (an ordinary single execute is just one row).
-        types = []
-        for _ in range(bind_count):
-            data_type, maxlen, _scale, _charset, csfrm, after = decode_oac_fields(after)
-            if data_type in (TNS_TYPE_CLOB, TNS_TYPE_BLOB):
-                # A thin CLOB / BLOB bind is the temp-LOB locator form (#412),
-                # whose OAC appends a trailing oaccolid field that the shared
-                # decoder stops short of — swallow it so the next OAC aligns.
-                after = after[1:]
-            # csfrm distinguishes an NCHAR / NVARCHAR bind (2 → UTF-16BE) from an
-            # ordinary char bind (1); maxlen is the OUT return-buffer size a
-            # PL/SQL OUT bind needs (#483/#484). Both ride alongside the type.
-            types.append((data_type, csfrm, maxlen))
+        # (an ordinary single execute is just one row). A cached re-execute omits
+        # the OACs, so `after` already sits on the first RXD — use the remembered
+        # bind types instead of decoding OACs (#80/#486).
+        if bind_types is not None:
+            types = list(bind_types)
+        else:
+            types = []
+            for _ in range(bind_count):
+                (
+                    data_type,
+                    maxlen,
+                    _scale,
+                    _charset,
+                    csfrm,
+                    after,
+                ) = decode_oac_fields(after)
+                if data_type in (TNS_TYPE_CLOB, TNS_TYPE_BLOB):
+                    # A thin CLOB / BLOB bind is the temp-LOB locator form (#412),
+                    # whose OAC appends a trailing oaccolid field the shared
+                    # decoder stops short of — swallow it so the next OAC aligns.
+                    after = after[1:]
+                # csfrm distinguishes an NCHAR / NVARCHAR bind (2 → UTF-16BE) from
+                # an ordinary char bind (1); maxlen is the OUT return-buffer size a
+                # PL/SQL OUT bind needs (#483/#484). Both ride alongside the type.
+                types.append((data_type, csfrm, maxlen))
         # Each row is a TTI_RXD token followed by one value per bind column; loop
         # until the rows run out (executemany sends N, a plain execute sends 1).
         while after and after[0] == TTI_RXD:
@@ -258,6 +294,9 @@ def parse_exec(payload: bytes) -> ExecRequest:
         # Per-bind (tns_type, max_size) — what a PL/SQL block's OUT binds need to
         # be registered on the backend with a correctly-sized buffer (#483).
         bind_meta = [(data_type, maxlen) for data_type, _csfrm, maxlen in types]
+        bind_type_list = list(types)
+    else:
+        bind_type_list = []
 
     return ExecRequest(
         sql=sql,
@@ -267,6 +306,7 @@ def parse_exec(payload: bytes) -> ExecRequest:
         binds=binds,
         bind_rows=bind_rows,
         bind_meta=bind_meta,
+        bind_types=bind_type_list,
         autocommit=autocommit,
         batcherrors=batcherrors,
         scrollable=scrollable,
@@ -1880,10 +1920,12 @@ def encode_error(ora_code: int, message: str) -> bytes:
     return _encode_oer(1, ora_code, 0, message.encode('utf-8'))
 
 
-def encode_status(rowcount: int = 0) -> bytes:
+def encode_status(rowcount: int = 0, cursor_id: int = 0) -> bytes:
     """OER reporting success for a non-query (DDL / DML), with the affected-row
-    count. No describe, no rows — the client just sees the statement completed."""
-    return _encode_oer(0, 0, rowcount, b'')
+    count. No describe, no rows — the client just sees the statement completed.
+    A non-zero ``cursor_id`` lets the client's cursor cache remember the server
+    handle and re-execute the same DML by id with an empty query (#80/#486)."""
+    return _encode_oer(0, 0, rowcount, b'', cursor_id=cursor_id)
 
 
 # ORA-24381: the array-DML summary code the server returns when a batcherrors

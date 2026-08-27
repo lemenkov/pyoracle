@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from seerdb.common.exceptions import InterfaceError
+from seerdb.common.exceptions import DataError, InterfaceError
 from seerdb.common.tns import (
     _DECODE_FIELD_VERSION,
     _decode_describe_body,
@@ -1688,3 +1688,72 @@ def test_parse_exec_reads_batcherrors_flag() -> None:
 
     assert parse_exec(dml(True)).batcherrors is True
     assert parse_exec(dml(False)).batcherrors is False
+
+
+# --- Cursor cache: cached re-execute without OACs (#80/#486) --------------------
+
+
+def test_peek_exec_cursor_reads_cursor_and_query_presence() -> None:
+    from seerdb.common.tns import encode_dictionary_exec
+    from seerdb.server.query import peek_exec_cursor
+
+    def msg(cursor: int, query: str) -> bytes:
+        return encode_dictionary_exec(
+            {
+                'seq': 3,
+                'field_version': 6,
+                'query': {
+                    'type': 'change',
+                    'auto': 0,
+                    'fetch': 0,
+                    'server_version': 186647040,
+                    'cursor': cursor,
+                    'query': query,
+                    'bind': [1, 'a'],
+                    'batch': [],
+                    'def': [],
+                },
+            }
+        )
+
+    # A fresh parse carries SQL; a cached re-execute has a cursor id and no SQL.
+    assert peek_exec_cursor(msg(0, 'INSERT INTO t VALUES (:1, :2)')) == (0, True)
+    assert peek_exec_cursor(msg(5, '')) == (5, False)
+    assert peek_exec_cursor(b'\x03\x05not an exec') == (0, True)
+
+
+def test_parse_exec_cached_reexecute_decodes_binds_without_oacs() -> None:
+    from seerdb.common.tns import encode_dictionary_exec
+
+    def msg(cursor: int, query: str, binds: list) -> bytes:
+        return encode_dictionary_exec(
+            {
+                'seq': 3,
+                'field_version': 6,
+                'query': {
+                    'type': 'change',
+                    'auto': 0,
+                    'fetch': 0,
+                    'server_version': 186647040,
+                    'cursor': cursor,
+                    'query': query,
+                    'bind': binds,
+                    'batch': [],
+                    'def': [],
+                },
+            }
+        )
+
+    # First parse remembers the bind format (bind_types); the re-execute omits the
+    # OACs, so parsing it needs those remembered types or its RXD mis-decodes.
+    first = parse_exec(msg(0, 'INSERT INTO t VALUES (:1, :2)', [1, 'a']))
+    assert first.binds == [1, 'a']
+    assert len(first.bind_types) == 2
+
+    reexec = msg(5, '', [2, 'b'])
+    # Parsing the OAC-less re-execute without the remembered types mis-reads the
+    # RXD (the session never does this — it always supplies the types).
+    with pytest.raises((InterfaceError, IndexError, DataError)):
+        parse_exec(reexec)
+    # With the remembered types the new bind values decode correctly.
+    assert parse_exec(reexec, bind_types=first.bind_types).binds == [2, 'b']
