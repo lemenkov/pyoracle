@@ -1124,6 +1124,18 @@ three position-aligned batch-error arrays — codes and offsets as `ub4 count`
 `ub4`-length text (§6.7). The client surfaces them through `getbatcherrors()`
 rather than raising, and the applied rows still commit.
 
+**Cursor cache (the Mirror, #80/#486).** On the pre-12c connection the client
+caches a DML's server cursor id keyed on `(SQL, bind-OAC signature)` and, on the
+next identical execute, sends a **re-execute**: the cursor id set, an **empty
+query**, and the bind values as a `TTI_RXD` row with **no OACs** (the server is
+expected to remember the bind format from the first parse). So the Mirror returns
+a fresh cursor id in the DML status OER (`encode_status(rowcount, cursor_id)`) and
+remembers the SQL + bind types keyed by that id. On a re-execute it reads the
+cursor id and empty-query flag from the header (`peek_exec_cursor`), hands the
+remembered bind types to `parse_exec` so the OAC-less RXD decodes, runs the stored
+SQL with the new binds, and replies with the same cursor id. A PL/SQL block is
+never assigned an id (the client doesn't cache blocks).
+
 **OUT-bind reply (the Mirror, OCI dialect).** The classic sqlplus `VARIABLE v
 NUMBER` / `EXEC :v := 42` flow sends a PL/SQL block that assigns literals to OUT
 binds; the client parks bind buffers and expects the values back. The Mirror
