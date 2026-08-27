@@ -91,6 +91,9 @@ _SERVER_VERSION_SLOT = 5
 # the connection is in autocommit mode, asking the server to commit after this
 # statement (set_opts encodes it as Param * 256 into the options word).
 _EXEC_OPTION_COMMIT = 0x100
+# The array-DML batcherrors bit (0x80000): the client sets it to ask the server
+# to apply the good rows and collect per-row failures rather than aborting (#18).
+_EXEC_OPTION_BATCH_ERRORS = 0x80000
 
 
 @dataclass(frozen=True)
@@ -109,6 +112,9 @@ class ExecRequest:
     # return-buffer size a PL/SQL block's OUT binds need (#483).
     bind_meta: list = field(default_factory=list)
     autocommit: bool = False
+    # Array-DML batcherrors mode (#18): apply the good rows and collect per-row
+    # failures rather than aborting the whole executemany.
+    batcherrors: bool = False
     # Server-side scrollable cursor (#181/#485): the SCROLLABLE exec flag on the
     # opening execute, and the fetch orientation + 1-based position a scroll
     # re-execute carries in al8i4[10]/al8i4[11]. Zero orientation means "no
@@ -186,6 +192,7 @@ def parse_exec(payload: bytes) -> ExecRequest:
     rest = payload[3:]  # skip TTI_FUN, TTI_ALL8, seq
     options, rest = decode_ub4(rest)
     autocommit = bool(options & _EXEC_OPTION_COMMIT)
+    batcherrors = bool(options & _EXEC_OPTION_BATCH_ERRORS)
     cursor, rest = decode_ub4(rest)
     query_flag, rest = rest[0], rest[1:]
     query_len, rest = decode_ub4(rest)
@@ -261,6 +268,7 @@ def parse_exec(payload: bytes) -> ExecRequest:
         bind_rows=bind_rows,
         bind_meta=bind_meta,
         autocommit=autocommit,
+        batcherrors=batcherrors,
         scrollable=scrollable,
         scroll_orientation=scroll_orientation,
         scroll_position=scroll_position,
@@ -1798,13 +1806,46 @@ _END_OF_FETCH = (
 )
 
 
+def _encode_batch_ub4_array(values: list[int]) -> bytes:
+    # An array-DML batch field (#18): a ub4 count, then a DALC blob packing that
+    # many ub4 values back-to-back (the inverse of _read_batch_ub4_array). Empty
+    # is a bare zero count.
+    if not values:
+        return encode_sb4(0)
+    blob = b''.join(encode_sb4(v) for v in values)
+    return encode_sb4(len(values)) + _bytes_with_length(blob)
+
+
+def _encode_batch_messages(messages: list[str]) -> bytes:
+    # The batch-error message array (#18): a ub4 count, a 1-byte indicator, then
+    # per message a ub4 length + the length-prefixed text + a 2-byte trailer.
+    if not messages:
+        return encode_sb4(0)
+    out = bytearray(encode_sb4(len(messages)) + bytes([1]))
+    for message in messages:
+        text = message.encode('utf-8')
+        out += encode_sb4(len(text)) + _bytes_with_length(text) + bytes([0, 0])
+    return bytes(out)
+
+
 def _encode_oer(
-    call_status: int, ora_code: int, rowcount: int, message: bytes, cursor_id: int = 0
+    call_status: int,
+    ora_code: int,
+    rowcount: int,
+    message: bytes,
+    cursor_id: int = 0,
+    batch_errors: list[tuple[int, int, str]] | None = None,
 ) -> bytes:
     # An OER return-status token (§6.5, 11g) — the terminal of every response.
-    # Rowid / batch fields are zero; call status, the ORA error number, the
-    # affected-row count, the cursor id (for a mid-fetch "more rows" status), and
-    # the message text carry meaning.
+    # Rowid fields are zero; call status, the ORA error number, the affected-row
+    # count, the cursor id (for a mid-fetch "more rows" status), and the message
+    # text carry meaning. ``batch_errors`` is (offset, code, message) per row that
+    # failed in an array-DML batcherrors execute — the three arrays line up by
+    # position (#18).
+    batch_errors = batch_errors or []
+    codes = [code for _offset, code, _msg in batch_errors]
+    offsets = [offset for offset, _code, _msg in batch_errors]
+    messages = [msg for _offset, _code, msg in batch_errors]
     return (
         bytes([TTI_OER])
         + encode_sb4(call_status)
@@ -1826,9 +1867,9 @@ def _encode_oer(
         + encode_sb4(0)  # padding
         + encode_sb4(1)  # successful iterations
         + _bytes_with_length(b'')  # oerrdd (logical rowid)
-        + encode_sb4(0)  # batch error codes count
-        + encode_sb4(0)  # batch error offsets count
-        + encode_sb4(0)  # batch error messages count
+        + _encode_batch_ub4_array(codes)  # batch error codes
+        + _encode_batch_ub4_array(offsets)  # batch error row offsets
+        + _encode_batch_messages(messages)  # batch error messages
         + _bytes_with_length(message)  # the message DALC (read only when ora_code≠0)
     )
 
@@ -1843,6 +1884,25 @@ def encode_status(rowcount: int = 0) -> bytes:
     """OER reporting success for a non-query (DDL / DML), with the affected-row
     count. No describe, no rows — the client just sees the statement completed."""
     return _encode_oer(0, 0, rowcount, b'')
+
+
+# ORA-24381: the array-DML summary code the server returns when a batcherrors
+# execute collected per-row failures — non-fatal, the client reads the errors
+# from getbatcherrors() rather than raising (#18).
+_ARRAY_DML_ERRORS = 24381
+
+
+def encode_batch_errors_status(
+    rowcount: int, batch_errors: list[tuple[int, int, str]]
+) -> bytes:
+    """OER for an array-DML ``batcherrors`` execute that collected per-row
+    failures (#18): ORA-24381 with the (offset, code, message) arrays, and the
+    affected-row count of the rows that applied. The client surfaces the errors
+    through ``getbatcherrors()`` instead of raising."""
+    message = f'ORA-{_ARRAY_DML_ERRORS:05d}: error(s) in array DML'.encode()
+    return _encode_oer(
+        0, _ARRAY_DML_ERRORS, rowcount, message, batch_errors=batch_errors
+    )
 
 
 @dataclass(frozen=True)

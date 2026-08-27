@@ -84,6 +84,7 @@ from seerdb.server.query import (
     ScalarOutBind,
     TempLobRef,
     ddl_command_type,
+    encode_batch_errors_status,
     encode_commit_status_oci,
     encode_create_temp_response,
     encode_ddl_status_oci,
@@ -826,13 +827,22 @@ def _answer_query(
     # Returns the LOB contents the result's rows carry (row-major), which the thin
     # loop drains as the client issues its TTI_LOBOPS reads (#413).
     lobs: list[tuple[bytes, bool]] = []
+    # Per-row failures collected in array-DML batcherrors mode (#18).
+    batch_errors: list[tuple[int, int, str]] = []
     try:
         if len(request.bind_rows) > 1:
             # Array DML (executemany): apply each bind row and report the total
-            # affected-row count — one execute message, one aggregated reply.
+            # affected-row count — one execute message, one aggregated reply. With
+            # batcherrors the good rows still apply and a per-row failure is
+            # collected (offset, code, message) rather than aborting the batch.
             affected = 0
-            for row in request.bind_rows:
-                affected += backend.execute(request.sql, row).rowcount
+            for offset, row in enumerate(request.bind_rows):
+                try:
+                    affected += backend.execute(request.sql, row).rowcount
+                except BackendError as err:
+                    if not request.batcherrors:
+                        raise
+                    batch_errors.append((offset, err.ora_code, err.ora_message))
             result = Result(rowcount=affected)
         else:
             result = backend.execute(request.sql, _plsql_bind_vars(request))
@@ -848,6 +858,12 @@ def _answer_query(
         logger.warning('backend raised a non-ORA error: %s', exc)
         response = encode_error(_INTERNAL_ERROR, f'ORA-00600: backend error: {exc}')
     else:
+        if batch_errors:
+            # Array-DML batcherrors: ORA-24381 with the per-row failure arrays;
+            # the client reads them from getbatcherrors() rather than raising.
+            response = encode_batch_errors_status(result.rowcount, batch_errors)
+            stream.write_packet(TNS_DATA, response)
+            return lobs
         # A PL/SQL block that assigned OUT binds returns them as an IOV vector
         # (the client keeps only its Var positions); this precedes the column /
         # status branches — a block carries neither rows nor a rowcount (#483).

@@ -1633,3 +1633,58 @@ def test_encode_out_bind_response_thin_refcursor_entry() -> None:
     assert value['_refcursor'] is True
     assert value['cursor_id'] == 7
     assert [c['column_name'] for c in value['row_format']] == [b'A', b'B']
+
+
+# --- Array-DML batcherrors (#18/#486) ------------------------------------------
+
+
+def test_encode_batch_errors_status_roundtrips_via_client() -> None:
+    from seerdb.common.tns import decode_token_oer
+    from seerdb.server.query import encode_batch_errors_status
+
+    _DECODE_FIELD_VERSION.set(FIELD_VERSION_11_2)
+    # Two rows of a 5-row executemany violated the PK (offsets 2 and 4); the
+    # client reads ORA-24381 + the per-row (offset, code, message) arrays.
+    body = encode_batch_errors_status(
+        3,
+        [
+            (2, 1, 'ORA-00001: unique constraint violated'),
+            (4, 1, 'ORA-00001: unique constraint violated'),
+        ],
+    )
+    result = decode_token_oer(body, (0, [], []))
+    assert result[1] == 24381  # the array-DML summary code (non-fatal)
+    assert result[3][0] == 3  # affected-row count (the applied rows)
+    errs = result[7]
+    assert [(e['offset'], e['code']) for e in errs] == [(2, 1), (4, 1)]
+    assert 'ORA-00001' in errs[0]['message']
+    # No batch errors → the three arrays stay empty (a plain status is unchanged).
+    plain = decode_token_oer(encode_batch_errors_status(0, []), (0, [], []))
+    assert plain[7] == []
+
+
+def test_parse_exec_reads_batcherrors_flag() -> None:
+    from seerdb.common.tns import encode_dictionary_exec
+
+    def dml(batcherrors: bool) -> bytes:
+        return encode_dictionary_exec(
+            {
+                'seq': 3,
+                'field_version': 6,
+                'query': {
+                    'type': 'change',
+                    'auto': 0,
+                    'fetch': 0,
+                    'server_version': 186647040,
+                    'cursor': 0,
+                    'query': 'INSERT INTO t VALUES (:1, :2)',
+                    'bind': [1, 'a'],
+                    'batch': [[2, 'b']],
+                    'def': [],
+                    'batcherrors': batcherrors,
+                },
+            }
+        )
+
+    assert parse_exec(dml(True)).batcherrors is True
+    assert parse_exec(dml(False)).batcherrors is False

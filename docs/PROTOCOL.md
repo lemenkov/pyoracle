@@ -1115,6 +1115,15 @@ execute is just the one-row case. The session applies every row through the
 backend and replies with the **summed** affected-row count, so `cursor.rowcount`
 matches the total inserted/updated.
 
+With **`batcherrors`** (the `0x80000` options bit, which `parse_exec` now reads),
+the session applies the good rows and catches each per-row `BackendError` instead
+of aborting, collecting `(offset, code, message)`. It then replies with
+`encode_batch_errors_status`: an OER carrying a non-fatal `ORA-24381` and the
+three position-aligned batch-error arrays — codes and offsets as `ub4 count`
++ a DALC blob of packed `ub4`s, messages as `ub4 count` + indicator + per-message
+`ub4`-length text (§6.7). The client surfaces them through `getbatcherrors()`
+rather than raising, and the applied rows still commit.
+
 **OUT-bind reply (the Mirror, OCI dialect).** The classic sqlplus `VARIABLE v
 NUMBER` / `EXEC :v := 42` flow sends a PL/SQL block that assigns literals to OUT
 binds; the client parks bind buffers and expects the values back. The Mirror
