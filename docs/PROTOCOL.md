@@ -3790,3 +3790,82 @@ AES256 + SHA256.
 The classic sqlplus / thick-OCI client also negotiates ANO but stamps version
 `0x00000000`; that path is handled inline by the `deadbeef` dialect (§4.1.1) and
 is unaffected by the stance.
+
+## 34. End-user security context (#460, post-23ai / milestone #29)
+
+An **end-user security context** attaches a distinct end-user identity plus
+authorization details (a database access token, optional data roles and
+attributes) to an already-authenticated session — the Deep Data Security
+piggyback used in proxy / real-application-user scenarios. It is a discrete
+`field_version ≤ 24` feature (no field-version bump), first surfaced by the 26ai
+capability-array exploration (§4.2, #458).
+
+### 34.1 Negotiation and the tcps gate
+
+The server advertises support via a bit in the compile-cap array: **`compile_caps[45]`**
+(`FEATURE_BACKPORT2`) **bit `0x02`**. Oracle 26ai advertises `caps[45] = 0x03`;
+older servers do not carry the slot at all. seerdb records the server compile
+caps at PRO time and gates `set_end_user_security_context` on this bit.
+
+The reference thin client additionally restricts the feature to **TLS (tcps)
+transports** — attaching a context on a cleartext connection raises an error and
+the piggyback is *never* emitted in the clear. seerdb mirrors this: the setter
+requires an `ssl` transport (else `ProgrammingError`) and a server that
+advertises the bit (else `NotSupportedError`). A consequence is that this wire
+form cannot be captured on a plaintext proxy; the layout below was reconstructed
+from the reference client and pinned with an offline fixture.
+
+### 34.2 The func-205 piggyback
+
+Once set, the context rides as a piggyback in front of **every** subsequent
+call's message (it is not one-shot like the tracing/close-cursors piggybacks —
+it re-rides until cleared). Layout, all multi-byte integers in Oracle's
+variable-length form:
+
+```
+uint8   TTI_MSG_TYPE_PIGGYBACK (0x11)
+uint8   TNS_FUNC_END_USER_SECURITY_CTX (205 / 0xCD)
+uint8   seq
+[ub8    token_num]                       # only when field_version > 23.1 (fv24 qualifies); 0
+ub4     TNS_SECURITY_CONTEXT_ATTACH_FLAG (0x01)
+uint8   0x01                             # pointer(kpdkve) non-null
+ub4     0x01                             # number of key-value pairs
+  -- one keyword-value pair --
+  ub4   0x00                             # pair flags
+  kv    "ORCL_XS_AUTHZ_CONTEXT"          # keyword, write_bytes_with_two_lengths
+  kv    <null>                           # text (unused)
+  kv    <OSON image>                     # value, write_bytes_with_two_lengths
+```
+
+`write_bytes_with_two_lengths` is a `ub4` count followed, for a non-empty value,
+by the `write_bytes_with_length` (chunked) bytes — the same encoding seerdb uses
+for object attributes.
+
+### 34.3 The context payload (OSON)
+
+The value is the **OSON image** (Oracle binary JSON, magic `ff 4a 5a`) of a dict
+whose keys are inserted in this order so the OSON field table matches the
+reference client:
+
+```
+ver                     "1.0"
+end_user_token          <str>   # IAM / Entra ID token identity   (token path)
+end_user_name           <str>   # database-managed user name      (name/key path)
+end_user_contextid      <str>   # the key of the (name, key) pair (name/key path)
+database_access_token   <str>   # required
+data_roles              [<str>] # optional
+attributes              [{"name": k, "values": v}, ...]  # optional
+```
+
+Either `end_user_token` (a token string identity) or the
+`end_user_name` + `end_user_contextid` pair is present, never both. The image
+must not exceed 65535 bytes (it is `ub2`-length-prefixed on the wire). seerdb's
+existing OSON encoder (`seerdb.common.oson.encode_oson`) produces the image;
+`seerdb.create_end_user_security_context` builds the dict and returns an
+`EndUserSecurityContext`, attached with
+`OracleConnect.set_end_user_security_context` (sync and async).
+
+Live end-to-end validation (a server *accepting* the attached context) requires
+a TLS path to a 26ai instance and is pending; the encoder, guards, cap
+negotiation, and OSON payload are pinned offline and the guards verified live
+against 26ai on `:1523`.

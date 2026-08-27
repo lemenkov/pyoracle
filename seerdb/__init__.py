@@ -56,6 +56,10 @@ from seerdb.common.datatypes import (
     Var,
 )
 from seerdb.common.dbobject import DbObject, DbObjectType, DbRef
+from seerdb.common.end_user_sec import (
+    EndUserSecurityContext,
+    create_end_user_security_context,
+)
 from seerdb.common.exceptions import (
     DatabaseError,
     DataError,
@@ -184,6 +188,8 @@ __all__ = [
     'PipelineOpResult',
     'PipelineOpType',
     'create_pipeline',
+    'create_end_user_security_context',
+    'EndUserSecurityContext',
     'TPC_BEGIN_NEW',
     'TPC_BEGIN_JOIN',
     'TPC_BEGIN_RESUME',

@@ -77,6 +77,16 @@ TNS_END_TO_END_MODULE = 0x0008
 TNS_END_TO_END_ACTION = 0x0010
 TNS_END_TO_END_CLIENT_INFO = 0x0100
 TNS_END_TO_END_DBOP = 0x0200
+
+# End-user security context (#460, milestone #29): a piggyback (func 205) that
+# attaches an end-user identity / authorization context to the session for Deep
+# Data Security (proxy / real-application-user scenarios). Carries a single
+# keyword-value pair whose value is the OSON image of the context. Negotiated
+# via the FEATURE_BACKPORT2 capability bit; the reference thin client restricts
+# it to TLS (tcps) transports.
+TNS_FUNC_END_USER_SECURITY_CTX = 205  # 0xCD
+TNS_SECURITY_CONTEXT_ATTACH_FLAG = 0x01
+
 TNS_ATTENTION = 13
 TNS_CONTROL = 14
 TNS_MAX = 19
