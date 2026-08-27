@@ -25,7 +25,11 @@ from seerdb.server import PacketStream, serve_session
 
 psycopg = pytest.importorskip('psycopg')
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'examples'))
-from postgres_backend import PostgresBackend, _translate_ddl  # noqa: E402
+from postgres_backend import (  # noqa: E402
+    PostgresBackend,
+    _translate_ddl,
+    _translate_idioms,
+)
 
 # --- DDL type translation (#500) — a pure function, no live PostgreSQL needed ---
 
@@ -493,3 +497,40 @@ def test_bind_variables_postgres() -> None:
 
     assert result.get('error') is None, result.get('error')
     assert row == ('bob',)
+
+
+# --- Oracle SQL idiom / function translation (#502) — pure, no live PG needed --
+
+
+def test_translate_idioms_functions_and_literals() -> None:
+    assert _translate_idioms("SELECT HEXTORAW('DEADBEEF')") == (
+        "SELECT decode('DEADBEEF', 'hex')"
+    )
+    assert _translate_idioms('INSERT INTO t VALUES (EMPTY_CLOB())') == (
+        "INSERT INTO t VALUES ('')"
+    )
+    assert _translate_idioms('INSERT INTO t VALUES (EMPTY_BLOB())') == (
+        "INSERT INTO t VALUES (''::bytea)"
+    )
+    assert _translate_idioms("SELECT NVL(:v, 'x')") == "SELECT coalesce(:v, 'x')"
+    assert _translate_idioms('SELECT SYSDATE') == 'SELECT localtimestamp(0)'
+    assert (
+        _translate_idioms(
+            "SELECT FROM_TZ(TIMESTAMP '2024-01-15 12:00:00', 'US/Eastern')"
+        )
+        == "SELECT (TIMESTAMP '2024-01-15 12:00:00' AT TIME ZONE 'US/Eastern')"
+    )
+
+
+def test_translate_idioms_binary_float_double_literals() -> None:
+    # The BINARY_DOUBLE / BINARY_FLOAT literal suffix is dropped; the special
+    # values become IEEE-754 float literals.
+    assert _translate_idioms('VALUES (1234.5678d)') == 'VALUES (1234.5678)'
+    assert _translate_idioms('VALUES (-2.25f)') == 'VALUES (-2.25)'
+    assert _translate_idioms('VALUES (binary_double_infinity)') == (
+        "VALUES ('Infinity'::float8)"
+    )
+    assert _translate_idioms('VALUES (binary_double_nan)') == "VALUES ('NaN'::float8)"
+    # A decimal point is required, so a plain integer or identifier is untouched.
+    assert _translate_idioms('SELECT id2 FROM t') == 'SELECT id2 FROM t'
+    assert _translate_idioms('VALUES (100)') == 'VALUES (100)'
