@@ -27,6 +27,8 @@ psycopg = pytest.importorskip('psycopg')
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'examples'))
 from postgres_backend import (  # noqa: E402
     PostgresBackend,
+    _distinct_bind_refs,
+    _parse_out_assignments,
     _reject_unsupported_ddl_types,
     _translate_binds,
     _translate_ddl,
@@ -656,3 +658,25 @@ def test_translate_binds_mixed_named_first_appearance_order() -> None:
     )
     assert sql == 'SELECT * FROM t WHERE a = %(x)s AND b = %(y)s AND c = %(x)s'
     assert params == {'x': 1, 'y': 2}
+
+
+# --- Anonymous PL/SQL blocks with binds (#517) — pure helpers, no live PG ------
+
+
+def test_parse_out_assignments_recognises_assignment_blocks() -> None:
+    # A pure OUT-assignment block → the (ref, expr) pairs; anything else → None.
+    assert _parse_out_assignments(':y := 7 * 6') == [('y', '7 * 6')]
+    assert _parse_out_assignments(":1 := 'x'; :2 := NULL; :3 := 'z'") == [
+        ('1', "'x'"),
+        ('2', 'NULL'),
+        ('3', "'z'"),
+    ]
+    # A DML block is not an assignment block.
+    assert _parse_out_assignments('INSERT INTO t VALUES (:x)') is None
+    assert _parse_out_assignments('proc(:a, :b)') is None
+
+
+def test_distinct_bind_refs_first_appearance_order_skips_literals() -> None:
+    assert _distinct_bind_refs(':a := :b; :c := :a') == ['a', 'b', 'c']
+    # A colon inside a string literal is not a bind ref.
+    assert _distinct_bind_refs("INSERT INTO t VALUES ('x :nope' || :v)") == ['v']
