@@ -334,7 +334,7 @@ def _reject_unsupported_ddl_types(sql: str) -> None:
 # valid PL/pgSQL for the simple assignment / RETURN cases the suite uses.
 _ROUTINE_DDL = re.compile(
     r'(?is)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(PROCEDURE|FUNCTION)\s+([\w.]+)\s*'
-    r'\((.*)\)\s*(?:RETURN\s+([\w ]+?)\s+)?(?:AS|IS)\s+(.*?)\s*;?\s*$'
+    r'(?:\((.*)\)\s*)?(?:RETURN\s+([\w ]+?)\s+)?(?:AS|IS)\s+(.*?)\s*;?\s*$'
 )
 # Oracle parameter direction `IN OUT` → PostgreSQL `INOUT` (do this before the
 # type rewrites, which share the DDL type list).
@@ -356,7 +356,10 @@ def _translate_routine_ddl(sql: str) -> str:
     if match is None:
         return sql
     kind, name, params, return_type, body = match.groups()
-    params = _translate_routine_types(_PARAM_IN_OUT.sub('INOUT', params))
+    # Oracle allows a routine with no parameters to omit the list entirely
+    # (FUNCTION f RETURN NUMBER AS …); PostgreSQL always needs the parentheses, so
+    # an absent list (params is None) becomes an empty one (#530).
+    params = _translate_routine_types(_PARAM_IN_OUT.sub('INOUT', params or ''))
     header = f'CREATE OR REPLACE {kind.upper()} {name}({params})'
     if kind.upper() == 'FUNCTION' and return_type:
         header += f' RETURNS {_translate_routine_types(return_type.strip())}'
