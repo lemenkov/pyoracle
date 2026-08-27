@@ -26,10 +26,12 @@ source with PGXS) — see ``examples/mirror-pg.Dockerfile``.
 
 from __future__ import annotations
 
+import datetime
 import re
 from collections.abc import Sequence
 
 import psycopg
+from psycopg.types.composite import CompositeInfo, register_composite
 
 from seerdb.common.tns_consts import (
     TNS_TYPE_BDOUBLE,
@@ -53,6 +55,19 @@ from seerdb.server import (
     credential_lookup,
 )
 
+# The PostgreSQL composite type that backs Oracle's TIMESTAMP WITH TIME ZONE
+# (#519). A native timestamptz stores UTC and hands the value back in the session
+# zone, discarding the offset the client entered — but Oracle preserves that
+# offset. So a WITH TIME ZONE column becomes this two-field composite: `utc` is
+# the instant (a real timestamptz, so the instant is stored correctly) and `off`
+# is the entered offset in seconds, which the read path uses to re-tag the value.
+_TSTZ_TYPE = 'ora_tstz'
+_TSTZ_TYPE_DDL = (
+    'DO $$ BEGIN CREATE TYPE ora_tstz AS (utc timestamptz, off integer); '
+    'EXCEPTION WHEN duplicate_object THEN NULL; END $$'
+)
+
+
 # One Oracle bind reference: `:` + an identifier or number (`:x`, `:my_var`,
 # `:1`). A `::` cast is left alone (handled by the scan below, which only starts
 # a bind where the previous char isn't `:`).
@@ -72,8 +87,10 @@ def _translate_binds(sql: str, binds: Sequence) -> tuple[str, dict]:
     — both of which a blind ``:name`` → ``%s`` substitution gets wrong. Distinct
     binds map to ``binds`` in first-appearance order (positional ``:1 :2`` and a
     single dict/list of values both land correctly)."""
+    values = list(binds)
     names: list[str] = []  # distinct bind names, in first-appearance order
     out: list[str] = []
+    tstz_keys: set[str] = set()  # bind keys whose value is an aware datetime
     i, n = 0, len(sql)
     while i < n:
         char = sql[i]
@@ -92,17 +109,30 @@ def _translate_binds(sql: str, binds: Sequence) -> tuple[str, dict]:
             name = match.group(1)
             if name not in names:
                 names.append(name)
-            out.append(f'%({_bind_key(name)})s')
+            key = _bind_key(name)
+            value = (
+                values[names.index(name)] if names.index(name) < len(values) else None
+            )
+            if isinstance(value, datetime.datetime) and value.tzinfo is not None:
+                # An aware datetime binds a TIMESTAMP WITH TIME ZONE — build the
+                # offset-preserving composite so the entered offset survives the
+                # round trip rather than being normalised to UTC (#519).
+                out.append(f'ROW(%({key})s, %({key}__off)s)::{_TSTZ_TYPE}')
+                tstz_keys.add(key)
+            else:
+                out.append(f'%({key})s')
             i = match.end()
             continue
         out.append(char)
         i += 1
-    values = list(binds)
-    params = {
-        _bind_key(name): values[idx]
-        for idx, name in enumerate(names)
-        if idx < len(values)
-    }
+    params: dict = {}
+    for idx, name in enumerate(names):
+        if idx >= len(values):
+            continue
+        key = _bind_key(name)
+        params[key] = values[idx]
+        if key in tstz_keys:
+            params[f'{key}__off'] = int(values[idx].utcoffset().total_seconds())
     return ''.join(out), params
 
 
@@ -119,9 +149,18 @@ _DDL_TYPE_REWRITES = [
     (re.compile(r'\bLONG\s+RAW\b', re.IGNORECASE), 'bytea'),
     (re.compile(r'\bRAW\s*\(\s*\d+\s*\)', re.IGNORECASE), 'bytea'),
     (re.compile(r'\bRAW\b', re.IGNORECASE), 'bytea'),
+    # WITH LOCAL TIME ZONE normalises to the session zone (like PostgreSQL's own
+    # timestamptz), so map it there. WITH TIME ZONE instead *preserves* the entered
+    # offset — which timestamptz cannot — so it maps to the `ora_tstz` composite
+    # (utc, offset) that carries the offset across the round trip (#519). LOCAL is
+    # matched first (it is the more specific keyword).
     (
-        re.compile(r'\bTIMESTAMP\s+WITH\s+(?:LOCAL\s+)?TIME\s+ZONE\b', re.IGNORECASE),
+        re.compile(r'\bTIMESTAMP\s+WITH\s+LOCAL\s+TIME\s+ZONE\b', re.IGNORECASE),
         'timestamptz',
+    ),
+    (
+        re.compile(r'\bTIMESTAMP\s+WITH\s+TIME\s+ZONE\b', re.IGNORECASE),
+        _TSTZ_TYPE,
     ),
     (re.compile(r'\bTIMESTAMP\b', re.IGNORECASE), 'timestamp'),
     (re.compile(r'\bDATE\b', re.IGNORECASE), 'timestamp(0)'),
@@ -217,12 +256,33 @@ _IDIOM_REWRITES = [
 ]
 
 
+# An Oracle TIMESTAMP literal carrying an explicit offset — TIMESTAMP '<ts> ±HH:MM'
+# — is a TIMESTAMP WITH TIME ZONE value. PostgreSQL's `TIMESTAMP '…'` keyword
+# parses as *without* time zone and silently drops the offset (wrong instant), so
+# such a literal is rewritten to build the offset-preserving `ora_tstz` composite:
+# the instant via `TIMESTAMPTZ '…'` (which does honour the offset) and the offset
+# itself in seconds. A TIMESTAMP literal with no offset is an ordinary timestamp
+# and is left untouched (#519).
+_TSTZ_LITERAL = re.compile(r"\bTIMESTAMP\s*'([^']*)'", re.IGNORECASE)
+_OFFSET_TAIL = re.compile(r'([+-])(\d{2}):(\d{2})\s*$')
+
+
+def _tstz_literal_sub(match: 're.Match') -> str:
+    content = match.group(1)
+    tail = _OFFSET_TAIL.search(content)
+    if tail is None:
+        return match.group(0)  # a plain TIMESTAMP literal — not WITH TIME ZONE
+    sign = -1 if tail.group(1) == '-' else 1
+    seconds = sign * (int(tail.group(2)) * 3600 + int(tail.group(3)) * 60)
+    return f"ROW(TIMESTAMPTZ '{content}', {seconds})::{_TSTZ_TYPE}"
+
+
 def _translate_idioms(sql: str) -> str:
     """Rewrite the Oracle SQL functions / literal idioms the suite uses to their
     PostgreSQL equivalents (#502). Applied to every statement."""
     for pattern, replacement in _IDIOM_REWRITES:
         sql = pattern.sub(replacement, sql)
-    return sql
+    return _TSTZ_LITERAL.sub(_tstz_literal_sub, sql)
 
 
 # Column types that are Oracle-only *for the version the Mirror advertises*
@@ -389,10 +449,40 @@ def _ora_code_for(exc) -> int:
     return _SQLSTATE_TO_ORA.get(getattr(exc, 'sqlstate', None), _ORA_INVALID_SQL)
 
 
-def _column_meta(desc, values: list) -> ColumnMeta:
+def _reconstruct_tstz(value):
+    # A psycopg `ora_tstz(utc, off)` composite → an aware datetime re-tagged with
+    # the entered offset, so TIMESTAMP WITH TIME ZONE round-trips its offset the way
+    # Oracle does rather than coming back normalised to UTC (#519).
+    if value is None:
+        return None
+    return value.utc.astimezone(
+        datetime.timezone(datetime.timedelta(seconds=value.off))
+    )
+
+
+def _decode_row(cursor, row, tstz_oid: int | None) -> list | None:
+    # Re-tag any ora_tstz composite cells in a fetched row to aware datetimes, so a
+    # WITH TIME ZONE value returned from a routine keeps its offset (#519).
+    if row is None:
+        return None
+    return [
+        _reconstruct_tstz(value)
+        if (tstz_oid is not None and desc.type_code == tstz_oid)
+        else value
+        for value, desc in zip(row, cursor.description or ())
+    ]
+
+
+def _column_meta(desc, values: list, tstz_oid: int | None = None) -> ColumnMeta:
     # `desc` is a psycopg Column (name / type_code / precision / scale / ...).
     name, oid = desc.name, desc.type_code
     ident = name.upper().encode('utf-8')
+    if tstz_oid is not None and oid == tstz_oid:
+        # The ora_tstz composite backing TIMESTAMP WITH TIME ZONE — the cells are
+        # reconstructed to aware datetimes by the caller (#519).
+        return ColumnMeta(
+            name=ident, data_type=TNS_TYPE_TIMESTAMPTZ, data_length=13, max_size=13
+        )
     if oid in _NUMBER_OIDS:
         # A numeric(p, s) column reports its precision/scale; int / float / bare
         # numeric report None, which becomes Oracle's unconstrained NUMBER (0/0).
@@ -470,6 +560,19 @@ class PostgresBackend:
         except psycopg.Error:
             self._conn.rollback()
         self._conn.execute('SET search_path TO public, oracle')
+        # Create + register the composite that backs TIMESTAMP WITH TIME ZONE, so
+        # its columns come back as a typed tuple the read path can re-tag with the
+        # entered offset (#519). Best-effort: a backend that can't create the type
+        # just leaves WITH TIME ZONE unsupported, like the orafce idioms above.
+        self._tstz_oid: int | None = None
+        try:
+            self._conn.execute(_TSTZ_TYPE_DDL)
+            info = CompositeInfo.fetch(self._conn, _TSTZ_TYPE)
+            if info is not None:
+                register_composite(info, self._conn)
+                self._tstz_oid = info.oid
+        except psycopg.Error:
+            self._conn.rollback()
         self._conn.commit()
 
     def authenticate(self, username: str) -> str | None:
@@ -507,12 +610,18 @@ class PostgresBackend:
             if cursor.description is None:
                 result = Result(rowcount=max(cursor.rowcount, 0))
             else:
-                rows = cursor.fetchall()
+                rows = [list(r) for r in cursor.fetchall()]
+                # Re-tag any ora_tstz composite cells to aware datetimes carrying
+                # the entered offset before they reach the wire encoder (#519).
+                for i, desc in enumerate(cursor.description):
+                    if self._tstz_oid is not None and desc.type_code == self._tstz_oid:
+                        for row in rows:
+                            row[i] = _reconstruct_tstz(row[i])
                 columns = [
-                    _column_meta(desc, [r[i] for r in rows])
+                    _column_meta(desc, [r[i] for r in rows], self._tstz_oid)
                     for i, desc in enumerate(cursor.description)
                 ]
-                result = Result(columns=columns, rows=rows)
+                result = Result(columns=columns, rows=[tuple(r) for r in rows])
         except psycopg.Error as exc:
             self._conn.execute('ROLLBACK TO SAVEPOINT _mirror_stmt')
             self._conn.execute('RELEASE SAVEPOINT _mirror_stmt')
@@ -570,7 +679,7 @@ class PostgresBackend:
         placeholders = ', '.join(['%s'] * len(arg_values))
         cursor = self._conn.cursor()
         cursor.execute(f'SELECT {name}({placeholders})', tuple(arg_values) or None)
-        row = cursor.fetchone()
+        row = _decode_row(cursor, cursor.fetchone(), self._tstz_oid)
         out = list(values)
         out[int(ret_ref) - 1] = row[0] if row else None
         return Result(out_binds=out)
@@ -585,7 +694,11 @@ class PostgresBackend:
         placeholders = ', '.join(['%s'] * len(arg_values))
         cursor = self._conn.cursor()
         cursor.execute(f'CALL {name}({placeholders})', tuple(arg_values) or None)
-        returned = list(cursor.fetchone() or ()) if cursor.description else []
+        returned = (
+            _decode_row(cursor, cursor.fetchone(), self._tstz_oid) or []
+            if cursor.description
+            else []
+        )
         modes = self._arg_modes(name, len(arg_refs))
         out = list(values)
         result_i = 0
@@ -606,7 +719,7 @@ class PostgresBackend:
         sql, params = _translate_binds(_translate_idioms(f'SELECT {exprs}'), values)
         cursor = self._conn.cursor()
         cursor.execute(sql, params)
-        row = list(cursor.fetchone() or [])
+        row = _decode_row(cursor, cursor.fetchone(), self._tstz_oid) or []
         out = list(values)
         for (ref, _expr), result in zip(assignments, row):
             if ref in refs:
