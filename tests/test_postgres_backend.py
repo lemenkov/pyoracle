@@ -25,7 +25,47 @@ from seerdb.server import PacketStream, serve_session
 
 psycopg = pytest.importorskip('psycopg')
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'examples'))
-from postgres_backend import PostgresBackend  # noqa: E402
+from postgres_backend import PostgresBackend, _translate_ddl  # noqa: E402
+
+# --- DDL type translation (#500) — a pure function, no live PostgreSQL needed ---
+
+
+def test_translate_ddl_maps_create_table_column_types() -> None:
+    sent = _translate_ddl(
+        'CREATE TABLE t (id NUMBER(10,2), v VARCHAR2(20), d DATE, '
+        'r RAW(16), c CLOB, b BLOB, ts TIMESTAMP WITH TIME ZONE, '
+        'f BINARY_FLOAT, g BINARY_DOUBLE)'
+    )
+    assert 'numeric(10,2)' in sent
+    assert 'varchar(20)' in sent
+    assert 'timestamp(0)' in sent  # DATE keeps its time-of-day
+    assert 'r bytea' in sent  # RAW(16) → bytea (size dropped)
+    assert 'c text' in sent  # CLOB
+    assert 'b bytea' in sent  # BLOB
+    assert 'timestamptz' in sent
+    assert 'f real' in sent and 'g double precision' in sent
+    assert 'NUMBER' not in sent and 'VARCHAR2' not in sent
+
+
+def test_translate_ddl_drops_organization_index_and_global_temporary() -> None:
+    iot = _translate_ddl('CREATE TABLE t (id NUMBER PRIMARY KEY) ORGANIZATION INDEX')
+    assert 'ORGANIZATION INDEX' not in iot
+    gtt = _translate_ddl(
+        'CREATE GLOBAL TEMPORARY TABLE g (id NUMBER) ON COMMIT PRESERVE ROWS'
+    )
+    assert 'GLOBAL TEMPORARY' not in gtt and 'TEMPORARY TABLE' in gtt
+
+
+def test_translate_ddl_leaves_non_create_table_unchanged() -> None:
+    # Only CREATE TABLE is rewritten — a DATE literal / type keyword elsewhere
+    # (DML, a query) must pass through verbatim.
+    for sql in (
+        "INSERT INTO t (d) VALUES (DATE '2020-01-01')",
+        'SELECT id, v FROM t',
+        'UPDATE t SET v = :1 WHERE id = :2',
+    ):
+        assert _translate_ddl(sql) == sql
+
 
 _CONNINFO = os.environ.get(
     'MIRROR_PG', 'host=127.0.0.1 port=5433 user=pyo password=pyo123 dbname=mirror'

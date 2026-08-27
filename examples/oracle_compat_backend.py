@@ -110,6 +110,8 @@ class OracleCompatBackend:
         # A bare `SELECT <expr> FROM DUAL` maps to `SELECT <expr>` on the backend.
         if _FROM_DUAL.search(sql):
             return self._inner.execute(_FROM_DUAL.sub('', sql.strip()), binds)
+        # Every other statement is a real one — the inner backend runs it (and,
+        # being dialect-specific, translates Oracle SQL to its own dialect there).
         return self._inner.execute(sql, binds)
 
     def commit(self) -> None:

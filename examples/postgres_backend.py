@@ -45,6 +45,71 @@ from seerdb.server import (
 # negative lookbehind leaves any '::' cast untouched.
 _ORACLE_BIND = re.compile(r'(?<!:):\w+')
 
+# Oracle → PostgreSQL column-type rewrites for CREATE TABLE (#500). Applied in
+# order, so a multi-word / longer keyword comes before a shorter one it contains
+# (LONG RAW before RAW / LONG, TIMESTAMP WITH TIME ZONE before TIMESTAMP,
+# NVARCHAR2 before VARCHAR2, NCLOB before CLOB). A size suffix the target type
+# keeps (VARCHAR2(10) → varchar(10), NUMBER(p,s) → numeric(p,s)) rides along
+# because only the keyword is replaced; one PostgreSQL rejects (RAW(16)) is
+# matched with its parens and dropped. Word boundaries keep column names and
+# other tokens untouched; only CREATE TABLE is rewritten, so a type keyword used
+# as an identifier elsewhere is left alone.
+_DDL_TYPE_REWRITES = [
+    (re.compile(r'\bLONG\s+RAW\b', re.IGNORECASE), 'bytea'),
+    (re.compile(r'\bRAW\s*\(\s*\d+\s*\)', re.IGNORECASE), 'bytea'),
+    (re.compile(r'\bRAW\b', re.IGNORECASE), 'bytea'),
+    (
+        re.compile(r'\bTIMESTAMP\s+WITH\s+(?:LOCAL\s+)?TIME\s+ZONE\b', re.IGNORECASE),
+        'timestamptz',
+    ),
+    (re.compile(r'\bTIMESTAMP\b', re.IGNORECASE), 'timestamp'),
+    (re.compile(r'\bDATE\b', re.IGNORECASE), 'timestamp(0)'),
+    (
+        re.compile(
+            r'\bINTERVAL\s+DAY(?:\s*\(\d+\))?\s+TO\s+SECOND(?:\s*\(\d+\))?\b',
+            re.IGNORECASE,
+        ),
+        'interval',
+    ),
+    (
+        re.compile(r'\bINTERVAL\s+YEAR(?:\s*\(\d+\))?\s+TO\s+MONTH\b', re.IGNORECASE),
+        'interval',
+    ),
+    (re.compile(r'\bNVARCHAR2\b', re.IGNORECASE), 'varchar'),
+    (re.compile(r'\bVARCHAR2\b', re.IGNORECASE), 'varchar'),
+    (re.compile(r'\bNCHAR\b', re.IGNORECASE), 'char'),
+    (re.compile(r'\bNUMBER\b', re.IGNORECASE), 'numeric'),
+    (re.compile(r'\bNCLOB\b', re.IGNORECASE), 'text'),
+    (re.compile(r'\bCLOB\b', re.IGNORECASE), 'text'),
+    (re.compile(r'\bBLOB\b', re.IGNORECASE), 'bytea'),
+    (re.compile(r'\bLONG\b', re.IGNORECASE), 'text'),
+    (re.compile(r'\bBINARY_FLOAT\b', re.IGNORECASE), 'real'),
+    (re.compile(r'\bBINARY_DOUBLE\b', re.IGNORECASE), 'double precision'),
+]
+# Oracle table clauses PostgreSQL has no equal for — dropped (the resulting plain
+# table is close enough for the suite): an index-organized table is just a table
+# (a PRIMARY KEY already gives the index), and GLOBAL TEMPORARY maps to a plain
+# TEMPORARY table (ON COMMIT ... ROWS is already valid PostgreSQL).
+_DDL_ORG_INDEX = re.compile(r'\s+ORGANIZATION\s+INDEX\b', re.IGNORECASE)
+_DDL_GLOBAL_TEMPORARY = re.compile(r'\bGLOBAL\s+TEMPORARY\b', re.IGNORECASE)
+_IS_CREATE_TABLE = re.compile(
+    r'\s*CREATE\s+(?:GLOBAL\s+TEMPORARY\s+)?TABLE\b', re.IGNORECASE
+)
+
+
+def _translate_ddl(sql: str) -> str:
+    """Rewrite an Oracle ``CREATE TABLE`` to PostgreSQL: map the column types and
+    drop the clauses PostgreSQL has no equal for (#500). Non-CREATE-TABLE SQL is
+    returned unchanged."""
+    if not _IS_CREATE_TABLE.match(sql):
+        return sql
+    out = _DDL_GLOBAL_TEMPORARY.sub('TEMPORARY', sql)
+    out = _DDL_ORG_INDEX.sub('', out)
+    for pattern, replacement in _DDL_TYPE_REWRITES:
+        out = pattern.sub(replacement, out)
+    return out
+
+
 # PostgreSQL type OIDs (pg_type.oid) → Oracle wire type.
 _NUMBER_OIDS = frozenset(
     {
@@ -73,6 +138,26 @@ _TEMPORAL_OIDS = {
 }
 
 _ORA_INVALID_SQL = 900
+
+# Map a PostgreSQL error (by SQLSTATE) to the Oracle error number a client
+# expects, so error-conditional flows behave (#500). The load-bearing one is
+# `undefined_table` → ORA-00942: the suite's setUp/tearDown drops tables
+# best-effort and only swallows ORA-00942 — reporting ORA-00900 instead re-raised
+# and failed every test in setUp. Anything unmapped falls back to ORA-00900.
+_SQLSTATE_TO_ORA = {
+    '42P01': 942,  # undefined_table         -> table or view does not exist
+    '42704': 942,  # undefined_object (type) -> (DROP TYPE cleanup)
+    '42P07': 955,  # duplicate_table         -> name is already used
+    '42703': 904,  # undefined_column        -> invalid identifier
+    '42883': 904,  # undefined_function
+    '23505': 1,  # unique_violation        -> unique constraint violated
+    '23502': 1400,  # not_null_violation      -> cannot insert NULL
+    '23514': 2290,  # check_violation         -> check constraint violated
+}
+
+
+def _ora_code_for(exc) -> int:
+    return _SQLSTATE_TO_ORA.get(getattr(exc, 'sqlstate', None), _ORA_INVALID_SQL)
 
 
 def _column_meta(desc, values: list) -> ColumnMeta:
@@ -147,6 +232,9 @@ class PostgresBackend:
         return credential_lookup(self._credentials, username)
 
     def execute(self, sql: str, binds: Sequence = ()) -> Result:
+        # Translate Oracle DDL column types to PostgreSQL's dialect (#500) — this
+        # is where dialect knowledge belongs, not in the generic compat shim.
+        sql = _translate_ddl(sql)
         if binds:
             sql = _ORACLE_BIND.sub('%s', sql)
         cursor = self._conn.cursor()
@@ -170,7 +258,9 @@ class PostgresBackend:
             self._conn.execute('ROLLBACK TO SAVEPOINT _mirror_stmt')
             self._conn.execute('RELEASE SAVEPOINT _mirror_stmt')
             # A PostgreSQL failure surfaces as a clean ORA error — never a desync.
-            raise BackendError(str(exc).strip(), ora_code=_ORA_INVALID_SQL) from exc
+            # Map the SQLSTATE to the matching Oracle code so error-conditional
+            # client flows (e.g. a best-effort DROP that swallows ORA-00942) work.
+            raise BackendError(str(exc).strip(), ora_code=_ora_code_for(exc)) from exc
         except Exception:
             # An our-side rejection (e.g. UnsupportedFeature on an unmapped column
             # type) after the statement ran — undo it and re-raise for the session
