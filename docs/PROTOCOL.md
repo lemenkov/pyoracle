@@ -1730,6 +1730,17 @@ remaining bytes (no `=` padding). Example: value
 table's NUMBER primary key, since an IOT rowid is logical). NULL when
 `num_bytes` is 0.
 
+**Server side — the Mirror (#484).** The Mirror holds a rowid as its rendered
+string (what the backend hands back), so it inverts the render before emitting.
+`encode_rowid_value` parses the 18-char string back to object / file / block /
+slot (`string_to_rowid`, the inverse of the render) and writes the structured
+RID; `encode_urowid_value` base64-decodes the `*`-body and re-frames it with a
+leading type tag (the tag is stripped on decode, so any value round-trips). Both
+are routed before the scalar NULL path, since a NULL rowid still carries its own
+framing (the RID present indicator / a zero `num_bytes`), not the empty DALC.
+Verified live over 11g: `ROWID == ROWIDTOCHAR(ROWID)`, a rowid used as a bind,
+and an IOT UROWID.
+
 ### 11.9 LOB Locators (CLOB, NCLOB, BLOB, BFILE)
 
 LOBs are *not* sent inline with row data. What appears in RXD for a

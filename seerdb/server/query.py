@@ -11,6 +11,7 @@ encoders that answer it are layered on separately.
 
 from __future__ import annotations
 
+import base64
 import datetime
 import re
 import struct
@@ -56,8 +57,10 @@ from seerdb.common.tns_consts import (
     TNS_TYPE_LONGRAW,
     TNS_TYPE_NUMBER,
     TNS_TYPE_RAW,
+    TNS_TYPE_RID,
     TNS_TYPE_TIMESTAMP,
     TNS_TYPE_TIMESTAMPTZ,
+    TNS_TYPE_UROWID,
     TNS_TYPE_VARCHAR,
     TTI_ALL8,
     TTI_DCB,
@@ -69,7 +72,7 @@ from seerdb.common.tns_consts import (
     TTI_RXD,
     TTI_RXH,
 )
-from seerdb.common.types import decode_value
+from seerdb.common.types import decode_value, string_to_rowid
 
 # AL32UTF8 (AL32UTF8_CHARSET) — what seerdb advertises and what an 11g DUAL
 # column reports. _CSFRM_DB is the database charset form (not the national one).
@@ -1196,10 +1199,61 @@ def encode_long_value_thin(value: object) -> bytes:
     return bytes(out) + _THIN_LONG_TRAILER
 
 
+# A physical ROWID (RID, type 11) reserves this many bytes on the wire — the
+# present indicator the client reads to tell a real rowid (any non-zero,
+# non-0xff value) from a NULL. The client only tests for 0 / 0xff, so the exact
+# size is cosmetic; 10 is a physical rowid's structured length.
+_RID_PRESENT = 0x0A
+# The leading type tag of a logical/universal rowid (UROWID, type 208). The
+# client strips it before rendering, so any value round-trips; 0x01 is the
+# logical-rowid tag.
+_UROWID_TAG = 0x01
+
+
+def encode_rowid_value(value: object) -> bytes:
+    """The physical ROWID (RID, type 11) RXD value (#484), the inverse of the
+    client's ``_read_rowid_column``: a present-indicator byte then the structured
+    rowid — data object / relative file / an unused field / block / slot, each a
+    ub4. ``value`` is the 18-char extended ROWID string; ``None`` (or empty) is a
+    bare ``0x00`` indicator (NULL)."""
+    if value is None or value == '':
+        return bytes([0])
+    obj, file, block, slot = string_to_rowid(str(value))
+    return (
+        bytes([_RID_PRESENT])
+        + encode_sb4(obj)
+        + encode_sb4(file)
+        + encode_sb4(0)  # unused field between file and block
+        + encode_sb4(block)
+        + encode_sb4(slot)
+    )
+
+
+def encode_urowid_value(value: object) -> bytes:
+    """The UROWID (logical/universal rowid, type 208) RXD value (#484), the
+    inverse of the client's ``_read_urowid_column``: a ub4 byte count, a 1-byte
+    length echo, then the rowid bytes (a leading type tag + the body). ``value``
+    is the ``*``-prefixed base64 string; ``None`` (or empty) is a zero count
+    (NULL)."""
+    if value is None or value == '':
+        return encode_sb4(0)
+    body = str(value)[1:]  # drop the leading '*'
+    raw = base64.b64decode(body + '=' * (-len(body) % 4))
+    payload = bytes([_UROWID_TAG]) + raw
+    return encode_sb4(len(payload)) + bytes([len(payload)]) + payload
+
+
 def _encode_value(value: object, data_type: int) -> bytes:
     # A scalar column value as a DALC (1-byte length + data). NULL is the empty
     # DALC; text is UTF-8; a number is Oracle's base-100 NUMBER encoding; a
     # datetime/date is encoded per the column's temporal type.
+    if data_type == TNS_TYPE_RID:
+        # ROWID is a structured physical rowid, not a DALC; a NULL still carries
+        # its present indicator, so it can't take the bare-0x00 NULL path below.
+        return encode_rowid_value(value)
+    if data_type == TNS_TYPE_UROWID:
+        # UROWID is a length-framed rowid blob, not a DALC (same reasoning).
+        return encode_urowid_value(value)
     if data_type in (TNS_TYPE_LONG, TNS_TYPE_LONGRAW):
         # LONG columns are NOT a DALC: they stream inline with their own framing
         # and trailing indicators, and a NULL LONG still carries them (so it can't
