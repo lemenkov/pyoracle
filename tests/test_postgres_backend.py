@@ -51,9 +51,52 @@ def test_translate_ddl_maps_create_table_column_types() -> None:
     assert 'r bytea' in sent  # RAW(16) → bytea (size dropped)
     assert 'c text' in sent  # CLOB
     assert 'b bytea' in sent  # BLOB
-    assert 'timestamptz' in sent
+    assert 'ts ora_tstz' in sent  # WITH TIME ZONE preserves the offset (#519)
     assert 'f real' in sent and 'g double precision' in sent
     assert 'NUMBER' not in sent and 'VARCHAR2' not in sent
+
+
+def test_translate_ddl_time_zone_variants() -> None:
+    # WITH LOCAL TIME ZONE normalises like PostgreSQL timestamptz; plain WITH TIME
+    # ZONE preserves the entered offset, so it maps to the ora_tstz composite (#519).
+    sent = _translate_ddl(
+        'CREATE TABLE t (a TIMESTAMP WITH LOCAL TIME ZONE, '
+        'b TIMESTAMP WITH TIME ZONE, c TIMESTAMP)'
+    )
+    assert 'a timestamptz' in sent
+    assert 'b ora_tstz' in sent
+    assert 'c timestamp' in sent and 'c ora_tstz' not in sent
+
+
+def test_translate_idioms_rewrites_offset_bearing_timestamp_literal() -> None:
+    # TIMESTAMP '<ts> ±HH:MM' is a WITH TIME ZONE value — build the composite so
+    # the offset survives, rather than PostgreSQL's WITHOUT-time-zone parse dropping
+    # it. A literal with no offset is an ordinary timestamp, left untouched (#519).
+    with_offset = _translate_idioms("v := TIMESTAMP '2026-06-07 13:14:15.5 +02:00'")
+    assert (
+        "ROW(TIMESTAMPTZ '2026-06-07 13:14:15.5 +02:00', 7200)::ora_tstz" in with_offset
+    )
+    negative = _translate_idioms("TIMESTAMP '2026-05-23 10:11:12.345678 -05:30'")
+    assert '-19800)::ora_tstz' in negative  # -(5*3600 + 30*60)
+    plain = _translate_idioms("TIMESTAMP '2026-06-07 13:14:15.5'")
+    assert plain == "TIMESTAMP '2026-06-07 13:14:15.5'"
+
+
+def test_translate_binds_wraps_aware_datetime_as_composite() -> None:
+    # An aware datetime bind carries a WITH TIME ZONE value: it becomes a ROW cast
+    # with the offset in seconds alongside the instant, so the offset round-trips
+    # rather than being normalised to UTC by a bare timestamptz bind (#519).
+    tz = datetime.timezone(datetime.timedelta(hours=-5, minutes=-30))
+    value = datetime.datetime(2026, 5, 23, 10, 11, 12, 345678, tzinfo=tz)
+    sql, params = _translate_binds('INSERT INTO t VALUES (:1)', [value])
+    assert sql == 'INSERT INTO t VALUES (ROW(%(b1)s, %(b1__off)s)::ora_tstz)'
+    assert params['b1'] is value
+    assert params['b1__off'] == -19800
+    # A naive datetime (or any non-aware value) binds plainly, no composite wrap.
+    naive = datetime.datetime(2026, 5, 23, 10, 11, 12)
+    sql2, params2 = _translate_binds('INSERT INTO t VALUES (:1)', [naive])
+    assert sql2 == 'INSERT INTO t VALUES (%(b1)s)'
+    assert '__off' not in ''.join(params2)
 
 
 def test_translate_ddl_drops_organization_index_and_global_temporary() -> None:
