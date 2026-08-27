@@ -469,8 +469,26 @@ _SQLSTATE_TO_ORA = {
 }
 
 
+# The canonical Oracle message text for a mapped ORA code, used in place of
+# PostgreSQL's own wording so a client that matches on the Oracle phrasing behaves
+# — ORA-00942 reads "table or view does not exist", not "relation … does not
+# exist" (#529). A code with no entry keeps PostgreSQL's message (still prefixed
+# with its ORA-NNNNN by the Mirror), which is right where the English text varies
+# by Oracle version anyway (e.g. ORA-01722).
+_ORA_MESSAGE = {
+    942: 'table or view does not exist',
+}
+
+
 def _ora_code_for(exc) -> int:
     return _SQLSTATE_TO_ORA.get(getattr(exc, 'sqlstate', None), _ORA_INVALID_SQL)
+
+
+def _backend_error(exc) -> BackendError:
+    # A PostgreSQL failure as a clean ORA error: the mapped code, and the Oracle
+    # canonical text for it when there is one, else PostgreSQL's own message (#529).
+    code = _ora_code_for(exc)
+    return BackendError(_ORA_MESSAGE.get(code, str(exc).strip()), ora_code=code)
 
 
 # PostgreSQL's built-in `refcursor` type OID (stable across versions) — a CALL's
@@ -658,7 +676,7 @@ class PostgresBackend:
             # A PostgreSQL failure surfaces as a clean ORA error — never a desync.
             # Map the SQLSTATE to the matching Oracle code so error-conditional
             # client flows (e.g. a best-effort DROP that swallows ORA-00942) work.
-            raise BackendError(str(exc).strip(), ora_code=_ora_code_for(exc)) from exc
+            raise _backend_error(exc) from exc
         except Exception:
             # An our-side rejection (e.g. UnsupportedFeature on an unmapped column
             # type) after the statement ran — undo it and re-raise for the session
@@ -698,7 +716,7 @@ class PostgresBackend:
             return Result(out_binds=values)
         except psycopg.Error as exc:
             self._conn.rollback()
-            raise BackendError(str(exc).strip(), ora_code=_ora_code_for(exc)) from exc
+            raise _backend_error(exc) from exc
 
     def _call_function(self, match: 're.Match', values: list) -> Result:
         # BEGIN :r := name(:a, :b); END;  →  SELECT name(a, b); the result is the

@@ -27,6 +27,7 @@ psycopg = pytest.importorskip('psycopg')
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'examples'))
 from postgres_backend import (  # noqa: E402
     PostgresBackend,
+    _backend_error,
     _distinct_bind_refs,
     _parse_out_assignments,
     _reject_unsupported_ddl_types,
@@ -35,6 +36,30 @@ from postgres_backend import (  # noqa: E402
     _translate_idioms,
     _translate_routine_ddl,
 )
+
+
+class _FakePgError(Exception):
+    def __init__(self, sqlstate: str, message: str) -> None:
+        super().__init__(message)
+        self.sqlstate = sqlstate
+
+
+def test_backend_error_uses_oracle_canonical_text_for_mapped_code() -> None:
+    # A mapped code with a canonical Oracle phrasing gets it, so a client matching
+    # on the Oracle text behaves — ORA-00942 is "table or view does not exist", not
+    # PostgreSQL's "relation … does not exist" (#529).
+    err = _backend_error(_FakePgError('42P01', 'relation "nope" does not exist'))
+    assert err.ora_code == 942
+    assert 'table or view' in str(err) and 'does not exist' in str(err)
+    # A mapped code with no canonical text keeps PostgreSQL's message (its English
+    # varies by Oracle version), still under the right code.
+    num = _backend_error(_FakePgError('22P02', 'invalid input syntax for type numeric'))
+    assert num.ora_code == 1722
+    assert 'invalid input syntax' in str(num)
+    # An unmapped SQLSTATE falls back to ORA-00900 with PostgreSQL's message.
+    other = _backend_error(_FakePgError('XX000', 'internal error'))
+    assert other.ora_code == 900
+
 
 # --- DDL type translation (#500) — a pure function, no live PostgreSQL needed ---
 
