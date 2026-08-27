@@ -401,13 +401,24 @@ def _str_with_length(data: bytes) -> bytes:
     return encode_sb4(len(data)) + _bytes_with_length(data)
 
 
+def _encode_signed_sb4(value: int) -> bytes:
+    # The 11g describe encodes scale as a variable-length *signed* integer: a
+    # negative value sets the 0x80 bit of the length byte over the magnitude
+    # bytes (so NUMBER's -127 "no scale" default is 0x81 0x7f). encode_sb4 only
+    # covers the non-negative case; the client's decode_ub4 reads both.
+    if value >= 0:
+        return encode_sb4(value)
+    magnitude = (-value).to_bytes(4, 'big').lstrip(b'\x00') or b'\x00'
+    return bytes([0x80 | len(magnitude)]) + magnitude
+
+
 def _encode_dcb_column(col: ColumnMeta, position: int) -> bytes:
     # Inverse of _decode_dcb_column (11g / fv < 12.2). Fields the client skips
     # are written as well-formed zeros; only type/precision/scale/length/
     # charset/csfrm/max_size/null_ok/name carry meaning.
     return (
-        bytes([col.data_type, 0, col.precision])
-        + encode_sb4(col.scale)
+        bytes([col.data_type, 0, col.precision & 0xFF])
+        + _encode_signed_sb4(col.scale)
         + encode_sb4(col.data_length)  # buffer size
         + encode_sb4(0)  # max array elements
         + encode_sb4(0)  # cont flags
