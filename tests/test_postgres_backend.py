@@ -30,6 +30,7 @@ from postgres_backend import (  # noqa: E402
     _reject_unsupported_ddl_types,
     _translate_ddl,
     _translate_idioms,
+    _translate_routine_ddl,
 )
 
 # --- DDL type translation (#500) — a pure function, no live PostgreSQL needed ---
@@ -556,3 +557,33 @@ def test_reject_oracle_only_ddl_types_raises_ora_902() -> None:
     # An ordinary CREATE TABLE — and any non-CREATE-TABLE statement — is fine.
     _reject_unsupported_ddl_types('CREATE TABLE t (id NUMBER, v VARCHAR2(10))')
     _reject_unsupported_ddl_types('SELECT json_col FROM t WHERE flag = 1')
+
+
+# --- PL/SQL routine translation (#503) — a pure function, no live PG needed -----
+
+
+def test_translate_routine_ddl_procedure() -> None:
+    out = _translate_routine_ddl(
+        'CREATE OR REPLACE PROCEDURE p '
+        '(p_in IN NUMBER, p_out OUT NUMBER, p_io IN OUT VARCHAR2) '
+        'AS BEGIN p_out := p_in * 2; END;'
+    )
+    assert out.startswith('CREATE OR REPLACE PROCEDURE p(')
+    assert 'p_in IN numeric' in out
+    assert 'p_out OUT numeric' in out
+    assert 'p_io INOUT varchar' in out  # IN OUT -> INOUT
+    assert 'LANGUAGE plpgsql AS $$ BEGIN p_out := p_in * 2; END $$' in out
+
+
+def test_translate_routine_ddl_function() -> None:
+    out = _translate_routine_ddl(
+        'CREATE OR REPLACE FUNCTION f(p IN NUMBER) RETURN NUMBER '
+        'AS BEGIN RETURN p + 100; END;'
+    )
+    assert out.startswith('CREATE OR REPLACE FUNCTION f(p IN numeric) RETURNS numeric')
+    assert 'LANGUAGE plpgsql AS $$ BEGIN RETURN p + 100; END $$' in out
+
+
+def test_translate_routine_ddl_leaves_other_sql_unchanged() -> None:
+    for sql in ('SELECT 1', 'CREATE TABLE t (id NUMBER)', 'BEGIN p(:1); END;'):
+        assert _translate_routine_ddl(sql) == sql

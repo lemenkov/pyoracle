@@ -44,6 +44,7 @@ from seerdb.common.tns_consts import (
 )
 from seerdb.server import (
     BackendError,
+    BindVar,
     Capability,
     ColumnMeta,
     Credentials,
@@ -200,6 +201,49 @@ def _reject_unsupported_ddl_types(sql: str) -> None:
         )
 
 
+# --- PL/SQL: CREATE PROCEDURE / FUNCTION and callproc / callfunc (#503) ---------
+
+# Oracle `CREATE [OR REPLACE] PROCEDURE|FUNCTION name (params) [RETURN t] AS|IS
+# <body>`. The signature is close to PostgreSQL's; the body (BEGIN … END) is
+# valid PL/pgSQL for the simple assignment / RETURN cases the suite uses.
+_ROUTINE_DDL = re.compile(
+    r'(?is)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(PROCEDURE|FUNCTION)\s+([\w.]+)\s*'
+    r'\((.*)\)\s*(?:RETURN\s+([\w ]+?)\s+)?(?:AS|IS)\s+(.*?)\s*;?\s*$'
+)
+# Oracle parameter direction `IN OUT` → PostgreSQL `INOUT` (do this before the
+# type rewrites, which share the DDL type list).
+_PARAM_IN_OUT = re.compile(r'\bIN\s+OUT\b', re.IGNORECASE)
+
+
+def _translate_routine_types(text: str) -> str:
+    for pattern, replacement in _DDL_TYPE_REWRITES:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def _translate_routine_ddl(sql: str) -> str:
+    """Rewrite an Oracle ``CREATE PROCEDURE`` / ``CREATE FUNCTION`` to a PL/pgSQL
+    routine (#503): translate the parameter types + ``IN OUT`` → ``INOUT``, map
+    ``RETURN t`` → ``RETURNS t``, and wrap the ``BEGIN … END`` body as a
+    ``LANGUAGE plpgsql`` dollar-quoted body. Non-routine SQL is unchanged."""
+    match = _ROUTINE_DDL.match(sql)
+    if match is None:
+        return sql
+    kind, name, params, return_type, body = match.groups()
+    params = _translate_routine_types(_PARAM_IN_OUT.sub('INOUT', params))
+    header = f'CREATE OR REPLACE {kind.upper()} {name}({params})'
+    if kind.upper() == 'FUNCTION' and return_type:
+        header += f' RETURNS {_translate_routine_types(return_type.strip())}'
+    return f'{header} LANGUAGE plpgsql AS $$ {body} $$'
+
+
+# The anonymous block a thin callproc / callfunc sends: BEGIN name(:a, :b); END;
+# or BEGIN :r := name(:a, :b); END;
+_CALL_BLOCK = re.compile(r'(?is)^\s*BEGIN\s+(.*?)\s*;?\s*END\s*;?\s*$')
+_FUNC_CALL = re.compile(r'(?is)^\s*:(\d+)\s*:=\s*([\w.]+)\s*\((.*)\)\s*$')
+_PROC_CALL = re.compile(r'(?is)^\s*([\w.]+)\s*\((.*)\)\s*$')
+
+
 # PostgreSQL type OIDs (pg_type.oid) → Oracle wire type.
 _NUMBER_OIDS = frozenset(
     {
@@ -348,14 +392,20 @@ class PostgresBackend:
         return credential_lookup(self._credentials, username)
 
     def execute(self, sql: str, binds: Sequence = ()) -> Result:
+        # A PL/SQL block from callproc / callfunc arrives with BindVar binds (the
+        # Mirror's OUT-bind flow); run it via CALL / SELECT and return the OUT
+        # values (#503).
+        if any(isinstance(b, BindVar) for b in binds):
+            return self._execute_plsql(sql, binds)
         # Reject the column types that are Oracle-only for the version the Mirror
         # advertises (JSON/VECTOR/BOOLEAN), so the suite's version guards skip
         # rather than the backend mis-representing them (#504).
         _reject_unsupported_ddl_types(sql)
-        # Translate Oracle SQL to PostgreSQL's dialect (#500/#502) — DDL column
-        # types, then the function / literal idioms. This is where dialect
-        # knowledge belongs, not in the generic compat shim.
-        sql = _translate_idioms(_translate_ddl(sql))
+        # Translate Oracle SQL to PostgreSQL's dialect (#500/#502/#503) — DDL
+        # column types, CREATE PROCEDURE/FUNCTION → PL/pgSQL, then the function /
+        # literal idioms. This is where dialect knowledge belongs, not in the
+        # generic compat shim.
+        sql = _translate_idioms(_translate_routine_ddl(_translate_ddl(sql)))
         if binds:
             sql = _ORACLE_BIND.sub('%s', sql)
         cursor = self._conn.cursor()
@@ -391,6 +441,79 @@ class PostgresBackend:
             raise
         self._conn.execute('RELEASE SAVEPOINT _mirror_stmt')
         return result
+
+    def _execute_plsql(self, sql: str, binds: Sequence) -> Result:
+        # A callproc / callfunc block. `binds` is one BindVar per positional bind
+        # (:1 → index 0), value None for a pure OUT. Run the underlying routine and
+        # return every bind's value in order (input for IN, the routine's result
+        # for OUT / IN OUT / the function return) — the Mirror marks them all OUT
+        # and the client keeps only the positions it bound as a Var (#483/#503).
+        values = [b.value for b in binds]
+        inner = _CALL_BLOCK.match(sql)
+        statement = inner.group(1) if inner else ''
+        try:
+            func = _FUNC_CALL.match(statement)
+            if func is not None:
+                return self._call_function(func, values)
+            proc = _PROC_CALL.match(statement)
+            if proc is not None:
+                return self._call_procedure(proc, values)
+            # An anonymous block the translator doesn't model — run it as-is
+            # (best effort) so a side-effecting block still executes.
+            self._conn.cursor().execute(_translate_idioms(sql))
+            return Result(out_binds=values)
+        except psycopg.Error as exc:
+            self._conn.rollback()
+            raise BackendError(str(exc).strip(), ora_code=_ora_code_for(exc)) from exc
+
+    def _call_function(self, match: 're.Match', values: list) -> Result:
+        # BEGIN :r := name(:a, :b); END;  →  SELECT name(a, b); the result is the
+        # function's return value, written back into the :r bind position.
+        ret_ref, name, args = match.groups()
+        arg_refs = [int(r) for r in re.findall(r':(\d+)', args)]
+        arg_values = [values[r - 1] for r in arg_refs]
+        placeholders = ', '.join(['%s'] * len(arg_values))
+        cursor = self._conn.cursor()
+        cursor.execute(f'SELECT {name}({placeholders})', tuple(arg_values) or None)
+        row = cursor.fetchone()
+        out = list(values)
+        out[int(ret_ref) - 1] = row[0] if row else None
+        return Result(out_binds=out)
+
+    def _call_procedure(self, match: 're.Match', values: list) -> Result:
+        # BEGIN name(:a, :b); END;  →  CALL name(a, b); the OUT / IN OUT arguments
+        # come back as a result row, in parameter order, which we place onto their
+        # bind positions.
+        name, args = match.groups()
+        arg_refs = [int(r) for r in re.findall(r':(\d+)', args)]
+        arg_values = [values[r - 1] for r in arg_refs]
+        placeholders = ', '.join(['%s'] * len(arg_values))
+        cursor = self._conn.cursor()
+        cursor.execute(f'CALL {name}({placeholders})', tuple(arg_values) or None)
+        returned = list(cursor.fetchone() or ()) if cursor.description else []
+        modes = self._arg_modes(name, len(arg_refs))
+        out = list(values)
+        result_i = 0
+        for position, ref in enumerate(arg_refs):
+            is_out = modes[position] in ('o', 'b') if modes else False
+            if is_out and result_i < len(returned):
+                out[ref - 1] = returned[result_i]
+                result_i += 1
+        return Result(out_binds=out)
+
+    def _arg_modes(self, name: str, nargs: int) -> list | None:
+        # The parameter modes of a routine ('i' IN, 'o' OUT, 'b' IN OUT), so a
+        # CALL's result row (which carries only the OUT / IN OUT values) can be
+        # placed back onto the right bind positions. None means all-IN (PostgreSQL
+        # leaves proargmodes NULL then).
+        row = self._conn.execute(
+            'SELECT proargmodes FROM pg_proc WHERE proname = %s '
+            'ORDER BY oid DESC LIMIT 1',
+            (name.split('.')[-1].lower(),),
+        ).fetchone()
+        if not row or not row[0]:
+            return None
+        return list(row[0])
 
     def commit(self) -> None:
         self._conn.commit()
