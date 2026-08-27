@@ -41,7 +41,13 @@ class OraclePassthroughBackend:
         self._host = host
         self._port = port
         self._service = service
-        self._credentials = {u.upper(): p for u, p in credentials.items()}
+        # Held by reference (not copied) so a changepassword updates the same map
+        # every session's backend authenticates against — a fresh connection then
+        # sees the new password (#21/#486). Keys are upper-cased in place.
+        self._credentials = credentials
+        for name in list(self._credentials):
+            if name != name.upper():
+                self._credentials[name.upper()] = self._credentials.pop(name)
         self._conn = None
 
     def authenticate(self, username: str) -> str | None:
@@ -106,6 +112,25 @@ class OraclePassthroughBackend:
             code = getattr(exc, 'code', None) or 900
             raise BackendError(str(exc), ora_code=code) from exc
         return Result(out_binds=[_out_value(var.getvalue()) for var in variables])
+
+    def change_password(
+        self, username: str, old_password: str, new_password: str
+    ) -> None:
+        # ALTER USER ... REPLACE validates the old password and sets the new one
+        # on the real Oracle; the live upstream session stays authenticated. Then
+        # update the shared credential map so a fresh Mirror session authenticates
+        # (O5LOGON) with the new password and the old one is rejected (#21/#486).
+        cursor = self._conn.cursor()
+        quoted = new_password.replace('"', '""')
+        old_quoted = old_password.replace('"', '""')
+        try:
+            cursor.execute(
+                f'ALTER USER {username} IDENTIFIED BY "{quoted}" REPLACE "{old_quoted}"'
+            )
+        except seerdb.DatabaseError as exc:
+            code = getattr(exc, 'code', None) or 900
+            raise BackendError(str(exc), ora_code=code) from exc
+        self._credentials[username.upper()] = new_password
 
     def commit(self) -> None:
         if self._conn is not None:

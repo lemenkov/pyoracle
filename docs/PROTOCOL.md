@@ -775,6 +775,18 @@ session stays usable), `ORA-28008` for a wrong current password, or e.g.
 both 11g (128/192-bit O5LOGON) and 21c (256-bit). Reverse-engineered from an
 oracledb-thin capture through the logging proxy (`tools/capture_proxy.py`).
 
+**Server side (the Mirror, #21/#486).** A `TTI_AUTH` arriving *after* login is a
+changepassword (the only post-login auth op). The session loop reuses the login
+`conn_key` to `decrypt_password` both `AUTH_PASSWORD` (current) and
+`AUTH_NEWPASSWORD` (new) — the inverse of `encrypt_password`: AES-CBC decrypt,
+drop the leading 16-byte block, strip the PKCS7 tail — then calls the backend's
+optional `change_password(user, old, new)`, and replies with an `encode_status(0)`
+OER (or an ORA error). The backend both changes the real credential (the
+passthrough runs `ALTER USER … IDENTIFIED BY … REPLACE …`, which validates the
+old password) and updates a **shared** credential map so a fresh session's
+O5LOGON authenticates with the new password and rejects the old one. `handle_login`
+now returns the `conn_key` alongside `(user, is_sqlplus)` for exactly this reuse.
+
 ## 5. SQL Execution
 
 ### 5.1 Execute (TTI_FUN/TTI_ALL8)

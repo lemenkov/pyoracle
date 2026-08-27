@@ -22,6 +22,7 @@ from dataclasses import replace
 from secrets import token_bytes
 from typing import NoReturn
 
+from seerdb.common.crypto import decrypt_password
 from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import decode_ub4
 from seerdb.common.tns_consts import (
@@ -32,6 +33,7 @@ from seerdb.common.tns_consts import (
     TNS_TYPE_LONG,
     TNS_TYPE_LONGRAW,
     TTI_ALL8,
+    TTI_AUTH,
     TTI_COMMIT,
     TTI_FETCH,
     TTI_FUN,
@@ -53,6 +55,7 @@ from seerdb.server.auth import (
     make_challenge,
     parse_auth_response,
     parse_auth_response_oci,
+    parse_changepassword,
     parse_osesskey,
     parse_osesskey_oci,
     parse_token_auth,
@@ -241,12 +244,14 @@ def handle_login(
     *,
     encryption: str = 'accepted',
     token_public_key: bytes | None = None,
-) -> tuple[str, bool]:
+) -> tuple[str, bool, bytes | None]:
     """Run the server side of the handshake + O5LOGON.
 
-    Returns ``(username, is_sqlplus)`` — the second flag says whether the client
-    speaks the classic sqlplus / thick-OCI (deadbeef) dialect, so the query loop
-    can answer it in the right marshalling (#265).
+    Returns ``(username, is_sqlplus, conn_key)`` — the second flag says whether
+    the client speaks the classic sqlplus / thick-OCI (deadbeef) dialect, so the
+    query loop can answer it in the right marshalling (#265); ``conn_key`` is the
+    session key O5LOGON derived (``None`` for token auth), which the thin loop
+    reuses to decrypt a later changepassword (#21/#486).
 
     ``encryption`` is the Mirror's ANO stance (§33): ``'accepted'`` (default)
     stays plaintext unless the client forces it; ``'required'`` selects AES + a
@@ -298,7 +303,7 @@ def handle_login(
     # tokens, verify the OCI IAM signature (offline-checkable) and grant the
     # session — there is no O5LOGON challenge, proof, or ConnKey.
     if token_public_key is not None and is_token_auth(osesskey):
-        return _handle_token_login(stream, osesskey, token_public_key), sqlplus
+        return _handle_token_login(stream, osesskey, token_public_key), sqlplus, None
     parse_osesskey_fn = parse_osesskey_oci if sqlplus else parse_osesskey
     user = parse_osesskey_fn(osesskey).decode('utf-8')
     secret = backend.authenticate(user)
@@ -334,7 +339,7 @@ def handle_login(
         stream.write_packet(TNS_DATA, encode_result(conn_key))
 
     logger.info('login OK: %s', user)
-    return user, sqlplus
+    return user, sqlplus, conn_key
 
 
 def _deny_login(stream: PacketStream, reason: str) -> NoReturn:
@@ -369,7 +374,7 @@ def serve_session(
     the authenticated username. ``encryption`` is the Mirror's ANO stance,
     forwarded to :func:`handle_login` (§33 / #448).
     """
-    user, sqlplus = handle_login(
+    user, sqlplus, conn_key = handle_login(
         stream, backend, encryption=encryption, token_public_key=token_public_key
     )
     if sqlplus:
@@ -423,6 +428,11 @@ def serve_session(
             # just acknowledge with a success status so the client round-trip
             # completes instead of hanging.
             stream.write_packet(TNS_DATA, encode_status(0))
+        elif body[1] == TTI_AUTH:
+            # A post-login TTI_AUTH is a password change (#21/#486): it reuses the
+            # login session key, so decrypt the old / new passwords with conn_key
+            # and drive the backend's password change.
+            _answer_changepassword(stream, backend, body, conn_key, user)
         elif body[1] == TTI_LOGOFF:
             return user
 
@@ -1030,6 +1040,55 @@ def _answer_fetch(
         columns, batch, cursor_id=request.cursor, more=cursors.has(request.cursor)
     )
     stream.write_packet(TNS_DATA, response)
+
+
+_CHANGE_PASSWORD_UNSUPPORTED = 1031  # ORA-01031: insufficient privileges
+
+
+def _answer_changepassword(
+    stream: PacketStream,
+    backend: Backend,
+    body: bytes,
+    conn_key: bytes | None,
+    user: str,
+) -> None:
+    # Handle a password change on the live session (#21/#486): the client sends a
+    # TTI_AUTH reusing the login session key, with the current + new passwords
+    # AES-encrypted under it. Decrypt them, drive the backend's change, and answer
+    # with a success status (or an ORA error) — the session stays authenticated.
+    change = getattr(backend, 'change_password', None)
+    if conn_key is None or change is None:
+        stream.write_packet(
+            TNS_DATA,
+            encode_error(
+                _CHANGE_PASSWORD_UNSUPPORTED,
+                'ORA-01031: password change not supported',
+            ),
+        )
+        return
+    try:
+        _user, old_cipher, new_cipher = parse_changepassword(body)
+        old_password = decrypt_password(conn_key, old_cipher).decode('utf-8')
+        new_password = decrypt_password(conn_key, new_cipher).decode('utf-8')
+    except Exception as exc:
+        logger.info('changepassword parse failed: %s', exc)
+        stream.write_packet(
+            TNS_DATA, encode_error(1017, 'ORA-01017: invalid credential')
+        )
+        return
+    try:
+        change(user, old_password, new_password)
+    except BackendError as err:
+        stream.write_packet(TNS_DATA, encode_error(err.ora_code, err.ora_message))
+        return
+    except Exception as exc:
+        logger.warning('backend raised a non-ORA error: %s', exc)
+        stream.write_packet(
+            TNS_DATA, encode_error(_INTERNAL_ERROR, f'ORA-00600: backend error: {exc}')
+        )
+        return
+    logger.info('password changed: %s', user)
+    stream.write_packet(TNS_DATA, encode_status(0))
 
 
 def _answer_txn(stream: PacketStream, backend: Backend, *, commit: bool) -> None:
