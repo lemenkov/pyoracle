@@ -648,6 +648,18 @@ def test_translate_routine_ddl_function() -> None:
     assert 'LANGUAGE plpgsql AS $$ BEGIN RETURN p + 100; END $$' in out
 
 
+def test_translate_routine_ddl_maps_sys_refcursor_out() -> None:
+    # A REF CURSOR OUT parameter (SYS_REFCURSOR) maps to PostgreSQL's refcursor; the
+    # OPEN … FOR body is already valid PL/pgSQL (#518).
+    out = _translate_routine_ddl(
+        'CREATE OR REPLACE PROCEDURE seerdb_test_proc (p_rc OUT SYS_REFCURSOR) '
+        'AS BEGIN OPEN p_rc FOR SELECT 1 AS a FROM dual; END;'
+    )
+    assert 'p_rc OUT refcursor' in out
+    assert 'SYS_REFCURSOR' not in out
+    assert 'OPEN p_rc FOR SELECT 1 AS a FROM dual' in out
+
+
 def test_translate_routine_ddl_drops_before_create() -> None:
     # PostgreSQL cannot change an existing routine's OUT/return row type via CREATE
     # OR REPLACE; the suite reuses one name with different signatures, so a DROP …

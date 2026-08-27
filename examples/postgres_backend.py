@@ -31,6 +31,7 @@ import re
 from collections.abc import Sequence
 
 import psycopg
+from psycopg import sql
 from psycopg.types.composite import CompositeInfo, register_composite
 
 from seerdb.common.tns_consts import (
@@ -50,6 +51,7 @@ from seerdb.server import (
     Capability,
     ColumnMeta,
     Credentials,
+    CursorResult,
     Result,
     UnsupportedFeature,
     credential_lookup,
@@ -146,6 +148,8 @@ def _translate_binds(sql: str, binds: Sequence) -> tuple[str, dict]:
 # other tokens untouched; only CREATE TABLE is rewritten, so a type keyword used
 # as an identifier elsewhere is left alone.
 _DDL_TYPE_REWRITES = [
+    # SYS_REFCURSOR (a REF CURSOR OUT param) → PostgreSQL's refcursor (#518).
+    (re.compile(r'\bSYS_REFCURSOR\b', re.IGNORECASE), 'refcursor'),
     (re.compile(r'\bLONG\s+RAW\b', re.IGNORECASE), 'bytea'),
     (re.compile(r'\bRAW\s*\(\s*\d+\s*\)', re.IGNORECASE), 'bytea'),
     (re.compile(r'\bRAW\b', re.IGNORECASE), 'bytea'),
@@ -469,6 +473,12 @@ def _ora_code_for(exc) -> int:
     return _SQLSTATE_TO_ORA.get(getattr(exc, 'sqlstate', None), _ORA_INVALID_SQL)
 
 
+# PostgreSQL's built-in `refcursor` type OID (stable across versions) — a CALL's
+# OUT refcursor comes back as the portal name at this OID, which the backend then
+# drains into a CursorResult for the REF CURSOR OUT bind (#518).
+_REFCURSOR_OID = 1790
+
+
 def _reconstruct_tstz(value):
     # A psycopg `ora_tstz(utc, off)` composite → an aware datetime re-tagged with
     # the entered offset, so TIMESTAMP WITH TIME ZONE round-trips its offset the way
@@ -710,16 +720,19 @@ class PostgresBackend:
         # bind positions.
         name, args = match.groups()
         arg_refs = [int(r) for r in re.findall(r':(\d+)', args)]
-        arg_values = [values[r - 1] for r in arg_refs]
+        modes = self._arg_modes(name, len(arg_refs))
+        # A pure-OUT argument carries no input — pass an untyped NULL, not the
+        # client's placeholder Var value: a REF CURSOR Var marshals to bytea, which
+        # makes CALL's overload resolution miss the refcursor parameter (#518). IN
+        # and IN OUT arguments pass their value.
+        arg_values = [
+            None if modes and modes[position] == 'o' else values[ref - 1]
+            for position, ref in enumerate(arg_refs)
+        ]
         placeholders = ', '.join(['%s'] * len(arg_values))
         cursor = self._conn.cursor()
         cursor.execute(f'CALL {name}({placeholders})', tuple(arg_values) or None)
-        returned = (
-            _decode_row(cursor, cursor.fetchone(), self._tstz_oid) or []
-            if cursor.description
-            else []
-        )
-        modes = self._arg_modes(name, len(arg_refs))
+        returned = self._decode_out_row(cursor, cursor.fetchone())
         out = list(values)
         result_i = 0
         for position, ref in enumerate(arg_refs):
@@ -728,6 +741,42 @@ class PostgresBackend:
                 out[ref - 1] = returned[result_i]
                 result_i += 1
         return Result(out_binds=out)
+
+    def _decode_out_row(self, cursor, row) -> list:
+        # Decode a routine's OUT-value row: an ora_tstz composite → an aware
+        # datetime at its offset (#519); a refcursor portal → its rows drained into
+        # a CursorResult for the REF CURSOR OUT bind (#518); anything else verbatim.
+        if row is None:
+            return []
+        decoded: list = []
+        for value, desc in zip(row, cursor.description or ()):
+            if value is None:
+                decoded.append(None)
+            elif desc.type_code == _REFCURSOR_OID:
+                decoded.append(self._drain_refcursor(value))
+            elif self._tstz_oid is not None and desc.type_code == self._tstz_oid:
+                decoded.append(_reconstruct_tstz(value))
+            else:
+                decoded.append(value)
+        return decoded
+
+    def _drain_refcursor(self, portal: str) -> CursorResult:
+        # A REF CURSOR OUT bind: the routine OPENed a portal, whose name the CALL
+        # returned. Fetch all its rows (still inside this transaction) and hand them
+        # back as a CursorResult the Mirror parks and serves as a nested cursor —
+        # re-tagging any ora_tstz cells the same way the top-level read path does.
+        fetch = self._conn.cursor()
+        fetch.execute(sql.SQL('FETCH ALL FROM {}').format(sql.Identifier(portal)))
+        rows = [list(r) for r in fetch.fetchall()]
+        for i, desc in enumerate(fetch.description or ()):
+            if self._tstz_oid is not None and desc.type_code == self._tstz_oid:
+                for row in rows:
+                    row[i] = _reconstruct_tstz(row[i])
+        columns = [
+            _column_meta(desc, [r[i] for r in rows], self._tstz_oid)
+            for i, desc in enumerate(fetch.description or ())
+        ]
+        return CursorResult(columns=columns, rows=[tuple(r) for r in rows])
 
     def _eval_out_assignments(
         self, body: str, assignments: list, binds: Sequence, values: list
