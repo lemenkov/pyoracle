@@ -113,6 +113,7 @@ from seerdb.common.tns_consts import (
     TNS_FUNC_AQ_DEQ,
     TNS_FUNC_AQ_ENQ,
     TNS_FUNC_ARRAY_AQ,
+    TNS_FUNC_END_USER_SECURITY_CTX,
     TNS_FUNC_PIPELINE_BEGIN,
     TNS_FUNC_PIPELINE_END,
     TNS_FUNC_SET_END_TO_END_ATTR,
@@ -126,6 +127,7 @@ from seerdb.common.tns_consts import (
     TNS_LOB_OP_WRITE,
     TNS_MSG_TYPE_FAST_AUTH,
     TNS_REDIRECT,
+    TNS_SECURITY_CONTEXT_ATTACH_FLAG,
     TNS_SERVER_CONVERTS_CHARS,
     TNS_SERVER_PIGGYBACK_LTXID,
     TNS_SERVER_PIGGYBACK_OS_PID_MTS,
@@ -1999,6 +2001,39 @@ def encode_end_to_end_piggyback(Seq: int, FieldVersion: int, Attrs: dict) -> byt
     return Out
 
 
+# The single keyword under which the end-user security context OSON image is
+# carried in the func-205 piggyback (oracledb "ORCL_XS_AUTHZ_CONTEXT").
+END_USER_SEC_CTX_KEYWORD = b'ORCL_XS_AUTHZ_CONTEXT'
+
+
+def encode_end_user_sec_piggyback(
+    Seq: int, FieldVersion: int, OsonBytes: bytes
+) -> bytes:
+    """Build the end-user security context piggyback (func 205, #460) that
+    attaches an end-user identity / authorization context to the session for
+    Deep Data Security. `OsonBytes` is the OSON image of the context dict (see
+    ``seerdb.common.end_user_sec.create_end_user_security_context``). The
+    piggyback carries a single keyword-value pair — keyword
+    ``ORCL_XS_AUTHZ_CONTEXT``, value = the OSON image. It rides in front of the
+    next call's message and re-rides every call while a context is set (mirrors
+    oracledb's _write_end_user_sec_piggyback / _write_piggybacks). Byte layout
+    reconstructed from the reference thin client (docs/PROTOCOL.md §34); the
+    feature is tcps-only so it cannot be captured on a cleartext transport."""
+    Out = bytes([TTI_MSG_TYPE_PIGGYBACK, TNS_FUNC_END_USER_SECURITY_CTX, Seq])
+    if FieldVersion > FIELD_VERSION_23_1:
+        Out += encode_sb4(0)  # ub8 token (0)
+    Out += encode_sb4(TNS_SECURITY_CONTEXT_ATTACH_FLAG)  # ub4 attach flag = 1
+    Out += bytes([1])  # pointer(kpdkve) non-null
+    Out += encode_sb4(1)  # number of key-value pairs = 1
+    # One str-keyword-value-pair (flags=0, text=NULL), each field written as
+    # write_bytes_with_two_lengths (ub4 count + length-prefixed bytes).
+    Out += encode_sb4(0)  # kv flags
+    Out += _obj_two_lengths(END_USER_SEC_CTX_KEYWORD)  # keyword
+    Out += _obj_two_lengths(b'')  # text (NULL)
+    Out += _obj_two_lengths(OsonBytes)  # value = OSON image
+    return Out
+
+
 def encode_dictionary_close(Dictionary: dict) -> bytes:
     Tseq = Dictionary['seq']
     FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
@@ -2225,6 +2260,10 @@ CCAP_LOB2 = 42
 CCAP_TTC5 = 44
 CCAP_FEATURE_BACKPORT2 = 45
 CCAP_VECTOR_FEATURES = 52
+
+# Bit within compile_caps[CCAP_FEATURE_BACKPORT2] that advertises the end-user
+# security context piggyback (#460). 26ai advertises caps[45] = 0x03.
+CCAP_FEATURE_BACKPORT2_END_USER_SEC = 0x02
 
 # TNS_CCAP_FIELD_VERSION_* values (the byte written at CCAP_FIELD_VERSION) now
 # live in seerdb.common.tns_consts and are imported at the top of this module — kept

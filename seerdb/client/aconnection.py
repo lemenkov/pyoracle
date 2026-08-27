@@ -49,13 +49,18 @@ from seerdb.client.dialect import (
     O8iDialect,
 )
 from seerdb.common.crypto import validate
+from seerdb.common.end_user_sec import EndUserSecurityContext
 from seerdb.common.exceptions import (
     DatabaseError,
     InterfaceError,
+    NotSupportedError,
     OperationalError,
+    ProgrammingError,
 )
 from seerdb.common.tns import (
     _DTY_8I,
+    CCAP_FEATURE_BACKPORT2,
+    CCAP_FEATURE_BACKPORT2_END_USER_SEC,
     CCAP_FIELD_VERSION,
     FIELD_VERSION_10_2,
     FIELD_VERSION_12_1,
@@ -68,6 +73,7 @@ from seerdb.common.tns import (
     encode_dictionary,
     encode_dictionary_auth,
     encode_end_to_end_piggyback,
+    encode_end_user_sec_piggyback,
     encode_fast_auth,
     encode_packet,
     encode_pipeline_begin,
@@ -221,6 +227,10 @@ class AsyncOracleConnect:
         self._dialect: Dialect | None = None
         self._e2e_values: dict = {}  # end-to-end tracing (#183)
         self._e2e_pending: dict = {}
+        # End-user security context (#460): OSON image once set, re-sent as a
+        # func-205 piggyback on every call; server caps kept to gate the feature.
+        self._end_user_sec_context: bytes | None = None
+        self._server_compile_caps: bytes = b''
         self._transaction_context: bytes | None = None  # two-phase commit (#131)
         self._sessionless_txn_active = False  # sessionless txns (#133)
         # Native network encryption / data integrity (#437). Set by the ANO
@@ -878,6 +888,7 @@ class AsyncOracleConnect:
         try:
             Pro = decode_token_pro(Packet)
             Caps = Pro['compile_caps']
+            self._server_compile_caps = Caps
             if len(Caps) > CCAP_FIELD_VERSION:
                 self.field_version = min(self.field_version, Caps[CCAP_FIELD_VERSION])
             # Oracle 8i carries no caps in its PRO: pin the field version to 2 and
@@ -1091,8 +1102,9 @@ class AsyncOracleConnect:
         }
         Pre = (
             self._flush_cursor_closes_bytes()  # close drained cursors (#191)
-            + self._flush_end_to_end_bytes()
-        )  # tracing piggyback (#183)
+            + self._flush_end_to_end_bytes()  # tracing piggyback (#183)
+            + self._flush_end_user_sec_bytes()  # end-user security ctx (#460)
+        )
         Data = encode_dictionary(self._make_dict(DictionaryType.exec, query=QueryDict))
         await self.send(TNS_DATA, Pre + Data)
         # Arm row-count extraction for this response only (#18).
@@ -1323,7 +1335,11 @@ class AsyncOracleConnect:
             'scrollable': True,
             'scroll': (Orientation, Position),
         }
-        Pre = self._flush_cursor_closes_bytes() + self._flush_end_to_end_bytes()
+        Pre = (
+            self._flush_cursor_closes_bytes()
+            + self._flush_end_to_end_bytes()
+            + self._flush_end_user_sec_bytes()
+        )
         Data = encode_dictionary(self._make_dict(DictionaryType.exec, query=QueryDict))
         await self.send(TNS_DATA, Pre + Data)
         set_decode_prev_row(PrevRow)  # reused-column fallback for row 1 (#181)
@@ -2360,6 +2376,23 @@ class AsyncOracleConnect:
         self._cursors_to_close = []
         return Data
 
+    def _supports_end_user_sec(self) -> bool:
+        # See OracleConnect._supports_end_user_sec (#460).
+        Caps = self._server_compile_caps
+        return len(Caps) > CCAP_FEATURE_BACKPORT2 and bool(
+            Caps[CCAP_FEATURE_BACKPORT2] & CCAP_FEATURE_BACKPORT2_END_USER_SEC
+        )
+
+    def _flush_end_user_sec_bytes(self) -> bytes:
+        # func-205 piggyback re-sent every call while a context is set (#460);
+        # see OracleConnect._flush_end_user_sec_bytes.
+        if self._end_user_sec_context is None:
+            return b''
+        Seq = self._next_seq()
+        return encode_end_user_sec_piggyback(
+            Seq, self.field_version, self._end_user_sec_context
+        )
+
     def _flush_end_to_end_bytes(self) -> bytes:
         if not self._e2e_pending:
             return b''
@@ -2418,6 +2451,32 @@ class AsyncOracleConnect:
     @dbop.setter
     def dbop(self, value) -> None:
         self._set_e2e('dbop', value)
+
+    def set_end_user_security_context(self, context: EndUserSecurityContext) -> None:
+        """Attach an end-user security context to the connection (#460).
+
+        Once set, the context rides (as a func-205 piggyback) in front of every
+        subsequent database operation until
+        :meth:`clear_end_user_security_context` is called. Build ``context`` with
+        :func:`seerdb.create_end_user_security_context`. tcps-only, and only on
+        servers that advertise it (Oracle 26ai+), mirroring the reference client.
+        """
+        if not isinstance(context, EndUserSecurityContext):
+            raise TypeError('expecting an EndUserSecurityContext instance')
+        if not self.ssl:
+            raise ProgrammingError(
+                'end_user_security_context requires use of the tcps protocol'
+            )
+        if not self._supports_end_user_sec():
+            raise NotSupportedError(
+                'the database does not support end-user security context '
+                '(requires Oracle 26ai or later)'
+            )
+        self._end_user_sec_context = context.oson_bytes
+
+    def clear_end_user_security_context(self) -> None:
+        """Clear any end-user security context set on the connection (#460)."""
+        self._end_user_sec_context = None
 
     # ----- async context manager -----
 
