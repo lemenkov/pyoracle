@@ -130,6 +130,26 @@ def test_describe_carries_number_precision_and_scale() -> None:
     assert col['data_scale'] == 2
 
 
+def test_describe_carries_negative_scale() -> None:
+    # A plain NUMBER (no declared scale) reports scale -127 on 11g, encoded as a
+    # signed variable-length int (0x81 0x7f). The describe must survive it — a
+    # real Oracle backend hits this on every unscaled NUMBER column.
+    payload = encode_describe(
+        [
+            ColumnMeta(
+                name=b'N',
+                data_type=TNS_TYPE_NUMBER,
+                data_length=22,
+                max_size=22,
+                precision=0,
+                scale=-127,
+            )
+        ]
+    )
+    col = _decode_describe(payload)[0]
+    assert col['data_scale'] == -127
+
+
 def test_encode_rows_dual() -> None:
     col = ColumnMeta(
         name=b'DUMMY', data_type=TNS_TYPE_VARCHAR, data_length=1, max_size=1
