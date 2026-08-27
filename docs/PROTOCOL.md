@@ -1678,14 +1678,18 @@ original offset.
 respectively. Both fields share the interval's sign. Maps to
 `seerdb.IntervalYM(years, months)`.
 Example: `3-7` → `80 00 00 03 43` (years `0x80000003 − 2**31 = 3`, months
-`0x43 − 60 = 7`); `-1-2` → `7f ff ff ff 3a`.
+`0x43 − 60 = 7`); `-1-2` → `7f ff ff ff 3a`. The Mirror emits the same 5 bytes
+from an `IntervalYM` column value (`encode_interval_ym`, #484).
 
 ### 11.6 INTERVAL DAY TO SECOND
 
 11 bytes: `Day(4) | Hour(1) | Minute(1) | Second(1) | FracSec(4, BE
 nanoseconds)`. Day biased by `2**31`; H/M/S biased by `60`; FracSec biased by
 `2**31`. All fields share the interval's sign. Maps to `datetime.timedelta`.
-Example: `5 04:03:02.123456` → `80 00 00 05 40 3f 3e 87 5b ca 00`.
+Example: `5 04:03:02.123456` → `80 00 00 05 40 3f 3e 87 5b ca 00`. The Mirror
+emits the same 11 bytes from a `timedelta` column value (`encode_interval_ds`,
+#484); a negative interval's sub-day fields are reconstructed from the
+sign-normalised total, not the floor-divided `timedelta.days` / `.seconds`.
 
 `timedelta` sub-microsecond precision is lost (Oracle stores nanoseconds; Python
 has microseconds), and its range is slightly narrower than Oracle's on the
