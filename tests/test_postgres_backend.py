@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'examples'))
 from postgres_backend import (  # noqa: E402
     PostgresBackend,
     _reject_unsupported_ddl_types,
+    _translate_binds,
     _translate_ddl,
     _translate_idioms,
     _translate_routine_ddl,
@@ -619,3 +620,39 @@ def test_change_password_rejects_a_wrong_old_password() -> None:
     with pytest.raises(BackendError) as exc:
         backend.change_password('PYO', 'not-the-old-one', 'whatever')
     assert exc.value.ora_code == 1017
+
+
+# --- Bind translation (#516) — a pure function, no live PG needed --------------
+
+
+def test_translate_binds_repeated_named_bind_is_one_value() -> None:
+    # `:x` twice is one Oracle value → one psycopg parameter reused, not two.
+    sql, params = _translate_binds('SELECT id FROM t WHERE id = :x OR :x IS NULL', [1])
+    assert sql == 'SELECT id FROM t WHERE id = %(x)s OR %(x)s IS NULL'
+    assert params == {'x': 1}
+
+
+def test_translate_binds_skips_colon_inside_string_literal() -> None:
+    sql, params = _translate_binds(
+        "INSERT INTO t VALUES ('hello :not_a_bind ' || :v)", ['world']
+    )
+    assert sql == "INSERT INTO t VALUES ('hello :not_a_bind ' || %(v)s)"
+    assert params == {'v': 'world'}
+
+
+def test_translate_binds_positional_and_casts() -> None:
+    # Positional :1/:2 map by order; a :: cast is left alone.
+    sql, params = _translate_binds('INSERT INTO t VALUES (:1, :2)', [7, 'a'])
+    assert sql == 'INSERT INTO t VALUES (%(b1)s, %(b2)s)'
+    assert params == {'b1': 7, 'b2': 'a'}
+    sql, params = _translate_binds('SELECT :a::text FROM t', ['x'])
+    assert sql == 'SELECT %(a)s::text FROM t'
+    assert params == {'a': 'x'}
+
+
+def test_translate_binds_mixed_named_first_appearance_order() -> None:
+    sql, params = _translate_binds(
+        'SELECT * FROM t WHERE a = :x AND b = :y AND c = :x', [1, 2]
+    )
+    assert sql == 'SELECT * FROM t WHERE a = %(x)s AND b = %(y)s AND c = %(x)s'
+    assert params == {'x': 1, 'y': 2}
