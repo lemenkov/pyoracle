@@ -12,6 +12,16 @@ supported types.
 
 Requires the ``psycopg`` package. This is a demo/adapter outside ``seerdb``
 core; the driver dependency lives here, not in the library.
+
+**Requires the** `orafce <https://github.com/orafce/orafce>`_ **PostgreSQL
+extension** for Oracle-compatible SQL functions (``nvl``, ``decode``,
+``to_char`` / ``to_date``, ``add_months``, ``instr``, …). The backend puts its
+``oracle`` schema on the search_path and creates the extension if it can, so
+those idioms need no hand-rolled translation — only the ones orafce does not
+cover are rewritten (``hextoraw``, ``empty_clob`` / ``empty_blob``, ``from_tz``,
+the ``BINARY_DOUBLE`` special values / literal suffix). Install it on the server
+(e.g. Alpine ``apk add postgresql-orafce`` for a matching PG major, or build from
+source with PGXS) — see ``examples/mirror-pg.Dockerfile``.
 """
 
 from __future__ import annotations
@@ -136,8 +146,8 @@ _IDIOM_REWRITES = [
         ),
         r'(\1 AT TIME ZONE \2)',
     ),
-    # NVL(a, b) → COALESCE(a, b).
-    (re.compile(r'\bnvl\s*\(', re.IGNORECASE), 'coalesce('),
+    # (NVL, DECODE, TO_CHAR, TO_DATE, ADD_MONTHS, INSTR, … come from the orafce
+    # extension — see __init__ — so they need no rewrite here.)
     # BINARY_DOUBLE/FLOAT special values → IEEE-754 float literals.
     (
         re.compile(r'\bbinary_(?:double|float)_infinity\b', re.IGNORECASE),
@@ -316,6 +326,20 @@ class PostgresBackend:
     ) -> None:
         self._conn = psycopg.connect(conninfo)
         self._credentials = credentials or {}
+        # Lean on the `orafce` extension for Oracle-compatible SQL functions —
+        # nvl, decode, to_char / to_date, add_months, instr, and much more —
+        # rather than hand-rolling each rewrite. It installs those into the
+        # `oracle` schema, so put it on the search_path; then only the idioms
+        # orafce does NOT cover are translated in _translate_idioms. orafce is a
+        # requirement of this backend (see the module docstring). Best-effort so a
+        # PostgreSQL without it still starts — the uncovered idioms just fail as
+        # before.
+        try:
+            self._conn.execute('CREATE EXTENSION IF NOT EXISTS orafce')
+        except psycopg.Error:
+            self._conn.rollback()
+        self._conn.execute('SET search_path TO public, oracle')
+        self._conn.commit()
 
     def authenticate(self, username: str) -> str | None:
         # The login store the Mirror authenticates clients against — separate
