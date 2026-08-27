@@ -58,6 +58,7 @@ from seerdb.common.tns_consts import (
     TNS_TYPE_LONGRAW,
     TNS_TYPE_NUMBER,
     TNS_TYPE_RAW,
+    TNS_TYPE_REF,
     TNS_TYPE_RID,
     TNS_TYPE_TIMESTAMP,
     TNS_TYPE_TIMESTAMPTZ,
@@ -486,6 +487,12 @@ class ColumnMeta:
     precision: int = 0
     scale: int = 0
     null_ok: int = 1
+    # Object-type identity for an ADT / REF column (#119/#494): the referenced
+    # type's 16-byte OID, owner schema, and name — carried in the describe so the
+    # client can label a REF (``ref.type_name``) and lay out an object.
+    type_oid: bytes = b''
+    type_schema: bytes = b''
+    type_name: bytes = b''
 
 
 def _str_with_length(data: bytes) -> bytes:
@@ -517,15 +524,16 @@ def _encode_dcb_column(col: ColumnMeta, position: int) -> bytes:
         + encode_sb4(col.data_length)  # buffer size
         + encode_sb4(0)  # max array elements
         + encode_sb4(0)  # cont flags
-        + encode_sb4(0)  # type OID length (no ADT)
+        # For an ADT / REF column the referenced type's OID (else absent) (#494).
+        + _str_with_length(col.type_oid)
         + encode_sb4(0)  # version
         + encode_sb4(col.charset)
         + bytes([col.csfrm])
         + encode_sb4(col.max_size)
         + bytes([col.null_ok, 0])  # null_ok + (skipped) v7 name length
         + _str_with_length(col.name)
-        + _str_with_length(b'')  # type schema (ADT owner)
-        + _str_with_length(b'')  # type name
+        + _str_with_length(col.type_schema)  # type schema (ADT owner)
+        + _str_with_length(col.type_name)  # type name
         + encode_sb4(position)  # column position
         + encode_sb4(0)  # uds flags (11g addition)
     )
@@ -1333,6 +1341,10 @@ def _encode_value(value: object, data_type: int) -> bytes:
         return encode_long_value_thin(value)
     if value is None:
         return bytes([0])
+    if data_type == TNS_TYPE_REF:
+        # An object REF (#119/#494) rides as a plain DALC of its opaque locator
+        # bytes; the type identity travels in the describe, not the value.
+        return _bytes_with_length(getattr(value, 'bytes', b''))
     if data_type == TNS_TYPE_INTERVALDS and isinstance(value, datetime.timedelta):
         return _bytes_with_length(encode_interval_ds(value))
     if data_type == TNS_TYPE_INTERVALYM and isinstance(value, IntervalYM):

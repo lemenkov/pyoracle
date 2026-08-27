@@ -17,10 +17,11 @@ client, and the same credentials open the upstream connection.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 
 import seerdb
 from seerdb.common.datatypes import dbtype_for_oracle_type
-from seerdb.common.tns_consts import TNS_TYPE_REFCURSOR
+from seerdb.common.tns_consts import TNS_TYPE_REF, TNS_TYPE_REFCURSOR
 from seerdb.server.backend import BackendError, BindVar, CursorResult, Result
 from seerdb.server.query import ColumnMeta
 
@@ -87,6 +88,7 @@ class OraclePassthroughBackend:
         if cursor.description:
             columns = [_to_column_meta(desc) for desc in cursor.description]
             rows = cursor.fetchall()
+            columns = _enrich_ref_columns(columns, rows)
             return Result(columns=columns, rows=rows)
         return Result(rowcount=cursor.rowcount or 0)
 
@@ -146,6 +148,27 @@ class OraclePassthroughBackend:
                 self._conn.close()
             finally:
                 self._conn = None
+
+
+def _enrich_ref_columns(columns: list, rows: list) -> list:
+    # A REF column's type identity (type_name / schema / OID) is not in the
+    # PEP-249 description — only in the DbRef values — so copy it from the first
+    # non-null value into the ColumnMeta the describe carries (#494).
+    out = list(columns)
+    for idx, col in enumerate(out):
+        if col.data_type != TNS_TYPE_REF:
+            continue
+        for row in rows:
+            ref = row[idx]
+            if ref is not None and hasattr(ref, 'type_name'):
+                out[idx] = replace(
+                    col,
+                    type_name=(ref.type_name or '').encode('ascii'),
+                    type_schema=(ref.type_schema or '').encode('ascii'),
+                    type_oid=getattr(ref, 'type_oid', b'') or b'',
+                )
+                break
+    return out
 
 
 def _out_value(value: object) -> object:
