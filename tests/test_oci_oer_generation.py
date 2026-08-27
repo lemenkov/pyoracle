@@ -14,10 +14,14 @@ a time (rowcount, error, command type) to locate each field.
 import unittest
 
 from seerdb.server.query import (
+    _OCI_CMD_TYPE_OFF,
+    _OCI_DML_ROWCOUNT_OFF,
     _OCI_OER_ROW_KIND_LOB,
     _OCI_OER_ROW_KIND_LONG,
     _OCI_OER_STATUS_ERROR,
     _OCI_OER_STATUS_SUCCESS,
+    encode_ddl_status_oci,
+    encode_dml_status_oci,
     encode_error_oci,
     encode_oci_oer,
 )
@@ -87,6 +91,52 @@ class TestOciOerGeneration(unittest.TestCase):
         oer = encode_oci_oer(_OCI_OER_STATUS_SUCCESS, sequence=0x20)
         self.assertEqual(oer[5], 0x20)
         self.assertEqual(oer[49], 0x22)
+
+
+class TestExecuteStatusGeneration(unittest.TestCase):
+    """The DML/DDL execute-status replies are generated from one frame each,
+    varying only the V$SQL command type (offset 57) and — for DML — the rowcount
+    (offset 43). Validated live against sqlplus (see PROTOCOL.md §36)."""
+
+    def test_dml_verbs_share_frame_and_carry_command_type(self):
+        codes = {'INSERT': 2, 'UPDATE': 6, 'DELETE': 7}
+        bodies = {kw: encode_dml_status_oci(kw, 5) for kw in codes}
+        for kw, code in codes.items():
+            self.assertEqual(bodies[kw][_OCI_CMD_TYPE_OFF], code)
+            self.assertEqual(
+                int.from_bytes(
+                    bodies[kw][_OCI_DML_ROWCOUNT_OFF : _OCI_DML_ROWCOUNT_OFF + 4],
+                    'little',
+                ),
+                5,
+            )
+        # all three differ only at the command-type and rowcount offsets
+        ins = bodies['INSERT']
+        for kw in ('UPDATE', 'DELETE'):
+            diffs = [i for i in range(len(ins)) if ins[i] != bodies[kw][i]]
+            self.assertEqual(diffs, [_OCI_CMD_TYPE_OFF])
+
+    def test_dml_rowcount(self):
+        body = encode_dml_status_oci('UPDATE', 42)
+        self.assertEqual(
+            int.from_bytes(
+                body[_OCI_DML_ROWCOUNT_OFF : _OCI_DML_ROWCOUNT_OFF + 4], 'little'
+            ),
+            42,
+        )
+
+    def test_dml_unknown_verb_falls_back_to_insert(self):
+        self.assertEqual(
+            encode_dml_status_oci('MERGE', 3), encode_dml_status_oci('INSERT', 3)
+        )
+
+    def test_ddl_verbs_share_frame_and_carry_command_type(self):
+        create = encode_ddl_status_oci('CREATE')
+        drop = encode_ddl_status_oci('DROP')
+        self.assertEqual(create[_OCI_CMD_TYPE_OFF], 1)  # CREATE TABLE
+        self.assertEqual(drop[_OCI_CMD_TYPE_OFF], 12)  # DROP TABLE
+        diffs = [i for i in range(len(create)) if create[i] != drop[i]]
+        self.assertEqual(diffs, [_OCI_CMD_TYPE_OFF])
 
 
 if __name__ == '__main__':
