@@ -651,17 +651,47 @@ def encode_reexec_row_oci(
     return bytes(out)
 
 
-# The OER status that trails a *fetch*-delivered LONG row (as opposed to the
-# execute row-status of the re-execute reply): a 136-byte OER with no error and a
-# "more rows" call status, captured from a live 11g LONG fetch. It carries no
-# message (unlike the 1403 terminator) — the final empty fetch draws the
-# terminator instead (#407).
-_OCI_LONG_FETCH_STATUS = bytes.fromhex(
-    '04010000001100010200000000000000000002000000030000000000000000000000'
-    '00000000000000000000000000000013000001000000360100000000000000000000'
+# The 136-byte OCI OER return-status token, reverse-engineered against live 11g
+# (docs/PROTOCOL.md §36). All three of the Mirror's OER status trailers — the
+# error OER, the LONG-row fetch status, and the LOB-row fetch status — are this
+# one envelope differing only in a handful of named fields, so build them rather
+# than storing three near-identical blobs. The bulk (SCN/rowid/instance region,
+# the fixed 0x20f6310a marker) is the same fixed frame; the fields below vary.
+_OCI_OER_ENVELOPE = bytes.fromhex(
+    '04000000000000010000000000000000000002000000030000000000000000000000'
+    '00000000000000000000000000000000000001000000360100000000000000000000'
     '0000000020f6310a0000000000000000000000000000000000000000000000000000'
     '00000000000000000000000000000000000000000000000000000000000000000000'
 )
+_OCI_OER_STATUS_SUCCESS = 0x01
+_OCI_OER_STATUS_ERROR = 0x05
+_OCI_OER_ROW_KIND_NONE = 0x00
+_OCI_OER_ROW_KIND_LOB = 0x01
+_OCI_OER_ROW_KIND_LONG = 0x02
+
+
+def encode_oci_oer(
+    status: int,
+    *,
+    sequence: int,
+    row_kind: int = _OCI_OER_ROW_KIND_NONE,
+    error_pos: int = 0,
+    error_code: int = 0,
+) -> bytes:
+    """Build a 136-byte OCI OER return-status token (§36). ``status`` is
+    SUCCESS (0x01) or ERROR (0x05); ``row_kind`` marks a LOB/LONG-row status;
+    ``error_pos`` and ``error_code`` (ub4 LE at offset 12) carry an ORA error.
+    ``sequence`` is the OER's per-context internal field (carried from the live
+    capture; its echo at offset 49 is ``sequence + 2``). The caller appends the
+    ``ORA-…`` message DALC for the error case."""
+    oer = bytearray(_OCI_OER_ENVELOPE)
+    oer[1] = status
+    oer[5] = sequence
+    oer[8] = row_kind
+    oer[20] = error_pos
+    oer[49] = sequence + 2
+    struct.pack_into('<I', oer, 12, error_code)
+    return bytes(oer)
 
 
 def encode_long_fetch_row_oci(columns: list[ColumnMeta], row: tuple) -> bytes:
@@ -674,7 +704,10 @@ def encode_long_fetch_row_oci(columns: list[ColumnMeta], row: tuple) -> bytes:
     out += bytes([TTI_RXD]) + b''.join(
         _encode_oci_value(v, col) for v, col in zip(row, columns)
     )
-    return bytes(out) + _OCI_LONG_FETCH_STATUS
+    status = encode_oci_oer(
+        _OCI_OER_STATUS_SUCCESS, sequence=0x11, row_kind=_OCI_OER_ROW_KIND_LONG
+    )
+    return bytes(out) + status
 
 
 # The OCI end-of-fetch terminator sqlplus reads after the execute's rows: an OER
@@ -701,32 +734,19 @@ def encode_fetch_terminator_oci() -> bytes:
     return bytes(oer) + bytes([len(_OCI_END_OF_FETCH_MSG)]) + _OCI_END_OF_FETCH_MSG
 
 
-# A real 11g OCI error OER (captured for ORA-00942), the structure before the
-# message. Its call status (0x05) and frame differ from the end-of-fetch OER — a
-# real error, not "cursor drained" — so reusing the terminator here crashes
-# sqlplus. The ORA code goes at offset 12 (ub4 LE); the rest is the error frame +
-# the 0x20f6310a instance constant, mostly zero (#265, #350).
-_OCI_ERROR_OER = bytes.fromhex(
-    '04050000001300010000000000000000000002000e0003000000000000000000000000'
-    '0000000000000000000000000000150000010000003601000000000000000000000000'
-    '000020f6310a0000000000000000000000000000000000000000000000000000000000'
-    '00000000000000000000000000000000000000000000000000000000000000'
-)
-_OCI_ERROR_CODE_OFF = 12
-
-
 def encode_error_oci(ora_code: int, message: str) -> bytes:
     """OCI error reply — an OER carrying ORA-<code>: <message>, connection intact.
 
     The deadbeef-dialect counterpart of :func:`encode_error`: a failing statement
-    surfaces in sqlplus as the ORA error and the session stays usable.
+    surfaces in sqlplus as the ORA error and the session stays usable. The error
+    status (0x05) and frame differ from the end-of-fetch OER — a real error, not
+    "cursor drained" — so the two must not be conflated (#265, #350).
     """
-    oer = bytearray(_OCI_ERROR_OER)
-    oer[_OCI_ERROR_CODE_OFF : _OCI_ERROR_CODE_OFF + 4] = int(ora_code).to_bytes(
-        4, 'little'
+    oer = encode_oci_oer(
+        _OCI_OER_STATUS_ERROR, sequence=0x13, error_pos=0x0E, error_code=ora_code
     )
     text = f'ORA-{ora_code:05d}: {message}\n'.encode('utf-8')
-    return bytes(oer) + bytes([len(text)]) + text
+    return oer + bytes([len(text)]) + text
 
 
 def encode_query_response_oci(
@@ -1487,13 +1507,10 @@ def _encode_oci_value(value: object, col: ColumnMeta) -> bytes:
 
 # The OER status that trails a LOB locator row on the fetch — NOT the 1403
 # terminator: the LOB content still has to come over TTI_LOBOPS, so the cursor is
-# not drained. Captured from a live 11g out-of-line CLOB fetch; a following fetch
-# (after the LOBOPS reads) draws the 1403 terminator (#405).
-_OCI_LOB_FETCH_STATUS = bytes.fromhex(
-    '04010000001000010100000000000000000002000000030000000000000000000000'
-    '00000000000000000000000000000012000001000000360100000000000000000000'
-    '0000000020f6310a0000000000000000000000000000000000000000000000000000'
-    '00000000000000000000000000000000000000000000000000000000000000000000'
+# not drained (a following fetch after the LOBOPS reads draws the terminator,
+# #405). The same OER envelope as the LONG-row status, marked LOB (§36).
+_OCI_LOB_FETCH_STATUS = encode_oci_oer(
+    _OCI_OER_STATUS_SUCCESS, sequence=0x10, row_kind=_OCI_OER_ROW_KIND_LOB
 )
 
 
