@@ -116,6 +116,7 @@ from seerdb.common.tns_consts import (
     TNS_FUNC_END_USER_SECURITY_CTX,
     TNS_FUNC_PIPELINE_BEGIN,
     TNS_FUNC_PIPELINE_END,
+    TNS_FUNC_SESSION_STATE,
     TNS_FUNC_SET_END_TO_END_ATTR,
     TNS_FUNC_TPC_TXN_CHANGE_STATE,
     TNS_FUNC_TPC_TXN_SWITCH,
@@ -135,6 +136,7 @@ from seerdb.common.tns_consts import (
     TNS_SERVER_PIGGYBACK_SESS_RET,
     TNS_SERVER_PIGGYBACK_SYNC,
     TNS_SERVER_PIGGYBACK_TRACE_EVENT,
+    TNS_SESSION_STATE_EXPLICIT_BOUNDARY,
     TNS_TYPE_ADT,
     TNS_TYPE_BDOUBLE,
     TNS_TYPE_BFILE,
@@ -2034,6 +2036,21 @@ def encode_end_user_sec_piggyback(
     return Out
 
 
+def encode_session_state_piggyback(Seq: int, FieldVersion: int, State: int) -> bytes:
+    """Build the session-state (request boundary) piggyback (func 176, #464).
+    `State` is TNS_SESSION_STATE_REQUEST_BEGIN or _REQUEST_END; the explicit
+    boundary bit is OR'd in. It rides in front of the next call's message and is
+    one-shot (the caller clears the desired state after emitting it). Mirrors
+    oracledb's _write_session_state_piggyback; byte layout in docs/PROTOCOL.md
+    §35. Gated on the negotiated request-boundaries capability."""
+    Out = bytes([TTI_MSG_TYPE_PIGGYBACK, TNS_FUNC_SESSION_STATE, Seq])
+    if FieldVersion > FIELD_VERSION_23_1:
+        Out += encode_sb4(0)  # ub8 token (0)
+    # ub8 (state | explicit-boundary); small values encode like ub4.
+    Out += encode_sb4(State | TNS_SESSION_STATE_EXPLICIT_BOUNDARY)
+    return Out
+
+
 def encode_dictionary_close(Dictionary: dict) -> bytes:
     Tseq = Dictionary['seq']
     FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
@@ -2265,6 +2282,10 @@ CCAP_VECTOR_FEATURES = 52
 # security context piggyback (#460). 26ai advertises caps[45] = 0x03.
 CCAP_FEATURE_BACKPORT2_END_USER_SEC = 0x02
 
+# Bit within compile_caps[CCAP_TTC4] that advertises explicit request boundaries
+# (#464). Paired with the runtime RCAP_TTC_SESSION_STATE_OPS bit.
+CCAP_TTC4_EXPLICIT_BOUNDARY = 0x40
+
 # TNS_CCAP_FIELD_VERSION_* values (the byte written at CCAP_FIELD_VERSION) now
 # live in seerdb.common.tns_consts and are imported at the top of this module — kept
 # importable as `from seerdb.common.tns import FIELD_VERSION_*` for existing callers.
@@ -2277,6 +2298,7 @@ RCAP_TTC = 6
 RCAP_COMPAT_81 = 2
 RCAP_TTC_ZERO_COPY = 0x01
 RCAP_TTC_32K = 0x04
+RCAP_TTC_SESSION_STATE_OPS = 0x10  # server accepts request-boundary markers (#464)
 
 # Per-field-version capability vectors as {index: byte}; unset indices are 0.
 # 11.2 reproduces seerdb's historical 11g vector byte-for-byte (asserted by

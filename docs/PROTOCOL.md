@@ -3869,3 +3869,54 @@ Live end-to-end validation (a server *accepting* the attached context) requires
 a TLS path to a 26ai instance and is pending; the encoder, guards, cap
 negotiation, and OSON payload are pinned offline and the guards verified live
 against 26ai on `:1523`.
+
+## 35. Request boundaries (#464, post-23ai / milestone #29)
+
+**Request boundaries** let a pooled connection tell the server when a logical
+request begins and ends, so the server can reset or reclaim session state
+between requests (a DRCP / connection-pool resource optimisation). There is no
+correctness or user-visible effect, and it applies only to **pooled**
+connections — standalone connections never send it.
+
+### 35.1 Negotiation
+
+`supports_request_boundaries` requires the server to advertise **both**:
+- compile `compile_caps[40]` (TTC4) bit `0x40` (`EXPLICIT_BOUNDARY`), and
+- runtime `runtime_caps[6]` (TTC) bit `0x10` (`SESSION_STATE_OPS`).
+
+Oracle 21c, 23ai and 26ai advertise both; 10g/11g do not (so the feature is
+silently inactive there). seerdb records the server's compile *and* runtime cap
+arrays at PRO time to evaluate the gate.
+
+### 35.2 The func-176 piggyback
+
+The marker is a piggyback, func `SESSION_STATE = 176`, one-shot:
+
+```
+uint8  TTI_MSG_TYPE_PIGGYBACK (0x11)
+uint8  TNS_FUNC_SESSION_STATE (176 / 0xB0)
+uint8  seq
+[ub8   token_num]                 # only when field_version > 23.1; 0
+ub8    (state | 0x40)             # EXPLICIT_BOUNDARY OR'd in
+                                  #   REQUEST_BEGIN (0x04) -> 0x44
+                                  #   REQUEST_END   (0x08) -> 0x48
+```
+
+Unlike the end-user-security piggyback (§34) it does not re-ride; the desired
+state is cleared once emitted.
+
+### 35.3 Pool lifecycle
+
+- **Acquire:** arm `REQUEST_BEGIN`. It rides the piggyback slot in front of the
+  connection's next call (typically the caller's first execute) — no extra
+  round-trip.
+- **Release:** if `BEGIN` was armed but never flushed (the caller ran no
+  operation) it is cancelled and nothing is sent. Otherwise `REQUEST_END` is
+  emitted, piggybacked on a **rollback** round-trip (mirroring the reference
+  client, which rolls back at end-of-request); this is the one added round-trip
+  per release when the feature is active.
+
+Both `Pool` and `AsyncPool` drive this, on `connection.py` / `aconnection.py`.
+Validated live on 26ai (`:1523`): a pooled `select 1 from dual` sends
+`11 b0 07 00 01 44` (BEGIN) in front of the execute and `11 b0 09 00 01 48`
+(END) in front of the release rollback.

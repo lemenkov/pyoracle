@@ -87,6 +87,14 @@ TNS_END_TO_END_DBOP = 0x0200
 TNS_FUNC_END_USER_SECURITY_CTX = 205  # 0xCD
 TNS_SECURITY_CONTEXT_ATTACH_FLAG = 0x01
 
+# Request boundaries (#464): a SESSION_STATE piggyback (func 176) that tells the
+# server when a pooled logical request begins / ends, so it can reset or reclaim
+# session state between requests. Body is ub8(state | EXPLICIT_BOUNDARY).
+TNS_FUNC_SESSION_STATE = 176  # 0xB0
+TNS_SESSION_STATE_REQUEST_BEGIN = 0x04
+TNS_SESSION_STATE_REQUEST_END = 0x08
+TNS_SESSION_STATE_EXPLICIT_BOUNDARY = 0x40
+
 TNS_ATTENTION = 13
 TNS_CONTROL = 14
 TNS_MAX = 19

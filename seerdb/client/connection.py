@@ -35,10 +35,14 @@ from seerdb.common.tns import (
     CCAP_FEATURE_BACKPORT2,
     CCAP_FEATURE_BACKPORT2_END_USER_SEC,
     CCAP_FIELD_VERSION,
+    CCAP_TTC4,
+    CCAP_TTC4_EXPLICIT_BOUNDARY,
     FIELD_VERSION_9_2,
     FIELD_VERSION_10_2,
     FIELD_VERSION_12_1,
     FIELD_VERSION_21_1,
+    RCAP_TTC,
+    RCAP_TTC_SESSION_STATE_OPS,
     assemble_packet,
     decode_packet,
     decode_token_pro,
@@ -56,6 +60,7 @@ from seerdb.common.tns import (
     encode_packet,
     encode_pipeline_begin,
     encode_pipeline_end,
+    encode_session_state_piggyback,
     encode_tpc_change_state,
     encode_tpc_switch,
     exec_oac_signature,
@@ -88,6 +93,8 @@ from seerdb.common.tns_consts import (
     TNS_REDIRECT,
     TNS_REFUSE,
     TNS_RESEND,
+    TNS_SESSION_STATE_REQUEST_BEGIN,
+    TNS_SESSION_STATE_REQUEST_END,
     TNS_SESSIONLESS_TXN_ID_MAX,
     TNS_TPC_SESSIONLESS_FORMAT_ID,
     TNS_TPC_TXN_ABORT,
@@ -694,6 +701,12 @@ class OracleConnect:
         # call. The server's compile-cap array, kept to gate the feature.
         self._end_user_sec_context: bytes | None = None
         self._server_compile_caps: bytes = b''
+        self._server_runtime_caps: bytes = b''
+        # Request boundaries (#464): for pooled connections, the desired
+        # session-state marker (REQUEST_BEGIN / _END, or 0 = none) sent as a
+        # func-176 piggyback, and whether a logical request is currently open.
+        self._session_state_desired: int = 0
+        self._in_request: bool = False
         # Two-phase commit (#131): the opaque transaction context the server
         # returns from tpc_begin, replayed on prepare/commit/rollback/end.
         self._transaction_context: bytes | None = None
@@ -1288,6 +1301,7 @@ class OracleConnect:
             Pro = decode_token_pro(Packet)
             Caps = Pro['compile_caps']
             self._server_compile_caps = Caps
+            self._server_runtime_caps = Pro.get('runtime_caps') or b''
             if len(Caps) > CCAP_FIELD_VERSION:
                 ServerFv = Caps[CCAP_FIELD_VERSION]
                 self.field_version = min(self.field_version, ServerFv)
@@ -1596,6 +1610,7 @@ class OracleConnect:
             self._flush_cursor_closes_bytes()
             + self._flush_end_to_end_bytes()
             + self._flush_end_user_sec_bytes()
+            + self._flush_session_state_bytes()
         )
         Data = encode_dictionary(self._make_dict(DictionaryType.exec, query=QueryDict))
         self.send(TNS_DATA, Pre + Data)
@@ -1716,6 +1731,7 @@ class OracleConnect:
             self._flush_cursor_closes_bytes()
             + self._flush_end_to_end_bytes()
             + self._flush_end_user_sec_bytes()
+            + self._flush_session_state_bytes()
         )
         Data = encode_dictionary(self._make_dict(DictionaryType.exec, query=QueryDict))
         self.send(TNS_DATA, Data if not Pre else Pre + Data)
@@ -3167,6 +3183,62 @@ class OracleConnect:
         return encode_end_user_sec_piggyback(
             Seq, self.field_version, self._end_user_sec_context
         )
+
+    def _supports_request_boundaries(self) -> bool:
+        # Request boundaries (#464) need BOTH the compile-time EXPLICIT_BOUNDARY
+        # bit (TTC4) and the runtime SESSION_STATE_OPS bit (RCAP_TTC). 26ai / 23ai
+        # / 21c advertise both; older servers do not.
+        Cc = self._server_compile_caps
+        Rc = self._server_runtime_caps
+        return (
+            len(Cc) > CCAP_TTC4
+            and bool(Cc[CCAP_TTC4] & CCAP_TTC4_EXPLICIT_BOUNDARY)
+            and len(Rc) > RCAP_TTC
+            and bool(Rc[RCAP_TTC] & RCAP_TTC_SESSION_STATE_OPS)
+        )
+
+    def _flush_session_state_bytes(self) -> bytes:
+        # Emit the pending request-boundary (session-state) piggyback, if any,
+        # in front of the next call, then clear it (one-shot). Only pool
+        # acquire/release set _session_state_desired, so standalone connections
+        # never emit anything here (#464).
+        if self._session_state_desired == 0:
+            return b''
+        Seq = self._next_seq()
+        Data = encode_session_state_piggyback(
+            Seq, self.field_version, self._session_state_desired
+        )
+        self._session_state_desired = 0
+        return Data
+
+    def _begin_request(self) -> None:
+        # Marks the start of a pooled logical request (#464): arm a REQUEST_BEGIN
+        # marker that rides the next call. No-op unless the server supports
+        # request boundaries.
+        if self._supports_request_boundaries():
+            self._session_state_desired = TNS_SESSION_STATE_REQUEST_BEGIN
+            self._in_request = True
+
+    def _end_request(self) -> None:
+        # Marks the end of a pooled logical request (#464). If a BEGIN was armed
+        # but never flushed (no operation ran), just cancel it. Otherwise send a
+        # REQUEST_END marker piggybacked on a rollback round-trip (mirrors
+        # oracledb's _on_request_end_phase_one, which rolls back at request end).
+        if not self._in_request:
+            return
+        if self._session_state_desired != 0:
+            # BEGIN never rode a call — nothing was sent, so nothing to close.
+            self._session_state_desired = 0
+            self._in_request = False
+            return
+        self._session_state_desired = TNS_SESSION_STATE_REQUEST_END
+        self._in_request = False
+        from seerdb.common.tns_consts import TTI_ROLLBACK
+
+        Pre = self._flush_session_state_bytes()
+        Data = encode_dictionary(self._make_dict(DictionaryType.tran, req=TTI_ROLLBACK))
+        self.send(TNS_DATA, Pre + Data)
+        self._handle_response()
 
     def _pending_e2e_with_module_action(self) -> dict:
         # The server rejects a module update that does not also carry action

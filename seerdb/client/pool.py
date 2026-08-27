@@ -129,11 +129,13 @@ class Pool:
                             self._discard_dead(Entry.conn)
                             continue
                     self._in_use.add(id(Entry.conn))
+                    Entry.conn._begin_request()  # request boundary (#464)
                     return _PooledConnectionGuard(self, Entry.conn)
                 # Room to grow? Open a fresh one.
                 if len(self._in_use) < self._max:
                     Conn = self._open_connection()
                     self._in_use.add(id(Conn))
+                    Conn._begin_request()  # request boundary (#464)
                     return _PooledConnectionGuard(self, Conn)
                 # At capacity — wait for a release.
                 if Deadline is None:
@@ -164,6 +166,15 @@ class Pool:
                     # Best-effort: the pool is closing, so there is nothing
                     # to recover if this connection fails to close cleanly.
                     pass
+                return
+            # End the pooled logical request (#464): flush REQUEST_END if one is
+            # open. A failure here means the connection is dead — discard it
+            # rather than return a broken connection to the pool.
+            try:
+                conn._end_request()
+            except Exception:
+                self._discard_dead(conn)
+                self._available.notify()
                 return
             self._free.append(_PoolEntry(conn))
             self._available.notify()
