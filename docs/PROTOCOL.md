@@ -945,6 +945,30 @@ OALL8 scroll, so `scrollable=True` there falls back to a client-side buffered
 scroll over the fully-fetched result set (#161): `scroll()` is a local index
 move, available in every mode.
 
+**Server side (the Mirror, #485).** The Mirror answers scroll entirely from a
+materialised result — it reads `al8i4[9]` for the SCROLLABLE flag and
+`al8i4[10]`/`al8i4[11]` for the orientation and position (`parse_exec`), then:
+
+- **Open** (cursor 0, SQL present, SCROLLABLE set) — runs the query on the
+  backend, parks the *whole* row set keyed by a fresh cursor id (a scrollable
+  cursor stays open and revisits arbitrary rows, unlike the forward-only
+  `_Cursors` that hands out and forgets batches), and replies with describe +
+  the first `prefetch` rows + a terminator carrying the cursor id and the
+  cumulative row number.
+- **Re-execute** (an open scroll cursor id, empty SQL) — resolves the start row
+  (`FIRST`→1, `LAST`→the last row; `ABSOLUTE`/`RELATIVE`/`CURRENT` take the
+  client's already-absolute position verbatim), slices `rows[start-1 :
+  start-1+fetch]`, and replies with just that batch + terminator. A position
+  off either end yields an empty batch ending in `ORA-01403`.
+
+The terminator sets the OER `rowcount` to the absolute position of the last row
+delivered and reports `ORA-01403` once a batch reaches the end. The Mirror never
+emits the row-header **bit-vector compression** — it always sends full column
+values — so a `LAST`-after-EOF reposition that repeats the last value still
+decodes correctly (the client's previous-row seed simply goes unused). Because
+scroll is a wire-level feature, the same Mirror path serves the sync and async
+clients identically.
+
 ### 5.3 OAC (Oracle Access Column) Descriptor
 
 Each bind variable or column is described by an OAC structure:

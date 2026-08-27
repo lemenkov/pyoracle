@@ -1219,3 +1219,151 @@ def test_encode_out_bind_response_oci_marshals_each_bind() -> None:
     text = encode_out_bind_response_oci(['hi'])
     assert text[4] == 1
     assert text[51:].startswith(bytes.fromhex('0702686900'))  # 07 + 'hi' DALC
+
+
+# --- Server-side scrollable cursors (#181/#485) ---------------------------------
+
+
+def _scroll_exec(cursor: int, orientation: int, position: int, fetch: int) -> bytes:
+    # Build a SCROLLABLE OALL8 the way the thin client marshals a scroll
+    # re-execute (an open cursor, empty query, the orientation/position in the
+    # al8i4 array). field_version 6 is the Mirror's advertised 11.2 layout.
+    from seerdb.common.tns import FIELD_VERSION_11_2, encode_dictionary_exec
+
+    return encode_dictionary_exec(
+        {
+            'seq': 3,
+            'field_version': FIELD_VERSION_11_2,
+            'query': {
+                'type': 'select',
+                'auto': 0,
+                'fetch': fetch,
+                'server_version': 186647040,
+                'cursor': cursor,
+                'query': '',
+                'bind': [],
+                'batch': [],
+                'def': [],
+                'scrollable': True,
+                'scroll': (orientation, position),
+            },
+        }
+    )
+
+
+def test_parse_exec_reads_scroll_request() -> None:
+    from seerdb.common.tns_consts import (
+        TNS_FETCH_ORIENTATION_ABSOLUTE,
+        TNS_FETCH_ORIENTATION_LAST,
+    )
+
+    # A scroll re-execute: the SCROLLABLE flag plus orientation + 1-based position
+    # ride the al8i4 array (indices 9/10/11), which parse_exec now decodes even
+    # though the message carries no binds.
+    req = parse_exec(_scroll_exec(7, TNS_FETCH_ORIENTATION_ABSOLUTE, 5, 3))
+    assert req.scrollable is True
+    assert req.cursor == 7
+    assert req.scroll_orientation == TNS_FETCH_ORIENTATION_ABSOLUTE
+    assert req.scroll_position == 5
+
+    last = parse_exec(_scroll_exec(7, TNS_FETCH_ORIENTATION_LAST, 0, 3))
+    assert last.scroll_orientation == TNS_FETCH_ORIENTATION_LAST
+
+    # A plain (non-scrollable) execute leaves the flag clear.
+    from seerdb.common.tns import encode_dictionary_exec
+
+    plain = encode_dictionary_exec(
+        {
+            'seq': 3,
+            'field_version': 6,
+            'query': {
+                'type': 'select',
+                'auto': 0,
+                'fetch': 15,
+                'server_version': 186647040,
+                'cursor': 0,
+                'query': 'select 1 from dual',
+                'bind': [],
+                'batch': [],
+                'def': [],
+            },
+        }
+    )
+    assert parse_exec(plain).scrollable is False
+
+
+def test_scroll_start_row_maps_orientation() -> None:
+    from seerdb.common.tns_consts import (
+        TNS_FETCH_ORIENTATION_ABSOLUTE,
+        TNS_FETCH_ORIENTATION_FIRST,
+        TNS_FETCH_ORIENTATION_LAST,
+    )
+    from seerdb.server.query import scroll_start_row
+
+    assert scroll_start_row(TNS_FETCH_ORIENTATION_FIRST, 0, 10) == 1
+    assert scroll_start_row(TNS_FETCH_ORIENTATION_LAST, 0, 10) == 10
+    # ABSOLUTE / RELATIVE / CURRENT take the client's already-absolute position.
+    assert scroll_start_row(TNS_FETCH_ORIENTATION_ABSOLUTE, 4, 10) == 4
+    # An empty result set has no last row.
+    assert scroll_start_row(TNS_FETCH_ORIENTATION_LAST, 0, 0) == 0
+
+
+def test_scroll_terminator_carries_rowcount_and_eof() -> None:
+    from seerdb.common.tns import decode_token_oer
+    from seerdb.server.query import _scroll_terminator
+
+    _DECODE_FIELD_VERSION.set(FIELD_VERSION_11_2)
+
+    # Mid-stream: the OER carries the cumulative row number (absolute position of
+    # the last row delivered) and no ORA-01403, so the client keeps scrolling.
+    more = decode_token_oer(
+        _scroll_terminator(0, server_rowcount=6, eof=False), (0, [], [])
+    )
+    assert more[1] == 0  # not end-of-fetch
+    assert more[3][0] == 6  # cumulative row number
+
+    # A batch that reaches the end terminates with ORA-01403 (still carrying the
+    # cumulative row number).
+    end = decode_token_oer(
+        _scroll_terminator(0, server_rowcount=6, eof=True), (0, [], [])
+    )
+    assert end[1] == 1403
+    assert end[3][0] == 6
+
+    # The opening execute's terminator ties in the kept-open cursor id.
+    opened = decode_token_oer(
+        _scroll_terminator(9, server_rowcount=2, eof=False), (0, [], [])
+    )
+    assert opened[2] == 9
+
+
+def test_scroll_response_bodies_frame_rows_and_describe() -> None:
+    from seerdb.server.query import (
+        TTI_DCB,
+        TTI_RXH,
+        _scroll_terminator,
+        encode_rows,
+        encode_scroll_open_response,
+        encode_scroll_response,
+    )
+
+    col = ColumnMeta(name=b'ID', data_type=TNS_TYPE_NUMBER, data_length=22, max_size=22)
+
+    # The open leads with a describe (DCB); the re-execute leads with the row
+    # header (RXH) and omits the describe. Both end with the scroll terminator.
+    opened = encode_scroll_open_response(
+        [col], [(1,), (2,)], cursor_id=9, server_rowcount=2, eof=False
+    )
+    assert opened[0] == TTI_DCB
+    assert encode_rows([(1,), (2,)], [col]) in opened  # the prefetched batch
+    assert opened.endswith(_scroll_terminator(9, server_rowcount=2, eof=False))
+
+    reexec = encode_scroll_response([col], [(6,)], server_rowcount=6, eof=True)
+    assert reexec[0] == TTI_RXH  # no describe on a reposition
+    assert reexec.endswith(_scroll_terminator(0, server_rowcount=6, eof=True))
+
+    # Scrolled off the end: an empty batch (header only) ending in ORA-01403.
+    off = encode_scroll_response([], [], server_rowcount=0, eof=True)
+    assert off == encode_rows([], []) + _scroll_terminator(
+        0, server_rowcount=0, eof=True
+    )
