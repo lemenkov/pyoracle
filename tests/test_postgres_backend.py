@@ -202,6 +202,30 @@ def test_date_and_timestamp_columns() -> None:
     )
 
 
+def test_interval_day_to_second_column() -> None:
+    # A PostgreSQL `interval` (oid 1186) maps to Oracle INTERVAL DAY TO SECOND
+    # (#501): psycopg returns a timedelta, which the Mirror encodes as INTERVALDS
+    # and the client decodes back to the same timedelta.
+    listen, server, result = _start_mirror()
+    conn = _connect(listen.getsockname()[1])
+    try:
+        cur = conn.cursor()
+        cur.execute("select interval '5 3:2:1.5' as v")
+        value = cur.fetchone()[0]
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert value == datetime.timedelta(
+        days=5, hours=3, minutes=2, seconds=1, microseconds=500000
+    )
+
+
 def test_high_precision_numeric() -> None:
     # PostgreSQL numeric returns a Decimal; the Mirror's exact base-100 encoder
     # carries all of it, well past float's ~15 significant digits.
