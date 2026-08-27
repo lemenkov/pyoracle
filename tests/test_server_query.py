@@ -1757,3 +1757,35 @@ def test_parse_exec_cached_reexecute_decodes_binds_without_oacs() -> None:
         parse_exec(reexec)
     # With the remembered types the new bind values decode correctly.
     assert parse_exec(reexec, bind_types=first.bind_types).binds == [2, 'b']
+
+
+# --- Object REF column describe + value (#494) ---------------------------------
+
+
+def test_ref_column_describe_and_value_roundtrip() -> None:
+    from seerdb.common.dbobject import DbRef
+    from seerdb.common.tns_consts import TNS_TYPE_REF, TTI_STA
+    from seerdb.server.query import encode_describe, encode_rows
+
+    # A REF column carries the referenced type's identity in the describe and the
+    # opaque locator bytes in the row; the client rebuilds a typed DbRef.
+    col = ColumnMeta(
+        name=b'R',
+        data_type=TNS_TYPE_REF,
+        data_length=4000,
+        max_size=4000,
+        type_name=b'PERSON',
+        type_schema=b'PYO',
+        type_oid=b'\x01' * 16,
+    )
+    ref = DbRef(b'\x00\x28\x02\x09', 'PERSON', 'PYO', b'\x01' * 16)
+    response = encode_describe([col]) + encode_rows([(ref,)], [col]) + bytes([TTI_STA])
+    columns, rows = _decode_response(response)
+    # The describe carried the type identity (what surfaces as ref.type_name).
+    assert columns[0]['type_name'] == 'PERSON'
+    assert columns[0]['type_schema'] == 'PYO'
+    assert columns[0]['type_oid'] == b'\x01' * 16
+    # The value decoded back to a DbRef with that identity and its locator bytes.
+    got = rows[0][0]
+    assert got.type_name == 'PERSON'
+    assert got.bytes == b'\x00\x28\x02\x09'

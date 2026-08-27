@@ -3380,6 +3380,18 @@ owner/name in the same fields an ADT column uses, §21.1). Note python-oracledb
 has **no** REF type at all, so there is no thin-mode reference for this; the
 locator structure above was read from live captures (10g/11g/21c/23ai).
 
+**Server side (the Mirror, #494).** `ColumnMeta` gained `type_oid` /
+`type_schema` / `type_name`, which `_encode_dcb_column` now emits in the §21.1
+fields (the OID as a length-prefixed value, the owner/name as `str_with_length`)
+— previously always empty. A REF column's row value is the DbRef's `.bytes`
+wrapped as a plain DALC (`_encode_value`, type 111). The one wrinkle is that a
+REF column's type identity is **not** in the PEP-249 description the passthrough
+backend gets — only in the `DbRef` values — so the backend copies it from the
+first non-null value into the `ColumnMeta` before the describe goes out. With
+that, `SELECT REF(p)` round-trips a typed `DbRef` (so `ref.type_name` is set);
+the REF *bind* back into an INSERT / DEREF stays a 12c+ concern (the OAC form,
+§21.8), which the integration test skips below fv 12.1.
+
 ### 21.8 REF bind (#139)
 
 A fetched `DbRef` can be bound back — e.g. `INSERT INTO t (r) VALUES (:ref)` or
