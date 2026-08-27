@@ -18,11 +18,10 @@ from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import encode_packet
 from seerdb.common.tns_consts import TNS_ACCEPT, TNS_DATA
 from seerdb.server._handshake_11g import (
-    DTY_REPLY,
-    DTY_REPLY_SQLPLUS,
-    PRO_REPLY,
-    PRO_REPLY_SQLPLUS,
-    TYPE_REPLY_SQLPLUS,
+    build_caps_block_reply,
+    build_dty_type_reply,
+    build_pro_sqlplus_reply,
+    build_type_reply_sqlplus,
 )
 from seerdb.server.framing import DEFAULT_SDU
 
@@ -59,11 +58,6 @@ _ACCEPT_DATA_LEN = 0x0000
 _ACCEPT_FLAGS = 0x0020
 _ACCEPT_RESERVED = 0x4141
 _DEFAULT_TDU = 0xFFFF
-
-# A DATA packet's TTC payload starts after the 8-byte TNS header + 2-byte data
-# flags. The captured PRO/DTY replies are stored as full packets; re-wrapping
-# their payload reproduces the packet and proves our framing matches the wire.
-_DATA_PREFIX = 10
 
 # The classic sqlplus / thick-OCI PRO request leads its TTC payload with this
 # magic instead of TTI_PRO (0x01); the Mirror must answer that request in the
@@ -197,34 +191,35 @@ def encode_ano_null_reply(*, sdu: int = DEFAULT_SDU) -> bytes:
     the session stays plaintext. (These are the same bytes the sqlplus/OCI path
     replays as its first `deadbeef` reply — it *is* the ANO response.)
     """
-    packet, _ = encode_packet(TNS_DATA, PRO_REPLY_SQLPLUS[_DATA_PREFIX:], sdu)
+    packet, _ = encode_packet(TNS_DATA, build_pro_sqlplus_reply(), sdu)
     return packet
 
 
 def encode_pro_reply(*, sqlplus: bool = False, sdu: int = DEFAULT_SDU) -> bytes:
     """Build the server's PRO (protocol negotiation) reply — §4.1.
 
-    Replays the real 11g server's PRO reply, whose capability array pins the
+    Reproduces the real 11g server's PRO reply, whose capability array pins the
     negotiated field version to 6. ``sqlplus`` selects the classic
     ``deadbeef`` dialect (127B) over the oracledb/seerdb ``TTI_PRO`` dialect
     (238B); pass whatever :func:`pro_is_sqlplus` reported for the request.
     Returns the full TNS_DATA packet.
     """
-    reply = PRO_REPLY_SQLPLUS if sqlplus else PRO_REPLY
-    packet, _ = encode_packet(TNS_DATA, reply[_DATA_PREFIX:], sdu)
+    payload = build_pro_sqlplus_reply() if sqlplus else build_caps_block_reply()
+    packet, _ = encode_packet(TNS_DATA, payload, sdu)
     return packet
 
 
 def encode_dty_reply(*, sqlplus: bool = False, sdu: int = DEFAULT_SDU) -> bytes:
     """Build the server's DTY (data-type negotiation) reply — §4.2.
 
-    Replays the real 11g server's DTY reply as a full TNS_DATA packet.
-    ``sqlplus`` selects the ``deadbeef`` dialect (238B) over the
-    oracledb/seerdb dialect (924B); use the same value the PRO reply used so
-    both halves of the handshake speak one dialect.
+    Reproduces the real 11g server's DTY reply as a full TNS_DATA packet.
+    ``sqlplus`` selects the ``deadbeef`` dialect (238B — the same capability
+    block as the thin PRO reply) over the oracledb/seerdb dialect (924B
+    type-conversion table); use the same value the PRO reply used so both halves
+    of the handshake speak one dialect.
     """
-    reply = DTY_REPLY_SQLPLUS if sqlplus else DTY_REPLY
-    packet, _ = encode_packet(TNS_DATA, reply[_DATA_PREFIX:], sdu)
+    payload = build_caps_block_reply() if sqlplus else build_dty_type_reply()
+    packet, _ = encode_packet(TNS_DATA, payload, sdu)
     return packet
 
 
@@ -233,5 +228,5 @@ def encode_type_reply_sqlplus(*, sdu: int = DEFAULT_SDU) -> bytes:
     ``ttc=02`` confirmation sqlplus/thick OCI expects after PRO and DTY, before
     it sends OSESSKEY (#265). Thin clients skip this round. Full TNS_DATA packet.
     """
-    packet, _ = encode_packet(TNS_DATA, TYPE_REPLY_SQLPLUS[_DATA_PREFIX:], sdu)
+    packet, _ = encode_packet(TNS_DATA, build_type_reply_sqlplus(), sdu)
     return packet

@@ -11,15 +11,18 @@ from dataclasses import replace
 import handshake_11g as fx
 import pytest
 
-from seerdb.common.exceptions import InterfaceError
-from seerdb.common.tns import CCAP_FIELD_VERSION, decode_token_pro
-from seerdb.common.tns_consts import FIELD_VERSION_11_2, TNS_DATA, TTI_DTY, TTI_PRO
-from seerdb.server._handshake_11g import (
+# The captured PRO/DTY replies now live as golden fixtures alongside the
+# generation test (the server module builds them from named pieces).
+from test_handshake_generation import (
     DTY_REPLY,
     DTY_REPLY_SQLPLUS,
     PRO_REPLY,
     PRO_REPLY_SQLPLUS,
 )
+
+from seerdb.common.exceptions import InterfaceError
+from seerdb.common.tns import CCAP_FIELD_VERSION, decode_token_pro
+from seerdb.common.tns_consts import FIELD_VERSION_11_2, TNS_DATA, TTI_DTY, TTI_PRO
 from seerdb.server.handshake import (
     encode_accept,
     encode_dty_reply,
@@ -149,9 +152,10 @@ def test_sqlplus_dty_reply_reproduces_the_captured_packet() -> None:
 
 
 def test_sqlplus_type_reply_reproduces_the_captured_packet() -> None:
-    # The deadbeef dialect's third round: re-wrapping the stored 26-byte ttc=02
-    # reply reproduces the real server packet (#265).
-    from seerdb.server._handshake_11g import TYPE_REPLY_SQLPLUS
+    # The deadbeef dialect's third round: the built ttc=02 reply reproduces the
+    # real server packet (#265).
+    from test_handshake_generation import TYPE_REPLY_SQLPLUS
+
     from seerdb.server.handshake import encode_type_reply_sqlplus
 
     assert encode_type_reply_sqlplus() == TYPE_REPLY_SQLPLUS
