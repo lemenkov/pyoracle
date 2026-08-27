@@ -587,3 +587,35 @@ def test_translate_routine_ddl_function() -> None:
 def test_translate_routine_ddl_leaves_other_sql_unchanged() -> None:
     for sql in ('SELECT 1', 'CREATE TABLE t (id NUMBER)', 'BEGIN p(:1); END;'):
         assert _translate_routine_ddl(sql) == sql
+
+
+# --- changepassword (#515) — credential-map only, no live PG needed -------------
+
+
+class _NoConnPostgresBackend(PostgresBackend):
+    # Skip the psycopg connect / orafce setup — change_password only touches the
+    # credential map, so no live PostgreSQL is needed to test it.
+    def __init__(self, credentials: dict) -> None:
+        self._credentials = credentials
+
+
+def test_change_password_updates_the_shared_credential_map() -> None:
+
+    creds = {'PYO': 'pyo123'}
+    backend = _NoConnPostgresBackend(creds)
+    backend.change_password('PYO', 'pyo123', 'pyo123_new')
+    # The shared map now carries the new secret (a fresh session authenticates
+    # with it); the backend's own PostgreSQL conninfo is untouched.
+    assert creds['PYO'] == 'pyo123_new'
+    # Case-insensitive on the username, like Oracle.
+    backend.change_password('pyo', 'pyo123_new', 'again')
+    assert creds['PYO'] == 'again'
+
+
+def test_change_password_rejects_a_wrong_old_password() -> None:
+    from seerdb.server import BackendError
+
+    backend = _NoConnPostgresBackend({'PYO': 'pyo123'})
+    with pytest.raises(BackendError) as exc:
+        backend.change_password('PYO', 'not-the-old-one', 'whatever')
+    assert exc.value.ora_code == 1017

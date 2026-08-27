@@ -43,13 +43,16 @@ def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format='%(asctime)s %(name)s %(levelname)s %(message)s'
     )
+    # One shared credential map across every session's backend, so a
+    # changepassword on one connection is visible to the next (#515).
+    credentials = {'PYO': 'pyo123'}
     # One PostgreSQL session per client connection, behind the OracleCompatBackend
     # so a real sqlplus can bootstrap its session (thin clients pass through).
     seerdb.serve(
         '127.0.0.1',
         port,
         backend_factory=lambda: OracleCompatBackend(
-            PostgresBackend(conninfo, credentials={'PYO': 'pyo123'})
+            PostgresBackend(conninfo, credentials=credentials)
         ),
     )
 

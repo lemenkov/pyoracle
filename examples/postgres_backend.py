@@ -515,6 +515,25 @@ class PostgresBackend:
             return None
         return list(row[0])
 
+    def change_password(
+        self, username: str, old_password: str, new_password: str
+    ) -> None:
+        # The Mirror's client auth (the credential map) is separate from the
+        # backend's PostgreSQL connection (a fixed conninfo), so a password change
+        # updates only the map — a fresh Mirror session then authenticates with
+        # the new password and the old one is rejected — without touching a
+        # PostgreSQL role (which would break the backend's own conninfo). Oracle
+        # validates the old password (ALTER USER … REPLACE); do the same against
+        # the stored secret (#515). The map is shared across sessions.
+        current = credential_lookup(self._credentials, username)
+        if current is not None and old_password != current:
+            raise BackendError('invalid username/password; logon denied', ora_code=1017)
+        for name in list(self._credentials):
+            if name.upper() == username.upper():
+                self._credentials[name] = new_password
+                return
+        self._credentials[username.upper()] = new_password
+
     def commit(self) -> None:
         self._conn.commit()
 
