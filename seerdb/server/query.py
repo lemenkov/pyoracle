@@ -1106,13 +1106,10 @@ def _decode_describe_oci(payload: bytes) -> list[dict]:
     return cols
 
 
-def encode_describe(columns: list[ColumnMeta]) -> bytes:
-    """Build the describe (TTI_DCB) block for a result's columns — §19.1 (11g).
-
-    Returns the TTC payload starting at the TTI_DCB token. The cursor-uuid
-    preamble is empty (the client skips it); the row tokens are appended
-    separately by the exec-response encoder.
-    """
+def _encode_describe_body(columns: list[ColumnMeta]) -> bytes:
+    # The describe body shared by the TTI_DCB block and a REF CURSOR OUT bind's
+    # inline describe (#483): max row size, column count, the per-column DCB
+    # metadata, then the current-date / flag / query-cache-key trailer.
     body = encode_sb4(sum(c.max_size for c in columns))  # max row size (skipped)
     body += encode_sb4(len(columns))
     if columns:
@@ -1122,8 +1119,18 @@ def encode_describe(columns: list[ColumnMeta]) -> bytes:
     body += _bytes_with_length(b'')  # current date (skipped)
     body += encode_sb4(0) * 4  # dcbflag / dcbmdbz / dcbmnpr / dcbmxpr
     body += _bytes_with_length(b'')  # dcbqcky query-cache key (11g)
+    return body
+
+
+def encode_describe(columns: list[ColumnMeta]) -> bytes:
+    """Build the describe (TTI_DCB) block for a result's columns — §19.1 (11g).
+
+    Returns the TTC payload starting at the TTI_DCB token. The cursor-uuid
+    preamble is empty (the client skips it); the row tokens are appended
+    separately by the exec-response encoder.
+    """
     preamble = _bytes_with_length(b'')  # cursor uuid / timestamp (skipped)
-    return bytes([TTI_DCB]) + preamble + body
+    return bytes([TTI_DCB]) + preamble + _encode_describe_body(columns)
 
 
 def _encode_temporal(value: datetime.date, data_type: int) -> bytes:
@@ -1838,17 +1845,50 @@ def encode_status(rowcount: int = 0) -> bytes:
     return _encode_oer(0, 0, rowcount, b'')
 
 
-def encode_out_bind_response_thin(out_binds: list[tuple[object, int]]) -> bytes:
+@dataclass(frozen=True)
+class ScalarOutBind:
+    """A scalar PL/SQL OUT bind value + its declared type, for the IOV reply."""
+
+    value: object
+    tns_type: int
+
+
+@dataclass(frozen=True)
+class RefCursorOutBind:
+    """A REF CURSOR OUT bind: the nested result's columns and the cursor id the
+    Mirror parked its rows on. The client drains that id with ``TTI_FETCH``."""
+
+    columns: list[ColumnMeta]
+    cursor_id: int
+
+
+def _encode_refcursor_out(bind: RefCursorOutBind) -> bytes:
+    # A REF CURSOR OUT value in the IOV's RXD (#483/#84), the inverse of the
+    # client's _read_refcursor_out: a 1-byte length, the inline describe body
+    # (the same per-column DCB metadata a describe carries), the nested cursor
+    # id, and a 1-byte present indicator.
+    return (
+        bytes([1])  # length prefix (skipped by the client)
+        + _encode_describe_body(bind.columns)
+        + encode_sb4(bind.cursor_id)
+        + bytes([1])  # per-value present indicator
+    )
+
+
+def encode_out_bind_response_thin(
+    out_binds: list[ScalarOutBind | RefCursorOutBind],
+) -> bytes:
     """The thin reply returning a PL/SQL block's OUT bind values (#483): a
     TTI_IOV vector + a TTI_RXD row of the values + a success OER.
 
-    ``out_binds`` is ``(value, tns_type)`` for **every** bind, in bind order —
-    the Mirror can't tell IN from OUT (the wire has no direction), so it marks
-    them all OUT and returns each value; the client keeps only the positions it
-    bound as a ``Var`` (``_assign_out_binds``). The IOV header mirrors what
+    ``out_binds`` is one entry per bind, in bind order — the Mirror can't tell IN
+    from OUT (the wire has no direction), so it marks them all OUT and returns
+    each value; the client keeps only the positions it bound as a ``Var``
+    (``_assign_out_binds``). A scalar rides as a DALC + ub4 return code; a REF
+    CURSOR rides as its inline describe + cursor id. The IOV header mirrors what
     ``_read_iov`` decodes: a flag, the bind count (num_requests + num_iters*256),
-    and the zeroed iter / buffer / bit-vector / rowid fields, then one direction
-    byte per bind. Each value rides as a DALC followed by a ub4 return code (0)."""
+    the zeroed iter / buffer / bit-vector / rowid fields, then a direction byte
+    per bind."""
     count = len(out_binds)
     num_requests, num_iters = count % 256, count // 256
     iov = (
@@ -1861,10 +1901,13 @@ def encode_out_bind_response_thin(out_binds: list[tuple[object, int]]) -> bytes:
         + encode_sb4(0)  # rowid length
         + bytes([TNS_BIND_DIR_OUTPUT]) * count  # direction per bind
     )
-    rxd = bytes([TTI_RXD]) + b''.join(
-        _encode_value(value, tns_type) + encode_sb4(0) for value, tns_type in out_binds
-    )
-    return iov + rxd + encode_status(0)
+    rxd = bytearray([TTI_RXD])
+    for bind in out_binds:
+        if isinstance(bind, RefCursorOutBind):
+            rxd += _encode_refcursor_out(bind)
+        else:
+            rxd += _encode_value(bind.value, bind.tns_type) + encode_sb4(0)
+    return iov + bytes(rxd) + encode_status(0)
 
 
 def encode_more_rows(cursor_id: int) -> bytes:

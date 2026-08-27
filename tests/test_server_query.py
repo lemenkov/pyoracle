@@ -1561,13 +1561,17 @@ def test_encode_out_bind_response_thin_roundtrips_via_client() -> None:
     from seerdb.common.datatypes import NUMBER, STRING, Var
     from seerdb.common.tns import decode_packet
     from seerdb.common.tns_consts import TNS_TYPE_NUMBER, TNS_TYPE_VARCHAR
-    from seerdb.server.query import encode_out_bind_response_thin
+    from seerdb.server.query import ScalarOutBind, encode_out_bind_response_thin
 
     _DECODE_FIELD_VERSION.set(FIELD_VERSION_11_2)
     # callproc([21, out NUMBER, io VARCHAR]) — the Mirror marks every bind OUT and
     # returns each value; the client keeps only the positions it bound as a Var.
     resp = encode_out_bind_response_thin(
-        [(21, TNS_TYPE_NUMBER), (42, TNS_TYPE_NUMBER), ('hi!', TNS_TYPE_VARCHAR)]
+        [
+            ScalarOutBind(21, TNS_TYPE_NUMBER),
+            ScalarOutBind(42, TNS_TYPE_NUMBER),
+            ScalarOutBind('hi!', TNS_TYPE_VARCHAR),
+        ]
     )
     v_out, v_io = Var(NUMBER), Var(STRING, 100)
     bind = [21, v_out, v_io]
@@ -1608,3 +1612,24 @@ def test_parse_exec_exposes_bind_meta() -> None:
     assert len(req.bind_meta) == 2
     assert req.bind_meta[0][0] == TNS_TYPE_NUMBER  # a NUMBER bind's type
     assert all(size >= 0 for _t, size in req.bind_meta)
+
+
+def test_encode_out_bind_response_thin_refcursor_entry() -> None:
+    from seerdb.common.datatypes import CURSOR, Var
+    from seerdb.common.tns import decode_packet
+    from seerdb.server.query import RefCursorOutBind, encode_out_bind_response_thin
+
+    _DECODE_FIELD_VERSION.set(FIELD_VERSION_11_2)
+    cols = [
+        ColumnMeta(name=b'A', data_type=TNS_TYPE_NUMBER, data_length=22, max_size=22),
+        ColumnMeta(name=b'B', data_type=TNS_TYPE_VARCHAR, data_length=1, max_size=1),
+    ]
+    # A REF CURSOR OUT bind: the client decodes an inline-describe marker carrying
+    # the parked cursor id + row format (which it then drains with TTI_FETCH).
+    resp = encode_out_bind_response_thin([RefCursorOutBind(columns=cols, cursor_id=7)])
+    result = decode_packet(resp, (0, [], [], [Var(CURSOR)]))
+    assert result[1] == 0  # success OER
+    value = result[4][0]['out_values'][0]
+    assert value['_refcursor'] is True
+    assert value['cursor_id'] == 7
+    assert [c['column_name'] for c in value['row_format']] == [b'A', b'B']
