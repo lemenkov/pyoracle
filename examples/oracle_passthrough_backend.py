@@ -50,12 +50,18 @@ class OraclePassthroughBackend:
             return None
         # Open the upstream connection now, with the same credentials, so the
         # session is ready by the time the client runs its first statement.
+        # autocommit=False so the client drives the upstream transaction through
+        # the Mirror: an explicit commit / rollback reaches the backend, and an
+        # autocommit client still commits because the Mirror calls backend.commit()
+        # per statement. With the driver default (autocommit=True) every statement
+        # would commit upstream and a client rollback would be a no-op.
         self._conn = seerdb.connect(
             host=self._host,
             port=self._port,
             user=username,
             password=password,
             service_name=self._service,
+            autocommit=False,
         )
         return password
 
