@@ -34,6 +34,9 @@ from seerdb.common.tns import (
 )
 from seerdb.common.tns_consts import (
     AL32UTF8_CHARSET,
+    TNS_EXEC_FLAGS_SCROLLABLE,
+    TNS_FETCH_ORIENTATION_FIRST,
+    TNS_FETCH_ORIENTATION_LAST,
     TNS_LOB_OP_CLOSE,
     TNS_LOB_OP_FREE_TEMP,
     TNS_LOB_OP_GET_CHUNK_SIZE,
@@ -95,6 +98,13 @@ class ExecRequest:
     # single row equal to ``binds`` (empty for a statement with no binds).
     bind_rows: list = field(default_factory=list)
     autocommit: bool = False
+    # Server-side scrollable cursor (#181/#485): the SCROLLABLE exec flag on the
+    # opening execute, and the fetch orientation + 1-based position a scroll
+    # re-execute carries in al8i4[10]/al8i4[11]. Zero orientation means "no
+    # scroll" (a plain execute).
+    scrollable: bool = False
+    scroll_orientation: int = 0
+    scroll_position: int = 0
 
 
 @dataclass(frozen=True)
@@ -181,15 +191,26 @@ def parse_exec(payload: bytes) -> ExecRequest:
     rest = rest[_MARKER_LEN + _SERVER_VERSION_SLOT :]
     sql = rest[:query_len].decode('utf-8') if query_flag else ''
 
+    # The al8i4 option array follows the SQL text; decode all `all8_len` sb4
+    # elements so `after` lands on the OAC/RXD tokens and the scroll request
+    # (al8i4[9] exec flags, [10] orientation, [11] position) is available. A
+    # scroll re-execute carries no binds, so this must run unconditionally, not
+    # only in the bind path (#181/#485).
+    after = rest[query_len:]
+    al8: list[int] = []
+    for _ in range(all8_len):
+        al8_elem, after = decode_ub4(after)
+        al8.append(al8_elem)
+    scrollable = len(al8) > 9 and bool(al8[9] & TNS_EXEC_FLAGS_SCROLLABLE)
+    scroll_orientation = al8[10] if len(al8) > 10 else 0
+    scroll_position = al8[11] if len(al8) > 11 else 0
+
     binds: list = []
     bind_rows: list = []
     if bind_count > 0:
-        # After the SQL: the al8 option array, then one OAC (type descriptor)
+        # After the al8 array (already consumed above): one OAC (type descriptor)
         # per bind column, then one RXD row of values per array-DML iteration
         # (an ordinary single execute is just one row).
-        after = rest[query_len:]
-        for _ in range(all8_len):
-            _, after = decode_ub4(after)
         types = []
         for _ in range(bind_count):
             data_type, _maxlen, _scale, _charset, after = decode_token_oac(after, ())
@@ -219,6 +240,9 @@ def parse_exec(payload: bytes) -> ExecRequest:
         binds=binds,
         bind_rows=bind_rows,
         autocommit=autocommit,
+        scrollable=scrollable,
+        scroll_orientation=scroll_orientation,
+        scroll_position=scroll_position,
     )
 
 
@@ -1711,6 +1735,64 @@ def encode_fetch_response(
     """Assemble a ``TTI_FETCH`` continuation response: rows + terminator, with
     **no** describe (the column metadata was established on the execute)."""
     return encode_rows(rows, columns) + _terminator(cursor_id, more)
+
+
+def scroll_start_row(orientation: int, position: int, total: int) -> int:
+    """The 1-based absolute row a scroll re-execute positions on (#181/#485).
+
+    FIRST -> row 1, LAST -> the final row. For ABSOLUTE / RELATIVE / CURRENT /
+    NEXT the client resolves the request to an absolute target itself and sends
+    it as ``position`` (oracledb thin's ``_post_process_scroll``), so the Mirror
+    takes it verbatim. A result yields 0 (an off-the-end position) when empty.
+    """
+    if orientation == TNS_FETCH_ORIENTATION_FIRST:
+        return 1
+    if orientation == TNS_FETCH_ORIENTATION_LAST:
+        return total
+    return position
+
+
+def _scroll_terminator(cursor_id: int, server_rowcount: int, eof: bool) -> bytes:
+    # The OER that ends a scroll batch (#181/#485). It carries the cumulative
+    # row number (the absolute 1-based position of the last row delivered) in the
+    # rowcount field — the client reads it as ``server_rowcount`` to place its
+    # buffer window — and reports ORA-01403 once the batch reaches the end so the
+    # client stops pulling. The cursor id ties the opening execute's response to
+    # the kept-open scrollable cursor; a re-execute carries no id (0).
+    if eof:
+        return _encode_oer(0, 1403, server_rowcount, b'', cursor_id=cursor_id)
+    return _encode_oer(1, 0, server_rowcount, b'', cursor_id=cursor_id)
+
+
+def encode_scroll_open_response(
+    columns: list[ColumnMeta],
+    rows: list[tuple],
+    cursor_id: int,
+    *,
+    server_rowcount: int,
+    eof: bool,
+) -> bytes:
+    """A scrollable open reply (#181/#485): describe + the prefetched first batch
+    + a scroll terminator carrying the cursor id and cumulative row number. The
+    cursor stays open (the client drives later scroll re-executes against it)."""
+    return (
+        encode_describe(columns)
+        + encode_rows(rows, columns)
+        + _scroll_terminator(cursor_id, server_rowcount, eof)
+    )
+
+
+def encode_scroll_response(
+    columns: list[ColumnMeta],
+    rows: list[tuple],
+    *,
+    server_rowcount: int,
+    eof: bool,
+) -> bytes:
+    """A scroll re-execute reply (#181/#485): the repositioned batch + terminator,
+    with **no** describe (the metadata was established on the open). An empty
+    batch (scrolled off the end) is a bare ``ORA-01403`` terminator."""
+    return encode_rows(rows, columns) + _scroll_terminator(0, server_rowcount, eof)
 
 
 @dataclass(frozen=True)

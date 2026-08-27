@@ -96,6 +96,8 @@ from seerdb.server.query import (
     encode_query_response,
     encode_query_response_oci,
     encode_reexec_row_oci,
+    encode_scroll_open_response,
+    encode_scroll_response,
     encode_status,
     encode_status_oci,
     encode_version_banner_oci,
@@ -108,6 +110,7 @@ from seerdb.server.query import (
     parse_fetch,
     parse_lobops_read,
     parse_lobops_request,
+    scroll_start_row,
     strip_oci_piggyback,
 )
 
@@ -381,7 +384,10 @@ def serve_session(
             continue
         if body[1] == TTI_ALL8:
             request = _resolve_temp_lob_binds(parse_exec(body), temp_lobs)
-            lobs = _answer_query(stream, backend, request, cursors)
+            if request.scrollable:
+                lobs = _answer_scroll(stream, backend, request, cursors)
+            else:
+                lobs = _answer_query(stream, backend, request, cursors)
         elif body[1] == TTI_LOBOPS:
             lobs = _answer_lobops(stream, body, lobs, temp_lobs)
         elif body[1] == TTI_FETCH:
@@ -658,12 +664,30 @@ class _Cursors:
     def __init__(self) -> None:
         self._next = 1
         self._open: dict[int, tuple[list[ColumnMeta], list[tuple]]] = {}
+        # Scrollable cursors (#181/#485) keep their FULL materialised row set
+        # keyed by cursor id and stay open across scroll re-executes (a scroll
+        # can revisit any row), unlike `_open`, which hands out and forgets
+        # batches. Shares the `_next` id space so ids never collide.
+        self._scroll: dict[int, tuple[list[ColumnMeta], list[tuple]]] = {}
 
     def open(self, columns: list[ColumnMeta], rows: list[tuple]) -> int:
         cursor_id = self._next
         self._next += 1
         self._open[cursor_id] = (columns, rows)
         return cursor_id
+
+    def open_scroll(self, columns: list[ColumnMeta], rows: list[tuple]) -> int:
+        cursor_id = self._next
+        self._next += 1
+        self._scroll[cursor_id] = (columns, list(rows))
+        return cursor_id
+
+    def scroll_state(
+        self, cursor_id: int
+    ) -> tuple[list[ColumnMeta], list[tuple]] | None:
+        # The (columns, all rows) of a kept-open scrollable cursor, or None if
+        # the id isn't a scrollable cursor.
+        return self._scroll.get(cursor_id)
 
     def take(self, cursor_id: int, count: int) -> tuple[list[ColumnMeta], list[tuple]]:
         # Return (columns, next batch) and either keep the remainder or, once the
@@ -801,6 +825,74 @@ def _answer_query(
             response = encode_status(result.rowcount)
     stream.write_packet(TNS_DATA, response)
     return lobs
+
+
+def _answer_scroll(
+    stream: PacketStream, backend: Backend, request: ExecRequest, cursors: _Cursors
+) -> list[tuple[bytes, bool]]:
+    # Serve a server-side scrollable cursor (#181/#485). Two shapes arrive on the
+    # same SCROLLABLE-flagged execute: the opening execute (a new cursor, real
+    # SQL) runs the query, parks the full result set, and returns describe + the
+    # prefetched first batch; a scroll re-execute (an open scroll cursor id, no
+    # SQL) repositions within the parked rows per the fetch orientation + 1-based
+    # position and returns just that batch. The client places its buffer window
+    # from the cumulative row number the terminator carries.
+    state = cursors.scroll_state(request.cursor)
+    if state is not None:
+        # Reposition: slice the parked rows and reply with no describe.
+        columns, rows = state
+        total = len(rows)
+        start = scroll_start_row(
+            request.scroll_orientation, request.scroll_position, total
+        )
+        size = request.fetch if request.fetch > 0 else total
+        if start < 1 or start > total:
+            # Scrolled off either end: an empty batch ending in ORA-01403.
+            stream.write_packet(
+                TNS_DATA, encode_scroll_response([], [], server_rowcount=0, eof=True)
+            )
+            return []
+        batch = rows[start - 1 : start - 1 + size]
+        last_abs = start - 1 + len(batch)
+        stream.write_packet(
+            TNS_DATA,
+            encode_scroll_response(
+                columns, batch, server_rowcount=last_abs, eof=last_abs >= total
+            ),
+        )
+        return oci_lob_contents(columns, batch)
+    # Opening execute: run the query and park the whole result for later scrolls.
+    try:
+        result = backend.execute(request.sql, request.binds)
+        if request.autocommit:
+            backend.commit()
+    except BackendError as err:
+        logger.info('scrollable query refused: %s', err.ora_message)
+        stream.write_packet(TNS_DATA, encode_error(err.ora_code, err.ora_message))
+        return []
+    except Exception as exc:
+        logger.warning('backend raised a non-ORA error: %s', exc)
+        stream.write_packet(
+            TNS_DATA, encode_error(_INTERNAL_ERROR, f'ORA-00600: backend error: {exc}')
+        )
+        return []
+    columns = result.columns
+    rows = list(result.rows)
+    cursor_id = cursors.open_scroll(columns, rows)
+    size = request.fetch if request.fetch > 0 else len(rows)
+    batch = rows[:size]
+    last_abs = len(batch)
+    stream.write_packet(
+        TNS_DATA,
+        encode_scroll_open_response(
+            columns,
+            batch,
+            cursor_id,
+            server_rowcount=last_abs,
+            eof=last_abs >= len(rows),
+        ),
+    )
+    return oci_lob_contents(columns, batch)
 
 
 def _answer_fetch(
