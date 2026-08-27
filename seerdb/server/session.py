@@ -39,6 +39,7 @@ from seerdb.common.tns_consts import (
     TTI_LOGOFF,
     TTI_MSG_TYPE_PIGGYBACK,
     TTI_OCCA,
+    TTI_PING,
     TTI_ROLLBACK,
 )
 from seerdb.server.auth import (
@@ -388,6 +389,11 @@ def serve_session(
             _answer_txn(stream, backend, commit=True)
         elif body[1] == TTI_ROLLBACK:
             _answer_txn(stream, backend, commit=False)
+        elif body[1] == TTI_PING:
+            # A keepalive / pool health check (conn.ping()): no state to touch,
+            # just acknowledge with a success status so the client round-trip
+            # completes instead of hanging.
+            stream.write_packet(TNS_DATA, encode_status(0))
         elif body[1] == TTI_LOGOFF:
             return user
 
