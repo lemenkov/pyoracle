@@ -614,7 +614,8 @@ def test_translate_routine_ddl_procedure() -> None:
         '(p_in IN NUMBER, p_out OUT NUMBER, p_io IN OUT VARCHAR2) '
         'AS BEGIN p_out := p_in * 2; END;'
     )
-    assert out.startswith('CREATE OR REPLACE PROCEDURE p(')
+    # DROP-first so a changed signature can replace a prior definition (#521).
+    assert out.startswith('DROP PROCEDURE IF EXISTS p; CREATE OR REPLACE PROCEDURE p(')
     assert 'p_in IN numeric' in out
     assert 'p_out OUT numeric' in out
     assert 'p_io INOUT varchar' in out  # IN OUT -> INOUT
@@ -626,8 +627,31 @@ def test_translate_routine_ddl_function() -> None:
         'CREATE OR REPLACE FUNCTION f(p IN NUMBER) RETURN NUMBER '
         'AS BEGIN RETURN p + 100; END;'
     )
-    assert out.startswith('CREATE OR REPLACE FUNCTION f(p IN numeric) RETURNS numeric')
+    assert out.startswith(
+        'DROP FUNCTION IF EXISTS f; '
+        'CREATE OR REPLACE FUNCTION f(p IN numeric) RETURNS numeric'
+    )
     assert 'LANGUAGE plpgsql AS $$ BEGIN RETURN p + 100; END $$' in out
+
+
+def test_translate_routine_ddl_drops_before_create() -> None:
+    # PostgreSQL cannot change an existing routine's OUT/return row type via CREATE
+    # OR REPLACE; the suite reuses one name with different signatures, so a DROP …
+    # IF EXISTS by name precedes every CREATE (#521).
+    proc = _translate_routine_ddl(
+        'CREATE OR REPLACE PROCEDURE seerdb_test_proc (p OUT TIMESTAMP) '
+        'AS BEGIN p := SYSTIMESTAMP; END;'
+    )
+    assert proc.startswith(
+        'DROP PROCEDURE IF EXISTS seerdb_test_proc; CREATE OR REPLACE'
+    )
+    func = _translate_routine_ddl(
+        'CREATE OR REPLACE FUNCTION seerdb_test_func(p IN NUMBER) RETURN NUMBER '
+        'AS BEGIN RETURN p; END;'
+    )
+    assert func.startswith(
+        'DROP FUNCTION IF EXISTS seerdb_test_func; CREATE OR REPLACE'
+    )
 
 
 def test_translate_routine_ddl_leaves_other_sql_unchanged() -> None:

@@ -343,7 +343,14 @@ def _translate_routine_ddl(sql: str) -> str:
     header = f'CREATE OR REPLACE {kind.upper()} {name}({params})'
     if kind.upper() == 'FUNCTION' and return_type:
         header += f' RETURNS {_translate_routine_types(return_type.strip())}'
-    return f'{header} LANGUAGE plpgsql AS $$ {body} $$'
+    # Oracle's CREATE OR REPLACE freely redefines a routine, but PostgreSQL's
+    # refuses to change an existing routine's OUT-parameter row type or return type
+    # ("cannot change return type of existing function"). The suite reuses one
+    # routine name across tests with different signatures, so drop any prior
+    # definition first — by name (the suite never overloads, so it is unambiguous),
+    # IF EXISTS so the first CREATE is fine (#521).
+    drop = f'DROP {kind.upper()} IF EXISTS {name};'
+    return f'{drop} {header} LANGUAGE plpgsql AS $$ {body} $$'
 
 
 # The anonymous block a thin callproc / callfunc sends: BEGIN name(:a, :b); END;
