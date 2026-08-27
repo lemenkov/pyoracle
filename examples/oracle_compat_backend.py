@@ -118,6 +118,16 @@ class OracleCompatBackend:
         # being dialect-specific, translates Oracle SQL to its own dialect there).
         return self._inner.execute(sql, binds)
 
+    def change_password(
+        self, username: str, old_password: str, new_password: str
+    ) -> None:
+        # Delegate a password change to the inner backend (#515); a backend that
+        # doesn't support it gets a clean ORA-01031 rather than an AttributeError.
+        inner_change = getattr(self._inner, 'change_password', None)
+        if inner_change is None:
+            raise BackendError('password change not supported', ora_code=1031)
+        inner_change(username, old_password, new_password)
+
     def commit(self) -> None:
         self._inner.commit()
 
