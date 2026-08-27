@@ -834,7 +834,8 @@ def encode_status_oci() -> bytes:
 _OCI_DML_ROWCOUNT_OFF = 43
 _OCI_CMD_TYPE_OFF = 57
 
-# V$SQL COMMAND_TYPE values sqlplus maps to the completion verb.
+# V$SQL COMMAND_TYPE values sqlplus maps to the completion message. Confirmed
+# live: sqlplus renders the message purely from this field (docs/PROTOCOL.md §36).
 _OCI_CMD_INSERT = 2
 _OCI_CMD_UPDATE = 6
 _OCI_CMD_DELETE = 7
@@ -845,7 +846,56 @@ _OCI_DML_CMD = {
     'UPDATE': _OCI_CMD_UPDATE,
     'DELETE': _OCI_CMD_DELETE,
 }
-_OCI_DDL_CMD = {'CREATE': _OCI_CMD_CREATE_TABLE, 'DROP': _OCI_CMD_DROP_TABLE}
+
+# DDL / no-row statements, keyed by (verb, object). sqlplus prints e.g. "Index
+# created.", "Table altered.", "View dropped." from the command type. Verbs with
+# no object (GRANT/REVOKE) map on the verb alone. Verified live against sqlplus.
+_OCI_DDL_COMMAND_TYPE = {
+    ('CREATE', 'TABLE'): 1,
+    ('CREATE', 'INDEX'): 9,
+    ('CREATE', 'SEQUENCE'): 13,
+    ('CREATE', 'SYNONYM'): 19,
+    ('CREATE', 'VIEW'): 21,
+    ('ALTER', 'INDEX'): 11,
+    ('ALTER', 'SEQUENCE'): 14,
+    ('ALTER', 'TABLE'): 15,
+    ('DROP', 'INDEX'): 10,
+    ('DROP', 'TABLE'): 12,
+    ('DROP', 'SEQUENCE'): 16,
+    ('DROP', 'SYNONYM'): 20,
+    ('DROP', 'VIEW'): 22,
+    ('LOCK', 'TABLE'): 26,
+    ('TRUNCATE', 'TABLE'): 85,
+}
+# Object-less verbs, and the object each bare verb falls back to.
+_OCI_DDL_VERB_COMMAND_TYPE = {'GRANT': 17, 'REVOKE': 18}
+_OCI_DDL_VERB_DEFAULT_OBJECT = {
+    'CREATE': 'TABLE',
+    'ALTER': 'TABLE',
+    'DROP': 'TABLE',
+    'TRUNCATE': 'TABLE',
+    'LOCK': 'TABLE',
+}
+
+
+def ddl_command_type(sql: str) -> int | None:
+    """The V$SQL command type for a DDL / session statement, or None if it is not
+    one the Mirror recognises (so it falls back to the generic no-row status).
+    sqlplus turns this into the completion message ("Table created.", "Index
+    dropped.", "Grant succeeded.", …)."""
+    parts = sql.strip().upper().split()
+    if not parts:
+        return None
+    verb = parts[0]
+    if verb in _OCI_DDL_VERB_COMMAND_TYPE:
+        return _OCI_DDL_VERB_COMMAND_TYPE[verb]
+    if verb not in _OCI_DDL_VERB_DEFAULT_OBJECT:
+        return None
+    obj = parts[1] if len(parts) > 1 else _OCI_DDL_VERB_DEFAULT_OBJECT[verb]
+    return _OCI_DDL_COMMAND_TYPE.get(
+        (verb, obj), _OCI_DDL_COMMAND_TYPE[(verb, _OCI_DDL_VERB_DEFAULT_OBJECT[verb])]
+    )
+
 
 _OCI_DML_STATUS_FRAME = bytes.fromhex(
     '08060000e85b00000000000200000001000000000000000000000000000000000000'
@@ -877,13 +927,13 @@ def encode_dml_status_oci(keyword: str, rowcount: int) -> bytes:
     return bytes(status)
 
 
-def encode_ddl_status_oci(keyword: str) -> bytes:
-    """OCI reply for a DDL — success so sqlplus prints ``Table created.`` /
-    ``Table dropped.``. ``keyword`` (CREATE/DROP) selects the V$SQL command type;
-    anything else falls back to CREATE. DDL affects no rows, so nothing but the
-    command type varies."""
+def encode_ddl_status_oci(command_type: int) -> bytes:
+    """OCI reply for a DDL / no-row statement — success so sqlplus prints the
+    matching message ("Table created.", "Index dropped.", "Table truncated.", …).
+    ``command_type`` is the V$SQL command type (see :func:`ddl_command_type`);
+    DDL affects no rows, so nothing but that field varies."""
     status = bytearray(_OCI_DDL_STATUS_FRAME)
-    status[_OCI_CMD_TYPE_OFF] = _OCI_DDL_CMD.get(keyword, _OCI_CMD_CREATE_TABLE)
+    status[_OCI_CMD_TYPE_OFF] = command_type
     return bytes(status)
 
 

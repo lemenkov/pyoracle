@@ -1043,23 +1043,30 @@ def test_encode_dml_status_oci_carries_the_verb_and_rowcount() -> None:
     )
 
 
-def test_encode_ddl_status_oci_selects_create_or_drop() -> None:
-    # CREATE and DROP carry their own captured 171-byte body; sqlplus reads the SQL
-    # command code at offset 57 (CREATE TABLE 1, DROP TABLE 12 = 0x0c) to render
-    # "Table created." vs "Table dropped.". DDL affects no rows — nothing computed.
-    from seerdb.server.query import encode_ddl_status_oci
+def test_encode_ddl_status_oci_carries_the_command_type() -> None:
+    # One frame carries the V$SQL command code at offset 57; sqlplus renders it as
+    # "Table created." (1) / "Table dropped." (12) / "Index created." (9) etc. DDL
+    # affects no rows — nothing but that field varies.
+    from seerdb.server.query import ddl_command_type, encode_ddl_status_oci
 
-    create = encode_ddl_status_oci('CREATE')
-    drop = encode_ddl_status_oci('DROP')
+    create = encode_ddl_status_oci(1)
+    drop = encode_ddl_status_oci(12)
     for body in (create, drop):
         assert body[:3] == b'\x08\x06\x00'
         assert len(body) == 171
-    assert create[57] == 0x01  # CREATE TABLE command code
-    assert drop[57] == 0x0C  # DROP TABLE command code
+    assert create[57] == 0x01  # CREATE TABLE
+    assert drop[57] == 0x0C  # DROP TABLE
     assert create != drop
 
-    # An uncaptured verb falls back to the CREATE body.
-    assert encode_ddl_status_oci('ALTER') == create
+    # The resolver maps (verb, object) -> V$SQL command type.
+    assert ddl_command_type('create table t (x number)') == 1
+    assert ddl_command_type('CREATE INDEX ix ON t (x)') == 9
+    assert ddl_command_type('drop view v') == 22
+    assert ddl_command_type('truncate table t') == 85
+    assert ddl_command_type('grant select on t to bob') == 17
+    # a bare verb defaults to its TABLE variant; a non-DDL verb is None.
+    assert ddl_command_type('alter something') == 15
+    assert ddl_command_type('begin null; end;') is None
 
 
 def test_read_chunked_sql_reassembles_the_chunks() -> None:
