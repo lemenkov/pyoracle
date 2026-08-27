@@ -33,6 +33,7 @@ from seerdb.common.tns import (
     encode_token_num,
 )
 from seerdb.common.tns_consts import (
+    AL32UTF8_CHARSET,
     TNS_LOB_OP_CLOSE,
     TNS_LOB_OP_FREE_TEMP,
     TNS_LOB_OP_GET_CHUNK_SIZE,
@@ -64,8 +65,8 @@ from seerdb.common.tns_consts import (
 )
 from seerdb.common.types import decode_value
 
-# AL32UTF8 — what seerdb advertises and what an 11g DUAL column reports.
-_CHARSET_AL32UTF8 = 873
+# AL32UTF8 (AL32UTF8_CHARSET) — what seerdb advertises and what an 11g DUAL
+# column reports. _CSFRM_DB is the database charset form (not the national one).
 _CSFRM_DB = 1
 
 # The 11g tail between the fixed header and the SQL: a [0, 0, 1] marker and a
@@ -143,7 +144,7 @@ def _decode_bind_value(data_type: int, raw: bytes | list) -> object:
         'data_length': 0,
         'precision': 0,
         'data_scale': 0,
-        'charset': _CHARSET_AL32UTF8,
+        'charset': AL32UTF8_CHARSET,
         'csfrm': _CSFRM_DB,
     }
     return decode_value(column, bytes(raw))
@@ -385,7 +386,7 @@ class ColumnMeta:
     data_type: int
     data_length: int
     max_size: int
-    charset: int = _CHARSET_AL32UTF8
+    charset: int = AL32UTF8_CHARSET
     csfrm: int = _CSFRM_DB
     precision: int = 0
     scale: int = 0

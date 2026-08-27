@@ -217,7 +217,7 @@ _RESULT_PARAMS: tuple[tuple[bytes, bytes], ...] = (
     (b'AUTH_VERSION_STRING', b'- 64bit Production'),
     (b'AUTH_VERSION_SQL', b'22'),
     (b'AUTH_XACTION_TRAITS', b'3'),
-    (b'AUTH_VERSION_NO', b'186647040'),
+    (b'AUTH_VERSION_NO', str(_SERVER_VERSION_NO).encode('ascii')),
     (b'AUTH_VERSION_STATUS', b'0'),
     (b'AUTH_CAPABILITY_TABLE', b''),
     (b'AUTH_DBNAME', b'XE'),
