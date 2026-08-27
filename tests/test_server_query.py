@@ -1428,3 +1428,44 @@ def test_encode_value_dispatches_interval_columns() -> None:
     assert _encode_value(iy, TNS_TYPE_INTERVALYM) == bytes([5]) + encode_interval_ym(iy)
     # NULL stays the empty DALC regardless of type.
     assert _encode_value(None, TNS_TYPE_INTERVALDS) == bytes([0])
+
+
+# --- LONG / LONG RAW inline column values (#484) -------------------------------
+
+
+def test_encode_long_value_thin_roundtrips_via_client_reader() -> None:
+    from seerdb.common.tns import _DECODE_FIELD_VERSION, _read_long_column
+    from seerdb.server.query import encode_long_value_thin
+
+    _DECODE_FIELD_VERSION.set(FIELD_VERSION_11_2)  # 11g single-byte chunk form
+    for content in (
+        b'hello',
+        b'x' * 700,  # multi-chunk
+        b'',
+        ('café — 日本').encode('utf-8'),
+    ):
+        # A trailing sentinel proves the two ub4 indicators are consumed and the
+        # reader stops exactly at the value's end (no desync into the next token).
+        val, rest = _read_long_column(encode_long_value_thin(content) + b'\xaa\xbb')
+        assert val == content
+        assert rest == b'\xaa\xbb'
+
+    # A NULL LONG still carries the trailing indicators, so the reader realigns.
+    val, rest = _read_long_column(encode_long_value_thin(None) + b'\xaa\xbb')
+    assert val is None
+    assert rest == b'\xaa\xbb'
+
+
+def test_encode_value_routes_long_columns_and_null_carries_trailers() -> None:
+    from seerdb.common.tns_consts import TNS_TYPE_LONG, TNS_TYPE_LONGRAW
+    from seerdb.server.query import _encode_value, encode_long_value_thin
+
+    # A LONG / LONG RAW column must use the inline streaming form, not a DALC —
+    # and a NULL LONG must still carry the two trailing indicators (the bare-0x00
+    # DALC NULL would desync the client's _read_long_column).
+    assert _encode_value('abc', TNS_TYPE_LONG) == encode_long_value_thin('abc')
+    assert _encode_value(b'\x00\x01', TNS_TYPE_LONGRAW) == encode_long_value_thin(
+        b'\x00\x01'
+    )
+    assert _encode_value(None, TNS_TYPE_LONG) == encode_long_value_thin(None)
+    assert _encode_value(None, TNS_TYPE_LONG) != bytes([0])  # not the DALC NULL

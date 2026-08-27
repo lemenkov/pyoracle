@@ -1163,10 +1163,48 @@ def encode_interval_ym(value: IntervalYM) -> bytes:
     return (value.years + 2**31).to_bytes(4, 'big') + bytes([value.months + 60])
 
 
+# A thin (seerdb / oracledb-thin) LONG / LONG RAW value streams inline in the RXD
+# — no LOB locator — as a value followed by TWO trailing ub4 indicators (actual /
+# return lengths, 0 / 0 for an ordinary value), the inverse of the client's
+# _read_long_column. The value is the 0xFE-chunked form (a run of <ub1 len><bytes>
+# terminated by a zero-length chunk) even when it fits one chunk; a NULL is a bare
+# 0x00 marker. This is the thin analogue of encode_long_value_oci, which frames
+# the sqlplus / OCI dialect (a single ub4 trailer) instead. Character LONG content
+# is UTF-8, LONG RAW is raw bytes. Chunks stay ≤ 253 bytes (the single-byte DALC
+# boundary used throughout this codec).
+_THIN_LONG_CHUNK = 253
+_THIN_LONG_TRAILER = encode_sb4(0) + encode_sb4(0)  # two ub4 indicators (0, 0)
+
+
+def encode_long_value_thin(value: object) -> bytes:
+    """The thin RXD value for a LONG / LONG RAW column (#484): the content
+    streamed inline as 0xFE-chunked bytes (NULL is a bare 0x00), followed by the
+    two zero trailing indicators the client's ``_read_long_column`` consumes."""
+    if value is None:
+        return bytes([0]) + _THIN_LONG_TRAILER
+    if isinstance(value, str):
+        content = value.encode('utf-8')
+    elif isinstance(value, (bytes, bytearray)):
+        content = bytes(value)
+    else:
+        content = str(value).encode('utf-8')
+    out = bytearray([0xFE])
+    for start in range(0, len(content), _THIN_LONG_CHUNK):
+        chunk = content[start : start + _THIN_LONG_CHUNK]
+        out += bytes([len(chunk)]) + chunk
+    out += bytes([0])  # zero-length chunk terminates the run
+    return bytes(out) + _THIN_LONG_TRAILER
+
+
 def _encode_value(value: object, data_type: int) -> bytes:
     # A scalar column value as a DALC (1-byte length + data). NULL is the empty
     # DALC; text is UTF-8; a number is Oracle's base-100 NUMBER encoding; a
     # datetime/date is encoded per the column's temporal type.
+    if data_type in (TNS_TYPE_LONG, TNS_TYPE_LONGRAW):
+        # LONG columns are NOT a DALC: they stream inline with their own framing
+        # and trailing indicators, and a NULL LONG still carries them (so it can't
+        # take the bare-0x00 NULL path below).
+        return encode_long_value_thin(value)
     if value is None:
         return bytes([0])
     if data_type == TNS_TYPE_INTERVALDS and isinstance(value, datetime.timedelta):

@@ -1837,6 +1837,19 @@ scalar types use:
   cleanly afterward. sqlplus renders LONG RAW poorly (a display quirk of its own,
   reproduced against real Oracle); the bytes round-trip intact.
 
+**Server side — the Mirror answering a thin client (#484).** A thin client
+(seerdb / oracledb-thin) needs no streaming dance: the LONG / LONG RAW value
+rides **inline in the ordinary execute reply**, in the same `TTI_RXD` as the
+other columns (`encode_long_value_thin`). The value is the `0xFE`-chunked form
+(chunks ≤ 253 bytes, terminated by a zero-length chunk), and — unlike the OCI
+path — it carries **both** trailing `ub4` indicators (`0` / `0`) that
+`_read_long_column` consumes. A NULL is a bare `0x00` marker still followed by
+those two indicators, so it can **not** take the empty-DALC NULL path the scalar
+types use — the Mirror routes LONG columns to the streaming encoder before the
+generic NULL check. Verified live on 11g through the passthrough: single value,
+700-byte multi-chunk, a value over the SDU, LONG-not-last-column, and NULL LONG /
+LONG RAW.
+
 ## 12. Wire Encoding Primitives
 
 ### 12.1 Variable-Length Integer (SB4/SB2)
