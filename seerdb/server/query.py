@@ -17,6 +17,7 @@ import struct
 from dataclasses import dataclass, field
 from decimal import Decimal
 
+from seerdb.common.datatypes import IntervalYM
 from seerdb.common.exceptions import DataError, InterfaceError
 from seerdb.common.tns import (
     _bytes_with_length,
@@ -49,6 +50,8 @@ from seerdb.common.tns_consts import (
     TNS_TYPE_CHAR,
     TNS_TYPE_CLOB,
     TNS_TYPE_DATE,
+    TNS_TYPE_INTERVALDS,
+    TNS_TYPE_INTERVALYM,
     TNS_TYPE_LONG,
     TNS_TYPE_LONGRAW,
     TNS_TYPE_NUMBER,
@@ -1132,12 +1135,44 @@ def _encode_temporal(value: datetime.date, data_type: int) -> bytes:
     return _encode_date_prefix(dt.replace(microsecond=0, tzinfo=None))
 
 
+def encode_interval_ds(value: datetime.timedelta) -> bytes:
+    """The 11-byte INTERVAL DAY TO SECOND wire value (#484), the inverse of
+    ``decode_interval_ds``: 4-byte days biased by 2**31, hours / minutes /
+    seconds biased by 60, then 4-byte nanoseconds biased by 2**31. Oracle stores
+    each component with the interval's sign, so a negative interval carries
+    negative sub-day fields — reconstruct them from the (sign-normalised)
+    timedelta rather than its floor-divided ``.days`` / ``.seconds``."""
+    total_us = value // datetime.timedelta(microseconds=1)
+    sign = -1 if total_us < 0 else 1
+    us = abs(total_us)
+    days, rem = divmod(us, 86_400_000_000)
+    hours, rem = divmod(rem, 3_600_000_000)
+    minutes, rem = divmod(rem, 60_000_000)
+    seconds, micros = divmod(rem, 1_000_000)
+    return (
+        (sign * days + 2**31).to_bytes(4, 'big')
+        + bytes([sign * hours + 60, sign * minutes + 60, sign * seconds + 60])
+        + (sign * micros * 1000 + 2**31).to_bytes(4, 'big')
+    )
+
+
+def encode_interval_ym(value: IntervalYM) -> bytes:
+    """The 5-byte INTERVAL YEAR TO MONTH wire value (#484), the inverse of
+    ``decode_interval_ym``: 4-byte years biased by 2**31, 1-byte months biased
+    by 60."""
+    return (value.years + 2**31).to_bytes(4, 'big') + bytes([value.months + 60])
+
+
 def _encode_value(value: object, data_type: int) -> bytes:
     # A scalar column value as a DALC (1-byte length + data). NULL is the empty
     # DALC; text is UTF-8; a number is Oracle's base-100 NUMBER encoding; a
     # datetime/date is encoded per the column's temporal type.
     if value is None:
         return bytes([0])
+    if data_type == TNS_TYPE_INTERVALDS and isinstance(value, datetime.timedelta):
+        return _bytes_with_length(encode_interval_ds(value))
+    if data_type == TNS_TYPE_INTERVALYM and isinstance(value, IntervalYM):
+        return _bytes_with_length(encode_interval_ym(value))
     if data_type in _OCI_LOB_TYPES:
         # A thin (seerdb / oracledb-thin) CLOB / BLOB value is delivered as an
         # opaque locator, not inline; the content follows over TTI_LOBOPS. The
