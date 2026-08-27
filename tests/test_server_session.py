@@ -333,7 +333,8 @@ def test_plsql_bind_vars_wraps_block_binds_with_type_and_size() -> None:
     )
     assert _plsql_bind_vars(dml) == [7]
 
-    # A REF CURSOR bind is left on the plain path (its OUT form is a follow-up).
+    # A REF CURSOR bind also rides the OUT path — the backend opens the cursor
+    # and its rows come back on a parked cursor id (#483).
     refc = ExecRequest(
         sql='BEGIN p(:1); END;',
         cursor=0,
@@ -342,4 +343,6 @@ def test_plsql_bind_vars_wraps_block_binds_with_type_and_size() -> None:
         binds=[None],
         bind_meta=[(TNS_TYPE_REFCURSOR, 1)],
     )
-    assert _plsql_bind_vars(refc) == [None]
+    wrapped_rc = _plsql_bind_vars(refc)
+    assert len(wrapped_rc) == 1
+    assert wrapped_rc[0].tns_type == TNS_TYPE_REFCURSOR

@@ -20,7 +20,8 @@ from collections.abc import Sequence
 
 import seerdb
 from seerdb.common.datatypes import dbtype_for_oracle_type
-from seerdb.server.backend import BackendError, BindVar, Result
+from seerdb.common.tns_consts import TNS_TYPE_REFCURSOR
+from seerdb.server.backend import BackendError, BindVar, CursorResult, Result
 from seerdb.server.query import ColumnMeta
 
 
@@ -79,21 +80,26 @@ class OraclePassthroughBackend:
 
     def _execute_plsql(self, cursor, sql: str, binds: Sequence) -> Result:
         variables = []
-        params = []
         for bind in binds:
             dbtype = dbtype_for_oracle_type(bind.tns_type, 1)
-            size = bind.max_size if bind.max_size and bind.max_size > 0 else None
-            var = cursor.var(dbtype, size) if dbtype is not None else cursor.var(str)
-            if bind.value is not None:
-                var.setvalue(0, bind.value)
+            if bind.tns_type == TNS_TYPE_REFCURSOR:
+                # A REF CURSOR OUT param: the DB opens the cursor, so bind a
+                # cursor var and don't seed it.
+                var = cursor.var(seerdb.DB_TYPE_CURSOR)
+            else:
+                size = bind.max_size if bind.max_size and bind.max_size > 0 else None
+                var = (
+                    cursor.var(dbtype, size) if dbtype is not None else cursor.var(str)
+                )
+                if bind.value is not None:
+                    var.setvalue(0, bind.value)
             variables.append(var)
-            params.append(var)
         try:
-            cursor.execute(sql, params)
+            cursor.execute(sql, variables)
         except seerdb.DatabaseError as exc:
             code = getattr(exc, 'code', None) or 900
             raise BackendError(str(exc), ora_code=code) from exc
-        return Result(out_binds=[var.getvalue() for var in variables])
+        return Result(out_binds=[_out_value(var.getvalue()) for var in variables])
 
     def commit(self) -> None:
         if self._conn is not None:
@@ -109,6 +115,16 @@ class OraclePassthroughBackend:
                 self._conn.close()
             finally:
                 self._conn = None
+
+
+def _out_value(value: object) -> object:
+    # A REF CURSOR OUT param resolves to a nested cursor; drain its describe +
+    # rows into a CursorResult the Mirror can park and hand back. Any other OUT
+    # value is a plain scalar the Mirror encodes by the bind's declared type.
+    if hasattr(value, 'description') and hasattr(value, 'fetchall'):
+        columns = [_to_column_meta(desc) for desc in value.description]
+        return CursorResult(columns=columns, rows=value.fetchall())
+    return value
 
 
 def _to_column_meta(desc: tuple) -> ColumnMeta:

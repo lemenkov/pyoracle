@@ -31,7 +31,6 @@ from seerdb.common.tns_consts import (
     TNS_TYPE_CLOB,
     TNS_TYPE_LONG,
     TNS_TYPE_LONGRAW,
-    TNS_TYPE_REFCURSOR,
     TTI_ALL8,
     TTI_COMMIT,
     TTI_FETCH,
@@ -59,7 +58,13 @@ from seerdb.server.auth import (
     parse_token_auth,
     verify_password,
 )
-from seerdb.server.backend import Backend, BackendError, BindVar, Result
+from seerdb.server.backend import (
+    Backend,
+    BackendError,
+    BindVar,
+    CursorResult,
+    Result,
+)
 from seerdb.server.framing import PacketStream
 from seerdb.server.handshake import (
     encode_accept,
@@ -75,6 +80,8 @@ from seerdb.server.query import (
     ColumnMeta,
     ExecRequest,
     FetchRequest,
+    RefCursorOutBind,
+    ScalarOutBind,
     TempLobRef,
     ddl_command_type,
     encode_commit_status_oci,
@@ -788,15 +795,26 @@ def _plsql_bind_vars(request: ExecRequest) -> list:
         or len(request.bind_meta) != len(request.binds)
     ):
         return request.binds
-    # A REF CURSOR OUT bind needs the inline-describe response form, not the
-    # scalar IOV this path emits; until that lands (a follow-up), leave such a
-    # block on the plain-value path so it fails cleanly rather than desyncing.
-    if any(tns_type == TNS_TYPE_REFCURSOR for tns_type, _size in request.bind_meta):
-        return request.binds
     return [
         BindVar(value=value, tns_type=tns_type, max_size=size)
         for value, (tns_type, size) in zip(request.binds, request.bind_meta)
     ]
+
+
+def _out_bind_entries(
+    out_binds: list, bind_meta: list, cursors: _Cursors
+) -> list[ScalarOutBind | RefCursorOutBind]:
+    # Turn the backend's OUT bind values into IOV reply entries (#483). A scalar
+    # rides with its declared type; a REF CURSOR value (CursorResult) has its rows
+    # parked on a fresh cursor id the client then drains with TTI_FETCH.
+    entries: list[ScalarOutBind | RefCursorOutBind] = []
+    for value, (tns_type, _size) in zip(out_binds, bind_meta):
+        if isinstance(value, CursorResult):
+            cursor_id = cursors.open(value.columns, list(value.rows))
+            entries.append(RefCursorOutBind(columns=value.columns, cursor_id=cursor_id))
+        else:
+            entries.append(ScalarOutBind(value=value, tns_type=tns_type))
+    return entries
 
 
 def _answer_query(
@@ -834,8 +852,9 @@ def _answer_query(
         # (the client keeps only its Var positions); this precedes the column /
         # status branches — a block carries neither rows nor a rowcount (#483).
         if result.out_binds:
-            types = [tns_type for tns_type, _size in request.bind_meta]
-            response = encode_out_bind_response_thin(list(zip(result.out_binds, types)))
+            response = encode_out_bind_response_thin(
+                _out_bind_entries(result.out_binds, request.bind_meta, cursors)
+            )
         # A query carries result columns (even with zero rows); a DDL/DML
         # statement carries none and gets a bare success status instead of a
         # describe — the client expects one or the other, not both.

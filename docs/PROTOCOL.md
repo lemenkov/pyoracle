@@ -1448,9 +1448,17 @@ return code per bind. The client keeps only the positions it bound as a `Var`
 are read and discarded — correct, if slightly more than a real server sends. This
 is what carries the thin `callproc` / `callfunc` / OUT-`Var` flow; passing the
 value with its type + size is also the fix for the `ORA-06502: buffer too small`
-a value-only OUT bind hit. REF CURSOR OUT binds still take the plain path (their
-inline-describe form is a follow-up); the buffer-size fix is what the scalar OUT /
-IN OUT binds needed.
+a value-only OUT bind hit.
+
+A **REF CURSOR OUT bind** (`OUT SYS_REFCURSOR`, #483) is returned in that same
+RXD slot but in the inline-describe form above: the backend opens the cursor, the
+Mirror drains its columns + rows into a `CursorResult`, parks the rows on a fresh
+cursor id (the ordinary `_Cursors` registry), and `encode_out_bind_response_thin`
+emits `<len><describe body><cursor id><indicator>` for that position (the describe
+body is the shared §6.4 encoder). The client reads the marker, then drains that
+cursor id with `TTI_FETCH` like any other result set. Because the inline describe
+reuses the §6.4 body, it inherits the same field-version gating (no `dcbqcky`
+before 11.2).
 
 ### 6.6 Return Parameter (TTI_RPA)
 

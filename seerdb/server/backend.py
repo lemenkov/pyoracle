@@ -71,6 +71,18 @@ class BindVar:
 
 
 @dataclass(frozen=True)
+class CursorResult:
+    """A REF CURSOR OUT bind's value: the nested result set the block opened, as
+    columns + rows (#483). A backend returns one of these in
+    :attr:`Result.out_binds` for a ``SYS_REFCURSOR`` OUT parameter; the Mirror
+    parks the rows and hands the client a cursor id to fetch them from.
+    """
+
+    columns: list[ColumnMeta] = field(default_factory=list)
+    rows: list[tuple] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class Result:
     """A backend execute outcome: query columns + rows, or a DML row count.
 
