@@ -31,10 +31,6 @@ from seerdb.common.tns_consts import (
 )
 
 # --- the TTI_PRO capability block (thin PRO reply == sqlplus DTY reply) ---
-_SERVER_PRO_VERSION = FIELD_VERSION_11_2  # negotiates field version 6 (11g)
-_SERVER_BANNER = b'x86_64/Linux 2.4.xx'
-_PRO_CHARSET_ID = struct.pack('<H', AL32UTF8_CHARSET)  # AL32UTF8 (873), LE
-_PRO_FLAGS = 1
 _PRO_CHARSET_ELEMENTS = bytes.fromhex(  # 10 x 5-byte charset elements
     '6603400301400366030166034803014803660301660352030152036603016603610301610366'
     '030166031f03081f03660301'
@@ -96,11 +92,13 @@ def build_caps_block_reply() -> bytes:
     server 11g capability vectors. Serves both the thin PRO reply and the
     sqlplus/deadbeef DTY reply (they are byte-identical)."""
     return (
-        bytes([TTI_PRO, _SERVER_PRO_VERSION, 0])
-        + _SERVER_BANNER
+        # TTI_PRO, the negotiated field version (6 = 11g), a zero, then the
+        # NUL-terminated version banner.
+        bytes([TTI_PRO, FIELD_VERSION_11_2, 0])
+        + b'x86_64/Linux 2.4.xx'
         + b'\x00'
-        + _PRO_CHARSET_ID
-        + bytes([_PRO_FLAGS])
+        + struct.pack('<H', AL32UTF8_CHARSET)  # charset id, LE
+        + bytes([1])  # flags
         + struct.pack('<H', len(_PRO_CHARSET_ELEMENTS) // 5)
         + _PRO_CHARSET_ELEMENTS
         + struct.pack('>H', len(_PRO_FDO))
