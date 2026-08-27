@@ -3956,7 +3956,18 @@ zero-filled envelope. For an error, the `ORA-NNNNN: <message>` DALC follows the
 `encode_oci_oer(status, *, sequence, row_kind, error_pos, error_code)` builds the
 token from the named fields over the shared envelope; the error / LONG-row /
 LOB-row status trailers are three calls to it, pinned byte-for-byte to the live
-captures by `tests/test_oci_oer_generation.py`. The DML/DDL execute-status
-messages wrap this OER in a larger status frame (with the rowid trailer and a
-command-type-specific header); folding those into the same generator is a
-follow-up.
+captures by `tests/test_oci_oer_generation.py`.
+
+### 36.3 DML / DDL execute-status
+
+The DML and DDL execute-status replies wrap the OER in a larger status frame
+(SCN region, cursor/rowid trailer, the `0x20f6310a` marker). sqlplus renders the
+completion message from just **two** fields of that frame: the V$SQL **command
+type** at body offset `57` (INSERT=2, UPDATE=6, DELETE=7, CREATE TABLE=1, DROP
+TABLE=12) and — for DML — the affected-row **count** (ub4 LE) at offset `43`.
+`encode_dml_status_oci` / `encode_ddl_status_oci` generate from those two fields
+over one shared frame each (a live 11g INSERT / CREATE reply with the
+capture-order session counters at offsets `3/75/186` and `3/11` zeroed, since the
+Mirror has no per-statement sequence). **Verified live** against sqlplus over the
+Mirror: `insert/update/delete` print the right verb and count, `create/drop`
+print `Table created.` / `Table dropped.`.
