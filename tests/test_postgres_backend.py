@@ -513,8 +513,10 @@ def test_translate_idioms_functions_and_literals() -> None:
     assert _translate_idioms('INSERT INTO t VALUES (EMPTY_BLOB())') == (
         "INSERT INTO t VALUES (''::bytea)"
     )
-    assert _translate_idioms("SELECT NVL(:v, 'x')") == "SELECT coalesce(:v, 'x')"
     assert _translate_idioms('SELECT SYSDATE') == 'SELECT localtimestamp(0)'
+    # NVL / DECODE / TO_CHAR come from the orafce extension, not a rewrite here —
+    # so they pass through unchanged.
+    assert _translate_idioms("SELECT NVL(:v, 'x')") == "SELECT NVL(:v, 'x')"
     assert (
         _translate_idioms(
             "SELECT FROM_TZ(TIMESTAMP '2024-01-15 12:00:00', 'US/Eastern')"
