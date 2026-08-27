@@ -24,7 +24,7 @@ from seerdb.common.tns import (
     _bytes_with_length,
     _encode_date_prefix,
     decode_dalc,
-    decode_token_oac,
+    decode_oac_fields,
     decode_ub4,
     encode_chr,
     encode_sb4,
@@ -130,12 +130,12 @@ class TempLobRef:
 _TEMP_LOB_BIND_PREFIX = b'\x01\x28\x28'
 
 
-def _read_bind_value(data_type: int, after: bytes) -> tuple[object, bytes]:
+def _read_bind_value(data_type: int, csfrm: int, after: bytes) -> tuple[object, bytes]:
     # One RXD bind value and the bytes past it. A CLOB / BLOB bind is a temp-LOB
     # descriptor (#412), not a plain DALC: 01 28 28 | ub2 loclen | locator, with
     # no outer length — the server reads it by type (the descriptor's leading
     # 0x01 would otherwise be mistaken for a DALC length). Everything else is the
-    # ordinary DALC value decoded by its OAC type.
+    # ordinary DALC value decoded by its OAC type and charset form.
     if (
         data_type in (TNS_TYPE_CLOB, TNS_TYPE_BLOB)
         and after[:3] == _TEMP_LOB_BIND_PREFIX
@@ -146,12 +146,14 @@ def _read_bind_value(data_type: int, after: bytes) -> tuple[object, bytes]:
         # TTI_LOBOPS WRITE (the backend never sees a locator, only the value).
         return TempLobRef(locator, data_type == TNS_TYPE_BLOB), after[5 + loclen :]
     raw, after = decode_dalc(after)
-    return _decode_bind_value(data_type, raw), after
+    return _decode_bind_value(data_type, csfrm, raw), after
 
 
-def _decode_bind_value(data_type: int, raw: bytes | list) -> object:
+def _decode_bind_value(data_type: int, csfrm: int, raw: bytes | list) -> object:
     # A bind value from the RXD, decoded by its OAC type. An empty/NULL DALC
-    # (reported as a list by decode_dalc) is None.
+    # (reported as a list by decode_dalc) is None. csfrm selects the char
+    # encoding: 2 (national) decodes an NCHAR / NVARCHAR value as UTF-16BE, 1
+    # (ordinary) as AL32UTF8 — decode_value keys on it via _string_charset (#484).
     if isinstance(raw, list) or not raw:
         return None
     raw = bytes(raw)
@@ -161,7 +163,7 @@ def _decode_bind_value(data_type: int, raw: bytes | list) -> object:
         'precision': 0,
         'data_scale': 0,
         'charset': AL32UTF8_CHARSET,
-        'csfrm': _CSFRM_DB,
+        'csfrm': csfrm or _CSFRM_DB,
     }
     return decode_value(column, bytes(raw))
 
@@ -219,20 +221,24 @@ def parse_exec(payload: bytes) -> ExecRequest:
         # (an ordinary single execute is just one row).
         types = []
         for _ in range(bind_count):
-            data_type, _maxlen, _scale, _charset, after = decode_token_oac(after, ())
+            data_type, _maxlen, _scale, _charset, csfrm, after = decode_oac_fields(
+                after
+            )
             if data_type in (TNS_TYPE_CLOB, TNS_TYPE_BLOB):
                 # A thin CLOB / BLOB bind is the temp-LOB locator form (#412),
                 # whose OAC appends a trailing oaccolid field that the shared
                 # decoder stops short of — swallow it so the next OAC aligns.
                 after = after[1:]
-            types.append(data_type)
+            # csfrm distinguishes an NCHAR / NVARCHAR bind (2 → UTF-16BE) from an
+            # ordinary char bind (1), so it must ride alongside the type (#484).
+            types.append((data_type, csfrm))
         # Each row is a TTI_RXD token followed by one value per bind column; loop
         # until the rows run out (executemany sends N, a plain execute sends 1).
         while after and after[0] == TTI_RXD:
             after = after[1:]
             row = []
-            for data_type in types:
-                value, after = _read_bind_value(data_type, after)
+            for data_type, csfrm in types:
+                value, after = _read_bind_value(data_type, csfrm, after)
                 row.append(value)
             bind_rows.append(row)
         if bind_rows:
@@ -385,7 +391,9 @@ def _parse_oci_binds(payload: bytes, sql_end: int, bind_count: int) -> list:
         try:
             for data_type in types:
                 raw, rest = decode_dalc(rest)
-                values.append(_decode_bind_value(data_type, raw))
+                # The OCI (sqlplus) bind path doesn't carry a national char form;
+                # decode ordinary char (csfrm 1) — no test client binds NCHAR here.
+                values.append(_decode_bind_value(data_type, _CSFRM_DB, raw))
         except (IndexError, DataError):
             continue
         if len(values) == bind_count:

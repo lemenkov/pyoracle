@@ -503,7 +503,11 @@ msgtype=2 | charset_in (UB2 LE) | charset_out (UB2 LE) | flag (UB1) |
   AL32UTF8 and send UTF-8; a national bind (`DB_TYPE_NVARCHAR` / `DB_TYPE_NCHAR`)
   declares AL16UTF16 and sends UTF-16BE. The pre-10g (fv2) bind path follows the
   same rule — it formerly declared the database charset on the OAC while sending
-  UTF-8, which a non-UTF-8 9i server then mis-converted (#174).
+  UTF-8, which a non-UTF-8 9i server then mis-converted (#174). **Server side —
+  the Mirror (#484)** reads the csfrm byte from each bind's OAC (`decode_oac_fields`)
+  and decodes the value with it, so an NCHAR / NVARCHAR bind (csfrm 2, UTF-16BE)
+  is recovered as text rather than mojibake; the common 5-tuple OAC decode drops
+  csfrm, which had defaulted every bind to the ordinary form.
 - **compile_caps / runtime_caps**: two length-prefixed byte arrays. Each index
   is a named feature slot (`TNS_CCAP_*` / `TNS_RCAP_*`). The most important is
   the **field version** at compile-cap index 7 (`TNS_CCAP_FIELD_VERSION`): it

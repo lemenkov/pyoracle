@@ -974,7 +974,12 @@ def decode_lobops_oer(Packet: bytes, FieldVersion: int) -> tuple[int, str | None
     return (0, None)
 
 
-def decode_token_oac(Data: bytes, Acc: tuple) -> tuple[int, int, int, int, bytes]:
+def decode_oac_fields(Data: bytes) -> tuple[int, int, int, int, int, bytes]:
+    # The full OAC field set, including the charset form (csfrm) byte the common
+    # 5-tuple form skips. csfrm distinguishes national char data (2 → AL16UTF16 /
+    # UTF-16BE) from ordinary char data (1) — the server needs it to decode an
+    # NCHAR / NVARCHAR bind (#484). Returns (DataType, MaxDataLength, DataScale,
+    # Charset, Csfrm, Rest).
     (DataType, Flg, Pre) = struct.unpack('>BBB', Data[:3])
     (DataScale, R0) = decode_ub4(Data[3:])
     (MaxDataLength, R1) = decode_ub4(R0)
@@ -983,8 +988,16 @@ def decode_token_oac(Data: bytes, Acc: tuple) -> tuple[int, int, int, int, bytes
     (ToId, R4) = decode_dalc(R3)
     (VSN, R5) = decode_ub4(R4)
     (Charset, R6) = decode_ub4(R5)
-    (Mxlc, R7) = decode_ub4(R6[1:])  # R6[0] is the csfrm byte — skipped
-    return (DataType, MaxDataLength, DataScale, Charset, R7)
+    Csfrm = R6[0]
+    (Mxlc, R7) = decode_ub4(R6[1:])
+    return (DataType, MaxDataLength, DataScale, Charset, Csfrm, R7)
+
+
+def decode_token_oac(Data: bytes, Acc: tuple) -> tuple[int, int, int, int, bytes]:
+    (DataType, MaxDataLength, DataScale, Charset, _Csfrm, Rest) = decode_oac_fields(
+        Data
+    )
+    return (DataType, MaxDataLength, DataScale, Charset, Rest)
 
 
 def decode_token_rpa(Data: bytes, Acc: tuple) -> tuple:

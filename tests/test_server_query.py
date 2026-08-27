@@ -1523,3 +1523,31 @@ def test_encode_value_routes_rowid_columns() -> None:
     assert _encode_value('*BAEALAMCwQL+', TNS_TYPE_UROWID) == encode_urowid_value(
         '*BAEALAMCwQL+'
     )
+
+
+# --- National char (NCHAR / NVARCHAR) bind decode (#484) ------------------------
+
+
+def test_decode_oac_fields_exposes_csfrm() -> None:
+    from seerdb.common.tns import decode_oac_fields, decode_token_oac, encode_tokens_oac
+
+    # Build the OAC bytes the client sends for one VARCHAR bind, then confirm the
+    # new decoder surfaces the charset-form byte the 5-tuple form drops.
+    oac = encode_tokens_oac(['hi'], b'')
+    dtype, maxlen, scale, charset, csfrm, rest = decode_oac_fields(oac)
+    assert csfrm == 1  # an ordinary (DB) char bind
+    # The 5-tuple form stays byte-compatible (same fields minus csfrm).
+    assert (dtype, maxlen, scale, charset, rest) == decode_token_oac(oac, ())
+
+
+def test_decode_bind_value_honours_national_csfrm() -> None:
+    from seerdb.common.tns_consts import TNS_TYPE_VARCHAR
+    from seerdb.server.query import _decode_bind_value
+
+    text = 'café—Ω—日本'
+    raw = text.encode('utf-16-be')  # how an NCHAR / NVARCHAR bind arrives
+    # csfrm 2 (national) decodes UTF-16BE; csfrm 1 (ordinary) mojibakes it.
+    assert _decode_bind_value(TNS_TYPE_VARCHAR, 2, raw) == text
+    assert _decode_bind_value(TNS_TYPE_VARCHAR, 1, raw) != text
+    # A NULL bind stays None regardless of form.
+    assert _decode_bind_value(TNS_TYPE_VARCHAR, 2, b'') is None
