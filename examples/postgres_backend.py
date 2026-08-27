@@ -291,6 +291,44 @@ def _translate_routine_ddl(sql: str) -> str:
 _CALL_BLOCK = re.compile(r'(?is)^\s*BEGIN\s+(.*?)\s*;?\s*END\s*;?\s*$')
 _FUNC_CALL = re.compile(r'(?is)^\s*:(\d+)\s*:=\s*([\w.]+)\s*\((.*)\)\s*$')
 _PROC_CALL = re.compile(r'(?is)^\s*([\w.]+)\s*\((.*)\)\s*$')
+# A scalar OUT-bind assignment inside a block: `:ref := <expr>` (#517).
+_OUT_ASSIGN = re.compile(r'(?is)^\s*:(\w+)\s*:=\s*(.+?)\s*$')
+
+
+def _distinct_bind_refs(text: str) -> list[str]:
+    # The distinct bind references in first-appearance order (their positions in
+    # the Mirror's bind list), ignoring `:` inside string literals — the same
+    # scan _translate_binds uses, so a ref's position stays consistent.
+    seen: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] == "'":
+            i += 1
+            while i < n and text[i] != "'":
+                i += 1
+            i += 1
+            continue
+        match = _BIND_REF.match(text, i)
+        if match is not None and (i == 0 or text[i - 1] != ':'):
+            if match.group(1) not in seen:
+                seen.append(match.group(1))
+            i = match.end()
+            continue
+        i += 1
+    return seen
+
+
+def _parse_out_assignments(body: str) -> list[tuple[str, str]] | None:
+    # An OUT-bind-assignment block is one or more `:ref := <expr>` statements
+    # (BEGIN :y := 7*6; :2 := NULL; END). Returns (ref, expr) per assignment, or
+    # None if any statement isn't such an assignment (so it isn't this shape).
+    assignments = []
+    for statement in filter(None, (s.strip() for s in body.split(';'))):
+        match = _OUT_ASSIGN.match(statement)
+        if match is None:
+            return None
+        assignments.append((match.group(1), match.group(2)))
+    return assignments or None
 
 
 # PostgreSQL type OIDs (pg_type.oid) → Oracle wire type.
@@ -508,8 +546,15 @@ class PostgresBackend:
             proc = _PROC_CALL.match(statement)
             if proc is not None:
                 return self._call_procedure(proc, values)
-            # An anonymous block the translator doesn't model — run it as-is
-            # (best effort) so a side-effecting block still executes.
+            assignments = _parse_out_assignments(statement)
+            if assignments is not None:
+                return self._eval_out_assignments(statement, assignments, binds, values)
+            if inner is not None:
+                # A block wrapping DML (BEGIN INSERT/UPDATE/DELETE …(:x); END) —
+                # unwrap and run the inner statement with the binds.
+                return self._run_block_statement(statement, values)
+            # Not a shape we model — run it as-is (best effort) so a
+            # side-effecting block still executes.
             self._conn.cursor().execute(_translate_idioms(sql))
             return Result(out_binds=values)
         except psycopg.Error as exc:
@@ -550,6 +595,33 @@ class PostgresBackend:
                 out[ref - 1] = returned[result_i]
                 result_i += 1
         return Result(out_binds=out)
+
+    def _eval_out_assignments(
+        self, body: str, assignments: list, binds: Sequence, values: list
+    ) -> Result:
+        # BEGIN :a := <expr>; :b := <expr>; END — evaluate the right-hand sides
+        # with one SELECT and place each result onto its bind position (#517).
+        refs = _distinct_bind_refs(body)
+        exprs = ', '.join(expr for _ref, expr in assignments)
+        sql, params = _translate_binds(_translate_idioms(f'SELECT {exprs}'), values)
+        cursor = self._conn.cursor()
+        cursor.execute(sql, params)
+        row = list(cursor.fetchone() or [])
+        out = list(values)
+        for (ref, _expr), result in zip(assignments, row):
+            if ref in refs:
+                out[refs.index(ref)] = result
+        return Result(out_binds=out)
+
+    def _run_block_statement(self, statement: str, values: list) -> Result:
+        # A single DML statement unwrapped from a BEGIN … END block — run it with
+        # the binds (#517). The block carried IN binds, so there are no OUT values
+        # to return; the input values keep the bind positions aligned.
+        sql, params = _translate_binds(
+            _translate_idioms(_translate_ddl(statement)), values
+        )
+        self._conn.cursor().execute(sql, params)
+        return Result(out_binds=values)
 
     def _arg_modes(self, name: str, nargs: int) -> list | None:
         # The parameter modes of a routine ('i' IN, 'o' OUT, 'b' IN OUT), so a
