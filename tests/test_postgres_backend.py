@@ -82,6 +82,20 @@ def test_translate_idioms_rewrites_offset_bearing_timestamp_literal() -> None:
     assert plain == "TIMESTAMP '2026-06-07 13:14:15.5'"
 
 
+def test_translate_idioms_negates_whole_day_to_second_interval() -> None:
+    # Oracle's leading `-` negates the whole DAY TO SECOND interval; PostgreSQL
+    # applies it only to the days, so lift it to a unary minus on the literal (#520).
+    neg = _translate_idioms(
+        "INSERT INTO t VALUES (INTERVAL '-0 00:00:01.5' DAY TO SECOND)"
+    )
+    assert "(- INTERVAL '0 00:00:01.5' DAY TO SECOND)" in neg
+    # Precision qualifiers ride along; a positive literal is left untouched.
+    prec = _translate_idioms("p := INTERVAL '-1 02:03:04.5' DAY(4) TO SECOND(6)")
+    assert "- INTERVAL '1 02:03:04.5' DAY(4) TO SECOND(6)" in prec
+    pos = _translate_idioms("INTERVAL '5 04:03:02.123456' DAY TO SECOND")
+    assert pos == "INTERVAL '5 04:03:02.123456' DAY TO SECOND"
+
+
 def test_translate_binds_wraps_aware_datetime_as_composite() -> None:
     # An aware datetime bind carries a WITH TIME ZONE value: it becomes a ROW cast
     # with the offset in seconds alongside the instant, so the offset round-trips

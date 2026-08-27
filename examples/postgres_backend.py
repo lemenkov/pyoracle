@@ -246,6 +246,19 @@ _IDIOM_REWRITES = [
         re.compile(r'\bbinary_(?:double|float)_nan\b', re.IGNORECASE),
         "'NaN'::float8",
     ),
+    # A negative INTERVAL DAY TO SECOND literal. Oracle's leading `-` negates the
+    # whole interval — INTERVAL '-1 02:03:04' DAY TO SECOND is -(1d 2h3m4s) — but
+    # PostgreSQL applies the sign only to the field it prefixes (the days), leaving
+    # the time part positive. Lift the inner `-` out to a unary minus on the whole
+    # literal, which negates every field the way Oracle does (#520).
+    (
+        re.compile(
+            r"\bINTERVAL\s+'-([^']*)'\s+"
+            r'(DAY(?:\s*\(\d+\))?\s+TO\s+SECOND(?:\s*\(\d+\))?)\b',
+            re.IGNORECASE,
+        ),
+        r"- INTERVAL '\1' \2",
+    ),
     # SYSDATE / SYSTIMESTAMP → the session clock (SYSDATE is to-the-second).
     (re.compile(r'\bsystimestamp\b', re.IGNORECASE), 'now()'),
     (re.compile(r'\bsysdate\b', re.IGNORECASE), 'localtimestamp(0)'),
