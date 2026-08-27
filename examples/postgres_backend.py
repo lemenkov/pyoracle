@@ -53,9 +53,58 @@ from seerdb.server import (
     credential_lookup,
 )
 
-# Oracle numbered/named binds (:1, :name) → psycopg positional '%s'. The
-# negative lookbehind leaves any '::' cast untouched.
-_ORACLE_BIND = re.compile(r'(?<!:):\w+')
+# One Oracle bind reference: `:` + an identifier or number (`:x`, `:my_var`,
+# `:1`). A `::` cast is left alone (handled by the scan below, which only starts
+# a bind where the previous char isn't `:`).
+_BIND_REF = re.compile(r':(\w+)')
+
+
+def _bind_key(name: str) -> str:
+    # A psycopg dict key for a bind name — a numbered bind (:1) isn't a valid
+    # placeholder key, so prefix it (b1). Named binds keep their name.
+    return name if name.isidentifier() else f'b{name}'
+
+
+def _translate_binds(sql: str, binds: Sequence) -> tuple[str, dict]:
+    """Rewrite Oracle bind references to psycopg named placeholders and build the
+    parameter dict (#516). Oracle binds by name, so a bind repeated in the text
+    (``:x … :x``) is one value, and a ``:`` inside a string literal is not a bind
+    — both of which a blind ``:name`` → ``%s`` substitution gets wrong. Distinct
+    binds map to ``binds`` in first-appearance order (positional ``:1 :2`` and a
+    single dict/list of values both land correctly)."""
+    names: list[str] = []  # distinct bind names, in first-appearance order
+    out: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        char = sql[i]
+        if char == "'":  # copy a whole string literal verbatim ('' escapes a quote)
+            out.append(char)
+            i += 1
+            while i < n:
+                out.append(sql[i])
+                if sql[i] == "'" and not (i + 1 < n and sql[i + 1] == "'"):
+                    i += 1
+                    break
+                i += 2 if sql[i] == "'" else 1
+            continue
+        match = _BIND_REF.match(sql, i)
+        if match is not None and (i == 0 or sql[i - 1] != ':'):
+            name = match.group(1)
+            if name not in names:
+                names.append(name)
+            out.append(f'%({_bind_key(name)})s')
+            i = match.end()
+            continue
+        out.append(char)
+        i += 1
+    values = list(binds)
+    params = {
+        _bind_key(name): values[idx]
+        for idx, name in enumerate(names)
+        if idx < len(values)
+    }
+    return ''.join(out), params
+
 
 # Oracle → PostgreSQL column-type rewrites for CREATE TABLE (#500). Applied in
 # order, so a multi-word / longer keyword comes before a shorter one it contains
@@ -406,8 +455,9 @@ class PostgresBackend:
         # literal idioms. This is where dialect knowledge belongs, not in the
         # generic compat shim.
         sql = _translate_idioms(_translate_routine_ddl(_translate_ddl(sql)))
+        params: dict | None = None
         if binds:
-            sql = _ORACLE_BIND.sub('%s', sql)
+            sql, params = _translate_binds(sql, binds)
         cursor = self._conn.cursor()
         # SAVEPOINT isolates this statement: on any error we roll back to here
         # (which also clears PostgreSQL's aborted-transaction state) and leave the
@@ -415,7 +465,7 @@ class PostgresBackend:
         # the savepoint is resolved, so they never accumulate across statements.
         cursor.execute('SAVEPOINT _mirror_stmt')
         try:
-            cursor.execute(sql, tuple(binds) or None)
+            cursor.execute(sql, params)
             if cursor.description is None:
                 result = Result(rowcount=max(cursor.rowcount, 0))
             else:
