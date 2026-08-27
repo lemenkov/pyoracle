@@ -145,6 +145,14 @@ class AsyncPool:
                     # to recover if this connection fails to close cleanly.
                     pass
                 return
+            # End the pooled logical request (#464): flush REQUEST_END if open;
+            # a failure means the connection is dead, so discard it.
+            try:
+                await conn._end_request()
+            except Exception:
+                await self._discard_dead(conn)
+                cond.notify()
+                return
             self._free.append(_AsyncPoolEntry(conn))
             cond.notify()
 
@@ -199,10 +207,12 @@ class AsyncPool:
                             await self._discard_dead(Entry.conn)
                             continue
                     self._in_use.add(id(Entry.conn))
+                    Entry.conn._begin_request()  # request boundary (#464)
                     return Entry.conn
                 if len(self._in_use) < self._max:
                     Conn = await self._open_connection()
                     self._in_use.add(id(Conn))
+                    Conn._begin_request()  # request boundary (#464)
                     return Conn
                 if Deadline is None:
                     await cond.wait()
