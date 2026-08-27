@@ -648,6 +648,23 @@ def test_translate_routine_ddl_function() -> None:
     assert 'LANGUAGE plpgsql AS $$ BEGIN RETURN p + 100; END $$' in out
 
 
+def test_translate_routine_ddl_parameterless_function() -> None:
+    # Oracle lets a no-parameter routine omit the list entirely; PostgreSQL always
+    # needs the parentheses, so an absent list becomes an empty one (#530). A body
+    # containing its own parentheses still parses (params don't swallow the body).
+    out = _translate_routine_ddl(
+        'CREATE OR REPLACE FUNCTION f RETURN BINARY_DOUBLE AS BEGIN RETURN 2.25; END;'
+    )
+    assert 'CREATE OR REPLACE FUNCTION f() RETURNS double precision' in out
+    assert 'LANGUAGE plpgsql AS $$ BEGIN RETURN 2.25; END $$' in out
+    withbody = _translate_routine_ddl(
+        'CREATE OR REPLACE FUNCTION g(x IN NUMBER) RETURN NUMBER '
+        'AS BEGIN RETURN x * (x + 1); END;'
+    )
+    assert 'FUNCTION g(x IN numeric) RETURNS numeric' in withbody
+    assert 'BEGIN RETURN x * (x + 1); END' in withbody
+
+
 def test_translate_routine_ddl_maps_sys_refcursor_out() -> None:
     # A REF CURSOR OUT parameter (SYS_REFCURSOR) maps to PostgreSQL's refcursor; the
     # OPEN … FOR body is already valid PL/pgSQL (#518).
