@@ -111,6 +111,60 @@ def _translate_ddl(sql: str) -> str:
     return out
 
 
+# Oracle SQL functions / literal idioms → PostgreSQL (#502). Each is a function
+# call or a literal keyword the suite uses; the rewrites are anchored on the
+# call's `(` or a word boundary, so ordinary identifiers are left alone. Applied
+# to every statement (a DEFAULT SYSDATE in DDL is rewritten too).
+_IDIOM_REWRITES = [
+    # HEXTORAW('DEADBEEF') → a RAW/bytea value from the hex string.
+    (
+        re.compile(r"\bhextoraw\s*\(\s*('(?:[^']|'')*')\s*\)", re.IGNORECASE),
+        r"decode(\1, 'hex')",
+    ),
+    # RAWTOHEX(x) → the hex text of a bytea.
+    (
+        re.compile(r'\brawtohex\s*\(([^()]*)\)', re.IGNORECASE),
+        r"encode(\1, 'hex')",
+    ),
+    # EMPTY_CLOB() / EMPTY_BLOB() → an empty string / empty bytea.
+    (re.compile(r'\bempty_clob\s*\(\s*\)', re.IGNORECASE), "''"),
+    (re.compile(r'\bempty_blob\s*\(\s*\)', re.IGNORECASE), "''::bytea"),
+    # FROM_TZ(ts, 'zone') → interpret the naive timestamp as being in that zone.
+    (
+        re.compile(
+            r"\bfrom_tz\s*\(\s*(.+?)\s*,\s*('(?:[^']|'')*')\s*\)", re.IGNORECASE
+        ),
+        r'(\1 AT TIME ZONE \2)',
+    ),
+    # NVL(a, b) → COALESCE(a, b).
+    (re.compile(r'\bnvl\s*\(', re.IGNORECASE), 'coalesce('),
+    # BINARY_DOUBLE/FLOAT special values → IEEE-754 float literals.
+    (
+        re.compile(r'\bbinary_(?:double|float)_infinity\b', re.IGNORECASE),
+        "'Infinity'::float8",
+    ),
+    (
+        re.compile(r'\bbinary_(?:double|float)_nan\b', re.IGNORECASE),
+        "'NaN'::float8",
+    ),
+    # SYSDATE / SYSTIMESTAMP → the session clock (SYSDATE is to-the-second).
+    (re.compile(r'\bsystimestamp\b', re.IGNORECASE), 'now()'),
+    (re.compile(r'\bsysdate\b', re.IGNORECASE), 'localtimestamp(0)'),
+    # A BINARY_DOUBLE / BINARY_FLOAT numeric literal suffix (1234.5678d, 1.5f) —
+    # PostgreSQL has no such suffix, so drop it. A decimal point is required so
+    # this never touches an identifier or a plain integer.
+    (re.compile(r'\b(\d+\.\d+)[dfDF]\b'), r'\1'),
+]
+
+
+def _translate_idioms(sql: str) -> str:
+    """Rewrite the Oracle SQL functions / literal idioms the suite uses to their
+    PostgreSQL equivalents (#502). Applied to every statement."""
+    for pattern, replacement in _IDIOM_REWRITES:
+        sql = pattern.sub(replacement, sql)
+    return sql
+
+
 # PostgreSQL type OIDs (pg_type.oid) → Oracle wire type.
 _NUMBER_OIDS = frozenset(
     {
@@ -161,6 +215,7 @@ _SQLSTATE_TO_ORA = {
     '23505': 1,  # unique_violation        -> unique constraint violated
     '23502': 1400,  # not_null_violation      -> cannot insert NULL
     '23514': 2290,  # check_violation         -> check constraint violated
+    '22P02': 1722,  # invalid_text_representation -> invalid number (TO_NUMBER)
 }
 
 
@@ -244,9 +299,10 @@ class PostgresBackend:
         return credential_lookup(self._credentials, username)
 
     def execute(self, sql: str, binds: Sequence = ()) -> Result:
-        # Translate Oracle DDL column types to PostgreSQL's dialect (#500) — this
-        # is where dialect knowledge belongs, not in the generic compat shim.
-        sql = _translate_ddl(sql)
+        # Translate Oracle SQL to PostgreSQL's dialect (#500/#502) — DDL column
+        # types, then the function / literal idioms. This is where dialect
+        # knowledge belongs, not in the generic compat shim.
+        sql = _translate_idioms(_translate_ddl(sql))
         if binds:
             sql = _ORACLE_BIND.sub('%s', sql)
         cursor = self._conn.cursor()
