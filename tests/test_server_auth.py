@@ -276,3 +276,31 @@ def test_full_auth_roundtrip_through_seerdb_client_encoders() -> None:
     # The result the server sends back, validated by the client's own check.
     _, resp, _, _ = decode_token_rpa(encode_result(server_conn)[1:], ())
     assert validate(unhexlify(resp), client_conn)
+
+
+def test_parse_changepassword_and_decrypt_roundtrip() -> None:
+    # A changepassword TTI_AUTH round-trips: the server parser recovers the user
+    # and the two AES ciphertexts, and decrypt_password (the inverse of the
+    # client's encrypt_password) recovers the plaintext passwords under the
+    # login ConnKey (#21/#486).
+    from seerdb.common.crypto import decrypt_password
+    from seerdb.common.tns import encode_dictionary_chgpwd
+    from seerdb.server.auth import parse_changepassword
+
+    conn_key = bytes(range(24))  # a 24-byte 11g session ConnKey
+    msg = encode_dictionary_chgpwd(
+        {
+            'seq': 1,
+            'field_version': 6,
+            'env': {'user': 'PYO'},
+            'auth': {
+                'conn_key': conn_key,
+                'old_password': 'pyo123',
+                'new_password': 'pyo123_chg9',
+            },
+        }
+    )
+    user, old_cipher, new_cipher = parse_changepassword(msg)
+    assert user == b'PYO'
+    assert decrypt_password(conn_key, old_cipher) == b'pyo123'
+    assert decrypt_password(conn_key, new_cipher) == b'pyo123_chg9'

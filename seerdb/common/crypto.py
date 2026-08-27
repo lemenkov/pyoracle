@@ -191,6 +191,19 @@ def encrypt_password(ConnKey: bytes, Password: bytes) -> bytes:
     return cipher.encrypt(pad1(Password))
 
 
+def decrypt_password(ConnKey: bytes, Cipher: bytes) -> bytes:
+    # The inverse of encrypt_password: AES-CBC decrypt under the session ConnKey,
+    # drop the leading 16-byte block pad1 prepends, then strip the PKCS7 tail
+    # pad2 appended. The Mirror uses this to recover the changepassword old / new
+    # passwords a client encrypted under the login ConnKey (#21/#486).
+    plain = AES.new(ConnKey, AES.MODE_CBC, bytes(16)).decrypt(Cipher)
+    body = plain[16:]
+    pad_len = body[-1] if body else 0
+    if 0 < pad_len <= len(body):
+        body = body[:-pad_len]
+    return body
+
+
 def validate(Resp: bytes, Key: bytes) -> bool:
     IVec = bytes(16)
     cipher = AES.new(Key, AES.MODE_CBC, IVec)

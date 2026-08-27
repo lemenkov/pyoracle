@@ -32,6 +32,10 @@ def main() -> None:
     user = os.environ.get('SEERDB_TEST_USER', 'PYO')
     password = os.environ.get('SEERDB_TEST_PASSWORD', 'pyo123')
 
+    # One shared credential map across every session's backend, so a
+    # changepassword on one connection is visible to the next (#21/#486).
+    credentials = {user.upper(): password}
+
     logging.basicConfig(
         level=logging.INFO, format='%(asctime)s %(name)s %(levelname)s %(message)s'
     )
@@ -42,7 +46,7 @@ def main() -> None:
             host=host,
             port=int(port),
             service=service,
-            credentials={user.upper(): password},
+            credentials=credentials,
         ),
     )
 

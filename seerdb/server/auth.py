@@ -471,6 +471,22 @@ def parse_auth_response(payload: bytes) -> tuple[bytes, bytes, bytes | None]:
     return user, unhexlify(sesskey), auth_password
 
 
+def parse_changepassword(payload: bytes) -> tuple[bytes, bytes, bytes]:
+    """Return ``(username, AUTH_PASSWORD, AUTH_NEWPASSWORD)`` from a changepassword
+    TTI_AUTH (#21/#486). Both password fields are the AES-CBC ciphertext (already
+    un-hexed) the client encrypted under the login ConnKey — the session decrypts
+    them with :func:`~seerdb.common.crypto.decrypt_password`. Unlike login this
+    carries no ``AUTH_SESSKEY`` (the session already exists)."""
+    subtype, user, kvs = _parse_fun_auth(payload)
+    if subtype != TTI_AUTH:
+        raise InterfaceError(f'expected AUTH, got subtype {subtype}')
+    old_cipher = kvs.get(b'AUTH_PASSWORD')
+    new_cipher = kvs.get(b'AUTH_NEWPASSWORD')
+    if old_cipher is None or new_cipher is None:
+        raise InterfaceError('changepassword missing AUTH_PASSWORD / AUTH_NEWPASSWORD')
+    return user, unhexlify(old_cipher), unhexlify(new_cipher)
+
+
 # Token auth is a modern feature: its long values (the RSA signature, and real
 # JWTs) are written in the fv >= 12.2 chunked form (ub4-prefixed chunks). Decode
 # them with that field version, not the Mirror's pinned-11g default of 6.
