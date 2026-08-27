@@ -150,6 +150,46 @@ def test_live_seerdb_dual_query() -> None:
     assert row == ('X',)
 
 
+def test_live_seerdb_ping() -> None:
+    # A real client's ping() (keepalive / pool health check) round-trips against
+    # the Mirror and the session stays usable for a following query.
+    listen = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listen.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listen.bind(('127.0.0.1', 0))
+    listen.listen(1)
+    port = listen.getsockname()[1]
+
+    result: dict = {}
+    server = threading.Thread(
+        target=_run_mirror_session, args=(listen, result), daemon=True
+    )
+    server.start()
+
+    conn = seerdb.connect(
+        host='127.0.0.1',
+        port=port,
+        user='PYO',
+        password='pyo123',
+        service_name='XE',
+        timeout=5000,
+    )
+    try:
+        conn.ping()  # must not hang
+        cursor = conn.cursor()
+        cursor.execute('select * from dual')
+        row = cursor.fetchone()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert row == ('X',)
+
+
 def test_unsupported_query_errors_but_keeps_connection() -> None:
     # The cardinal rule: a refused query is an ORA error on a HEALTHY
     # connection — never a desync. After the error, the connection still works.
