@@ -25,6 +25,7 @@ from seerdb.common.tns_consts import (
     TNS_TYPE_BDOUBLE,
     TNS_TYPE_BFLOAT,
     TNS_TYPE_DATE,
+    TNS_TYPE_INTERVALDS,
     TNS_TYPE_NUMBER,
     TNS_TYPE_RAW,
     TNS_TYPE_TIMESTAMP,
@@ -136,6 +137,13 @@ _TEMPORAL_OIDS = {
     1114: (TNS_TYPE_TIMESTAMP, 11),  # timestamp (without time zone)
     1184: (TNS_TYPE_TIMESTAMPTZ, 13),  # timestamptz
 }
+# PostgreSQL `interval` (oid 1186) → Oracle INTERVAL DAY TO SECOND. psycopg
+# returns it as a datetime.timedelta, which the Mirror already encodes for an
+# INTERVALDS column. INTERVAL YEAR TO MONTH can't round-trip: PostgreSQL/psycopg
+# collapse a year-month interval to an approximate day count (a timedelta with no
+# months), losing the calendar distinction Oracle keeps — that's an Oracle-only
+# ceiling (#504), not a mapping this backend can honour.
+_INTERVAL_OIDS = frozenset({1186})
 
 _ORA_INVALID_SQL = 900
 
@@ -184,6 +192,10 @@ def _column_meta(desc, values: list) -> ColumnMeta:
         data_type, width = _TEMPORAL_OIDS[oid]
         return ColumnMeta(
             name=ident, data_type=data_type, data_length=width, max_size=width
+        )
+    if oid in _INTERVAL_OIDS:
+        return ColumnMeta(
+            name=ident, data_type=TNS_TYPE_INTERVALDS, data_length=11, max_size=11
         )
     if oid in _RAW_OIDS:
         width = max(
