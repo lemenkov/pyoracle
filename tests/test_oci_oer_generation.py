@@ -131,10 +131,10 @@ class TestExecuteStatusGeneration(unittest.TestCase):
         )
 
     def test_ddl_verbs_share_frame_and_carry_command_type(self):
-        create = encode_ddl_status_oci('CREATE')
-        drop = encode_ddl_status_oci('DROP')
-        self.assertEqual(create[_OCI_CMD_TYPE_OFF], 1)  # CREATE TABLE
-        self.assertEqual(drop[_OCI_CMD_TYPE_OFF], 12)  # DROP TABLE
+        create = encode_ddl_status_oci(1)  # CREATE TABLE
+        drop = encode_ddl_status_oci(12)  # DROP TABLE
+        self.assertEqual(create[_OCI_CMD_TYPE_OFF], 1)
+        self.assertEqual(drop[_OCI_CMD_TYPE_OFF], 12)
         diffs = [i for i in range(len(create)) if create[i] != drop[i]]
         self.assertEqual(diffs, [_OCI_CMD_TYPE_OFF])
 

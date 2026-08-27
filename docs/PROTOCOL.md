@@ -3970,4 +3970,4 @@ over one shared frame each (a live 11g INSERT / CREATE reply with the
 capture-order session counters at offsets `3/75/186` and `3/11` zeroed, since the
 Mirror has no per-statement sequence). **Verified live** against sqlplus over the
 Mirror: `insert/update/delete` print the right verb and count, `create/drop`
-print `Table created.` / `Table dropped.`.
+print `Table created.` / `Table dropped.` (and, via the resolved command type, `Index created.`, `Table altered.`, `View dropped.`, `Table truncated.`, and the rest).

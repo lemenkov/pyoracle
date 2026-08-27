@@ -75,6 +75,7 @@ from seerdb.server.query import (
     ExecRequest,
     FetchRequest,
     TempLobRef,
+    ddl_command_type,
     encode_commit_status_oci,
     encode_create_temp_response,
     encode_ddl_status_oci,
@@ -505,7 +506,6 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
 
 
 _OCI_DML_KEYWORDS = ('INSERT', 'UPDATE', 'DELETE', 'MERGE')
-_OCI_DDL_KEYWORDS = ('CREATE', 'DROP')
 
 
 def _is_long_result(columns: list[ColumnMeta]) -> bool:
@@ -542,15 +542,17 @@ def _serve_oci_long_row(
 def _oci_no_row_status(sql: str, rowcount: int) -> bytes:
     # Pick the OCI success reply for a statement that returned no columns, so
     # sqlplus renders the right message (#348 / #349): DML carries the affected row
-    # count ("N rows created/updated/deleted"), CREATE/DROP a plain DDL success
-    # ("Table created." / "Table dropped."), and everything else (other DDL, PL/SQL
-    # blocks, session bootstrap) the generic "PL/SQL procedure successfully
-    # completed".
+    # count ("N rows created/updated/deleted"); DDL / session verbs (CREATE / DROP
+    # / ALTER / TRUNCATE / GRANT / … on TABLE / INDEX / VIEW / SEQUENCE / …) carry a
+    # V$SQL command type sqlplus turns into "Table created.", "Index dropped.",
+    # "Table truncated.", "Grant succeeded.", etc.; anything else (PL/SQL blocks,
+    # session bootstrap) gets the generic "PL/SQL procedure successfully completed".
     keyword = sql.lstrip().split(None, 1)[0].upper() if sql.strip() else ''
     if keyword in _OCI_DML_KEYWORDS:
         return encode_dml_status_oci(keyword, rowcount)
-    if keyword in _OCI_DDL_KEYWORDS:
-        return encode_ddl_status_oci(keyword)
+    command_type = ddl_command_type(sql)
+    if command_type is not None:
+        return encode_ddl_status_oci(command_type)
     return encode_status_oci()
 
 
