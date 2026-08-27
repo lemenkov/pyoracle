@@ -24,7 +24,7 @@ import re
 from collections.abc import Sequence
 
 from seerdb.common.tns_consts import TNS_TYPE_VARCHAR
-from seerdb.server import Backend, BackendError, ColumnMeta, Result
+from seerdb.server import Backend, BackendError, BindVar, ColumnMeta, Result
 
 # Oracle's one-row ``DUAL`` table has no equal on a plain backend, but a bare
 # ``SELECT <expr>`` (no FROM) is the same thing there — so drop a trailing
@@ -92,10 +92,14 @@ class OracleCompatBackend:
     def execute(self, sql: str, binds: Sequence = ()) -> Result:
         normalized = ' '.join(sql.strip().upper().split())
         if normalized.startswith('BEGIN'):
-            # A PL/SQL block. The ``EXEC :v := <literal>`` form assigns OUT binds
-            # the client reads back — evaluate those literal assignments. Any other
-            # PL/SQL session call (DBMS_OUTPUT.DISABLE, SET_MODULE) has no effect on
-            # a non-Oracle backend, so acknowledge success and move on.
+            # A real callproc / callfunc (BindVar binds) is a proc call the inner
+            # backend runs — delegate it. Only the bind-less sqlplus
+            # ``EXEC :v := <literal>`` idiom is handled here: assign the OUT binds
+            # the client reads back from those literal assignments, and
+            # acknowledge any other session call (DBMS_OUTPUT.DISABLE, …) that has
+            # no effect on a non-Oracle backend.
+            if any(isinstance(b, BindVar) for b in binds):
+                return self._inner.execute(sql, binds)
             out_binds = _plsql_out_bind_values(sql)
             return Result(out_binds=out_binds) if out_binds else Result()
         if 'PRODUCT_PRIVS' in normalized:
