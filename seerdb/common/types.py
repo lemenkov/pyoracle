@@ -325,6 +325,19 @@ def rowid_to_string(Obj: int, File: int, Block: int, Slot: int) -> str:
     )
 
 
+def string_to_rowid(Text: str) -> tuple[int, int, int, int]:
+    # Inverse of rowid_to_string: parse the 18-char extended ROWID back into its
+    # (data object, relative file, block, slot) integers. Each segment is
+    # big-endian base64 in Oracle's alphabet — OOOOOO FFF BBBBBB RRR.
+    def _seg(Chars: str) -> int:
+        Value = 0
+        for Char in Chars:
+            Value = (Value << 6) | _ROWID_ALPHABET.index(Char)
+        return Value
+
+    return (_seg(Text[0:6]), _seg(Text[6:9]), _seg(Text[9:15]), _seg(Text[15:18]))
+
+
 def urowid_to_string(Value: bytes) -> str:
     # A logical/universal ROWID (e.g. an index-organized table's rowid) renders
     # as "*" + base64 of the rowid bytes minus their leading 1-byte type tag,

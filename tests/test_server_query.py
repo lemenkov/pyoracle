@@ -1469,3 +1469,57 @@ def test_encode_value_routes_long_columns_and_null_carries_trailers() -> None:
     )
     assert _encode_value(None, TNS_TYPE_LONG) == encode_long_value_thin(None)
     assert _encode_value(None, TNS_TYPE_LONG) != bytes([0])  # not the DALC NULL
+
+
+# --- ROWID / UROWID column values (#484) ---------------------------------------
+
+
+def test_string_to_rowid_inverts_rowid_to_string() -> None:
+    from seerdb.common.types import rowid_to_string, string_to_rowid
+
+    for text in ('AAAAB0AABAAAAOhAAA', 'AAAK6JAAEAAACGPAAA'):
+        obj, file, block, slot = string_to_rowid(text)
+        assert rowid_to_string(obj, file, block, slot) == text
+
+
+def test_encode_rowid_value_roundtrips_via_client_reader() -> None:
+    from seerdb.common.tns import _read_rowid_column
+    from seerdb.server.query import encode_rowid_value
+
+    for text in ('AAAAB0AABAAAAOhAAA', 'AAAK6JAAEAAACGPAAA'):
+        val, rest = _read_rowid_column(encode_rowid_value(text) + b'\xaa')
+        assert val == text
+        assert rest == b'\xaa'
+    # A NULL rowid is a bare present-indicator the reader reports as None.
+    val, rest = _read_rowid_column(encode_rowid_value(None) + b'\xaa')
+    assert val is None
+    assert rest == b'\xaa'
+
+
+def test_encode_urowid_value_roundtrips_via_client_reader() -> None:
+    from seerdb.common.tns import _read_urowid_column
+    from seerdb.server.query import encode_urowid_value
+
+    for text in ('*BAEALAMCwQL+', '*BAEAGYMCwQL+'):
+        val, rest = _read_urowid_column(encode_urowid_value(text) + b'\xaa')
+        assert val == text
+        assert rest == b'\xaa'
+    val, rest = _read_urowid_column(encode_urowid_value(None) + b'\xaa')
+    assert val is None
+    assert rest == b'\xaa'
+
+
+def test_encode_value_routes_rowid_columns() -> None:
+    from seerdb.common.tns_consts import TNS_TYPE_RID, TNS_TYPE_UROWID
+    from seerdb.server.query import (
+        _encode_value,
+        encode_rowid_value,
+        encode_urowid_value,
+    )
+
+    assert _encode_value('AAAAB0AABAAAAOhAAA', TNS_TYPE_RID) == encode_rowid_value(
+        'AAAAB0AABAAAAOhAAA'
+    )
+    assert _encode_value('*BAEALAMCwQL+', TNS_TYPE_UROWID) == encode_urowid_value(
+        '*BAEALAMCwQL+'
+    )
