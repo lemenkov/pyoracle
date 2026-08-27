@@ -281,3 +281,65 @@ def test_free_temp_drops_the_buffer_and_state_ops_ack() -> None:
     _answer_lobops(stream, op_request(TNS_LOB_OP_OPEN, locator), [], temp_lobs)
     assert bytes(locator) in temp_lobs  # OPEN doesn't free
     assert decode_lobops_oer(stream.sent[-1], 6)[0] in (0, 1403)
+
+
+# --- PL/SQL OUT-bind helpers (#483) --------------------------------------------
+
+
+def test_is_plsql_block_detects_begin_and_declare() -> None:
+    from seerdb.server.session import _is_plsql_block
+
+    assert _is_plsql_block('BEGIN p(:1); END;')
+    assert _is_plsql_block('  declare x number; begin null; end;')
+    assert not _is_plsql_block('SELECT 1 FROM dual')
+    assert not _is_plsql_block('INSERT INTO t VALUES (:1)')
+
+
+def test_plsql_bind_vars_wraps_block_binds_with_type_and_size() -> None:
+    from seerdb.common.tns_consts import (
+        TNS_TYPE_NUMBER,
+        TNS_TYPE_REFCURSOR,
+        TNS_TYPE_VARCHAR,
+    )
+    from seerdb.server.backend import BindVar
+    from seerdb.server.query import ExecRequest
+    from seerdb.server.session import _plsql_bind_vars
+
+    block = ExecRequest(
+        sql='BEGIN p(:1, :2); END;',
+        cursor=0,
+        bind_count=2,
+        fetch=0,
+        binds=[7, None],
+        bind_meta=[(TNS_TYPE_NUMBER, 22), (TNS_TYPE_VARCHAR, 32767)],
+    )
+    wrapped = _plsql_bind_vars(block)
+    assert all(isinstance(b, BindVar) for b in wrapped)
+    assert (wrapped[0].value, wrapped[0].tns_type, wrapped[0].max_size) == (
+        7,
+        TNS_TYPE_NUMBER,
+        22,
+    )
+    assert wrapped[1].max_size == 32767  # the OUT VARCHAR buffer size
+
+    # A non-block statement passes its plain values through unchanged.
+    dml = ExecRequest(
+        sql='INSERT INTO t VALUES (:1)',
+        cursor=0,
+        bind_count=1,
+        fetch=0,
+        binds=[7],
+        bind_meta=[(TNS_TYPE_NUMBER, 22)],
+    )
+    assert _plsql_bind_vars(dml) == [7]
+
+    # A REF CURSOR bind is left on the plain path (its OUT form is a follow-up).
+    refc = ExecRequest(
+        sql='BEGIN p(:1); END;',
+        cursor=0,
+        bind_count=1,
+        fetch=0,
+        binds=[None],
+        bind_meta=[(TNS_TYPE_REFCURSOR, 1)],
+    )
+    assert _plsql_bind_vars(refc) == [None]

@@ -1551,3 +1551,60 @@ def test_decode_bind_value_honours_national_csfrm() -> None:
     assert _decode_bind_value(TNS_TYPE_VARCHAR, 1, raw) != text
     # A NULL bind stays None regardless of form.
     assert _decode_bind_value(TNS_TYPE_VARCHAR, 2, b'') is None
+
+
+# --- PL/SQL OUT binds: thin IOV response (#483) --------------------------------
+
+
+def test_encode_out_bind_response_thin_roundtrips_via_client() -> None:
+    from seerdb.client.cursor import _assign_out_binds
+    from seerdb.common.datatypes import NUMBER, STRING, Var
+    from seerdb.common.tns import decode_packet
+    from seerdb.common.tns_consts import TNS_TYPE_NUMBER, TNS_TYPE_VARCHAR
+    from seerdb.server.query import encode_out_bind_response_thin
+
+    _DECODE_FIELD_VERSION.set(FIELD_VERSION_11_2)
+    # callproc([21, out NUMBER, io VARCHAR]) — the Mirror marks every bind OUT and
+    # returns each value; the client keeps only the positions it bound as a Var.
+    resp = encode_out_bind_response_thin(
+        [(21, TNS_TYPE_NUMBER), (42, TNS_TYPE_NUMBER), ('hi!', TNS_TYPE_VARCHAR)]
+    )
+    v_out, v_io = Var(NUMBER), Var(STRING, 100)
+    bind = [21, v_out, v_io]
+    result = decode_packet(resp, (0, [], [], bind))
+    assert result[1] == 0  # success OER
+    record = result[4][0]
+    assert record['out_positions'] == [0, 1, 2]
+    assert record['directions'] == [16, 16, 16]  # all OUT
+    # The client assigns only its Var positions; the plain IN value 0 is skipped.
+    assert _assign_out_binds(bind, result) == []
+    assert v_out.getvalue() == 42
+    assert v_io.getvalue() == 'hi!'
+
+
+def test_parse_exec_exposes_bind_meta() -> None:
+    from seerdb.common.tns import encode_dictionary_exec
+
+    # bind_meta carries (tns_type, max_size) per bind — the type + OUT buffer size
+    # a PL/SQL block's OUT binds need registered on the backend.
+    msg = encode_dictionary_exec(
+        {
+            'seq': 3,
+            'field_version': 6,
+            'query': {
+                'type': 'block',
+                'auto': 0,
+                'fetch': 0,
+                'server_version': 186647040,
+                'cursor': 0,
+                'query': 'BEGIN p(:1, :2); END;',
+                'bind': [7, 'hi'],
+                'batch': [],
+                'def': [],
+            },
+        }
+    )
+    req = parse_exec(msg)
+    assert len(req.bind_meta) == 2
+    assert req.bind_meta[0][0] == TNS_TYPE_NUMBER  # a NUMBER bind's type
+    assert all(size >= 0 for _t, size in req.bind_meta)

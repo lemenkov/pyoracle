@@ -1435,6 +1435,23 @@ value per OUT / IN OUT bind **in bind order** (IN binds contribute nothing):
 
 After the values come the usual `TTI_RPA` and `TTI_OER` tokens.
 
+**Server side — the Mirror answering a thin client (#483).** The wire carries
+**no** bind direction in the request — Oracle infers IN / OUT / IN OUT from the
+block source — so the Mirror can't label binds from the OALL8 alone. Instead it
+hands the backend *every* bind of a PL/SQL block as a `BindVar` (value + declared
+type + OAC buffer size); the backend registers each as an OUT-capable variable,
+runs the block (a pure-IN param simply keeps its input value, an OUT/IN OUT one
+is written back), and returns every variable's value. `encode_out_bind_response_thin`
+then emits the IOV with **all** binds marked OUT (`16`) and a DALC value + `ub4`
+return code per bind. The client keeps only the positions it bound as a `Var`
+(`_assign_out_binds` filters by its own bind list), so the extra echoed IN values
+are read and discarded — correct, if slightly more than a real server sends. This
+is what carries the thin `callproc` / `callfunc` / OUT-`Var` flow; passing the
+value with its type + size is also the fix for the `ORA-06502: buffer too small`
+a value-only OUT bind hit. REF CURSOR OUT binds still take the plain path (their
+inline-describe form is a follow-up); the buffer-size fix is what the scalar OUT /
+IN OUT binds needed.
+
 ### 6.6 Return Parameter (TTI_RPA)
 
 Contains cursor information and bookkeeping after statement execution. For authentication, it carries key-value pairs. For SQL execution, it carries the cursor ID for subsequent fetch operations.

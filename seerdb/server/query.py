@@ -36,6 +36,7 @@ from seerdb.common.tns import (
 )
 from seerdb.common.tns_consts import (
     AL32UTF8_CHARSET,
+    TNS_BIND_DIR_OUTPUT,
     TNS_EXEC_FLAGS_SCROLLABLE,
     TNS_FETCH_ORIENTATION_FIRST,
     TNS_FETCH_ORIENTATION_LAST,
@@ -66,6 +67,7 @@ from seerdb.common.tns_consts import (
     TTI_DCB,
     TTI_FETCH,
     TTI_FUN,
+    TTI_IOV,
     TTI_LOB,
     TTI_OER,
     TTI_RPA,
@@ -103,6 +105,9 @@ class ExecRequest:
     # One entry per array-DML (executemany) iteration; a plain execute has a
     # single row equal to ``binds`` (empty for a statement with no binds).
     bind_rows: list = field(default_factory=list)
+    # Per-bind (tns_type, max_size) from the OACs, in bind order — the type +
+    # return-buffer size a PL/SQL block's OUT binds need (#483).
+    bind_meta: list = field(default_factory=list)
     autocommit: bool = False
     # Server-side scrollable cursor (#181/#485): the SCROLLABLE exec flag on the
     # opening execute, and the fetch orientation + 1-based position a scroll
@@ -215,34 +220,37 @@ def parse_exec(payload: bytes) -> ExecRequest:
 
     binds: list = []
     bind_rows: list = []
+    bind_meta: list = []
     if bind_count > 0:
         # After the al8 array (already consumed above): one OAC (type descriptor)
         # per bind column, then one RXD row of values per array-DML iteration
         # (an ordinary single execute is just one row).
         types = []
         for _ in range(bind_count):
-            data_type, _maxlen, _scale, _charset, csfrm, after = decode_oac_fields(
-                after
-            )
+            data_type, maxlen, _scale, _charset, csfrm, after = decode_oac_fields(after)
             if data_type in (TNS_TYPE_CLOB, TNS_TYPE_BLOB):
                 # A thin CLOB / BLOB bind is the temp-LOB locator form (#412),
                 # whose OAC appends a trailing oaccolid field that the shared
                 # decoder stops short of — swallow it so the next OAC aligns.
                 after = after[1:]
             # csfrm distinguishes an NCHAR / NVARCHAR bind (2 → UTF-16BE) from an
-            # ordinary char bind (1), so it must ride alongside the type (#484).
-            types.append((data_type, csfrm))
+            # ordinary char bind (1); maxlen is the OUT return-buffer size a
+            # PL/SQL OUT bind needs (#483/#484). Both ride alongside the type.
+            types.append((data_type, csfrm, maxlen))
         # Each row is a TTI_RXD token followed by one value per bind column; loop
         # until the rows run out (executemany sends N, a plain execute sends 1).
         while after and after[0] == TTI_RXD:
             after = after[1:]
             row = []
-            for data_type, csfrm in types:
+            for data_type, csfrm, _maxlen in types:
                 value, after = _read_bind_value(data_type, csfrm, after)
                 row.append(value)
             bind_rows.append(row)
         if bind_rows:
             binds = bind_rows[0]
+        # Per-bind (tns_type, max_size) — what a PL/SQL block's OUT binds need to
+        # be registered on the backend with a correctly-sized buffer (#483).
+        bind_meta = [(data_type, maxlen) for data_type, _csfrm, maxlen in types]
 
     return ExecRequest(
         sql=sql,
@@ -251,6 +259,7 @@ def parse_exec(payload: bytes) -> ExecRequest:
         fetch=fetch,
         binds=binds,
         bind_rows=bind_rows,
+        bind_meta=bind_meta,
         autocommit=autocommit,
         scrollable=scrollable,
         scroll_orientation=scroll_orientation,
@@ -1827,6 +1836,35 @@ def encode_status(rowcount: int = 0) -> bytes:
     """OER reporting success for a non-query (DDL / DML), with the affected-row
     count. No describe, no rows — the client just sees the statement completed."""
     return _encode_oer(0, 0, rowcount, b'')
+
+
+def encode_out_bind_response_thin(out_binds: list[tuple[object, int]]) -> bytes:
+    """The thin reply returning a PL/SQL block's OUT bind values (#483): a
+    TTI_IOV vector + a TTI_RXD row of the values + a success OER.
+
+    ``out_binds`` is ``(value, tns_type)`` for **every** bind, in bind order —
+    the Mirror can't tell IN from OUT (the wire has no direction), so it marks
+    them all OUT and returns each value; the client keeps only the positions it
+    bound as a ``Var`` (``_assign_out_binds``). The IOV header mirrors what
+    ``_read_iov`` decodes: a flag, the bind count (num_requests + num_iters*256),
+    and the zeroed iter / buffer / bit-vector / rowid fields, then one direction
+    byte per bind. Each value rides as a DALC followed by a ub4 return code (0)."""
+    count = len(out_binds)
+    num_requests, num_iters = count % 256, count // 256
+    iov = (
+        bytes([TTI_IOV, 0])  # token + flag
+        + encode_sb4(num_requests)
+        + encode_sb4(num_iters)
+        + encode_sb4(1)  # num iters this time
+        + encode_sb4(0)  # uac buffer length
+        + encode_sb4(0)  # fast-fetch bit vector length
+        + encode_sb4(0)  # rowid length
+        + bytes([TNS_BIND_DIR_OUTPUT]) * count  # direction per bind
+    )
+    rxd = bytes([TTI_RXD]) + b''.join(
+        _encode_value(value, tns_type) + encode_sb4(0) for value, tns_type in out_binds
+    )
+    return iov + rxd + encode_status(0)
 
 
 def encode_more_rows(cursor_id: int) -> bytes:
