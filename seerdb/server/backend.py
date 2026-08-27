@@ -49,13 +49,35 @@ class Capability(Enum):
 
 
 @dataclass(frozen=True)
+class BindVar:
+    """A PL/SQL bind the Mirror hands the backend with its declared type and
+    return-buffer size, so the backend can register a correctly-sized OUT bind.
+
+    The wire carries no bind direction — Oracle infers IN / OUT / IN OUT from the
+    block itself — so the Mirror can't label binds up front. Instead it passes
+    *every* bind of a PL/SQL block as a ``BindVar`` (the input ``value`` seeded,
+    ``None`` for a pure OUT) and the backend binds each as an OUT-capable variable
+    of ``tns_type`` sized ``max_size``. After execution the backend returns each
+    variable's value in :attr:`Result.out_binds`; the ones the block wrote are the
+    OUT / IN OUT results, and the client keeps only the positions it bound as
+    ``Var`` (see ``_assign_out_binds``). ``max_size`` is the OAC buffer length the
+    client declared (e.g. 32767 for a VARCHAR OUT) — the fix for the
+    ``ORA-06502: buffer too small`` a value-only bind hit.
+    """
+
+    value: object
+    tns_type: int
+    max_size: int
+
+
+@dataclass(frozen=True)
 class Result:
     """A backend execute outcome: query columns + rows, or a DML row count.
 
     ``out_binds`` carries the values a PL/SQL block assigned to its OUT binds,
-    in bind order — the sqlplus ``VARIABLE`` / ``EXEC :v := ...`` flow. Empty for
-    an ordinary statement; when set, the Mirror returns them to the client
-    instead of a plain status.
+    in bind order — the sqlplus ``VARIABLE`` / ``EXEC :v := ...`` flow, and the
+    thin ``callproc`` / OUT-``Var`` flow (#483). Empty for an ordinary statement;
+    when set, the Mirror returns them to the client instead of a plain status.
     """
 
     columns: list[ColumnMeta] = field(default_factory=list)

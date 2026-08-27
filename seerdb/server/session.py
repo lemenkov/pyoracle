@@ -31,6 +31,7 @@ from seerdb.common.tns_consts import (
     TNS_TYPE_CLOB,
     TNS_TYPE_LONG,
     TNS_TYPE_LONGRAW,
+    TNS_TYPE_REFCURSOR,
     TTI_ALL8,
     TTI_COMMIT,
     TTI_FETCH,
@@ -58,7 +59,7 @@ from seerdb.server.auth import (
     parse_token_auth,
     verify_password,
 )
-from seerdb.server.backend import Backend, BackendError, Result
+from seerdb.server.backend import Backend, BackendError, BindVar, Result
 from seerdb.server.framing import PacketStream
 from seerdb.server.handshake import (
     encode_accept,
@@ -93,6 +94,7 @@ from seerdb.server.query import (
     encode_logoff_status_oci,
     encode_long_fetch_row_oci,
     encode_out_bind_response_oci,
+    encode_out_bind_response_thin,
     encode_query_response,
     encode_query_response_oci,
     encode_reexec_row_oci,
@@ -769,6 +771,34 @@ def _resolve_temp_lob_binds(
     return replace(request, binds=rows[0], bind_rows=rows)
 
 
+def _is_plsql_block(sql: str) -> bool:
+    head = sql.lstrip().upper()
+    return head.startswith('BEGIN') or head.startswith('DECLARE')
+
+
+def _plsql_bind_vars(request: ExecRequest) -> list:
+    # For a PL/SQL block with binds, wrap each value with its declared type and
+    # return-buffer size so the backend can register OUT binds correctly (#483) —
+    # the wire carries no direction, so every bind is handed over OUT-capable and
+    # the client keeps only the positions it bound as a Var. Any other statement,
+    # or a shape mismatch, passes its plain values unchanged.
+    if (
+        not request.binds
+        or not _is_plsql_block(request.sql)
+        or len(request.bind_meta) != len(request.binds)
+    ):
+        return request.binds
+    # A REF CURSOR OUT bind needs the inline-describe response form, not the
+    # scalar IOV this path emits; until that lands (a follow-up), leave such a
+    # block on the plain-value path so it fails cleanly rather than desyncing.
+    if any(tns_type == TNS_TYPE_REFCURSOR for tns_type, _size in request.bind_meta):
+        return request.binds
+    return [
+        BindVar(value=value, tns_type=tns_type, max_size=size)
+        for value, (tns_type, size) in zip(request.binds, request.bind_meta)
+    ]
+
+
 def _answer_query(
     stream: PacketStream, backend: Backend, request: ExecRequest, cursors: _Cursors
 ) -> list[tuple[bytes, bool]]:
@@ -787,7 +817,7 @@ def _answer_query(
                 affected += backend.execute(request.sql, row).rowcount
             result = Result(rowcount=affected)
         else:
-            result = backend.execute(request.sql, request.binds)
+            result = backend.execute(request.sql, _plsql_bind_vars(request))
         # Autocommit mode: the client set the commit-on-success option, so
         # persist this statement before replying (an explicit-transaction client
         # leaves the bit clear and drives commit/rollback itself).
@@ -800,10 +830,16 @@ def _answer_query(
         logger.warning('backend raised a non-ORA error: %s', exc)
         response = encode_error(_INTERNAL_ERROR, f'ORA-00600: backend error: {exc}')
     else:
+        # A PL/SQL block that assigned OUT binds returns them as an IOV vector
+        # (the client keeps only its Var positions); this precedes the column /
+        # status branches — a block carries neither rows nor a rowcount (#483).
+        if result.out_binds:
+            types = [tns_type for tns_type, _size in request.bind_meta]
+            response = encode_out_bind_response_thin(list(zip(result.out_binds, types)))
         # A query carries result columns (even with zero rows); a DDL/DML
         # statement carries none and gets a bare success status instead of a
         # describe — the client expects one or the other, not both.
-        if result.columns:
+        elif result.columns:
             rows = list(result.rows)
             # A LOB result's rows carry locators; the client reads their content
             # row-major over TTI_LOBOPS, so queue every cell's content in that
