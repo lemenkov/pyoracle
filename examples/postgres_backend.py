@@ -165,6 +165,31 @@ def _translate_idioms(sql: str) -> str:
     return sql
 
 
+# Column types that are Oracle-only *for the version the Mirror advertises*
+# (11.2) — native JSON is 21c+, VECTOR and BOOLEAN are 23ai+. The Mirror pins
+# field version 11.2, so a real Oracle at that version rejects such a column with
+# ORA-00902 (invalid datatype). PostgreSQL would instead accept JSON / BOOLEAN
+# and reject VECTOR as an unknown type, so the suite's version guards (which skip
+# on ORA-00902) never fired. Reject them here so those tests skip exactly as they
+# do against a real pre-21c/23ai Oracle, rather than failing on a value the
+# backend can't faithfully represent (#504). This is the honest ceiling: a
+# PostgreSQL backend behind an 11.2 Mirror does not offer these types.
+_ORA_INVALID_DATATYPE = 902
+_ORACLE_ONLY_DDL_TYPES = re.compile(r'\b(JSON|VECTOR|BOOLEAN)\b', re.IGNORECASE)
+
+
+def _reject_unsupported_ddl_types(sql: str) -> None:
+    if not _IS_CREATE_TABLE.match(sql):
+        return
+    match = _ORACLE_ONLY_DDL_TYPES.search(sql)
+    if match is not None:
+        raise BackendError(
+            f'invalid datatype: {match.group(1).upper()} is not available on '
+            f'this server version',
+            ora_code=_ORA_INVALID_DATATYPE,
+        )
+
+
 # PostgreSQL type OIDs (pg_type.oid) → Oracle wire type.
 _NUMBER_OIDS = frozenset(
     {
@@ -299,6 +324,10 @@ class PostgresBackend:
         return credential_lookup(self._credentials, username)
 
     def execute(self, sql: str, binds: Sequence = ()) -> Result:
+        # Reject the column types that are Oracle-only for the version the Mirror
+        # advertises (JSON/VECTOR/BOOLEAN), so the suite's version guards skip
+        # rather than the backend mis-representing them (#504).
+        _reject_unsupported_ddl_types(sql)
         # Translate Oracle SQL to PostgreSQL's dialect (#500/#502) — DDL column
         # types, then the function / literal idioms. This is where dialect
         # knowledge belongs, not in the generic compat shim.
