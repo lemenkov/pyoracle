@@ -32,6 +32,7 @@ values is layered on top separately.
 
 from __future__ import annotations
 
+import struct
 from binascii import unhexlify
 from dataclasses import dataclass
 from hashlib import sha1
@@ -55,10 +56,6 @@ from seerdb.common.tns_consts import (
     TTI_FUN,
     TTI_RPA,
     TTI_SESS,
-)
-from seerdb.server._handshake_11g import (
-    CHALLENGE_TEMPLATE_SQLPLUS,
-    RESULT_TEMPLATE_SQLPLUS,
 )
 
 # O5LOGON uses AES-CBC with an all-zero IV throughout.
@@ -197,21 +194,114 @@ def encode_challenge(challenge: Challenge) -> bytes:
     )
 
 
-# AUTH_SESSKEY value = hex of the 48-byte encrypted server session (96 chars);
-# AUTH_VFR_DATA value = hex of the 10-byte salt (20 chars). Both are fixed-size,
-# so encode_challenge_oci substitutes them into the captured template in place.
+# --- Generating the sqlplus / thick-OCI (deadbeef dialect) O5LOGON packets ---
+#
+# The challenge and result are lists of AUTH_* key-value pairs in the OCI dialect
+# (the read side is _oci_auth_value) behind the 10-byte TNS DATA header, followed
+# by a fixed capability/status trailer. Everything except the crypto values and
+# the salt is the Mirror's constant pinned-11g identity, captured once from a live
+# XE 11.2 server. encode_kv_oci computes the framing so the packets are generated
+# rather than replayed verbatim; the byte-for-byte match to the original captures
+# is pinned by tests/test_oci_auth_generation.py (#265).
+
+# The 11g SHA-1 password verifier type, carried as AUTH_VFR_DATA's trailing flag.
+_VERIFIER_TYPE_11G = 0x1B25
 _OCI_SESSKEY_HEXLEN = 96
 _OCI_SALT_HEXLEN = 20
+
+# The Mirror's fixed 11g identity, from the live XE 11.2 capture. The
+# session-identity fields (AUTH_SESSION_ID / _SERIAL_NUM / _SERVER_PID) are kept
+# as captured — the client does not cryptographically check them. AUTH_SVR_RESPONSE
+# is the one per-login value and is appended by encode_result_oci.
+_RESULT_PARAMS: tuple[tuple[bytes, bytes], ...] = (
+    (b'AUTH_VERSION_STRING', b'- 64bit Production'),
+    (b'AUTH_VERSION_SQL', b'22'),
+    (b'AUTH_XACTION_TRAITS', b'3'),
+    (b'AUTH_VERSION_NO', b'186647040'),
+    (b'AUTH_VERSION_STATUS', b'0'),
+    (b'AUTH_CAPABILITY_TABLE', b''),
+    (b'AUTH_DBNAME', b'XE'),
+    (b'AUTH_DB_MOUNT_ID\x00', b'3121942702'),
+    (b'AUTH_DB_ID\x00', b'3115068141'),
+    (b'AUTH_USER_ID', b'48'),
+    (b'AUTH_SESSION_ID', b'59'),
+    (b'AUTH_SERIAL_NUM', b'2021'),
+    (b'AUTH_INSTANCE_NO', b'1'),
+    (b'AUTH_FAILOVER_ID', b'1'),
+    (b'AUTH_SERVER_PID', b'3327'),
+    (b'AUTH_SC_SERVER_HOST', b'75106c7f39db'),
+    (b'AUTH_SC_DBUNIQUE_NAME', b'XE'),
+    (b'AUTH_SC_INSTANCE_NAME', b'XE'),
+    (b'AUTH_SC_SERVICE_NAME', b'XE'),
+    (b'AUTH_SC_INSTANCE_ID', b'1'),
+    (b'AUTH_SC_INSTANCE_START_TIME', b'2026-08-09 16:48:44.000000000 +00:00'),
+    (b'AUTH_SC_DB_DOMAIN', b''),
+    (b'AUTH_SC_SVC_FLAGS', b'8'),
+    (b'AUTH_INSTANCENAME', b'XE'),
+    (b'AUTH_NLS_LXLAN\x00', b'AMERICAN'),
+    (b'AUTH_NLS_LXCTERRITORY\x00', b'AMERICA'),
+    (b'AUTH_NLS_LXCCURRENCY\x00', b'$'),
+    (b'AUTH_NLS_LXCISOCURR\x00', b'AMERICA'),
+    (b'AUTH_NLS_LXCNUMERICS\x00', b'.,'),
+    (b'AUTH_NLS_LXCDATEFM\x00', b'DD-MON-RR'),
+    (b'AUTH_NLS_LXCDATELANG\x00', b'AMERICAN'),
+    (b'AUTH_NLS_LXCSORT\x00', b'BINARY'),
+    (b'AUTH_NLS_LXCCALENDAR\x00', b'GREGORIAN'),
+    (b'AUTH_NLS_LXCUNIONCUR\x00', b'$'),
+    (b'AUTH_NLS_LXCTIMEFM\x00', b'HH.MI.SSXFF AM'),
+    (b'AUTH_NLS_LXCSTMPFM\x00', b'DD-MON-RR HH.MI.SSXFF AM'),
+    (b'AUTH_NLS_LXCTTZNFM\x00', b'HH.MI.SSXFF AM TZR'),
+    (b'AUTH_NLS_LXCSTZNFM\x00', b'DD-MON-RR HH.MI.SSXFF AM TZR'),
+)
+_AUTH_GLOBALLY_UNIQUE_DBID = b'2C55FD5F1FE1101DA2455B7A62312B1D'
+
+# The 136-byte capability/status block trailing the key-value list (an opaque
+# OER-shaped status); challenge and result differ only in one subtype byte.
+_CHALLENGE_TRAILER = bytes.fromhex(
+    '04010000000200010000000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000002000000000000360100000000000000000000'
+    '0000000020f6310a0000000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000000000'
+)
+_RESULT_TRAILER = bytes.fromhex(
+    '04010000000300010000000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000003000000000000360100000000000000000000'
+    '0000000020f6310a0000000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000000000'
+)
+
+
+def encode_kv_oci(key: bytes, val: bytes, flags: int = 0) -> bytes:
+    """One OCI-dialect (deadbeef) key-value pair: a little-endian ub4 declared
+    length + short DALC for the key and the value (an empty value is the ub4
+    length 0 with no data byte), then a ub4 flags field (the verifier type for
+    AUTH_VFR_DATA, else 0). The write inverse of :func:`_oci_auth_value`."""
+
+    def field(data: bytes) -> bytes:
+        if not data:
+            return struct.pack('<I', 0)
+        return struct.pack('<I', len(data)) + bytes([len(data)]) + data
+
+    return field(key) + field(val) + struct.pack('<I', flags)
+
+
+def _oci_auth_packet(pairs: list[tuple[bytes, bytes, int]], trailer: bytes) -> bytes:
+    """Assemble a full deadbeef-dialect O5LOGON DATA packet from its key-value
+    pairs and trailer: a TTI_RPA marker, the pair count, a zero lead byte, the
+    pairs, and the trailer — behind the 10-byte TNS DATA header."""
+    payload = bytes([TTI_RPA, len(pairs), 0])
+    payload += b''.join(encode_kv_oci(k, v, f) for k, v, f in pairs)
+    payload += trailer
+    header = struct.pack('>H', len(payload) + 10) + bytes([0, 0, 6, 0, 0, 0, 0, 0])
+    return header + payload
 
 
 def encode_challenge_oci(challenge: Challenge) -> bytes:
     """Build the sqlplus / thick-OCI (deadbeef dialect) O5LOGON challenge (#265).
 
     Returns the **full TNS_DATA packet** (header included), ready for
-    ``PacketStream.send_raw``. Only AUTH_SESSKEY and AUTH_VFR_DATA vary between
-    challenges, so the two fixed-size crypto values are substituted into the
-    captured 390-byte template in place. Requires an 11g-shaped challenge — a
-    48-byte encrypted server session (96 hex) and a 10-byte salt (20 hex): pass
+    ``PacketStream.send_raw``. Requires an 11g-shaped challenge — a 48-byte
+    encrypted server session (96 hex) and a 10-byte salt (20 hex): pass
     ``make_challenge(secret, salt=token_bytes(10))``. Validated against live
     sqlplus 11.2, which accepts it and proceeds to send AUTH.
     """
@@ -222,38 +312,27 @@ def encode_challenge_oci(challenge: Challenge) -> bytes:
             'OCI challenge needs a 48-byte server session and a 10-byte salt, '
             f'got {len(challenge.auth_sesskey)}/{len(challenge.salt)} bytes'
         )
-    buf = bytearray(CHALLENGE_TEMPLATE_SQLPLUS)
-    # value offset = key end + ub4(len, LE) + ub1(len)
-    i_sk = buf.index(b'AUTH_SESSKEY') + len(b'AUTH_SESSKEY') + 5
-    i_vfr = buf.index(b'AUTH_VFR_DATA') + len(b'AUTH_VFR_DATA') + 5
-    buf[i_sk : i_sk + _OCI_SESSKEY_HEXLEN] = sesskey
-    buf[i_vfr : i_vfr + _OCI_SALT_HEXLEN] = salt
-    return bytes(buf)
-
-
-# AUTH_SVR_RESPONSE value = hex of the 48-byte server proof (96 chars). It begins
-# at this fixed offset in the captured result template (the framing ahead of it
-# is constant), so encode_result_oci substitutes it in place.
-_OCI_SVR_RESPONSE_HEXLEN = 96
-_RESULT_SVR_RESPONSE_OFF = 1526
+    pairs = [
+        (b'AUTH_SESSKEY', sesskey, 0),
+        (b'AUTH_VFR_DATA', salt, _VERIFIER_TYPE_11G),
+        (b'AUTH_GLOBALLY_UNIQUE_DBID\x00', _AUTH_GLOBALLY_UNIQUE_DBID, 0),
+    ]
+    return _oci_auth_packet(pairs, _CHALLENGE_TRAILER)
 
 
 def encode_result_oci(session_key: bytes, *, nonce: bytes | None = None) -> bytes:
     """Build the sqlplus / thick-OCI (deadbeef dialect) O5LOGON result (#265).
 
     Returns the **full TNS_DATA packet** (header included), ready for
-    ``PacketStream.send_raw``. Only ``AUTH_SVR_RESPONSE`` varies per login, so the
-    freshly computed 48-byte server proof (96 hex) is substituted into the
-    captured 1762-byte result template in place. The Mirror keeps the template's
-    session-identity fields (session id, serial, server PID) — the client does not
-    cryptographically check them. ``nonce`` is forwarded to
-    :func:`server_proof_oci` for deterministic tests.
+    ``PacketStream.send_raw``. ``AUTH_SVR_RESPONSE`` (the freshly computed 48-byte
+    server proof) is the one per-login value; every other field is the Mirror's
+    fixed identity. ``nonce`` is forwarded to :func:`server_proof_oci` for
+    deterministic tests.
     """
     proof = _hexval(server_proof_oci(session_key, nonce=nonce))
-    buf = bytearray(RESULT_TEMPLATE_SQLPLUS)
-    off = _RESULT_SVR_RESPONSE_OFF
-    buf[off : off + _OCI_SVR_RESPONSE_HEXLEN] = proof
-    return bytes(buf)
+    pairs = [(k, v, 0) for k, v in _RESULT_PARAMS]
+    pairs.append((b'AUTH_SVR_RESPONSE', proof, 0))
+    return _oci_auth_packet(pairs, _RESULT_TRAILER)
 
 
 def encode_result(
