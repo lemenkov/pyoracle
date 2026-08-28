@@ -28,11 +28,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'examples'))
 from postgres_backend import (  # noqa: E402
     _HELPER_FUNCTIONS_DDL,
     _IS_DDL,
+    OraInterval,
     PostgresBackend,
     _backend_error,
     _distinct_bind_refs,
     _parse_out_assignments,
     _reject_unsupported_ddl_types,
+    _to_interval_ym,
     _translate_binds,
     _translate_ddl,
     _translate_idioms,
@@ -82,6 +84,49 @@ def test_translate_ddl_maps_create_table_column_types() -> None:
     assert 'ts ora_tstz' in sent  # WITH TIME ZONE preserves the offset (#519)
     assert 'f real' in sent and 'g double precision' in sent
     assert 'NUMBER' not in sent and 'VARCHAR2' not in sent
+
+
+def test_translate_ddl_maps_interval_year_to_month_to_domain() -> None:
+    # INTERVAL YEAR TO MONTH → the ora_intervalym domain (so the read path can tell
+    # it from a DAY TO SECOND interval), while DAY TO SECOND stays a plain interval
+    # (#504).
+    sent = _translate_ddl(
+        'CREATE TABLE t (ym INTERVAL YEAR(4) TO MONTH, ds INTERVAL DAY TO SECOND)'
+    )
+    assert 'ym ora_intervalym' in sent
+    assert 'ds interval' in sent and 'ds ora_intervalym' not in sent
+
+
+def test_translate_binds_wraps_interval_ym_as_make_interval() -> None:
+    # An IntervalYM bind can't be sent as-is (psycopg has no dumper), so it becomes
+    # make_interval(months => N) with N the whole-month count — 3y7m → 43, and a
+    # negative -1y2m → -14 (IntervalYM normalises the sign) (#504).
+    sql, params = _translate_binds(
+        'INSERT INTO t VALUES (:1)', [seerdb.IntervalYM(3, 7)]
+    )
+    assert sql == 'INSERT INTO t VALUES (make_interval(months => %(b1)s))'
+    assert params == {'b1': 43}
+    _sql, neg = _translate_binds(
+        'INSERT INTO t VALUES (:1)', [seerdb.IntervalYM(-1, -2)]
+    )
+    assert neg == {'b1': -14}
+
+
+def test_to_interval_ym_from_ora_interval() -> None:
+    # An OraInterval (a timedelta carrying the whole-month count) → an IntervalYM;
+    # IntervalYM normalises the split and shares the sign (#504). A None passes.
+    empty = datetime.timedelta()
+    assert _to_interval_ym(OraInterval(months=43, td=empty)) == seerdb.IntervalYM(3, 7)
+    assert _to_interval_ym(OraInterval(months=-14, td=empty)) == seerdb.IntervalYM(
+        -1, -2
+    )
+    assert _to_interval_ym(None) is None
+    # A DAY TO SECOND interval carries months == 0 and keeps its exact duration, so
+    # it is still a real timedelta the INTERVALDS encode path handles unchanged.
+    ds = OraInterval(months=0, td=datetime.timedelta(days=2, seconds=11045))
+    assert isinstance(ds, datetime.timedelta)
+    assert ds == datetime.timedelta(days=2, seconds=11045)
+    assert _to_interval_ym(ds) == seerdb.IntervalYM(0, 0)
 
 
 def test_translate_ddl_time_zone_variants() -> None:
