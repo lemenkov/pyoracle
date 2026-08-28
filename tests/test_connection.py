@@ -13,6 +13,7 @@ from seerdb.client.connection import (
     _REDIRECT_CONNECT_ATTEMPTS,
     OracleConnect,
     _check_fv2_bind_sizes,
+    _reject_sharding,
     _split_proxy_user,
 )
 from seerdb.common.exceptions import DatabaseError, NotSupportedError, OperationalError
@@ -43,6 +44,53 @@ class TestProxyUser(unittest.TestCase):
         env = c._make_dict(None)['env']
         self.assertEqual(env['user'], 'pyo')
         self.assertEqual(env['proxy_user'], 'hr')
+
+
+class TestShardingRejected(unittest.TestCase):
+    # Sharding keys (#164) route to a shard of a sharded database — an OCI-only
+    # capability below the thin wire protocol. seerdb accepts the
+    # oracledb-compatible parameters but rejects them with NotSupportedError
+    # (before any socket work), so ported thin code gets the recognizable error
+    # rather than a TypeError on an unexpected keyword.
+    def test_helper_passes_through_when_absent(self):
+        # None / absent must not raise (the default construction path).
+        self.assertIsNone(_reject_sharding(None, None))
+
+    def test_helper_rejects_each_key(self):
+        with self.assertRaises(NotSupportedError):
+            _reject_sharding(['CUST42'], None)
+        with self.assertRaises(NotSupportedError):
+            _reject_sharding(None, ['REGION1'])
+        with self.assertRaises(NotSupportedError):
+            _reject_sharding([42], ['REGION1'])
+
+    def test_helper_rejects_falsey_but_present_key(self):
+        # An empty list is still a request to shard — present, so rejected.
+        with self.assertRaises(NotSupportedError):
+            _reject_sharding([], None)
+
+    def test_connection_init_rejects_sharding(self):
+        # Raised at construction, before any host/port is touched.
+        with self.assertRaises(NotSupportedError):
+            OracleConnect(host='x', port=1, user='pyo', shardingkey=['CUST42'])
+        with self.assertRaises(NotSupportedError):
+            OracleConnect(host='x', port=1, user='pyo', supershardingkey=['R1'])
+
+    def test_connection_init_without_sharding_ok(self):
+        # The default (no sharding) construction path is unaffected.
+        c = OracleConnect(host='x', port=1, user='pyo', password='p')
+        self.assertEqual(c.host, 'x')
+
+    def test_async_connection_init_rejects_sharding(self):
+        # Sync/async parity: the async constructor rejects it the same way
+        # (its __init__ is not a coroutine, so no loop is needed here).
+        from seerdb.client.aconnection import AsyncOracleConnect
+
+        with self.assertRaises(NotSupportedError):
+            AsyncOracleConnect(host='x', port=1, user='pyo', shardingkey=['C'])
+        # And the default path still constructs.
+        a = AsyncOracleConnect(host='x', port=1, user='pyo', password='p')
+        self.assertEqual(a.host, 'x')
 
 
 class TestFv2BindSizeGate(unittest.TestCase):
