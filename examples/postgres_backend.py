@@ -17,11 +17,18 @@ core; the driver dependency lives here, not in the library.
 extension** for Oracle-compatible SQL functions (``nvl``, ``decode``,
 ``to_char`` / ``to_date``, ``add_months``, ``instr``, …). The backend puts its
 ``oracle`` schema on the search_path and creates the extension if it can, so
-those idioms need no hand-rolled translation — only the ones orafce does not
-cover are rewritten (``hextoraw``, ``empty_clob`` / ``empty_blob``, ``from_tz``,
-the ``BINARY_DOUBLE`` special values / literal suffix). Install it on the server
-(e.g. Alpine ``apk add postgresql-orafce`` for a matching PG major, or build from
+those idioms need no hand-rolled translation. Install it on the server (e.g.
+Alpine ``apk add postgresql-orafce`` for a matching PG major, or build from
 source with PGXS) — see ``examples/mirror-pg.Dockerfile``.
+
+The scalar Oracle functions orafce does *not* cover — ``hextoraw`` / ``rawtohex``,
+``empty_clob`` / ``empty_blob``, ``from_tz`` — the backend installs itself as real
+PostgreSQL functions at connect (see ``_HELPER_FUNCTIONS_DDL``), so those call
+sites resolve directly with no rewrite, the same way the ``ora_tstz`` composite
+and the ``ora_clob`` / ``ora_blob`` domains back their types. Only bare
+pseudo-constants (``SYSDATE``, ``BINARY_DOUBLE_INFINITY``) and literal / clause
+shapes (a negative ``INTERVAL``, the ``1.5f`` suffix, ``CONNECT BY LEVEL``) — none
+of which is a call that could resolve to a function — remain regex rewrites.
 
 **Oracle-only ceiling.** A handful of Oracle features a real server offers cannot
 be represented faithfully behind an 11.2 Mirror on PostgreSQL. Where the 11.2 suite
@@ -109,6 +116,39 @@ _LOB_TYPE_DDL = (
     'EXCEPTION WHEN duplicate_object THEN NULL; END $$;'
     'DO $$ BEGIN CREATE DOMAIN ora_blob AS bytea; '
     'EXCEPTION WHEN duplicate_object THEN NULL; END $$;'
+)
+
+# Oracle scalar functions the backend installs as real PostgreSQL functions,
+# rather than rewriting each call site with a regex (#513). A parens-called Oracle
+# function — HEXTORAW('..'), EMPTY_CLOB(), FROM_TZ(ts, 'zone') — resolves
+# case-insensitively to a same-named function on the search_path, so once these
+# exist the call text needs no translation at all. This is the same "install a
+# server-side object" pattern the ora_tstz composite and the ora_clob / ora_blob
+# domains already use, and it is exactly the shape the orafce upstream
+# contribution (#513) needs — none of these exist in orafce yet (checked 4.16).
+# Only the parens-called functions move here; a bare pseudo-constant (SYSDATE,
+# BINARY_DOUBLE_INFINITY) or a literal / clause shape (a negative INTERVAL, the
+# `1.5f` suffix, CONNECT BY LEVEL) has no call to resolve and stays a rewrite in
+# _translate_idioms. EMPTY_CLOB / EMPTY_BLOB return the LOB domains, so they need
+# those to exist first (created just before this in __init__).
+_HELPER_FUNCTIONS_DDL = (
+    # HEXTORAW('DEADBEEF') → the RAW/bytea value of a hex string.
+    'CREATE OR REPLACE FUNCTION hextoraw(text) RETURNS bytea '
+    "LANGUAGE sql IMMUTABLE STRICT AS $$ SELECT decode($1, 'hex') $$;"
+    # RAWTOHEX(x) → the hex text of a bytea. Oracle returns upper-case hex.
+    'CREATE OR REPLACE FUNCTION rawtohex(bytea) RETURNS text '
+    "LANGUAGE sql IMMUTABLE STRICT AS $$ SELECT upper(encode($1, 'hex')) $$;"
+    # EMPTY_CLOB() / EMPTY_BLOB() → an empty LOB (the domain type, so a value
+    # stored through one is recognised as a LOB on read-back).
+    f'CREATE OR REPLACE FUNCTION empty_clob() RETURNS {_CLOB_TYPE} '
+    f"LANGUAGE sql IMMUTABLE AS $$ SELECT ''::{_CLOB_TYPE} $$;"
+    f'CREATE OR REPLACE FUNCTION empty_blob() RETURNS {_BLOB_TYPE} '
+    f"LANGUAGE sql IMMUTABLE AS $$ SELECT ''::bytea::{_BLOB_TYPE} $$;"
+    # FROM_TZ(ts, 'zone') → interpret the naive timestamp as being in that zone
+    # (a timestamptz instant). A named region resolves to a fixed offset here, so
+    # it does not round-trip through ora_tstz — the documented Oracle-only ceiling.
+    'CREATE OR REPLACE FUNCTION from_tz(timestamp, text) RETURNS timestamptz '
+    'LANGUAGE sql IMMUTABLE STRICT AS $$ SELECT $1 AT TIME ZONE $2 $$;'
 )
 
 
@@ -270,28 +310,11 @@ def _translate_ddl(sql: str) -> str:
 # call's `(` or a word boundary, so ordinary identifiers are left alone. Applied
 # to every statement (a DEFAULT SYSDATE in DDL is rewritten too).
 _IDIOM_REWRITES = [
-    # HEXTORAW('DEADBEEF') → a RAW/bytea value from the hex string.
-    (
-        re.compile(r"\bhextoraw\s*\(\s*('(?:[^']|'')*')\s*\)", re.IGNORECASE),
-        r"decode(\1, 'hex')",
-    ),
-    # RAWTOHEX(x) → the hex text of a bytea.
-    (
-        re.compile(r'\brawtohex\s*\(([^()]*)\)', re.IGNORECASE),
-        r"encode(\1, 'hex')",
-    ),
-    # EMPTY_CLOB() / EMPTY_BLOB() → an empty string / empty bytea.
-    (re.compile(r'\bempty_clob\s*\(\s*\)', re.IGNORECASE), "''"),
-    (re.compile(r'\bempty_blob\s*\(\s*\)', re.IGNORECASE), "''::bytea"),
-    # FROM_TZ(ts, 'zone') → interpret the naive timestamp as being in that zone.
-    (
-        re.compile(
-            r"\bfrom_tz\s*\(\s*(.+?)\s*,\s*('(?:[^']|'')*')\s*\)", re.IGNORECASE
-        ),
-        r'(\1 AT TIME ZONE \2)',
-    ),
-    # (NVL, DECODE, TO_CHAR, TO_DATE, ADD_MONTHS, INSTR, … come from the orafce
-    # extension — see __init__ — so they need no rewrite here.)
+    # (HEXTORAW, RAWTOHEX, EMPTY_CLOB / EMPTY_BLOB and FROM_TZ are installed as
+    # real PostgreSQL functions — see _HELPER_FUNCTIONS_DDL / __init__ — so their
+    # call sites resolve directly and need no rewrite here. NVL, DECODE, TO_CHAR,
+    # TO_DATE, ADD_MONTHS, INSTR, … come from the orafce extension the same way.
+    # Only bare pseudo-constants and literal / clause shapes remain below.)
     # BINARY_DOUBLE/FLOAT special values → IEEE-754 float literals.
     (
         re.compile(r'\bbinary_(?:double|float)_infinity\b', re.IGNORECASE),
@@ -750,6 +773,14 @@ class PostgresBackend:
                 ).fetchone()
                 if row is not None:
                     setattr(self, attr, row[0])
+        except psycopg.Error:
+            self._conn.rollback()
+        # Install the Oracle scalar helper functions (hextoraw, rawtohex,
+        # empty_clob / empty_blob, from_tz), so those call sites need no rewrite
+        # (#513). Best-effort like the type / domain setup above; empty_clob /
+        # empty_blob return the LOB domains just created, so this runs after them.
+        try:
+            self._conn.execute(_HELPER_FUNCTIONS_DDL)
         except psycopg.Error:
             self._conn.rollback()
         self._conn.commit()
