@@ -22,13 +22,14 @@ Alpine ``apk add postgresql-orafce`` for a matching PG major, or build from
 source with PGXS) — see ``examples/mirror-pg.Dockerfile``.
 
 The scalar Oracle functions orafce does *not* cover — ``hextoraw`` / ``rawtohex``,
-``empty_clob`` / ``empty_blob``, ``from_tz`` — the backend installs itself as real
-PostgreSQL functions at connect (see ``_HELPER_FUNCTIONS_DDL``), so those call
-sites resolve directly with no rewrite, the same way the ``ora_tstz`` composite
-and the ``ora_clob`` / ``ora_blob`` domains back their types. Only bare
-pseudo-constants (``SYSDATE``, ``BINARY_DOUBLE_INFINITY``) and literal / clause
-shapes (a negative ``INTERVAL``, the ``1.5f`` suffix, ``CONNECT BY LEVEL``) — none
-of which is a call that could resolve to a function — remain regex rewrites.
+``empty_clob`` / ``empty_blob``, ``from_tz``, ``rowidtochar`` — the backend installs
+itself as real PostgreSQL functions at connect (see ``_HELPER_FUNCTIONS_DDL``), so
+those call sites resolve directly with no rewrite, the same way the ``ora_tstz``
+composite and the ``ora_clob`` / ``ora_blob`` domains back their types. Only bare
+pseudo-columns / -constants (``ROWID``, ``SYSDATE``, ``BINARY_DOUBLE_INFINITY``) and
+literal / clause shapes (a negative ``INTERVAL``, the ``1.5f`` suffix, ``CONNECT BY
+LEVEL``) — none of which is a call that could resolve to a function — remain regex
+rewrites.
 
 **Oracle-only ceiling.** A handful of Oracle features a real server offers cannot
 be represented faithfully behind an 11.2 Mirror on PostgreSQL. Where the 11.2 suite
@@ -38,8 +39,13 @@ just as the JSON / VECTOR / BOOLEAN column types (21c/23ai) are refused with
 ORA-00902. The rest have no such guard and simply do not pass; they are the honest
 edge of this adapter:
 
-- **ROWID / UROWID** — an Oracle physical row address. PostgreSQL's ``ctid`` is a
-  different, mutable locator with no stable text form or ``ROWIDTOCHAR`` analogue.
+- **UROWID / index-organized rowids** — the physical ``ROWID`` pseudo-column is
+  emulated with PostgreSQL's ``ctid`` (rendered as text, ``ROWIDTOCHAR``-comparable,
+  usable as a bind), but ``ctid`` is *mutable* — it changes on ``UPDATE`` / ``VACUUM
+  FULL`` — so it is a faithful locator only within an unmodified snapshot, not a
+  durable cross-transaction handle (a real migration substitutes a surrogate identity
+  key). The UROWID (``*``-prefixed logical rowid) of an ``ORGANIZATION INDEX`` table
+  has no ``ctid`` analogue and cannot be produced.
 - **Object types (``AS OBJECT``) and ``REF`` / ``DEREF``** — a PostgreSQL composite
   type is not an Oracle object type and has no REF; the object schema the REF tests
   build cannot even be created.
@@ -168,6 +174,10 @@ _HELPER_FUNCTIONS_DDL = (
     '$1 AT TIME ZONE $2, '
     "EXTRACT(EPOCH FROM ($1 - (($1 AT TIME ZONE $2) AT TIME ZONE 'UTC')))::int"
     f')::{_TSTZ_TYPE} $$;'
+    # ROWIDTOCHAR(rowid) → the VARCHAR2 form of a ROWID. The ROWID pseudo-column is
+    # rewritten to `ctid::text` (already text), so this is the identity on that text.
+    'CREATE OR REPLACE FUNCTION rowidtochar(text) RETURNS text '
+    'LANGUAGE sql IMMUTABLE STRICT AS $$ SELECT $1 $$;'
 )
 
 # The PostgreSQL `interval` OID (pg_type.oid) — the base type ora_intervalym is a
@@ -448,6 +458,17 @@ _IDIOM_REWRITES = [
     # SYSDATE / SYSTIMESTAMP → the session clock (SYSDATE is to-the-second).
     (re.compile(r'\bsystimestamp\b', re.IGNORECASE), 'now()'),
     (re.compile(r'\bsysdate\b', re.IGNORECASE), 'localtimestamp(0)'),
+    # The ROWID pseudo-column → PostgreSQL's `ctid` as text ('(0,1)'). This one
+    # rewrite serves both a SELECT (returns the str) and a `WHERE ROWID = :bind`
+    # (compares the bound text). The word boundary keeps it off ROWIDTOCHAR (no
+    # boundary mid-token) and UROWID (a word char precedes ROWID). ctid is a
+    # physical, *mutable* address — it changes on UPDATE / VACUUM FULL — so it is a
+    # faithful row locator only within an unmodified snapshot, which is all the
+    # read-then-bind suite needs; it is not a durable cross-transaction handle like
+    # Oracle's ROWID (a real migration uses a surrogate identity key instead). The
+    # UROWID / index-organized logical rowid has no ctid analogue and stays a
+    # ceiling (#548).
+    (re.compile(r'\bROWID\b', re.IGNORECASE), 'ctid::text'),
     # A BINARY_DOUBLE / BINARY_FLOAT numeric literal suffix (1234.5678d, 1.5f) —
     # PostgreSQL has no such suffix, so drop it. A decimal point is required so
     # this never touches an identifier or a plain integer.
