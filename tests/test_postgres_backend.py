@@ -26,6 +26,7 @@ from seerdb.server import PacketStream, serve_session
 psycopg = pytest.importorskip('psycopg')
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'examples'))
 from postgres_backend import (  # noqa: E402
+    _HELPER_FUNCTIONS_DDL,
     _IS_DDL,
     PostgresBackend,
     _backend_error,
@@ -658,25 +659,40 @@ def test_bind_variables_postgres() -> None:
 # --- Oracle SQL idiom / function translation (#502) — pure, no live PG needed --
 
 
+def test_helper_functions_ddl_defines_the_scalar_helpers() -> None:
+    # The Oracle scalar functions orafce doesn't cover are installed as real
+    # PostgreSQL functions (#513) instead of rewritten per call site, so those
+    # call sites resolve directly. Each is defined idempotently (CREATE OR
+    # REPLACE) and returns the LOB domains where appropriate.
+    for name in ('hextoraw', 'rawtohex', 'empty_clob', 'empty_blob', 'from_tz'):
+        assert f'FUNCTION {name}(' in _HELPER_FUNCTIONS_DDL
+    assert _HELPER_FUNCTIONS_DDL.count('CREATE OR REPLACE FUNCTION') == 5
+    # empty_clob / empty_blob hand back the domain types, so a value stored
+    # through one is recognised as a LOB on read-back rather than a plain string.
+    assert 'RETURNS ora_clob' in _HELPER_FUNCTIONS_DDL
+    assert 'RETURNS ora_blob' in _HELPER_FUNCTIONS_DDL
+    # Oracle's RAWTOHEX yields upper-case hex (PostgreSQL's encode is lower-case).
+    assert 'upper(encode(' in _HELPER_FUNCTIONS_DDL
+
+
 def test_translate_idioms_functions_and_literals() -> None:
+    assert _translate_idioms('SELECT SYSDATE') == 'SELECT localtimestamp(0)'
+    # HEXTORAW / RAWTOHEX, EMPTY_CLOB / EMPTY_BLOB and FROM_TZ are installed as
+    # real PostgreSQL functions (_HELPER_FUNCTIONS_DDL), so their call sites
+    # resolve directly and pass through the idiom translation unchanged — just
+    # like the orafce-provided NVL / DECODE / TO_CHAR do.
+    assert _translate_idioms("SELECT NVL(:v, 'x')") == "SELECT NVL(:v, 'x')"
     assert _translate_idioms("SELECT HEXTORAW('DEADBEEF')") == (
-        "SELECT decode('DEADBEEF', 'hex')"
+        "SELECT HEXTORAW('DEADBEEF')"
     )
     assert _translate_idioms('INSERT INTO t VALUES (EMPTY_CLOB())') == (
-        "INSERT INTO t VALUES ('')"
+        'INSERT INTO t VALUES (EMPTY_CLOB())'
     )
-    assert _translate_idioms('INSERT INTO t VALUES (EMPTY_BLOB())') == (
-        "INSERT INTO t VALUES (''::bytea)"
-    )
-    assert _translate_idioms('SELECT SYSDATE') == 'SELECT localtimestamp(0)'
-    # NVL / DECODE / TO_CHAR come from the orafce extension, not a rewrite here —
-    # so they pass through unchanged.
-    assert _translate_idioms("SELECT NVL(:v, 'x')") == "SELECT NVL(:v, 'x')"
     assert (
         _translate_idioms(
             "SELECT FROM_TZ(TIMESTAMP '2024-01-15 12:00:00', 'US/Eastern')"
         )
-        == "SELECT (TIMESTAMP '2024-01-15 12:00:00' AT TIME ZONE 'US/Eastern')"
+        == "SELECT FROM_TZ(TIMESTAMP '2024-01-15 12:00:00', 'US/Eastern')"
     )
 
 
