@@ -673,6 +673,12 @@ def test_helper_functions_ddl_defines_the_scalar_helpers() -> None:
     assert 'RETURNS ora_blob' in _HELPER_FUNCTIONS_DDL
     # Oracle's RAWTOHEX yields upper-case hex (PostgreSQL's encode is lower-case).
     assert 'upper(encode(' in _HELPER_FUNCTIONS_DDL
+    # from_tz returns the ora_tstz composite (not a plain timestamptz), so a named
+    # region's DST-correct offset round-trips into a WITH TIME ZONE column; it is
+    # STABLE, since a named region's offset depends on the tz database.
+    assert 'FUNCTION from_tz(timestamp, text) RETURNS ora_tstz' in _HELPER_FUNCTIONS_DDL
+    assert 'AT TIME ZONE' in _HELPER_FUNCTIONS_DDL
+    assert 'IMMUTABLE' not in _HELPER_FUNCTIONS_DDL.split('from_tz', 1)[1]
 
 
 def test_translate_idioms_functions_and_literals() -> None:
