@@ -111,6 +111,28 @@ def _run_mirror_session(listen: socket.socket, result: dict) -> None:
         conn.close()
 
 
+class _BadOutBindBackend(_DualBackend):
+    # A PL/SQL block returns an OUT-bind value the wire cannot encode (a bare
+    # object has no _encode_value branch), standing in for a backend that hands
+    # back a value the Mirror can't represent — e.g. an INTERVAL YEAR TO MONTH that
+    # a foreign backend surfaces as a plain timedelta. Everything else behaves like
+    # _DualBackend.
+    def execute(self, sql: str, binds=()) -> Result:
+        if sql.lstrip().upper().startswith('BEGIN'):
+            return Result(out_binds=[object()])
+        return super().execute(sql, binds)
+
+
+def _run_bad_out_bind_session(listen: socket.socket, result: dict) -> None:
+    conn, _ = listen.accept()
+    try:
+        result['user'] = serve_session(PacketStream(conn), _BadOutBindBackend())
+    except Exception as exc:  # noqa: BLE001 - surfaced to the test thread
+        result['error'] = exc
+    finally:
+        conn.close()
+
+
 def test_live_seerdb_dual_query() -> None:
     # The 2.1.0 capstone: a real client runs SELECT * FROM DUAL against the
     # Mirror (no Oracle, no Postgres) and gets the DUMMY 'X' row back.
@@ -219,6 +241,51 @@ def test_unsupported_query_errors_but_keeps_connection() -> None:
             cursor.execute('select * from something_the_backend_refuses')
         assert 'ORA-03001' in str(excinfo.value)
         # The connection survived the error — a valid query still works.
+        cursor.execute('select * from dual')
+        row = cursor.fetchone()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert row == ('X',)
+
+
+def test_unencodable_out_bind_errors_but_keeps_connection() -> None:
+    # The never-desync rule extends to encoding the reply: a backend that returns
+    # an OUT-bind value the wire can't carry must surface a clean ORA error on a
+    # HEALTHY connection, not drop it mid-response. The OUT-bind encode step used
+    # to run outside the guard, so it desynced (#535).
+    listen = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listen.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listen.bind(('127.0.0.1', 0))
+    listen.listen(1)
+    port = listen.getsockname()[1]
+
+    result: dict = {}
+    server = threading.Thread(
+        target=_run_bad_out_bind_session, args=(listen, result), daemon=True
+    )
+    server.start()
+
+    conn = seerdb.connect(
+        host='127.0.0.1',
+        port=port,
+        user='PYO',
+        password='pyo123',
+        service_name='XE',
+        timeout=5000,
+    )
+    try:
+        cursor = conn.cursor()
+        with pytest.raises(seerdb.DatabaseError) as excinfo:
+            cursor.callproc('P', [cursor.var(seerdb.DB_TYPE_NUMBER)])
+        assert 'ORA-00600' in str(excinfo.value)
+        # The connection survived the encoding failure — a valid query still works.
         cursor.execute('select * from dual')
         row = cursor.fetchone()
     finally:

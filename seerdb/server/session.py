@@ -904,13 +904,11 @@ def _answer_query(
         # leaves the bit clear and drives commit/rollback itself).
         if request.autocommit:
             backend.commit()
-    except BackendError as err:
-        logger.info('query refused: %s', err.ora_message)
-        response = encode_error(err.ora_code, err.ora_message)
-    except Exception as exc:
-        logger.warning('backend raised a non-ORA error: %s', exc)
-        response = encode_error(_INTERNAL_ERROR, f'ORA-00600: backend error: {exc}')
-    else:
+        # Build the reply inside the same guard: encoding the result must honour
+        # the never-desync contract too. A value the wire can't carry (e.g. a
+        # backend that hands back a type the encoder has no branch for) raises
+        # here, and that has to surface as a clean ORA error below — not escape
+        # and drop the connection mid-response (#535).
         if batch_errors:
             # Array-DML batcherrors: ORA-24381 with the per-row failure arrays;
             # the client reads them from getbatcherrors() rather than raising.
@@ -954,6 +952,12 @@ def _answer_query(
             if not cursor_id and not _is_plsql_block(sql):
                 cursor_id = cursors.open_dml(sql, request.bind_types)
             response = encode_status(result.rowcount, cursor_id=cursor_id)
+    except BackendError as err:
+        logger.info('query refused: %s', err.ora_message)
+        response = encode_error(err.ora_code, err.ora_message)
+    except Exception as exc:
+        logger.warning('backend raised a non-ORA error: %s', exc)
+        response = encode_error(_INTERNAL_ERROR, f'ORA-00600: backend error: {exc}')
     stream.write_packet(TNS_DATA, response)
     return lobs
 
