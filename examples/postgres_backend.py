@@ -199,6 +199,13 @@ _DDL_GLOBAL_TEMPORARY = re.compile(r'\bGLOBAL\s+TEMPORARY\b', re.IGNORECASE)
 _IS_CREATE_TABLE = re.compile(
     r'\s*CREATE\s+(?:GLOBAL\s+TEMPORARY\s+)?TABLE\b', re.IGNORECASE
 )
+# Oracle auto-commits DDL (an implicit COMMIT before and after), so a DDL statement
+# is never rolled back and any pending DML committed with it. PostgreSQL keeps DDL
+# transactional, so the Mirror commits after a successful DDL to match — a later
+# rollback then discards only the DML, not the table (#532).
+_IS_DDL = re.compile(
+    r'\s*(CREATE|ALTER|DROP|TRUNCATE|RENAME|COMMENT|GRANT|REVOKE)\b', re.IGNORECASE
+)
 
 
 def _translate_ddl(sql: str) -> str:
@@ -651,6 +658,9 @@ class PostgresBackend:
         # advertises (JSON/VECTOR/BOOLEAN), so the suite's version guards skip
         # rather than the backend mis-representing them (#504).
         _reject_unsupported_ddl_types(sql)
+        # Oracle auto-commits DDL — decide from the original statement, before the
+        # dialect rewrite reshapes it (#532).
+        is_ddl = _IS_DDL.match(sql) is not None
         # Translate Oracle SQL to PostgreSQL's dialect (#500/#502/#503) — DDL
         # column types, CREATE PROCEDURE/FUNCTION → PL/pgSQL, then the function /
         # literal idioms. This is where dialect knowledge belongs, not in the
@@ -697,6 +707,10 @@ class PostgresBackend:
             self._conn.execute('RELEASE SAVEPOINT _mirror_stmt')
             raise
         self._conn.execute('RELEASE SAVEPOINT _mirror_stmt')
+        # DDL auto-commits (Oracle semantics): persist it — and any pending DML —
+        # so a later rollback discards only DML, not the table (#532).
+        if is_ddl:
+            self._conn.commit()
         return result
 
     def _execute_plsql(self, sql: str, binds: Sequence) -> Result:
