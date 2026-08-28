@@ -49,6 +49,7 @@ from seerdb.common.tns_consts import (
 )
 
 if TYPE_CHECKING:
+    from seerdb.client.connection import Xid
     from seerdb.common.ano_session import AnoChannel
 
 
@@ -96,6 +97,7 @@ class _ConnectionLogic:
     _call_timeout: int
     _cursor_cache: dict[tuple[str, bytes], int]
     _cursor_cache_max: int
+    server_version: int
 
     if TYPE_CHECKING:
 
@@ -466,6 +468,38 @@ class _ConnectionLogic:
         blocked in the call drains the server's interrupt response and raises
         ORA-01013. Safe to call from another thread (e.g. a timer/signal)."""
         self._send_break()
+
+    @property
+    def version(self) -> str | None:
+        """Server version as a dotted release string (e.g. '11.2.0.2.0'), or
+        None before authentication. Decoded from the packed AUTH_VERSION_NO the
+        server returns at logon; oracledb-compatible."""
+        # Lazy import: _format_version lives in connection.py, which imports
+        # this mixin — a module-level import would be circular.
+        from seerdb.client.connection import _format_version
+
+        return _format_version(self.server_version)
+
+    def xid(self, format_id: int, global_transaction_id, branch_qualifier) -> Xid:
+        """Build a global transaction id (Xid) for the TPC methods."""
+        from seerdb.client.connection import Xid
+
+        return Xid(format_id, global_transaction_id, branch_qualifier)
+
+    def subscribe(self, *args: object, **kwargs: object) -> None:
+        """Register a Continuous Query Notification subscription — not supported
+        (#129). Accepts any arguments for API compatibility and raises
+        NotSupportedError; see ``_reject_cqn``."""
+        from seerdb.client.connection import _reject_cqn
+
+        _reject_cqn()
+
+    def unsubscribe(self, *args: object, **kwargs: object) -> None:
+        """Remove a CQN subscription — not supported (#129); the counterpart to
+        ``subscribe``, raising NotSupportedError for the same reason."""
+        from seerdb.client.connection import _reject_cqn
+
+        _reject_cqn()
 
     def _raise_lobops_error(self, Packet: bytes) -> None:
         # Decode the OER trailing a content-free LOBOPS response and raise on a

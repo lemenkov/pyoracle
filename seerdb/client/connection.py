@@ -790,13 +790,6 @@ class OracleConnect(_ConnectionLogic):
         # time an object of that type is fetched.
         self._object_type_cache: dict[tuple[str, str], 'DbObjectType'] = {}
 
-    @property
-    def version(self) -> str | None:
-        """Server version as a dotted release string (e.g. '11.2.0.2.0'), or
-        None before authentication. Decoded from the packed AUTH_VERSION_NO the
-        server returns at logon; oracledb-compatible."""
-        return _format_version(self.server_version)
-
     def _next_seq(self) -> int:
         seq = self.seq
         self.seq = self.seq % MAX_SEQ_NUM + 1
@@ -2176,17 +2169,6 @@ class OracleConnect(_ConnectionLogic):
         self.send(TNS_DATA, Data)
         self._handle_response()
 
-    def subscribe(self, *args: object, **kwargs: object) -> None:
-        """Register a Continuous Query Notification subscription — not supported
-        (#129). Accepts any arguments for API compatibility and raises
-        NotSupportedError; see ``_reject_cqn``."""
-        _reject_cqn()
-
-    def unsubscribe(self, *args: object, **kwargs: object) -> None:
-        """Remove a CQN subscription — not supported (#129); the counterpart to
-        ``subscribe``, raising NotSupportedError for the same reason."""
-        _reject_cqn()
-
     def changepassword(self, old_password: str, new_password: str) -> None:
         """Change the connected user's password (#21, oracledb-compatible).
 
@@ -2354,10 +2336,6 @@ class OracleConnect(_ConnectionLogic):
         )
 
     # --- Two-phase commit / XA (#131) ---
-
-    def xid(self, format_id: int, global_transaction_id, branch_qualifier) -> Xid:
-        """Build a global transaction id (Xid) for the TPC methods."""
-        return Xid(format_id, global_transaction_id, branch_qualifier)
 
     def _tpc_request(self, Data: bytes) -> bytes:
         # Send a TPC function message and return the assembled response body
