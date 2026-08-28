@@ -48,12 +48,6 @@ edge of this adapter:
 - **Object types (``AS OBJECT``) and ``REF`` / ``DEREF``** — a PostgreSQL composite
   type is not an Oracle object type and has no REF; the object schema the REF tests
   build cannot even be created.
-
-A named time-zone region — ``FROM_TZ(ts, 'US/Eastern')`` — is *not* on this list:
-the ``from_tz`` helper resolves the region's offset at that instant from
-PostgreSQL's live zone database (DST-correct) and returns the ``ora_tstz``
-composite, so it round-trips like an explicit ``±HH:MM`` offset. Only the region
-*name* itself is not preserved — the value carries the resolved offset.
 """
 
 from __future__ import annotations
