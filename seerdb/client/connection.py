@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 
+from seerdb.client._conn_logic import _ConnectionLogic
 from seerdb.client.dialect import (
     CAP_ARRAY_DML,
     CAP_OWN_TXN,
@@ -54,7 +55,6 @@ from seerdb.common.tns import (
     encode_data_packet,
     encode_dictionary,
     encode_dictionary_auth,
-    encode_end_to_end_piggyback,
     encode_end_user_sec_piggyback,
     encode_fast_auth,
     encode_packet,
@@ -633,7 +633,7 @@ def _reject_cqn() -> None:
     )
 
 
-class OracleConnect:
+class OracleConnect(_ConnectionLogic):
     def __init__(
         self,
         host: str = 'localhost',
@@ -3174,33 +3174,6 @@ class OracleConnect:
 
     # --- End-to-end application tracing (#183) ---
 
-    def _set_e2e(self, name: str, value) -> None:
-        # Record a new end-to-end attribute value and mark it to flush before
-        # the next execute (oracledb sends only what changed). The
-        # SET_END_TO_END_ATTR piggyback (func 135) is a 12c+ message — a pre-12c
-        # server closes the connection on it — so gate it (oracledb thin is
-        # itself 12.1+ only). #183.
-        if self.field_version < FIELD_VERSION_12_1:
-            from seerdb.common.exceptions import NotSupportedError
-
-            raise NotSupportedError(
-                'end-to-end tracing attributes require an Oracle 12.1+ server'
-            )
-        self._e2e_values[name] = value
-        self._e2e_pending[name] = value
-
-    def _flush_end_to_end_bytes(self) -> bytes:
-        # Build the SET_END_TO_END_ATTR piggyback for the attributes changed
-        # since the last flush, then clear the pending set. Empty when nothing
-        # changed. Allocate the piggyback's seq here so it precedes the execute.
-        if not self._e2e_pending:
-            return b''
-        Pending = self._pending_e2e_with_module_action()
-        Seq = self._next_seq()
-        Bytes = encode_end_to_end_piggyback(Seq, self.field_version, Pending)
-        self._e2e_pending = {}
-        return Bytes
-
     def _flush_cursor_closes_bytes(self) -> bytes:
         # Build an OCCA (close-cursors) piggyback for the server cursors queued
         # for close (#191), then clear the queue. Empty when nothing is queued.
@@ -3293,65 +3266,6 @@ class OracleConnect:
         Data = encode_dictionary(self._make_dict(DictionaryType.tran, req=TTI_ROLLBACK))
         self.send(TNS_DATA, Pre + Data)
         self._handle_response()
-
-    def _pending_e2e_with_module_action(self) -> dict:
-        # The server rejects a module update that does not also carry action
-        # (Oracle's SET_MODULE always sets both — a module-only piggyback is
-        # ORA-03137). So when module flushes, send action too, at its current
-        # value (None -> empty), matching oracledb. #184.
-        Pending = dict(self._e2e_pending)
-        if 'module' in Pending and 'action' not in Pending:
-            Pending['action'] = self._e2e_values.get('action')
-        return Pending
-
-    @property
-    def module(self):
-        """The session's MODULE for end-to-end tracing (V$SESSION.MODULE /
-        SYS_CONTEXT('USERENV','MODULE')). Set it before running a statement;
-        the change is sent with the next execute. oracledb-compatible (#183)."""
-        return self._e2e_values.get('module')
-
-    @module.setter
-    def module(self, value) -> None:
-        self._set_e2e('module', value)
-
-    @property
-    def action(self):
-        """The session's ACTION for end-to-end tracing (#183)."""
-        return self._e2e_values.get('action')
-
-    @action.setter
-    def action(self, value) -> None:
-        self._set_e2e('action', value)
-
-    @property
-    def client_identifier(self):
-        """The session's CLIENT_IDENTIFIER for end-to-end tracing (#183)."""
-        return self._e2e_values.get('client_identifier')
-
-    @client_identifier.setter
-    def client_identifier(self, value) -> None:
-        self._set_e2e('client_identifier', value)
-
-    @property
-    def clientinfo(self):
-        """The session's CLIENT_INFO for end-to-end tracing
-        (SYS_CONTEXT('USERENV','CLIENT_INFO')); oracledb-compatible (#184)."""
-        return self._e2e_values.get('client_info')
-
-    @clientinfo.setter
-    def clientinfo(self, value) -> None:
-        self._set_e2e('client_info', value)
-
-    @property
-    def dbop(self):
-        """The session's database operation for monitoring (DBMS_SQL_MONITOR /
-        SYS_CONTEXT('USERENV','DBOP')); oracledb-compatible (#184)."""
-        return self._e2e_values.get('dbop')
-
-    @dbop.setter
-    def dbop(self, value) -> None:
-        self._set_e2e('dbop', value)
 
     def set_end_user_security_context(self, context: EndUserSecurityContext) -> None:
         """Attach an end-user security context to the connection (#460).
