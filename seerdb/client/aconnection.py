@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from seerdb.common.ano_session import AnoChannel
     from seerdb.common.dbobject import DbObjectType
 
+from seerdb.client._conn_logic import _ConnectionLogic
 from seerdb.client.connection import (
     _MAX_REDIRECTS,
     _REDIRECT_CONNECT_ATTEMPTS,
@@ -76,7 +77,6 @@ from seerdb.common.tns import (
     encode_data_packet,
     encode_dictionary,
     encode_dictionary_auth,
-    encode_end_to_end_piggyback,
     encode_end_user_sec_piggyback,
     encode_fast_auth,
     encode_packet,
@@ -143,7 +143,7 @@ from seerdb.common.tns_consts import (
 logger = logging.getLogger(__name__)
 
 
-class AsyncOracleConnect:
+class AsyncOracleConnect(_ConnectionLogic):
     """Async equivalent of `OracleConnect`. Same constructor surface so
     pool / cursor / app code can swap one for the other given an
     appropriate sync vs async caller."""
@@ -2391,16 +2391,6 @@ class AsyncOracleConnect:
 
     # --- End-to-end application tracing (#183), async port ---
 
-    def _set_e2e(self, name: str, value) -> None:
-        if self.field_version < FIELD_VERSION_12_1:
-            from seerdb.common.exceptions import NotSupportedError
-
-            raise NotSupportedError(
-                'end-to-end tracing attributes require an Oracle 12.1+ server'
-            )
-        self._e2e_values[name] = value
-        self._e2e_pending[name] = value
-
     def _flush_cursor_closes_bytes(self) -> bytes:
         # OCCA piggyback closing drained server cursors (#191); see
         # OracleConnect._flush_cursor_closes_bytes.
@@ -2476,65 +2466,6 @@ class AsyncOracleConnect:
         Data = encode_dictionary(self._make_dict(DictionaryType.tran, req=TTI_ROLLBACK))
         await self.send(TNS_DATA, Pre + Data)
         await self._handle_response()
-
-    def _flush_end_to_end_bytes(self) -> bytes:
-        if not self._e2e_pending:
-            return b''
-        # A module update must also carry action or the server rejects it
-        # (ORA-03137) — see OracleConnect._pending_e2e_with_module_action (#184).
-        Pending = dict(self._e2e_pending)
-        if 'module' in Pending and 'action' not in Pending:
-            Pending['action'] = self._e2e_values.get('action')
-        Seq = self._next_seq()
-        Bytes = encode_end_to_end_piggyback(Seq, self.field_version, Pending)
-        self._e2e_pending = {}
-        return Bytes
-
-    @property
-    def module(self):
-        """Session MODULE for end-to-end tracing (#183). See
-        `OracleConnect.module`."""
-        return self._e2e_values.get('module')
-
-    @module.setter
-    def module(self, value) -> None:
-        self._set_e2e('module', value)
-
-    @property
-    def action(self):
-        """Session ACTION for end-to-end tracing (#183)."""
-        return self._e2e_values.get('action')
-
-    @action.setter
-    def action(self, value) -> None:
-        self._set_e2e('action', value)
-
-    @property
-    def client_identifier(self):
-        """Session CLIENT_IDENTIFIER for end-to-end tracing (#183)."""
-        return self._e2e_values.get('client_identifier')
-
-    @client_identifier.setter
-    def client_identifier(self, value) -> None:
-        self._set_e2e('client_identifier', value)
-
-    @property
-    def clientinfo(self):
-        """Session CLIENT_INFO for end-to-end tracing (#184)."""
-        return self._e2e_values.get('client_info')
-
-    @clientinfo.setter
-    def clientinfo(self, value) -> None:
-        self._set_e2e('client_info', value)
-
-    @property
-    def dbop(self):
-        """Session database operation for monitoring (#184)."""
-        return self._e2e_values.get('dbop')
-
-    @dbop.setter
-    def dbop(self, value) -> None:
-        self._set_e2e('dbop', value)
 
     def set_end_user_security_context(self, context: EndUserSecurityContext) -> None:
         """Attach an end-user security context to the connection (#460).
