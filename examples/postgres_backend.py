@@ -389,6 +389,27 @@ def _translate_routine_ddl(sql: str) -> str:
     return f'{drop} {header} LANGUAGE plpgsql AS $$ {body} $$'
 
 
+# An anonymous PL/SQL block a bind-less client sends — DECLARE … BEGIN … END, or a
+# bare BEGIN … END. PostgreSQL can't run one directly, so wrap it as an anonymous
+# code block: DO $$ … $$. The declared local types are mapped (VARCHAR2 → varchar,
+# NUMBER → numeric, …) and the body is already valid PL/pgSQL for the assignment /
+# DML cases the suite uses. A DO block takes no parameters, so this is the bind-less
+# path — a block carrying binds goes through the callproc / OUT-bind flow (#517).
+# The END must be present, so a bare `BEGIN` (transaction control) is left alone.
+_ANON_BLOCK = re.compile(r'(?is)^\s*(DECLARE\b.*?\s)?BEGIN\b(.*)\bEND\s*;?\s*$')
+
+
+def _translate_plsql_block(sql: str) -> str:
+    """Wrap an anonymous DECLARE/BEGIN … END block as a PostgreSQL ``DO $$ … $$``
+    block, mapping the declared local types (#533). Non-block SQL is unchanged."""
+    match = _ANON_BLOCK.match(sql)
+    if match is None:
+        return sql
+    declare_part, body = match.groups()
+    declare = _translate_routine_types(declare_part) if declare_part else ''
+    return f'DO $$ {declare}BEGIN {body.strip()} END $$'
+
+
 # The anonymous block a thin callproc / callfunc sends: BEGIN name(:a, :b); END;
 # or BEGIN :r := name(:a, :b); END;
 _CALL_BLOCK = re.compile(r'(?is)^\s*BEGIN\s+(.*?)\s*;?\s*END\s*;?\s*$')
@@ -665,7 +686,9 @@ class PostgresBackend:
         # column types, CREATE PROCEDURE/FUNCTION → PL/pgSQL, then the function /
         # literal idioms. This is where dialect knowledge belongs, not in the
         # generic compat shim.
-        sql = _translate_idioms(_translate_routine_ddl(_translate_ddl(sql)))
+        sql = _translate_idioms(
+            _translate_plsql_block(_translate_routine_ddl(_translate_ddl(sql)))
+        )
         params: dict | None = None
         if binds:
             sql, params = _translate_binds(sql, binds)

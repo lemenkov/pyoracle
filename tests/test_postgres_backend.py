@@ -35,6 +35,7 @@ from postgres_backend import (  # noqa: E402
     _translate_binds,
     _translate_ddl,
     _translate_idioms,
+    _translate_plsql_block,
     _translate_routine_ddl,
 )
 
@@ -179,6 +180,25 @@ def test_is_ddl_classifies_auto_committing_statements() -> None:
         'BEGIN p(:1); END;',
     ):
         assert _IS_DDL.match(sql) is None
+
+
+def test_translate_plsql_block_wraps_anonymous_declare_block() -> None:
+    # A bind-less DECLARE … BEGIN … END block becomes DO $$ … $$ with the declared
+    # local types mapped (VARCHAR2 → varchar); the body rides along (#533).
+    out = _translate_plsql_block(
+        "DECLARE v VARCHAR2(32767); BEGIN v := RPAD('X', 10, 'X'); "
+        'INSERT INTO t VALUES (1, v); END;'
+    )
+    assert out.startswith('DO $$ DECLARE v varchar(32767); BEGIN ')
+    assert out.endswith('END $$')
+    assert 'INSERT INTO t VALUES (1, v);' in out
+    # A bare BEGIN … END (no DECLARE) is wrapped too; a NUMBER local maps to numeric.
+    numeric = _translate_plsql_block('DECLARE n NUMBER; BEGIN n := 1; END;')
+    assert numeric.startswith('DO $$ DECLARE n numeric; BEGIN ')
+    # A bare BEGIN with no END (transaction control) is left alone.
+    assert _translate_plsql_block('BEGIN') == 'BEGIN'
+    # Non-block SQL passes through untouched.
+    assert _translate_plsql_block('SELECT 1') == 'SELECT 1'
 
 
 def test_translate_ddl_leaves_non_create_table_unchanged() -> None:
