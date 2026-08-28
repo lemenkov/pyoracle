@@ -45,11 +45,6 @@ edge of this adapter:
   region against the live zone database to a fixed offset; only an explicit
   ``±HH:MM`` offset round-trips through the ``ora_tstz`` composite that backs
   TIMESTAMP WITH TIME ZONE.
-- **Empty LOBs** — an empty CLOB / BLOB returns as NULL, not ``''`` / ``b''``: the
-  CLOB→``text`` / BLOB→``bytea`` mapping makes a zero-length value indistinguishable
-  from NULL on the Oracle wire (Oracle's own empty-string-is-NULL). Faithful
-  empty-versus-null would need real LOB locators, a larger change tracked
-  separately.
 """
 
 from __future__ import annotations
@@ -65,6 +60,8 @@ from psycopg.types.composite import CompositeInfo, register_composite
 from seerdb.common.tns_consts import (
     TNS_TYPE_BDOUBLE,
     TNS_TYPE_BFLOAT,
+    TNS_TYPE_BLOB,
+    TNS_TYPE_CLOB,
     TNS_TYPE_DATE,
     TNS_TYPE_INTERVALDS,
     TNS_TYPE_NUMBER,
@@ -95,6 +92,23 @@ _TSTZ_TYPE = 'ora_tstz'
 _TSTZ_TYPE_DDL = (
     'DO $$ BEGIN CREATE TYPE ora_tstz AS (utc timestamptz, off integer); '
     'EXCEPTION WHEN duplicate_object THEN NULL; END $$'
+)
+
+# CLOB / BLOB back onto PostgreSQL domains over text / bytea (#534). A plain text
+# column can't tell an empty CLOB from a NULL one — a zero-length value encodes as
+# NULL on the Oracle wire (empty-string-is-NULL), so an empty LOB came back as None
+# instead of '' / b''. A domain is transparent for INSERT (it accepts its base
+# type) and for every text / bytea operation, yet a result column still traces back
+# through pg_attribute to the domain — so the read path can recognise a LOB column
+# and encode it as a real LOB, whose empty value is distinct from NULL. The domain
+# is otherwise invisible: values arrive as ordinary str / bytes.
+_CLOB_TYPE = 'ora_clob'
+_BLOB_TYPE = 'ora_blob'
+_LOB_TYPE_DDL = (
+    'DO $$ BEGIN CREATE DOMAIN ora_clob AS text; '
+    'EXCEPTION WHEN duplicate_object THEN NULL; END $$;'
+    'DO $$ BEGIN CREATE DOMAIN ora_blob AS bytea; '
+    'EXCEPTION WHEN duplicate_object THEN NULL; END $$;'
 )
 
 
@@ -211,9 +225,11 @@ _DDL_TYPE_REWRITES = [
     (re.compile(r'\bVARCHAR2\b', re.IGNORECASE), 'varchar'),
     (re.compile(r'\bNCHAR\b', re.IGNORECASE), 'char'),
     (re.compile(r'\bNUMBER\b', re.IGNORECASE), 'numeric'),
-    (re.compile(r'\bNCLOB\b', re.IGNORECASE), 'text'),
-    (re.compile(r'\bCLOB\b', re.IGNORECASE), 'text'),
-    (re.compile(r'\bBLOB\b', re.IGNORECASE), 'bytea'),
+    # CLOB / NCLOB / BLOB → domains over text / bytea, so the read path can tell a
+    # LOB column from a plain VARCHAR2 / RAW and preserve empty-vs-NULL (#534).
+    (re.compile(r'\bNCLOB\b', re.IGNORECASE), _CLOB_TYPE),
+    (re.compile(r'\bCLOB\b', re.IGNORECASE), _CLOB_TYPE),
+    (re.compile(r'\bBLOB\b', re.IGNORECASE), _BLOB_TYPE),
     (re.compile(r'\bLONG\b', re.IGNORECASE), 'text'),
     (re.compile(r'\bBINARY_FLOAT\b', re.IGNORECASE), 'real'),
     (re.compile(r'\bBINARY_DOUBLE\b', re.IGNORECASE), 'double precision'),
@@ -516,6 +532,10 @@ _BINARY_FLOAT_OIDS = {
 }
 _TEXT_OIDS = frozenset({18, 19, 25, 1042, 1043})  # char name text bpchar varchar
 _RAW_OIDS = frozenset({17})  # bytea
+# The base type oids the ora_clob / ora_blob domains report on the wire (text /
+# bytea) — only a column of one of these can be a LOB domain, so the LOB catalog
+# lookup is skipped for anything else (#534).
+_LOB_BASE_OIDS = frozenset({25, 17})
 # Each PostgreSQL temporal OID maps to the Oracle type of matching precision:
 # a bare date → DATE (7 bytes), timestamp → TIMESTAMP (11), timestamptz → 13.
 _TEMPORAL_OIDS = {
@@ -601,6 +621,18 @@ def _decode_row(cursor, row, tstz_oid: int | None) -> list | None:
         else value
         for value, desc in zip(row, cursor.description or ())
     ]
+
+
+def _lob_column_meta(name: str, tns_type: int) -> ColumnMeta:
+    # A CLOB / BLOB result column (an ora_clob / ora_blob domain traced back through
+    # the catalog). LOBs are unsized on the wire — data_length is nominal, max_size
+    # 0 — and the Mirror streams the cell content as a locator (#534).
+    return ColumnMeta(
+        name=name.upper().encode('utf-8'),
+        data_type=tns_type,
+        data_length=4000,
+        max_size=0,
+    )
 
 
 def _column_meta(desc, values: list, tstz_oid: int | None = None) -> ColumnMeta:
@@ -703,6 +735,23 @@ class PostgresBackend:
                 self._tstz_oid = info.oid
         except psycopg.Error:
             self._conn.rollback()
+        # Create the CLOB / BLOB domains and note their oids, so a result column can
+        # be traced back to one and encoded as a real LOB (#534). Best-effort, like
+        # the composite above; a (relid, attnum) → LOB-type cache avoids re-querying
+        # the catalog for a column already seen.
+        self._clob_oid: int | None = None
+        self._blob_oid: int | None = None
+        self._lob_col_cache: dict[tuple[int, int], int | None] = {}
+        try:
+            self._conn.execute(_LOB_TYPE_DDL)
+            for name, attr in ((_CLOB_TYPE, '_clob_oid'), (_BLOB_TYPE, '_blob_oid')):
+                row = self._conn.execute(
+                    'SELECT oid FROM pg_type WHERE typname = %s', (name,)
+                ).fetchone()
+                if row is not None:
+                    setattr(self, attr, row[0])
+        except psycopg.Error:
+            self._conn.rollback()
         self._conn.commit()
 
     def authenticate(self, username: str) -> str | None:
@@ -752,10 +801,23 @@ class PostgresBackend:
                     if self._tstz_oid is not None and desc.type_code == self._tstz_oid:
                         for row in rows:
                             row[i] = _reconstruct_tstz(row[i])
-                columns = [
-                    _column_meta(desc, [r[i] for r in rows], self._tstz_oid)
-                    for i, desc in enumerate(cursor.description)
-                ]
+                columns = []
+                for i, desc in enumerate(cursor.description):
+                    # A column tracing back to an ora_clob / ora_blob domain is a
+                    # real LOB — encode it as one so an empty value stays '' / b''
+                    # rather than collapsing to NULL (#534). Only a text / bytea
+                    # column can be one, so cheaper types skip the catalog lookup.
+                    lob = (
+                        self._lob_type(cursor.pgresult, i)
+                        if desc.type_code in _LOB_BASE_OIDS
+                        else None
+                    )
+                    if lob is not None:
+                        columns.append(_lob_column_meta(desc.name, lob))
+                    else:
+                        columns.append(
+                            _column_meta(desc, [r[i] for r in rows], self._tstz_oid)
+                        )
                 result = Result(columns=columns, rows=[tuple(r) for r in rows])
         except psycopg.Error as exc:
             self._conn.execute('ROLLBACK TO SAVEPOINT _mirror_stmt')
@@ -777,6 +839,34 @@ class PostgresBackend:
         if is_ddl:
             self._conn.commit()
         return result
+
+    def _lob_type(self, pgresult, index: int) -> int | None:
+        # TNS_TYPE_CLOB / TNS_TYPE_BLOB if result column `index` comes from an
+        # ora_clob / ora_blob domain column, else None. The value's own oid is the
+        # domain's base type (text / bytea), so trace the column back to its source
+        # table + attribute (libpq ftable / ftablecol) and read the real declared
+        # type from pg_attribute — cached per (relid, attnum) (#534). A computed
+        # column (ftable 0) isn't a LOB.
+        if self._clob_oid is None and self._blob_oid is None:
+            return None
+        relid = pgresult.ftable(index)
+        if not relid:
+            return None
+        attnum = pgresult.ftablecol(index)
+        key = (relid, attnum)
+        if key not in self._lob_col_cache:
+            row = self._conn.execute(
+                'SELECT atttypid FROM pg_attribute WHERE attrelid = %s AND attnum = %s',
+                (relid, attnum),
+            ).fetchone()
+            atttypid = row[0] if row else None
+            if atttypid == self._clob_oid:
+                self._lob_col_cache[key] = TNS_TYPE_CLOB
+            elif atttypid == self._blob_oid:
+                self._lob_col_cache[key] = TNS_TYPE_BLOB
+            else:
+                self._lob_col_cache[key] = None
+        return self._lob_col_cache[key]
 
     def _execute_plsql(self, sql: str, binds: Sequence) -> Result:
         # A callproc / callfunc block. `binds` is one BindVar per positional bind
