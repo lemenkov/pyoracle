@@ -413,48 +413,6 @@ class AsyncOracleConnect(_ConnectionLogic):
             return Ctx
         return True
 
-    def _apply_wallet(
-        self,
-        WalletLocation: str | None,
-        WalletPassword: str | None,
-        ConfigDir: str | None,
-        Dsn: str | None,
-    ) -> None:
-        # Wallet resolution (#127); a verbatim copy of OracleConnect._apply_wallet
-        # — the codebase keeps the sync/async pair duplicated rather than shared.
-        from seerdb.client import wallet as _wallet
-
-        Location = WalletLocation or ConfigDir
-        if not Location:
-            raise _wallet.WalletError('wallet_location or config_dir is required')
-        Wal = _wallet.open_wallet(Location, WalletPassword, Dsn)
-        Info = Wal.connect
-        if Info is not None:
-            if self.host == 'localhost':
-                self.host = Info.host
-            if self.port == 1521:
-                self.port = Info.port
-            if not self.service_name and Info.service_name:
-                self.service_name = Info.service_name
-            if not self.sid and Info.sid:
-                self.sid = Info.sid
-            if Info.dn_match and Info.server_dn:
-                self._wallet_server_dn = Info.server_dn
-        self.ssl = _wallet.build_client_context(Wal)
-
-    def _check_server_dn(self, PeerCert: dict | None) -> None:
-        # SSL_SERVER_DN_MATCH (#127); mirrors OracleConnect._check_server_dn.
-        if self._wallet_server_dn is None:
-            return
-        import ssl as _ssl
-
-        from seerdb.client import wallet as _wallet
-
-        if not _wallet.server_dn_matches(self._wallet_server_dn, PeerCert):
-            raise _ssl.SSLError(
-                f'server certificate DN does not match {self._wallet_server_dn!r}'
-            )
-
     async def send(self, Type: int, Data: bytes | None) -> None:
         """Iterative split-and-send; mirrors `OracleConnect.send`."""
         while Data is not None:
@@ -468,22 +426,6 @@ class AsyncOracleConnect(_ConnectionLogic):
             Data = Rest
         await self._wr.drain()
         logger.debug('Send OK (async)')
-
-    def _encode_ano_packet(self, Data: bytes) -> tuple[bytes, bytes | None]:
-        # One encrypted TNS_DATA packet (#437) — mirror of
-        # OracleConnect._encode_ano_packet. A plaintext chunk small enough that,
-        # after the MAC + cipher padding + fold flag, the framed packet still fits
-        # the SDU; non-final packets carry data flags 0x0020.
-        from seerdb.common.tns import _packet_header
-
-        assert self._ano is not None  # only called while the ANO cipher is active
-        MaxPlain = self.sdu - 64
-        Chunk = Data[:MaxPlain]
-        Rest = Data[MaxPlain:] or None
-        Payload = self._ano.wrap(Chunk)
-        DataFlag = 0x0000 if Rest is None else 0x0020
-        Header = _packet_header(len(Payload) + 10, TNS_DATA, self._large_packets)
-        return (Header + struct.pack('>H', DataFlag) + Payload, Rest)
 
     @property
     def _wr(self) -> asyncio.StreamWriter:
