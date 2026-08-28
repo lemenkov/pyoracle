@@ -43,6 +43,7 @@ from seerdb.common.tns_consts import (
     FIELD_VERSION_12_1,
     FIELD_VERSION_23_1,
     TNS_SESSION_STATE_REQUEST_BEGIN,
+    DictionaryType,
 )
 
 
@@ -58,6 +59,21 @@ class _ConnectionLogic:
     port: int
     sid: str
     service_name: str
+    user: str
+    proxy_user: str | None
+    password: str
+    cclass: str | None
+    purity: int
+    socket_options: object
+    conn_state: int
+    timeout: int
+    autocommit: bool
+    fetch: int
+    role: int
+    charset: str
+    prelim: int
+    app_name: str
+    sdu: int
     _e2e_values: dict
     _e2e_pending: dict
     _cursors_to_close: list[int]
@@ -255,6 +271,41 @@ class _ConnectionLogic:
         if self._supports_request_boundaries():
             self._session_state_desired = TNS_SESSION_STATE_REQUEST_BEGIN
             self._in_request = True
+
+    # --- Request-dictionary builder ----------------------------------------
+
+    def _make_dict(self, Type: DictionaryType, **extra) -> dict:
+        d = {
+            'env': {
+                'host': self.host,
+                'port': self.port,
+                'user': self.user,
+                'proxy_user': self.proxy_user,
+                'cclass': self.cclass,
+                'purity': self.purity,
+                'password': self.password,
+                'sid': self.sid,
+                'service_name': self.service_name,
+                'ssl': self.ssl,
+                'socket_options': self.socket_options,
+                'conn_state': self.conn_state,
+                'timeout': self.timeout,
+                'autocommit': self.autocommit,
+                'fetch': self.fetch,
+                'role': self.role,
+                'charset': self.charset,
+                'prelim': self.prelim,
+                'app_name': self.app_name,
+            },
+            'sdu': self.sdu,
+            'type': Type,
+            'req': self.charset,
+            'seq': self._next_seq(),
+            'field_version': self.field_version,
+            'supports_eor': self._supports_eor,
+        }
+        d.update(extra)
+        return d
 
     # --- Capability / dialect / misc pure helpers --------------------------
 
