@@ -1770,6 +1770,22 @@ class AsyncOracleConnect:
         await self.send(TNS_DATA, Data)
         await self._handle_response()
 
+    def subscribe(self, *args: object, **kwargs: object) -> None:
+        """Register a Continuous Query Notification subscription — not supported
+        (#129). Async mirror of `OracleConnect.subscribe`: a regular method
+        (not a coroutine) that raises NotSupportedError before any await point,
+        so `conn.subscribe(...)` fails the same way in either flavour."""
+        from seerdb.client.connection import _reject_cqn
+
+        _reject_cqn()
+
+    def unsubscribe(self, *args: object, **kwargs: object) -> None:
+        """Remove a CQN subscription — not supported (#129); the counterpart to
+        `subscribe`, raising NotSupportedError for the same reason."""
+        from seerdb.client.connection import _reject_cqn
+
+        _reject_cqn()
+
     async def changepassword(self, old_password: str, new_password: str) -> None:
         """Change the connected user's password (#21). Async mirror of
         `OracleConnect.changepassword` — same single TTI_AUTH password-change

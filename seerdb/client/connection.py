@@ -615,6 +615,24 @@ def _reject_sharding(shardingkey: object, supershardingkey: object) -> None:
         )
 
 
+def _reject_cqn() -> None:
+    """Reject a Continuous Query Notification request with NotSupportedError (#129).
+
+    CQN registers a server-initiated subscription: the database opens a callback
+    connection back to the client to push change / query notifications. Driving
+    that callback channel is an OCI-client capability that sits outside the thin
+    TTC/TNS request-response protocol, so a pure-protocol thin client cannot
+    offer it — the reference thin driver rejects it for the same reason. The
+    subscribe / unsubscribe methods exist for API compatibility and raise here,
+    so code ported from a thin driver gets the recognizable NotSupportedError
+    rather than an AttributeError on a missing method.
+    """
+    raise NotSupportedError(
+        'Continuous Query Notification / server-initiated subscriptions are not '
+        'supported: they require the OCI-based client'
+    )
+
+
 class OracleConnect:
     def __init__(
         self,
@@ -2301,6 +2319,17 @@ class OracleConnect:
         Data = encode_dictionary(self._make_dict(DictionaryType.tran, req=TTI_PING))
         self.send(TNS_DATA, Data)
         self._handle_response()
+
+    def subscribe(self, *args: object, **kwargs: object) -> None:
+        """Register a Continuous Query Notification subscription — not supported
+        (#129). Accepts any arguments for API compatibility and raises
+        NotSupportedError; see ``_reject_cqn``."""
+        _reject_cqn()
+
+    def unsubscribe(self, *args: object, **kwargs: object) -> None:
+        """Remove a CQN subscription — not supported (#129); the counterpart to
+        ``subscribe``, raising NotSupportedError for the same reason."""
+        _reject_cqn()
 
     def changepassword(self, old_password: str, new_password: str) -> None:
         """Change the connected user's password (#21, oracledb-compatible).

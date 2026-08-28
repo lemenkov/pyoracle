@@ -4116,3 +4116,20 @@ front (`_reject_sharding`), so code ported from a thin driver gets the recogniza
 exception instead of an unexpected-keyword `TypeError`. A downstream thin
 implementation should do the same rather than search for a wire encoding that the
 thin protocol does not have.
+
+## 38. Continuous Query Notification is not on the thin wire (#129)
+
+Continuous Query Notification (CQN) registers a **server-initiated
+subscription**: the client asks the database to watch a query / set of objects
+and, when they change, the *server opens a callback connection back to the
+client* to push a notification. That callback channel — a listener the client
+runs, plus the registration that points the server at it — is an OCI-client
+capability that sits outside the thin TTC/TNS request-response protocol. A
+pure-protocol thin client has no way to host the callback, so it cannot offer
+CQN; the reference thin driver rejects `subscribe()` for the same reason.
+
+As with sharding keys (§37), there is nothing to reverse-engineer or emit on the
+thin wire. seerdb exposes `subscribe` / `unsubscribe` for API parity but raises
+`NotSupportedError` (`_reject_cqn`), so code ported from a thin driver gets the
+recognizable exception rather than an `AttributeError`. A downstream thin
+implementation should do the same.
