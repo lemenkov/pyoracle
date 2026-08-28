@@ -1776,15 +1776,6 @@ class OracleConnect(_ConnectionLogic):
             return Content.decode('utf-16-be', errors='replace')
         return Content
 
-    def _rows(self, result: object) -> list:
-        # The row block of an execute() result (execute is typed `object`); [] if
-        # the result carries no rows.
-        return (
-            result[4]
-            if isinstance(result, tuple) and len(result) > 4 and result[4]
-            else []
-        )
-
     def gettype(self, name: str) -> 'DbObjectType':
         """Look up a SQL object type by name and return a ``DbObjectType``.
 
@@ -2713,29 +2704,6 @@ class OracleConnect(_ConnectionLogic):
         if payload_type is _JSON:
             return Queue(self, name, payload_type=None, is_json=True)
         return Queue(self, name, payload_type=payload_type)
-
-    def msgproperties(
-        self,
-        payload=None,
-        correlation=None,
-        delay=0,
-        expiration=-1,
-        priority=0,
-        exceptionq=None,
-        recipients=None,
-    ):
-        """Build a MessageProperties for enqueue."""
-        from seerdb.client.aq import MessageProperties
-
-        return MessageProperties(
-            payload=payload,
-            correlation=correlation,
-            delay=delay,
-            expiration=expiration,
-            priority=priority,
-            exceptionq=exceptionq,
-            recipients=recipients,
-        )
 
     def _aq_request(self, Data: bytes) -> bytes:
         self.send(TNS_DATA, Data)

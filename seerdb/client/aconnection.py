@@ -419,15 +419,6 @@ class AsyncOracleConnect(_ConnectionLogic):
             raise InterfaceError('connection is not open')
         return self._reader
 
-    def _rows(self, result: object) -> list:
-        # The row block of an execute() result (execute is typed `object`); [] if
-        # the result carries no rows.
-        return (
-            result[4]
-            if isinstance(result, tuple) and len(result) > 4 and result[4]
-            else []
-        )
-
     async def recv(self, Acc: bytes, Data: bytes) -> tuple[int, bytes] | Literal[False]:
         """Same packet-reassembly state machine as `OracleConnect.recv`,
         but awaiting the StreamReader instead of `sock.recv`. Seeds from and
@@ -2041,28 +2032,6 @@ class AsyncOracleConnect(_ConnectionLogic):
         if payload_type is _JSON:
             return AsyncQueue(self, name, payload_type=None, is_json=True)
         return AsyncQueue(self, name, payload_type=payload_type)
-
-    def msgproperties(
-        self,
-        payload=None,
-        correlation=None,
-        delay=0,
-        expiration=-1,
-        priority=0,
-        exceptionq=None,
-        recipients=None,
-    ):
-        from seerdb.client.aq import MessageProperties
-
-        return MessageProperties(
-            payload=payload,
-            correlation=correlation,
-            delay=delay,
-            expiration=expiration,
-            priority=priority,
-            exceptionq=exceptionq,
-            recipients=recipients,
-        )
 
     async def _aq_request(self, Data: bytes) -> bytes:
         await self.send(TNS_DATA, Data)
