@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "seerdb"
-version = "2.3.0"
+version = "2.4.0"
 description = "Python module to interact with a proprietary database"
 readme = "README.md"
 license = "MIT"
