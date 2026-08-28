@@ -19,7 +19,6 @@ from seerdb.client.dialect import (
     CAP_ARRAY_DML,
     CAP_OWN_TXN,
     Dialect,
-    Fv2Dialect,
     O8iDialect,
 )
 from seerdb.common.crypto import validate
@@ -923,10 +922,6 @@ class OracleConnect(_ConnectionLogic):
         Data = encode_dictionary(self._make_dict(DictionaryType.login))
         self.send(TNS_CONNECT, Data)
 
-    def _nego_cache_key(self) -> tuple[str, int, str]:
-        # Identify the connection target for the negotiation cache (#438).
-        return (self.host, self.port, self.service_name or self.sid or '')
-
     def connect(self) -> bool:
         self._redirects = 0
         self._open_transport()
@@ -1360,18 +1355,6 @@ class OracleConnect(_ConnectionLogic):
             # Unknown PRO layout — keep the default field version (11.2).
             logger.debug('handle_login: could not parse PRO caps', exc_info=True)
 
-    def _select_dialect(self, is_8i: bool = False) -> None:
-        # Pick the wire dialect once the negotiated version is final — the single
-        # discriminator the rest of the driver reads (#369). 8i and 9i both
-        # advertise fv2, so the 8i banner (passed in) is what tells them apart;
-        # modern (10g→23ai) keeps _dialect None and takes the TTI_ALL8 path.
-        if is_8i:
-            self._dialect = O8iDialect(self._next_seq)
-        elif self.field_version < FIELD_VERSION_10_2:
-            self._dialect = Fv2Dialect()
-        else:
-            self._dialect = None
-
     def _drive(self, gen: object) -> object:
         # Run a sans-io dialect generator (#369): a yielded Send(data) is written
         # as a TNS_DATA packet; a yielded RECV is answered with the next data
@@ -1781,13 +1764,6 @@ class OracleConnect(_ConnectionLogic):
             RetFormat[0] if (isinstance(RetFormat, tuple) and RetFormat) else 0
         )
         return (list(Rows or []), AtEof, ServerRowCount)
-
-    def _fv2_raise_for_error(self, Packet: bytes) -> None:
-        # Thin delegate to the shared colorless helper — still used by the inline
-        # 8i methods until they migrate to a dialect (#369).
-        from seerdb.client.dialect import fv2_raise_for_error
-
-        fv2_raise_for_error(Packet)
 
     def _drain_cursor(self, Result: object) -> object:
         # The EXEC response either bundles all rows inline (small SELECTs,
@@ -2611,14 +2587,6 @@ class OracleConnect(_ConnectionLogic):
 
     # --- Sessionless transactions (#133, 23ai) ---
 
-    def _check_sessionless_support(self) -> None:
-        if self.field_version < FIELD_VERSION_23_1:
-            from seerdb.common.exceptions import NotSupportedError
-
-            raise NotSupportedError(
-                'sessionless transactions require an Oracle 23ai+ server'
-            )
-
     def _sessionless_switch(
         self, operation: int, transaction_id, flags: int, timeout: int
     ):
@@ -2701,18 +2669,6 @@ class OracleConnect(_ConnectionLogic):
             if Result.error is not None and not continue_on_error:
                 raise Result.error
         return results
-
-    def _pipeline_wire_eligible(self, pipeline) -> bool:
-        # The single-round-trip wire path (#158) needs end-of-response framing
-        # (23ai) and covers only the exec-family ops, whose token framing is
-        # verified against a capture. A pipeline with a commit / callproc /
-        # callfunc op runs serially instead (correct results, no optimisation).
-        from seerdb.client.pipeline import PipelineOpType as T
-
-        WireOps = (T.EXECUTE, T.EXECUTE_MANY, T.FETCH_ONE, T.FETCH_MANY, T.FETCH_ALL)
-        if not self._supports_eor or not pipeline.operations:
-            return False
-        return all(Op.op_type in WireOps for Op in pipeline.operations)
 
     def _encode_pipeline_op(self, Op, TokenNum: int):
         # Build one pipelined op's exec request (token-tagged, no cursor cache)
@@ -2990,11 +2946,6 @@ class OracleConnect(_ConnectionLogic):
         attention support, otherwise an in-band INTERRUPT marker); the thread
         blocked in the call drains the server's interrupt response and raises
         ORA-01013. Safe to call from another thread (e.g. a timer/signal)."""
-        self._send_break()
-
-    def _on_call_timeout(self) -> None:
-        # call_timeout timer callback: flag the timeout and break the call.
-        self._timed_out = True
         self._send_break()
 
     def _send_break(self) -> None:

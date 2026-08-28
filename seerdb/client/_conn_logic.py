@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from seerdb.client.dialect import Dialect, Fv2Dialect, O8iDialect
 from seerdb.common.end_user_sec import EndUserSecurityContext
 from seerdb.common.exceptions import NotSupportedError, ProgrammingError
 from seerdb.common.tns import (
@@ -38,7 +39,9 @@ from seerdb.common.tns import (
     encode_session_state_piggyback,
 )
 from seerdb.common.tns_consts import (
+    FIELD_VERSION_10_2,
     FIELD_VERSION_12_1,
+    FIELD_VERSION_23_1,
     TNS_SESSION_STATE_REQUEST_BEGIN,
 )
 
@@ -51,6 +54,10 @@ class _ConnectionLogic:
     # in the pure methods below; the concrete classes own the real values.
     field_version: int
     ssl: object
+    host: str
+    port: int
+    sid: str
+    service_name: str
     _e2e_values: dict
     _e2e_pending: dict
     _cursors_to_close: list[int]
@@ -59,10 +66,15 @@ class _ConnectionLogic:
     _end_user_sec_context: bytes | None
     _session_state_desired: int
     _in_request: bool
+    _supports_eor: bool
+    _timed_out: bool
+    _dialect: Dialect | None
 
     if TYPE_CHECKING:
 
         def _next_seq(self) -> int: ...
+
+        def _send_break(self) -> None: ...
 
     # --- End-to-end tracing attributes (#183/#184) -------------------------
 
@@ -243,3 +255,51 @@ class _ConnectionLogic:
         if self._supports_request_boundaries():
             self._session_state_desired = TNS_SESSION_STATE_REQUEST_BEGIN
             self._in_request = True
+
+    # --- Capability / dialect / misc pure helpers --------------------------
+
+    def _nego_cache_key(self) -> tuple[str, int, str]:
+        # Identify the connection target for the negotiation cache (#438).
+        return (self.host, self.port, self.service_name or self.sid or '')
+
+    def _select_dialect(self, is_8i: bool = False) -> None:
+        # Pick the wire dialect once the negotiated version is final — the single
+        # discriminator the rest of the driver reads (#369). 8i and 9i both
+        # advertise fv2, so the 8i banner (passed in) is what tells them apart;
+        # modern (10g->23ai) keeps _dialect None and takes the TTI_ALL8 path.
+        if is_8i:
+            self._dialect = O8iDialect(self._next_seq)
+        elif self.field_version < FIELD_VERSION_10_2:
+            self._dialect = Fv2Dialect()
+        else:
+            self._dialect = None
+
+    def _fv2_raise_for_error(self, Packet: bytes) -> None:
+        # Thin delegate to the shared colorless helper — still used by the inline
+        # 8i methods until they migrate to a dialect (#369).
+        from seerdb.client.dialect import fv2_raise_for_error
+
+        fv2_raise_for_error(Packet)
+
+    def _check_sessionless_support(self) -> None:
+        if self.field_version < FIELD_VERSION_23_1:
+            raise NotSupportedError(
+                'sessionless transactions require an Oracle 23ai+ server'
+            )
+
+    def _pipeline_wire_eligible(self, pipeline) -> bool:
+        # The single-round-trip wire path (#158) needs end-of-response framing
+        # (23ai) and covers only the exec-family ops, whose token framing is
+        # verified against a capture. A pipeline with a commit / callproc /
+        # callfunc op runs serially instead (correct results, no optimisation).
+        from seerdb.client.pipeline import PipelineOpType as T
+
+        WireOps = (T.EXECUTE, T.EXECUTE_MANY, T.FETCH_ONE, T.FETCH_MANY, T.FETCH_ALL)
+        if not self._supports_eor or not pipeline.operations:
+            return False
+        return all(Op.op_type in WireOps for Op in pipeline.operations)
+
+    def _on_call_timeout(self) -> None:
+        # call_timeout timer callback: flag the timeout and break the call.
+        self._timed_out = True
+        self._send_break()
