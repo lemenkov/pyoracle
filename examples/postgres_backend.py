@@ -45,7 +45,10 @@ edge of this adapter:
   FULL`` — so it is a faithful locator only within an unmodified snapshot, not a
   durable cross-transaction handle (a real migration substitutes a surrogate identity
   key). The UROWID (``*``-prefixed logical rowid) of an ``ORGANIZATION INDEX`` table
-  has no ``ctid`` analogue and cannot be produced.
+  has no ``ctid`` analogue and cannot be produced. ``DBMS_ROWID`` is likewise
+  unimplemented: ``ctid`` exposes only a block and a slot, not the data-object# and
+  relative-file# that the package's accessors (``ROWID_OBJECT``,
+  ``ROWID_RELATIVE_FNO``, …) decompose a physical rowid into.
 - **Object types (``AS OBJECT``) and ``REF`` / ``DEREF``** — a PostgreSQL composite
   type is not an Oracle object type and has no REF; the object schema the REF tests
   build cannot even be created.
