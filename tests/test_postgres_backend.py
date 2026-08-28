@@ -26,6 +26,7 @@ from seerdb.server import PacketStream, serve_session
 psycopg = pytest.importorskip('psycopg')
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'examples'))
 from postgres_backend import (  # noqa: E402
+    _IS_DDL,
     PostgresBackend,
     _backend_error,
     _distinct_bind_refs,
@@ -156,6 +157,28 @@ def test_translate_ddl_drops_organization_index_and_global_temporary() -> None:
         'CREATE GLOBAL TEMPORARY TABLE g (id NUMBER) ON COMMIT PRESERVE ROWS'
     )
     assert 'GLOBAL TEMPORARY' not in gtt and 'TEMPORARY TABLE' in gtt
+
+
+def test_is_ddl_classifies_auto_committing_statements() -> None:
+    # Oracle auto-commits DDL, so these are committed after they run (#532)…
+    for sql in (
+        'CREATE TABLE t (id NUMBER)',
+        'CREATE OR REPLACE PROCEDURE p AS BEGIN NULL; END;',
+        'DROP TABLE t',
+        'ALTER TABLE t ADD (v VARCHAR2(10))',
+        'TRUNCATE TABLE t',
+        '  create index i on t (id)',
+    ):
+        assert _IS_DDL.match(sql) is not None
+    # …while DML / queries stay under the client's own transaction control.
+    for sql in (
+        'INSERT INTO t VALUES (1)',
+        'UPDATE t SET id = 2',
+        'DELETE FROM t',
+        'SELECT * FROM t',
+        'BEGIN p(:1); END;',
+    ):
+        assert _IS_DDL.match(sql) is None
 
 
 def test_translate_ddl_leaves_non_create_table_unchanged() -> None:
