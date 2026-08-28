@@ -23,9 +23,24 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from seerdb.common.exceptions import NotSupportedError
-from seerdb.common.tns import encode_end_to_end_piggyback
-from seerdb.common.tns_consts import FIELD_VERSION_12_1
+from seerdb.common.end_user_sec import EndUserSecurityContext
+from seerdb.common.exceptions import NotSupportedError, ProgrammingError
+from seerdb.common.tns import (
+    CCAP_FEATURE_BACKPORT2,
+    CCAP_FEATURE_BACKPORT2_END_USER_SEC,
+    CCAP_TTC4,
+    CCAP_TTC4_EXPLICIT_BOUNDARY,
+    RCAP_TTC,
+    RCAP_TTC_SESSION_STATE_OPS,
+    encode_close_cursors_piggyback,
+    encode_end_to_end_piggyback,
+    encode_end_user_sec_piggyback,
+    encode_session_state_piggyback,
+)
+from seerdb.common.tns_consts import (
+    FIELD_VERSION_12_1,
+    TNS_SESSION_STATE_REQUEST_BEGIN,
+)
 
 
 class _ConnectionLogic:
@@ -35,8 +50,15 @@ class _ConnectionLogic:
     # here (no runtime assignment) so the type checker resolves the references
     # in the pure methods below; the concrete classes own the real values.
     field_version: int
+    ssl: object
     _e2e_values: dict
     _e2e_pending: dict
+    _cursors_to_close: list[int]
+    _server_compile_caps: bytes
+    _server_runtime_caps: bytes
+    _end_user_sec_context: bytes | None
+    _session_state_desired: int
+    _in_request: bool
 
     if TYPE_CHECKING:
 
@@ -127,3 +149,97 @@ class _ConnectionLogic:
     @dbop.setter
     def dbop(self, value) -> None:
         self._set_e2e('dbop', value)
+
+    # --- Session-state piggybacks (#191/#460/#464) -------------------------
+    # Each rides in front of the next call; its seq is allocated here so it
+    # precedes the call's. All are pure builders — the concrete class does the
+    # actual send.
+
+    def _flush_cursor_closes_bytes(self) -> bytes:
+        # Build an OCCA (close-cursors) piggyback for the server cursors queued
+        # for close (#191), then clear the queue. Empty when nothing is queued.
+        if not self._cursors_to_close:
+            return b''
+        Seq = self._next_seq()
+        Data = encode_close_cursors_piggyback(
+            Seq, self.field_version, self._cursors_to_close
+        )
+        self._cursors_to_close = []
+        return Data
+
+    def _supports_end_user_sec(self) -> bool:
+        # The server advertises end-user security context via a compile-cap bit
+        # (#460).
+        Caps = self._server_compile_caps
+        return len(Caps) > CCAP_FEATURE_BACKPORT2 and bool(
+            Caps[CCAP_FEATURE_BACKPORT2] & CCAP_FEATURE_BACKPORT2_END_USER_SEC
+        )
+
+    def _flush_end_user_sec_bytes(self) -> bytes:
+        # func-205 piggyback re-sent in front of every call while a context is
+        # set (#460). Empty when none is set.
+        if self._end_user_sec_context is None:
+            return b''
+        Seq = self._next_seq()
+        return encode_end_user_sec_piggyback(
+            Seq, self.field_version, self._end_user_sec_context
+        )
+
+    def set_end_user_security_context(self, context: EndUserSecurityContext) -> None:
+        """Attach an end-user security context to the connection (#460).
+
+        Once set, the context is sent (as a func-205 piggyback) in front of every
+        subsequent database operation until :meth:`clear_end_user_security_context`
+        is called. Build ``context`` with
+        :func:`seerdb.create_end_user_security_context`.
+
+        The reference thin client restricts this feature to TLS (tcps)
+        transports and to servers that advertise it (Oracle 26ai and later), and
+        seerdb mirrors both guards.
+        """
+        if not isinstance(context, EndUserSecurityContext):
+            raise TypeError('expecting an EndUserSecurityContext instance')
+        if not self.ssl:
+            raise ProgrammingError(
+                'end_user_security_context requires use of the tcps protocol'
+            )
+        if not self._supports_end_user_sec():
+            raise NotSupportedError(
+                'the database does not support end-user security context '
+                '(requires Oracle 26ai or later)'
+            )
+        self._end_user_sec_context = context.oson_bytes
+
+    def clear_end_user_security_context(self) -> None:
+        """Clear any end-user security context previously set on the connection
+        (#460), reverting to operations without an attached context."""
+        self._end_user_sec_context = None
+
+    def _supports_request_boundaries(self) -> bool:
+        # Explicit request boundaries need a compile-cap bit AND a runtime-cap
+        # bit (#464).
+        Cc = self._server_compile_caps
+        Rc = self._server_runtime_caps
+        return (
+            len(Cc) > CCAP_TTC4
+            and bool(Cc[CCAP_TTC4] & CCAP_TTC4_EXPLICIT_BOUNDARY)
+            and len(Rc) > RCAP_TTC
+            and bool(Rc[RCAP_TTC] & RCAP_TTC_SESSION_STATE_OPS)
+        )
+
+    def _flush_session_state_bytes(self) -> bytes:
+        # One-shot request-boundary piggyback (#464). Empty when nothing armed.
+        if self._session_state_desired == 0:
+            return b''
+        Seq = self._next_seq()
+        Data = encode_session_state_piggyback(
+            Seq, self.field_version, self._session_state_desired
+        )
+        self._session_state_desired = 0
+        return Data
+
+    def _begin_request(self) -> None:
+        # Arm a REQUEST_BEGIN marker for a pooled logical request (#464).
+        if self._supports_request_boundaries():
+            self._session_state_desired = TNS_SESSION_STATE_REQUEST_BEGIN
+            self._in_request = True
