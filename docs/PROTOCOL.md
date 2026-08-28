@@ -4097,3 +4097,22 @@ capture-order session counters at offsets `3/75/186` and `3/11` zeroed, since th
 Mirror has no per-statement sequence). **Verified live** against sqlplus over the
 Mirror: `insert/update/delete` print the right verb and count, `create/drop`
 print `Table created.` / `Table dropped.` (and, via the resolved command type, `Index created.`, `Table altered.`, `View dropped.`, `Table truncated.`, and the rest).
+
+## 37. Sharding keys are not on the thin wire (#164)
+
+A **sharding key** (`shardingkey` / `supershardingkey`) routes a connection to a
+specific shard of a sharded database. This is an **OCI-client-only** capability:
+the shard resolution happens below the thin TTC/TNS protocol, and a pure-protocol
+thin client has no message to carry it. Confirmed by capture — driving the thin
+reference client with a sharding key against a (non-sharded) 23ai listener through
+the logging proxy sends **zero** bytes: the client rejects the request locally,
+before the connect, with a "not supported in thin mode" error. A second
+independent thin-protocol reference implementation has no sharding code at all.
+
+There is therefore **nothing to reverse-engineer or emit** here, and no capture
+source for the OCI encoding in a thin context. seerdb accepts the two
+oracledb-compatible parameters for API parity but raises `NotSupportedError` up
+front (`_reject_sharding`), so code ported from a thin driver gets the recognizable
+exception instead of an unexpected-keyword `TypeError`. A downstream thin
+implementation should do the same rather than search for a wire encoding that the
+thin protocol does not have.

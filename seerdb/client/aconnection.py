@@ -175,7 +175,14 @@ class AsyncOracleConnect:
         dsn: str | None = None,
         negotiation_cache: bool = False,
         access_token: object = None,
+        shardingkey: object = None,
+        supershardingkey: object = None,
     ):
+        # Sharding keys are an OCI-only routing capability (#164); accept the
+        # oracledb-compatible parameters but reject them with NotSupportedError.
+        from seerdb.client.connection import _reject_sharding
+
+        _reject_sharding(shardingkey, supershardingkey)
         # Negotiation cache (#438): opt-in reconnect optimization, sharing the
         # process-level cache with the sync connection.
         self.negotiation_cache = negotiation_cache

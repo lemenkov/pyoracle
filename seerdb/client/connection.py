@@ -595,6 +595,26 @@ def _split_proxy_user(user: str) -> tuple[str, str | None]:
     return (user, None)
 
 
+def _reject_sharding(shardingkey: object, supershardingkey: object) -> None:
+    """Reject a sharding-key request with a clean NotSupportedError (#164).
+
+    ``shardingkey`` / ``supershardingkey`` route a connection to a specific
+    shard of a sharded database. Emitting them is an OCI-client capability —
+    the routing lives below the thin wire protocol — so a pure-protocol thin
+    driver cannot honour them; the reference thin driver rejects them for the
+    same reason (verified live: the request never reaches the wire). The two
+    parameters are accepted for API compatibility and raise here, so code
+    ported from a thin driver gets the recognizable NotSupportedError rather
+    than a TypeError on an unexpected keyword argument.
+    """
+    if shardingkey is not None or supershardingkey is not None:
+        raise NotSupportedError(
+            'sharding keys (shardingkey / supershardingkey) are not supported: '
+            'routing to a database shard is available only through the '
+            'OCI-based client'
+        )
+
+
 class OracleConnect:
     def __init__(
         self,
@@ -623,7 +643,12 @@ class OracleConnect:
         dsn: str | None = None,
         negotiation_cache: bool = False,
         access_token: object = None,
+        shardingkey: object = None,
+        supershardingkey: object = None,
     ):
+        # Sharding keys are an OCI-only routing capability (#164); accept the
+        # oracledb-compatible parameters but reject them with NotSupportedError.
+        _reject_sharding(shardingkey, supershardingkey)
         # field_version is the highest TTC field version seerdb advertises;
         # the server negotiates it down (min(client, server)). The default is the
         # 23ai max (24), reached via fast-auth (#89) — older servers settle at
