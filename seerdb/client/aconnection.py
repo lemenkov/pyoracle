@@ -46,7 +46,6 @@ from seerdb.client.dialect import (
     CAP_ARRAY_DML,
     CAP_OWN_TXN,
     Dialect,
-    Fv2Dialect,
     O8iDialect,
 )
 from seerdb.common.crypto import validate
@@ -384,9 +383,6 @@ class AsyncOracleConnect(_ConnectionLogic):
                 raise
         Data = encode_dictionary(self._make_dict(DictionaryType.login))
         await self.send(TNS_CONNECT, Data)
-
-    def _nego_cache_key(self) -> tuple[str, int, str]:
-        return (self.host, self.port, self.service_name or self.sid or '')
 
     async def connect(self) -> bool:
         """Open the TCP (optionally TLS) connection and run the
@@ -916,17 +912,6 @@ class AsyncOracleConnect(_ConnectionLogic):
         except Exception:
             logger.debug('handle_login: could not parse PRO caps', exc_info=True)
 
-    def _select_dialect(self, is_8i: bool = False) -> None:
-        # Pick the wire dialect once the negotiated version is final — the single
-        # discriminator the rest of the driver reads (#369). The colorless twin of
-        # OracleConnect._select_dialect.
-        if is_8i:
-            self._dialect = O8iDialect(self._next_seq)
-        elif self.field_version < FIELD_VERSION_10_2:
-            self._dialect = Fv2Dialect()
-        else:
-            self._dialect = None
-
     async def _drive(self, gen: object) -> object:
         # Async twin of OracleConnect._drive (#369): run a sans-io dialect
         # generator, awaiting the real send / receive. Send(data) -> a TNS_DATA
@@ -1259,13 +1244,6 @@ class AsyncOracleConnect(_ConnectionLogic):
                 self._auth_info_pairs() + [(b'AUTH_ACL', b'8000')],
             ),
         )
-
-    def _fv2_raise_for_error(self, Packet: bytes) -> None:
-        # Thin delegate to the shared colorless helper — still used by the inline
-        # 8i methods until they migrate to a dialect (#369).
-        from seerdb.client.dialect import fv2_raise_for_error
-
-        fv2_raise_for_error(Packet)
 
     async def _drain_cursor(self, Result: object) -> object:
         """Mirror of the sync drain loop: pulls follow-up FETCH packets
@@ -1818,10 +1796,6 @@ class AsyncOracleConnect(_ConnectionLogic):
         the server supports it, otherwise an in-band INTERRUPT marker)."""
         self._send_break()
 
-    def _on_call_timeout(self) -> None:
-        self._timed_out = True
-        self._send_break()
-
     def _send_break(self) -> None:
         # In-band INTERRUPT marker break (#144), the async port of OracleConnect.
         # Written straight to the StreamWriter's underlying socket so it flushes
@@ -1955,14 +1929,6 @@ class AsyncOracleConnect(_ConnectionLogic):
 
     # --- Sessionless transactions (#133, 23ai), async port ---
 
-    def _check_sessionless_support(self) -> None:
-        if self.field_version < FIELD_VERSION_23_1:
-            from seerdb.common.exceptions import NotSupportedError
-
-            raise NotSupportedError(
-                'sessionless transactions require an Oracle 23ai+ server'
-            )
-
     async def _sessionless_switch(
         self, operation: int, transaction_id, flags: int, timeout: int
     ):
@@ -2020,16 +1986,6 @@ class AsyncOracleConnect(_ConnectionLogic):
         self._sessionless_txn_active = False
 
     # --- Request pipelining (#132), async port ---
-
-    def _pipeline_wire_eligible(self, pipeline) -> bool:
-        # See OracleConnect._pipeline_wire_eligible (#158): the single-round-trip
-        # wire path needs EOR framing (23ai) and covers only the exec-family ops.
-        from seerdb.client.pipeline import PipelineOpType as T
-
-        WireOps = (T.EXECUTE, T.EXECUTE_MANY, T.FETCH_ONE, T.FETCH_MANY, T.FETCH_ALL)
-        if not self._supports_eor or not pipeline.operations:
-            return False
-        return all(Op.op_type in WireOps for Op in pipeline.operations)
 
     def _encode_pipeline_op(self, Op, TokenNum: int):
         # Async copy of OracleConnect._encode_pipeline_op (#158).
