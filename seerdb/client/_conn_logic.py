@@ -501,6 +501,38 @@ class _ConnectionLogic:
 
         _reject_cqn()
 
+    def _rows(self, result: object) -> list:
+        # The row block of an execute() result (execute is typed `object`); [] if
+        # the result carries no rows.
+        return (
+            result[4]
+            if isinstance(result, tuple) and len(result) > 4 and result[4]
+            else []
+        )
+
+    def msgproperties(
+        self,
+        payload=None,
+        correlation=None,
+        delay=0,
+        expiration=-1,
+        priority=0,
+        exceptionq=None,
+        recipients=None,
+    ):
+        """Build a MessageProperties for enqueue."""
+        from seerdb.client.aq import MessageProperties
+
+        return MessageProperties(
+            payload=payload,
+            correlation=correlation,
+            delay=delay,
+            expiration=expiration,
+            priority=priority,
+            exceptionq=exceptionq,
+            recipients=recipients,
+        )
+
     def _raise_lobops_error(self, Packet: bytes) -> None:
         # Decode the OER trailing a content-free LOBOPS response and raise on a
         # real ORA error. decode_lobops_oer skips the RPA's binary locator and
