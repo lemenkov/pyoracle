@@ -76,8 +76,8 @@ def test_translate_ddl_maps_create_table_column_types() -> None:
     assert 'varchar(20)' in sent
     assert 'timestamp(0)' in sent  # DATE keeps its time-of-day
     assert 'r bytea' in sent  # RAW(16) → bytea (size dropped)
-    assert 'c text' in sent  # CLOB
-    assert 'b bytea' in sent  # BLOB
+    assert 'c ora_clob' in sent  # CLOB → domain over text, so empty ≠ NULL (#534)
+    assert 'b ora_blob' in sent  # BLOB → domain over bytea (#534)
     assert 'ts ora_tstz' in sent  # WITH TIME ZONE preserves the offset (#519)
     assert 'f real' in sent and 'g double precision' in sent
     assert 'NUMBER' not in sent and 'VARCHAR2' not in sent
@@ -149,6 +149,21 @@ def test_translate_binds_wraps_aware_datetime_as_composite() -> None:
     sql2, params2 = _translate_binds('INSERT INTO t VALUES (:1)', [naive])
     assert sql2 == 'INSERT INTO t VALUES (%(b1)s)'
     assert '__off' not in ''.join(params2)
+
+
+def test_translate_ddl_maps_lob_types_to_domains() -> None:
+    # CLOB / NCLOB / BLOB become ora_clob / ora_blob domains so the read path can
+    # tell a LOB from a plain VARCHAR2 / RAW and keep empty distinct from NULL
+    # (#534). LONG / LONG RAW / RAW are not LOBs and stay text / bytea.
+    sent = _translate_ddl(
+        'CREATE TABLE t (a CLOB, b NCLOB, c BLOB, d LONG, e LONG RAW, f RAW(8))'
+    )
+    assert 'a ora_clob' in sent
+    assert 'b ora_clob' in sent
+    assert 'c ora_blob' in sent
+    assert 'd text' in sent
+    assert 'e bytea' in sent and 'f bytea' in sent
+    assert 'ora_clob' not in sent.split('d text')[1]  # LONG isn't a LOB domain
 
 
 def test_translate_ddl_drops_organization_index_and_global_temporary() -> None:
