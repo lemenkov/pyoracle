@@ -50,39 +50,28 @@ from seerdb.client.dialect import (
     O8iDialect,
 )
 from seerdb.common.crypto import validate
-from seerdb.common.end_user_sec import EndUserSecurityContext
 from seerdb.common.exceptions import (
     DatabaseError,
     InterfaceError,
     NotSupportedError,
     OperationalError,
-    ProgrammingError,
 )
 from seerdb.common.tns import (
     _DTY_8I,
-    CCAP_FEATURE_BACKPORT2,
-    CCAP_FEATURE_BACKPORT2_END_USER_SEC,
     CCAP_FIELD_VERSION,
-    CCAP_TTC4,
-    CCAP_TTC4_EXPLICIT_BOUNDARY,
     FIELD_VERSION_10_2,
     FIELD_VERSION_12_1,
-    RCAP_TTC,
-    RCAP_TTC_SESSION_STATE_OPS,
     assemble_packet,
     decode_packet,
     decode_token_pro,
     decode_token_rpa,
-    encode_close_cursors_piggyback,
     encode_data_packet,
     encode_dictionary,
     encode_dictionary_auth,
-    encode_end_user_sec_piggyback,
     encode_fast_auth,
     encode_packet,
     encode_pipeline_begin,
     encode_pipeline_end,
-    encode_session_state_piggyback,
     encode_tpc_change_state,
     encode_tpc_switch,
     exec_oac_signature,
@@ -113,7 +102,6 @@ from seerdb.common.tns_consts import (
     TNS_REDIRECT,
     TNS_REFUSE,
     TNS_RESEND,
-    TNS_SESSION_STATE_REQUEST_BEGIN,
     TNS_SESSION_STATE_REQUEST_END,
     TNS_TPC_SESSIONLESS_FORMAT_ID,
     TNS_TPC_TXN_ABORT,
@@ -1790,7 +1778,7 @@ class AsyncOracleConnect(_ConnectionLogic):
         """Change the connected user's password (#21). Async mirror of
         `OracleConnect.changepassword` — same single TTI_AUTH password-change
         call reusing the login session key, same error behaviour."""
-        from seerdb.common.exceptions import NotSupportedError, from_ora_code
+        from seerdb.common.exceptions import from_ora_code
 
         if self.field_version < FIELD_VERSION_10_2:
             raise NotSupportedError(
@@ -2249,7 +2237,6 @@ class AsyncOracleConnect(_ConnectionLogic):
     def queue(self, name: str, payload_type=None):
         from seerdb.client.aq import AsyncQueue
         from seerdb.common.datatypes import JSON as _JSON
-        from seerdb.common.exceptions import NotSupportedError
 
         if self.field_version < FIELD_VERSION_12_1:
             raise NotSupportedError('Advanced Queuing requires an Oracle 12.1+ server')
@@ -2391,64 +2378,6 @@ class AsyncOracleConnect(_ConnectionLogic):
 
     # --- End-to-end application tracing (#183), async port ---
 
-    def _flush_cursor_closes_bytes(self) -> bytes:
-        # OCCA piggyback closing drained server cursors (#191); see
-        # OracleConnect._flush_cursor_closes_bytes.
-        if not self._cursors_to_close:
-            return b''
-        Seq = self._next_seq()
-        Data = encode_close_cursors_piggyback(
-            Seq, self.field_version, self._cursors_to_close
-        )
-        self._cursors_to_close = []
-        return Data
-
-    def _supports_end_user_sec(self) -> bool:
-        # See OracleConnect._supports_end_user_sec (#460).
-        Caps = self._server_compile_caps
-        return len(Caps) > CCAP_FEATURE_BACKPORT2 and bool(
-            Caps[CCAP_FEATURE_BACKPORT2] & CCAP_FEATURE_BACKPORT2_END_USER_SEC
-        )
-
-    def _flush_end_user_sec_bytes(self) -> bytes:
-        # func-205 piggyback re-sent every call while a context is set (#460);
-        # see OracleConnect._flush_end_user_sec_bytes.
-        if self._end_user_sec_context is None:
-            return b''
-        Seq = self._next_seq()
-        return encode_end_user_sec_piggyback(
-            Seq, self.field_version, self._end_user_sec_context
-        )
-
-    def _supports_request_boundaries(self) -> bool:
-        # See OracleConnect._supports_request_boundaries (#464).
-        Cc = self._server_compile_caps
-        Rc = self._server_runtime_caps
-        return (
-            len(Cc) > CCAP_TTC4
-            and bool(Cc[CCAP_TTC4] & CCAP_TTC4_EXPLICIT_BOUNDARY)
-            and len(Rc) > RCAP_TTC
-            and bool(Rc[RCAP_TTC] & RCAP_TTC_SESSION_STATE_OPS)
-        )
-
-    def _flush_session_state_bytes(self) -> bytes:
-        # One-shot request-boundary piggyback (#464); see
-        # OracleConnect._flush_session_state_bytes.
-        if self._session_state_desired == 0:
-            return b''
-        Seq = self._next_seq()
-        Data = encode_session_state_piggyback(
-            Seq, self.field_version, self._session_state_desired
-        )
-        self._session_state_desired = 0
-        return Data
-
-    def _begin_request(self) -> None:
-        # Arm a REQUEST_BEGIN marker for a pooled logical request (#464).
-        if self._supports_request_boundaries():
-            self._session_state_desired = TNS_SESSION_STATE_REQUEST_BEGIN
-            self._in_request = True
-
     async def _end_request(self) -> None:
         # End a pooled logical request (#464): cancel an unflushed BEGIN, else
         # send REQUEST_END on a rollback. See OracleConnect._end_request.
@@ -2466,32 +2395,6 @@ class AsyncOracleConnect(_ConnectionLogic):
         Data = encode_dictionary(self._make_dict(DictionaryType.tran, req=TTI_ROLLBACK))
         await self.send(TNS_DATA, Pre + Data)
         await self._handle_response()
-
-    def set_end_user_security_context(self, context: EndUserSecurityContext) -> None:
-        """Attach an end-user security context to the connection (#460).
-
-        Once set, the context rides (as a func-205 piggyback) in front of every
-        subsequent database operation until
-        :meth:`clear_end_user_security_context` is called. Build ``context`` with
-        :func:`seerdb.create_end_user_security_context`. tcps-only, and only on
-        servers that advertise it (Oracle 26ai+), mirroring the reference client.
-        """
-        if not isinstance(context, EndUserSecurityContext):
-            raise TypeError('expecting an EndUserSecurityContext instance')
-        if not self.ssl:
-            raise ProgrammingError(
-                'end_user_security_context requires use of the tcps protocol'
-            )
-        if not self._supports_end_user_sec():
-            raise NotSupportedError(
-                'the database does not support end-user security context '
-                '(requires Oracle 26ai or later)'
-            )
-        self._end_user_sec_context = context.oson_bytes
-
-    def clear_end_user_security_context(self) -> None:
-        """Clear any end-user security context set on the connection (#460)."""
-        self._end_user_sec_context = None
 
     # ----- async context manager -----
 
