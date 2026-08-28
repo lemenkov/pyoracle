@@ -709,9 +709,19 @@ def test_helper_functions_ddl_defines_the_scalar_helpers() -> None:
     # PostgreSQL functions (#513) instead of rewritten per call site, so those
     # call sites resolve directly. Each is defined idempotently (CREATE OR
     # REPLACE) and returns the LOB domains where appropriate.
-    for name in ('hextoraw', 'rawtohex', 'empty_clob', 'empty_blob', 'from_tz'):
+    for name in (
+        'hextoraw',
+        'rawtohex',
+        'empty_clob',
+        'empty_blob',
+        'from_tz',
+        'rowidtochar',
+    ):
         assert f'FUNCTION {name}(' in _HELPER_FUNCTIONS_DDL
-    assert _HELPER_FUNCTIONS_DDL.count('CREATE OR REPLACE FUNCTION') == 5
+    assert _HELPER_FUNCTIONS_DDL.count('CREATE OR REPLACE FUNCTION') == 6
+    # rowidtochar is the identity on the text ctid the ROWID pseudo-column rewrites
+    # to, so ROWIDTOCHAR(ROWID) equals ROWID.
+    assert 'FUNCTION rowidtochar(text) RETURNS text' in _HELPER_FUNCTIONS_DDL
     # empty_clob / empty_blob hand back the domain types, so a value stored
     # through one is recognised as a LOB on read-back rather than a plain string.
     assert 'RETURNS ora_clob' in _HELPER_FUNCTIONS_DDL
@@ -723,7 +733,10 @@ def test_helper_functions_ddl_defines_the_scalar_helpers() -> None:
     # STABLE, since a named region's offset depends on the tz database.
     assert 'FUNCTION from_tz(timestamp, text) RETURNS ora_tstz' in _HELPER_FUNCTIONS_DDL
     assert 'AT TIME ZONE' in _HELPER_FUNCTIONS_DDL
-    assert 'IMMUTABLE' not in _HELPER_FUNCTIONS_DDL.split('from_tz', 1)[1]
+    from_tz_body = _HELPER_FUNCTIONS_DDL.split('from_tz', 1)[1].split(
+        'CREATE OR REPLACE', 1
+    )[0]
+    assert 'IMMUTABLE' not in from_tz_body
 
 
 def test_translate_idioms_functions_and_literals() -> None:
@@ -745,6 +758,26 @@ def test_translate_idioms_functions_and_literals() -> None:
         )
         == "SELECT FROM_TZ(TIMESTAMP '2024-01-15 12:00:00', 'US/Eastern')"
     )
+
+
+def test_translate_idioms_rewrites_rowid_pseudocolumn() -> None:
+    # The ROWID pseudo-column becomes ctid::text — one rewrite serving both a
+    # SELECT (returns the '(0,1)' text) and a WHERE ROWID = :bind (text compare).
+    assert _translate_idioms('SELECT ROWID FROM t') == 'SELECT ctid::text FROM t'
+    assert _translate_idioms('SELECT id FROM t WHERE ROWID = :r') == (
+        'SELECT id FROM t WHERE ctid::text = :r'
+    )
+    # The word boundary keeps it off ROWIDTOCHAR (no boundary mid-token) — that call
+    # resolves to the installed identity helper — and off UROWID (a word char
+    # precedes ROWID), so a UROWID column type name is left intact.
+    assert _translate_idioms('SELECT ROWIDTOCHAR(ROWID) FROM t') == (
+        'SELECT ROWIDTOCHAR(ctid::text) FROM t'
+    )
+    assert _translate_idioms('CREATE TABLE t (r UROWID)') == (
+        'CREATE TABLE t (r UROWID)'
+    )
+    # Case-insensitive, like the other pseudo-column rewrites.
+    assert _translate_idioms('select rowid from t') == 'select ctid::text from t'
 
 
 def test_translate_idioms_binary_float_double_literals() -> None:
