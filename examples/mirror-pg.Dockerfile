@@ -17,7 +17,7 @@
 
 FROM postgres:16-alpine
 
-ARG ORAFCE_VERSION=VERSION_4_10_0
+ARG ORAFCE_VERSION=VERSION_4_16_7
 
 RUN set -eux; \
     apk add --no-cache --virtual .orafce-build \
