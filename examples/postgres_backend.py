@@ -38,11 +38,6 @@ just as the JSON / VECTOR / BOOLEAN column types (21c/23ai) are refused with
 ORA-00902. The rest have no such guard and simply do not pass; they are the honest
 edge of this adapter:
 
-- **INTERVAL YEAR TO MONTH** — PostgreSQL has a single ``interval`` type and psycopg
-  surfaces a year-month interval as a ``timedelta`` (months flattened to days), so
-  the calendar Y/M distinction Oracle preserves is lost. (An OUT bind of this type
-  fails cleanly rather than desyncing the connection — the Mirror's never-desync
-  contract, restored in the reply-encoding path.)
 - **ROWID / UROWID** — an Oracle physical row address. PostgreSQL's ``ctid`` is a
   different, mutable locator with no stable text form or ``ROWIDTOCHAR`` analogue.
 - **Object types (``AS OBJECT``) and ``REF`` / ``DEREF``** — a PostgreSQL composite
@@ -54,12 +49,15 @@ from __future__ import annotations
 
 import datetime
 import re
+import struct
 from collections.abc import Sequence
 
 import psycopg
 from psycopg import sql
+from psycopg.adapt import Loader
 from psycopg.types.composite import CompositeInfo, register_composite
 
+from seerdb.common.datatypes import IntervalYM
 from seerdb.common.tns_consts import (
     TNS_TYPE_BDOUBLE,
     TNS_TYPE_BFLOAT,
@@ -67,6 +65,7 @@ from seerdb.common.tns_consts import (
     TNS_TYPE_CLOB,
     TNS_TYPE_DATE,
     TNS_TYPE_INTERVALDS,
+    TNS_TYPE_INTERVALYM,
     TNS_TYPE_NUMBER,
     TNS_TYPE_RAW,
     TNS_TYPE_TIMESTAMP,
@@ -114,6 +113,21 @@ _LOB_TYPE_DDL = (
     'EXCEPTION WHEN duplicate_object THEN NULL; END $$;'
 )
 
+# INTERVAL YEAR TO MONTH onto a PostgreSQL domain over `interval` (#504). Oracle
+# has two interval families — YEAR TO MONTH (a calendar count of months) and DAY
+# TO SECOND (an exact duration) — but PostgreSQL has a single `interval` type, so
+# both share oid 1186 and neither is distinguishable by wire oid alone. A domain
+# lets a YEAR TO MONTH column trace back through pg_attribute to `ora_intervalym`
+# (exactly as the LOB domains do), so the read path can encode it as the Oracle
+# INTERVAL YEAR TO MONTH type rather than DAY TO SECOND. The months themselves
+# survive via a custom interval loader (see OraInterval below); psycopg's default
+# loader flattens a year-month interval to a `timedelta`, dropping the months.
+_INTERVALYM_TYPE = 'ora_intervalym'
+_INTERVALYM_TYPE_DDL = (
+    'DO $$ BEGIN CREATE DOMAIN ora_intervalym AS interval; '
+    'EXCEPTION WHEN duplicate_object THEN NULL; END $$'
+)
+
 # Oracle scalar functions the backend installs as real PostgreSQL functions,
 # rather than rewriting each call site with a regex (#513). A parens-called Oracle
 # function — HEXTORAW('..'), EMPTY_CLOB(), FROM_TZ(ts, 'zone') — resolves
@@ -156,6 +170,84 @@ _HELPER_FUNCTIONS_DDL = (
     f')::{_TSTZ_TYPE} $$;'
 )
 
+# The PostgreSQL `interval` OID (pg_type.oid) — the base type ora_intervalym is a
+# domain over, so both YEAR TO MONTH and DAY TO SECOND columns report it on the
+# wire.
+_INTERVAL_OID = 1186
+
+
+class OraInterval(datetime.timedelta):
+    """A ``timedelta`` that also carries the interval's whole-month count.
+
+    psycopg's default loader turns a PostgreSQL ``interval`` into a plain
+    ``timedelta``, which has no notion of months — so a YEAR TO MONTH interval
+    (``3-7``) arrives as an approximate day count and its calendar months are
+    lost. The loaders below return this subclass instead, capturing ``months``
+    from the raw value while still being a real ``timedelta``: a DAY TO SECOND
+    interval keeps its exact duration with ``months == 0`` (so the existing
+    INTERVALDS encode path, which tests ``isinstance(value, timedelta)``, is
+    untouched), and a YEAR TO MONTH interval carries its months for the read path
+    to turn into an :class:`IntervalYM`.
+    """
+
+    months: int
+
+    def __new__(cls, *, months: int, td: datetime.timedelta) -> 'OraInterval':
+        self = super().__new__(
+            cls, days=td.days, seconds=td.seconds, microseconds=td.microseconds
+        )
+        self.months = months
+        return self
+
+
+# `<n> years <m> mons` in a PostgreSQL interval's text form (either field may be
+# signed and either may be absent). Their sum is the whole-month count.
+_PG_INTERVAL_YEARS = re.compile(r'(-?\d+)\s+years?')
+_PG_INTERVAL_MONS = re.compile(r'(-?\d+)\s+mons?')
+
+
+class _IntervalMonthsTextLoader(Loader):
+    # Parse the month fields out of the text form, delegating the duration to
+    # psycopg's built-in text interval loader.
+    format = psycopg.pq.Format.TEXT
+
+    def __init__(self, oid: int, context=None) -> None:
+        super().__init__(oid, context)
+        from psycopg.types.datetime import IntervalLoader
+
+        self._base = IntervalLoader(oid, context)
+
+    def load(self, data) -> OraInterval:
+        text = bytes(data).decode()
+        years = int(m.group(1)) if (m := _PG_INTERVAL_YEARS.search(text)) else 0
+        mons = int(m.group(1)) if (m := _PG_INTERVAL_MONS.search(text)) else 0
+        return OraInterval(months=years * 12 + mons, td=self._base.load(data))
+
+
+class _IntervalMonthsBinaryLoader(Loader):
+    # The binary form is int64 microseconds, int32 days, int32 months; take the
+    # months field and delegate the duration to the built-in binary loader.
+    format = psycopg.pq.Format.BINARY
+
+    def __init__(self, oid: int, context=None) -> None:
+        super().__init__(oid, context)
+        from psycopg.types.datetime import IntervalBinaryLoader
+
+        self._base = IntervalBinaryLoader(oid, context)
+
+    def load(self, data) -> OraInterval:
+        _micros, _days, months = struct.unpack('!qii', data)
+        return OraInterval(months=months, td=self._base.load(data))
+
+
+def _to_interval_ym(value: 'OraInterval | None') -> 'IntervalYM | None':
+    # An OraInterval → an IntervalYM built from its whole-month count; IntervalYM
+    # normalises the split (0, 43) → 3y 7m and shares the sign, so a negative
+    # (0, -14) → -1y -2m. A None (SQL NULL) passes through.
+    if value is None:
+        return None
+    return IntervalYM(0, getattr(value, 'months', 0))
+
 
 # One Oracle bind reference: `:` + an identifier or number (`:x`, `:my_var`,
 # `:1`). A `::` cast is left alone (handled by the scan below, which only starts
@@ -180,6 +272,7 @@ def _translate_binds(sql: str, binds: Sequence) -> tuple[str, dict]:
     names: list[str] = []  # distinct bind names, in first-appearance order
     out: list[str] = []
     tstz_keys: set[str] = set()  # bind keys whose value is an aware datetime
+    intervalym_keys: set[str] = set()  # bind keys whose value is an IntervalYM
     i, n = 0, len(sql)
     while i < n:
         char = sql[i]
@@ -208,6 +301,12 @@ def _translate_binds(sql: str, binds: Sequence) -> tuple[str, dict]:
                 # round trip rather than being normalised to UTC (#519).
                 out.append(f'ROW(%({key})s, %({key}__off)s)::{_TSTZ_TYPE}')
                 tstz_keys.add(key)
+            elif isinstance(value, IntervalYM):
+                # An IntervalYM binds an INTERVAL YEAR TO MONTH — send its whole-month
+                # count and rebuild a PostgreSQL interval, so the months survive
+                # (psycopg has no dumper for IntervalYM) (#504).
+                out.append(f'make_interval(months => %({key})s)')
+                intervalym_keys.add(key)
             else:
                 out.append(f'%({key})s')
             i = match.end()
@@ -222,6 +321,8 @@ def _translate_binds(sql: str, binds: Sequence) -> tuple[str, dict]:
         params[key] = values[idx]
         if key in tstz_keys:
             params[f'{key}__off'] = int(values[idx].utcoffset().total_seconds())
+        elif key in intervalym_keys:
+            params[key] = values[idx].years * 12 + values[idx].months
     return ''.join(out), params
 
 
@@ -262,9 +363,11 @@ _DDL_TYPE_REWRITES = [
         ),
         'interval',
     ),
+    # INTERVAL YEAR TO MONTH → the ora_intervalym domain over interval, so the read
+    # path can tell it from a DAY TO SECOND interval and preserve the months (#504).
     (
         re.compile(r'\bINTERVAL\s+YEAR(?:\s*\(\d+\))?\s+TO\s+MONTH\b', re.IGNORECASE),
-        'interval',
+        _INTERVALYM_TYPE,
     ),
     (re.compile(r'\bNVARCHAR2\b', re.IGNORECASE), 'varchar'),
     (re.compile(r'\bVARCHAR2\b', re.IGNORECASE), 'varchar'),
@@ -560,10 +663,11 @@ _BINARY_FLOAT_OIDS = {
 }
 _TEXT_OIDS = frozenset({18, 19, 25, 1042, 1043})  # char name text bpchar varchar
 _RAW_OIDS = frozenset({17})  # bytea
-# The base type oids the ora_clob / ora_blob domains report on the wire (text /
-# bytea) — only a column of one of these can be a LOB domain, so the LOB catalog
-# lookup is skipped for anything else (#534).
-_LOB_BASE_OIDS = frozenset({25, 17})
+# The base type oids the Oracle-typed domains report on the wire — ora_clob /
+# ora_blob over text / bytea (#534), ora_intervalym over interval (#504). Only a
+# column of one of these can be such a domain, so the catalog lookup that
+# distinguishes them is skipped for anything else.
+_DOMAIN_BASE_OIDS = frozenset({25, 17, _INTERVAL_OID})
 # Each PostgreSQL temporal OID maps to the Oracle type of matching precision:
 # a bare date → DATE (7 bytes), timestamp → TIMESTAMP (11), timestamptz → 13.
 _TEMPORAL_OIDS = {
@@ -571,13 +675,11 @@ _TEMPORAL_OIDS = {
     1114: (TNS_TYPE_TIMESTAMP, 11),  # timestamp (without time zone)
     1184: (TNS_TYPE_TIMESTAMPTZ, 13),  # timestamptz
 }
-# PostgreSQL `interval` (oid 1186) → Oracle INTERVAL DAY TO SECOND. psycopg
-# returns it as a datetime.timedelta, which the Mirror already encodes for an
-# INTERVALDS column. INTERVAL YEAR TO MONTH can't round-trip: PostgreSQL/psycopg
-# collapse a year-month interval to an approximate day count (a timedelta with no
-# months), losing the calendar distinction Oracle keeps — that's an Oracle-only
-# ceiling (#504), not a mapping this backend can honour.
-_INTERVAL_OIDS = frozenset({1186})
+# PostgreSQL `interval` (oid 1186) → Oracle INTERVAL DAY TO SECOND by default;
+# psycopg returns it as a timedelta (an OraInterval, months == 0), which the Mirror
+# encodes for an INTERVALDS column. A YEAR TO MONTH interval is distinguished by its
+# ora_intervalym domain (traced through the catalog) and handled separately (#504).
+_INTERVAL_OIDS = frozenset({_INTERVAL_OID})
 
 _ORA_INVALID_SQL = 900
 
@@ -660,6 +762,18 @@ def _lob_column_meta(name: str, tns_type: int) -> ColumnMeta:
         data_type=tns_type,
         data_length=4000,
         max_size=0,
+    )
+
+
+def _intervalym_column_meta(name: str) -> ColumnMeta:
+    # An INTERVAL YEAR TO MONTH result column (an ora_intervalym domain traced back
+    # through the catalog). The wire form is 5 bytes — 4-byte years + 1-byte months
+    # (see the Mirror's encode_interval_ym) — and its cells are IntervalYM (#504).
+    return ColumnMeta(
+        name=name.upper().encode('utf-8'),
+        data_type=TNS_TYPE_INTERVALYM,
+        data_length=5,
+        max_size=5,
     )
 
 
@@ -763,21 +877,35 @@ class PostgresBackend:
                 self._tstz_oid = info.oid
         except psycopg.Error:
             self._conn.rollback()
-        # Create the CLOB / BLOB domains and note their oids, so a result column can
-        # be traced back to one and encoded as a real LOB (#534). Best-effort, like
-        # the composite above; a (relid, attnum) → LOB-type cache avoids re-querying
-        # the catalog for a column already seen.
-        self._clob_oid: int | None = None
-        self._blob_oid: int | None = None
-        self._lob_col_cache: dict[tuple[int, int], int | None] = {}
+        # Create the typed domains and map each domain's oid to the Oracle wire type
+        # it stands for, so a result column tracing back to one is encoded as that
+        # Oracle type — ora_clob / ora_blob as a LOB (#534), ora_intervalym as
+        # INTERVAL YEAR TO MONTH (#504). Best-effort, like the composite above; a
+        # (relid, attnum) → type cache avoids re-querying the catalog for a column
+        # already seen. The ora_intervalym oid is kept on its own for the OUT-bind
+        # path, which has no result column to trace and matches on the arg type.
+        self._intervalym_oid: int | None = None
+        self._domain_type_by_oid: dict[int, int] = {}
+        self._domain_col_cache: dict[tuple[int, int], int | None] = {}
         try:
             self._conn.execute(_LOB_TYPE_DDL)
-            for name, attr in ((_CLOB_TYPE, '_clob_oid'), (_BLOB_TYPE, '_blob_oid')):
+            self._conn.execute(_INTERVALYM_TYPE_DDL)
+            for name, tns_type in (
+                (_CLOB_TYPE, TNS_TYPE_CLOB),
+                (_BLOB_TYPE, TNS_TYPE_BLOB),
+                (_INTERVALYM_TYPE, TNS_TYPE_INTERVALYM),
+            ):
                 row = self._conn.execute(
                     'SELECT oid FROM pg_type WHERE typname = %s', (name,)
                 ).fetchone()
                 if row is not None:
-                    setattr(self, attr, row[0])
+                    self._domain_type_by_oid[row[0]] = tns_type
+                    if name == _INTERVALYM_TYPE:
+                        self._intervalym_oid = row[0]
+            # Preserve an interval's months through psycopg (its default loader
+            # flattens them to a timedelta), so a YEAR TO MONTH value survives (#504).
+            self._conn.adapters.register_loader('interval', _IntervalMonthsTextLoader)
+            self._conn.adapters.register_loader('interval', _IntervalMonthsBinaryLoader)
         except psycopg.Error:
             self._conn.rollback()
         # Install the Oracle scalar helper functions (hextoraw, rawtohex,
@@ -839,17 +967,23 @@ class PostgresBackend:
                             row[i] = _reconstruct_tstz(row[i])
                 columns = []
                 for i, desc in enumerate(cursor.description):
-                    # A column tracing back to an ora_clob / ora_blob domain is a
-                    # real LOB — encode it as one so an empty value stays '' / b''
-                    # rather than collapsing to NULL (#534). Only a text / bytea
-                    # column can be one, so cheaper types skip the catalog lookup.
-                    lob = (
-                        self._lob_type(cursor.pgresult, i)
-                        if desc.type_code in _LOB_BASE_OIDS
+                    # A column tracing back to a typed domain is that Oracle type —
+                    # an ora_clob / ora_blob LOB (so an empty value stays '' / b''
+                    # rather than collapsing to NULL, #534), or an ora_intervalym
+                    # INTERVAL YEAR TO MONTH (so its months survive, #504). Only a
+                    # text / bytea / interval column can be one, so cheaper types
+                    # skip the catalog lookup.
+                    domain = (
+                        self._domain_type(cursor.pgresult, i)
+                        if desc.type_code in _DOMAIN_BASE_OIDS
                         else None
                     )
-                    if lob is not None:
-                        columns.append(_lob_column_meta(desc.name, lob))
+                    if domain in (TNS_TYPE_CLOB, TNS_TYPE_BLOB):
+                        columns.append(_lob_column_meta(desc.name, domain))
+                    elif domain == TNS_TYPE_INTERVALYM:
+                        for row in rows:
+                            row[i] = _to_interval_ym(row[i])
+                        columns.append(_intervalym_column_meta(desc.name))
                     else:
                         columns.append(
                             _column_meta(desc, [r[i] for r in rows], self._tstz_oid)
@@ -876,33 +1010,31 @@ class PostgresBackend:
             self._conn.commit()
         return result
 
-    def _lob_type(self, pgresult, index: int) -> int | None:
-        # TNS_TYPE_CLOB / TNS_TYPE_BLOB if result column `index` comes from an
-        # ora_clob / ora_blob domain column, else None. The value's own oid is the
-        # domain's base type (text / bytea), so trace the column back to its source
-        # table + attribute (libpq ftable / ftablecol) and read the real declared
-        # type from pg_attribute — cached per (relid, attnum) (#534). A computed
-        # column (ftable 0) isn't a LOB.
-        if self._clob_oid is None and self._blob_oid is None:
+    def _domain_type(self, pgresult, index: int) -> int | None:
+        # The Oracle wire type if result column `index` comes from one of the typed
+        # domains — TNS_TYPE_CLOB / TNS_TYPE_BLOB (ora_clob / ora_blob, #534) or
+        # TNS_TYPE_INTERVALYM (ora_intervalym, #504) — else None. A domain value
+        # reports its base type on the wire (text / bytea / interval), so trace the
+        # column back to its source table + attribute (libpq ftable / ftablecol) and
+        # read the real declared type from pg_attribute — cached per (relid, attnum).
+        # A computed column (ftable 0) isn't a domain column.
+        if not self._domain_type_by_oid:
             return None
         relid = pgresult.ftable(index)
         if not relid:
             return None
         attnum = pgresult.ftablecol(index)
         key = (relid, attnum)
-        if key not in self._lob_col_cache:
+        if key not in self._domain_col_cache:
             row = self._conn.execute(
                 'SELECT atttypid FROM pg_attribute WHERE attrelid = %s AND attnum = %s',
                 (relid, attnum),
             ).fetchone()
             atttypid = row[0] if row else None
-            if atttypid == self._clob_oid:
-                self._lob_col_cache[key] = TNS_TYPE_CLOB
-            elif atttypid == self._blob_oid:
-                self._lob_col_cache[key] = TNS_TYPE_BLOB
-            else:
-                self._lob_col_cache[key] = None
-        return self._lob_col_cache[key]
+            self._domain_col_cache[key] = (
+                self._domain_type_by_oid.get(atttypid) if atttypid is not None else None
+            )
+        return self._domain_col_cache[key]
 
     def _execute_plsql(self, sql: str, binds: Sequence) -> Result:
         # A callproc / callfunc block. `binds` is one BindVar per positional bind
@@ -955,7 +1087,7 @@ class PostgresBackend:
         # bind positions.
         name, args = match.groups()
         arg_refs = [int(r) for r in re.findall(r':(\d+)', args)]
-        modes = self._arg_modes(name, len(arg_refs))
+        modes, argtypes = self._proc_signature(name)
         # A pure-OUT argument carries no input — pass an untyped NULL, not the
         # client's placeholder Var value: a REF CURSOR Var marshals to bytea, which
         # makes CALL's overload resolution miss the refcursor parameter (#518). IN
@@ -973,7 +1105,18 @@ class PostgresBackend:
         for position, ref in enumerate(arg_refs):
             is_out = modes[position] in ('o', 'b') if modes else False
             if is_out and result_i < len(returned):
-                out[ref - 1] = returned[result_i]
+                value = returned[result_i]
+                # An OUT INTERVAL YEAR TO MONTH arrives as an OraInterval (base
+                # interval on the wire) — turn it into an IntervalYM by matching the
+                # argument's declared ora_intervalym type, since a CALL result has no
+                # table column to trace (#504).
+                if (
+                    self._intervalym_oid is not None
+                    and position < len(argtypes)
+                    and argtypes[position] == self._intervalym_oid
+                ):
+                    value = _to_interval_ym(value)
+                out[ref - 1] = value
                 result_i += 1
         return Result(out_binds=out)
 
@@ -1040,19 +1183,21 @@ class PostgresBackend:
         self._conn.cursor().execute(sql, params)
         return Result(out_binds=values)
 
-    def _arg_modes(self, name: str, nargs: int) -> list | None:
-        # The parameter modes of a routine ('i' IN, 'o' OUT, 'b' IN OUT), so a
-        # CALL's result row (which carries only the OUT / IN OUT values) can be
-        # placed back onto the right bind positions. None means all-IN (PostgreSQL
-        # leaves proargmodes NULL then).
+    def _proc_signature(self, name: str) -> tuple[list | None, list]:
+        # A routine's parameter modes ('i' IN, 'o' OUT, 'b' IN OUT) and the aligned
+        # argument type oids, from one pg_proc row. Modes place a CALL's result row
+        # (which carries only the OUT / IN OUT values) back onto the right bind
+        # positions; the types let the OUT-bind path spot an ora_intervalym argument
+        # (which has no result column to trace). Modes are None for an all-IN routine
+        # (PostgreSQL leaves proargmodes — and proallargtypes — NULL then).
         row = self._conn.execute(
-            'SELECT proargmodes FROM pg_proc WHERE proname = %s '
+            'SELECT proargmodes, proallargtypes FROM pg_proc WHERE proname = %s '
             'ORDER BY oid DESC LIMIT 1',
             (name.split('.')[-1].lower(),),
         ).fetchone()
         if not row or not row[0]:
-            return None
-        return list(row[0])
+            return None, []
+        return list(row[0]), list(row[1] or ())
 
     def change_password(
         self, username: str, old_password: str, new_password: str
