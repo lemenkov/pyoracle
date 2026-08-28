@@ -48,10 +48,12 @@ edge of this adapter:
 - **Object types (``AS OBJECT``) and ``REF`` / ``DEREF``** — a PostgreSQL composite
   type is not an Oracle object type and has no REF; the object schema the REF tests
   build cannot even be created.
-- **Named time-zone regions** — ``FROM_TZ(ts, 'US/Eastern')`` resolves an IANA
-  region against the live zone database to a fixed offset; only an explicit
-  ``±HH:MM`` offset round-trips through the ``ora_tstz`` composite that backs
-  TIMESTAMP WITH TIME ZONE.
+
+A named time-zone region — ``FROM_TZ(ts, 'US/Eastern')`` — is *not* on this list:
+the ``from_tz`` helper resolves the region's offset at that instant from
+PostgreSQL's live zone database (DST-correct) and returns the ``ora_tstz``
+composite, so it round-trips like an explicit ``±HH:MM`` offset. Only the region
+*name* itself is not preserved — the value carries the resolved offset.
 """
 
 from __future__ import annotations
@@ -144,11 +146,20 @@ _HELPER_FUNCTIONS_DDL = (
     f"LANGUAGE sql IMMUTABLE AS $$ SELECT ''::{_CLOB_TYPE} $$;"
     f'CREATE OR REPLACE FUNCTION empty_blob() RETURNS {_BLOB_TYPE} '
     f"LANGUAGE sql IMMUTABLE AS $$ SELECT ''::bytea::{_BLOB_TYPE} $$;"
-    # FROM_TZ(ts, 'zone') → interpret the naive timestamp as being in that zone
-    # (a timestamptz instant). A named region resolves to a fixed offset here, so
-    # it does not round-trip through ora_tstz — the documented Oracle-only ceiling.
-    'CREATE OR REPLACE FUNCTION from_tz(timestamp, text) RETURNS timestamptz '
-    'LANGUAGE sql IMMUTABLE STRICT AS $$ SELECT $1 AT TIME ZONE $2 $$;'
+    # FROM_TZ(ts, 'zone') → a TIMESTAMP WITH TIME ZONE: the naive timestamp read as
+    # local wall-clock in `zone`, returned as the ora_tstz composite (utc, offset)
+    # so it inserts into a WITH TIME ZONE column and round-trips its offset. `zone`
+    # may be a named IANA region (US/Eastern), whose offset PostgreSQL resolves at
+    # that instant from the live zone database — so the stored offset is DST-correct
+    # (EST -05:00 in January, EDT -04:00 in July). The offset is local minus the
+    # instant shown as naive UTC. STABLE, not IMMUTABLE: a named region's offset
+    # depends on the tz database. The region *name* itself is not preserved — the
+    # value carries the resolved offset, exactly like an explicit ±HH:MM literal.
+    f'CREATE OR REPLACE FUNCTION from_tz(timestamp, text) RETURNS {_TSTZ_TYPE} '
+    'LANGUAGE sql STABLE STRICT AS $$ SELECT ROW('
+    '$1 AT TIME ZONE $2, '
+    "EXTRACT(EPOCH FROM ($1 - (($1 AT TIME ZONE $2) AT TIME ZONE 'UTC')))::int"
+    f')::{_TSTZ_TYPE} $$;'
 )
 
 
