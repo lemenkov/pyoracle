@@ -26,6 +26,14 @@ contributors are expected to follow (no Oracle proprietary sources, no
 decompiled binaries, no copied error-message catalogs; public references and
 packet captures are fine).
 
+The repository also contains **the Mirror** (`seerdb.server`) — an experimental
+*server* side of the same wire protocol, which makes a non-Oracle backend
+(PostgreSQL, SQLite, or a real Oracle) answer Oracle clients such as `sqlplus` or
+a thin driver. It is a development / reference component: unstable, unversioned,
+and **not part of the published package** — the PyPI distribution is the client
+driver only. See the `examples/mirror_over_*.py` launchers; its wire details live
+in [`docs/PROTOCOL.md`](docs/PROTOCOL.md). Everything below describes the client.
+
 What works:
 
 - TNS transport layer (packet framing, fragmentation, SDU negotiation)
@@ -243,7 +251,7 @@ the 12c+ protocol the 21c tier exercises.
 | **Request pipelining** — `create_pipeline()` batches operations into one round trip (23ai) | ✅ |
 | **Async** — full `asyncio` API (connection, cursor, pool) at parity with the sync API | ✅ |
 | **Character sets** — AL32UTF8 and others; national-charset (`DB_TYPE_NVARCHAR` / `NCHAR`) binds | ✅ |
-| Continuous Query Notification (CQN), sharding keys | ❌ not implemented (cloud / testbed-blocked) |
+| Continuous Query Notification (CQN), sharding keys | ❌ not supported — thick-only (OCI) capabilities absent from the thin protocol; `conn.subscribe(...)` and `shardingkey=` / `supershardingkey=` are accepted but raise `NotSupportedError`, matching the thin reference |
 
 Most of the above works across every supported server version; a few features
 are inherently version-scoped: the **23ai types** need 23ai (`VECTOR` /
