@@ -37,7 +37,6 @@ from seerdb.client.connection import (
     Xid,
     _decode_tpc_context,
     _decode_tpc_state,
-    _format_version,
     _normalize_sessionless_txn_id,
     _parse_accept_eor,
     _parse_accept_sdu,
@@ -258,12 +257,6 @@ class AsyncOracleConnect(_ConnectionLogic):
         # Ordered attribute layout per SQL object type (#115), keyed by
         # (owner, type_name); see OracleConnect._object_type_layout.
         self._object_type_cache: dict[tuple[str, str], 'DbObjectType'] = {}
-
-    @property
-    def version(self) -> str | None:
-        """Server version as a dotted release string. See
-        `OracleConnect.version`."""
-        return _format_version(self.server_version)
 
     # ----- bookkeeping shared with the sync class -----
     # These are copy-pasted from connection.py rather than imported via a
@@ -1620,22 +1613,6 @@ class AsyncOracleConnect(_ConnectionLogic):
         await self.send(TNS_DATA, Data)
         await self._handle_response()
 
-    def subscribe(self, *args: object, **kwargs: object) -> None:
-        """Register a Continuous Query Notification subscription — not supported
-        (#129). Async mirror of `OracleConnect.subscribe`: a regular method
-        (not a coroutine) that raises NotSupportedError before any await point,
-        so `conn.subscribe(...)` fails the same way in either flavour."""
-        from seerdb.client.connection import _reject_cqn
-
-        _reject_cqn()
-
-    def unsubscribe(self, *args: object, **kwargs: object) -> None:
-        """Remove a CQN subscription — not supported (#129); the counterpart to
-        `subscribe`, raising NotSupportedError for the same reason."""
-        from seerdb.client.connection import _reject_cqn
-
-        _reject_cqn()
-
     async def changepassword(self, old_password: str, new_password: str) -> None:
         """Change the connected user's password (#21). Async mirror of
         `OracleConnect.changepassword` — same single TTI_AUTH password-change
@@ -1695,9 +1672,6 @@ class AsyncOracleConnect(_ConnectionLogic):
                 pass
 
     # --- Two-phase commit / XA (#131), async port of OracleConnect ---
-
-    def xid(self, format_id: int, global_transaction_id, branch_qualifier) -> Xid:
-        return Xid(format_id, global_transaction_id, branch_qualifier)
 
     async def _tpc_request(self, Data: bytes) -> bytes:
         await self.send(TNS_DATA, Data)
