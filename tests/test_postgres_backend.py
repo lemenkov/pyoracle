@@ -698,6 +698,21 @@ def test_reject_oracle_only_ddl_types_raises_ora_902() -> None:
     _reject_unsupported_ddl_types('SELECT json_col FROM t WHERE flag = 1')
 
 
+def test_reject_create_domain_raises_ora_901() -> None:
+    from seerdb.server import BackendError
+
+    # SQL domains are 23ai; the 11.2 Mirror's server doesn't know CREATE DOMAIN, so
+    # it is refused with ORA-00901 — one of the codes the suite's SQL-domain guard
+    # skips on (#512). A domain-referencing CREATE TABLE is not itself a domain
+    # definition and passes this check.
+    with pytest.raises(BackendError) as exc:
+        _reject_unsupported_ddl_types('CREATE DOMAIN PYO_DOM_T AS NUMBER(3,0)')
+    assert exc.value.ora_code == 901
+    _reject_unsupported_ddl_types(
+        'CREATE TABLE t (id NUMBER, d NUMBER DOMAIN PYO_DOM_T)'
+    )
+
+
 # --- PL/SQL routine translation (#503) — a pure function, no live PG needed -----
 
 

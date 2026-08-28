@@ -22,6 +22,34 @@ cover are rewritten (``hextoraw``, ``empty_clob`` / ``empty_blob``, ``from_tz``,
 the ``BINARY_DOUBLE`` special values / literal suffix). Install it on the server
 (e.g. Alpine ``apk add postgresql-orafce`` for a matching PG major, or build from
 source with PGXS) — see ``examples/mirror-pg.Dockerfile``.
+
+**Oracle-only ceiling.** A handful of Oracle features a real server offers cannot
+be represented faithfully behind an 11.2 Mirror on PostgreSQL. Where the 11.2 suite
+has a version guard, the backend rejects the feature so the test *skips* exactly as
+it would on a server that lacks it — a SQL domain (23ai) is refused with ORA-00901,
+just as the JSON / VECTOR / BOOLEAN column types (21c/23ai) are refused with
+ORA-00902. The rest have no such guard and simply do not pass; they are the honest
+edge of this adapter:
+
+- **INTERVAL YEAR TO MONTH** — PostgreSQL has a single ``interval`` type and psycopg
+  surfaces a year-month interval as a ``timedelta`` (months flattened to days), so
+  the calendar Y/M distinction Oracle preserves is lost. (An OUT bind of this type
+  fails cleanly rather than desyncing the connection — the Mirror's never-desync
+  contract, restored in the reply-encoding path.)
+- **ROWID / UROWID** — an Oracle physical row address. PostgreSQL's ``ctid`` is a
+  different, mutable locator with no stable text form or ``ROWIDTOCHAR`` analogue.
+- **Object types (``AS OBJECT``) and ``REF`` / ``DEREF``** — a PostgreSQL composite
+  type is not an Oracle object type and has no REF; the object schema the REF tests
+  build cannot even be created.
+- **Named time-zone regions** — ``FROM_TZ(ts, 'US/Eastern')`` resolves an IANA
+  region against the live zone database to a fixed offset; only an explicit
+  ``±HH:MM`` offset round-trips through the ``ora_tstz`` composite that backs
+  TIMESTAMP WITH TIME ZONE.
+- **Empty LOBs** — an empty CLOB / BLOB returns as NULL, not ``''`` / ``b''``: the
+  CLOB→``text`` / BLOB→``bytea`` mapping makes a zero-length value indistinguishable
+  from NULL on the Oracle wire (Oracle's own empty-string-is-NULL). Faithful
+  empty-versus-null would need real LOB locators, a larger change tracked
+  separately.
 """
 
 from __future__ import annotations
@@ -331,7 +359,21 @@ _ORA_INVALID_DATATYPE = 902
 _ORACLE_ONLY_DDL_TYPES = re.compile(r'\b(JSON|VECTOR|BOOLEAN)\b', re.IGNORECASE)
 
 
+# A SQL domain (CREATE DOMAIN) is 23ai — the 11.2 Mirror's server doesn't know the
+# command, so a real one raises ORA-00901 ("invalid CREATE command"). PostgreSQL
+# *does* have CREATE DOMAIN, so without this it would run (and then fail on the
+# Oracle type name), never letting the suite's version guard skip. Reject it with
+# ORA-00901 so the SQL-domain test skips exactly as on a pre-23ai server (#512).
+_ORA_INVALID_CREATE = 901
+_IS_CREATE_DOMAIN = re.compile(r'\s*CREATE\s+DOMAIN\b', re.IGNORECASE)
+
+
 def _reject_unsupported_ddl_types(sql: str) -> None:
+    if _IS_CREATE_DOMAIN.match(sql):
+        raise BackendError(
+            'invalid CREATE command: SQL domains need a 23ai server',
+            ora_code=_ORA_INVALID_CREATE,
+        )
     if not _IS_CREATE_TABLE.match(sql):
         return
     match = _ORACLE_ONLY_DDL_TYPES.search(sql)
