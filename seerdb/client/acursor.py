@@ -6,6 +6,7 @@
 
 from typing import Any
 
+from seerdb.client._cursor_logic import _CursorLogic
 from seerdb.client.cursor import (
     _assign_out_binds,
     _assign_return_binds,
@@ -32,7 +33,7 @@ from seerdb.common.tns_consts import (
 )
 
 
-class AsyncCursor:
+class AsyncCursor(_CursorLogic):
     """Async equivalent of `seerdb.client.cursor.Cursor`.
 
     Result-set handling is the same: the rows the server sends back in
@@ -41,85 +42,11 @@ class AsyncCursor:
     `async with` context manager are both supported.
     """
 
-    arraysize: int = 1
-    prefetchrows: int = 2  # rows prefetched on a scrollable open (#181)
-
-    def __init__(self, connection, scrollable: bool = False):
-        self._connection = connection
-        self._description: list[tuple] | None = None
-        self._annotations: list[dict | None] | None = None
-        self._rows: list[list] = []
-        self._row_index: int = 0
-        self._rowcount: int = -1
-        self._closed: bool = False
-        self._lastrowid = None
-        self._rowfactory = None
-        # Scrollable cursor: scrollable=True fetches a SELECT lazily from a
-        # kept-open server cursor (#181); scrollable=False buffers the whole set
-        # and scroll() is a local reposition (#161). See seerdb.client.cursor.Cursor.
-        self._scrollable = bool(scrollable)
-        self._scroll_active: bool = False
-        self._scroll_cursor_id: int = 0
-        self._scroll_rowformat: list | None = None
-        self._scroll_buf_min: int = 0
-        self._scroll_buf_max: int = 0
-        self._scroll_consumed: int = 0
-        self._scroll_eof: bool = False
-        self._implicit_results: list = []  # #121, consumed via nextset()
-
-    @property
-    def scrollable(self) -> bool:
-        """Whether this cursor was opened scrollable (#161). seerdb buffers
-        the result set, so scroll() works on any cursor; exposed for oracledb
-        API compatibility."""
-        return self._scrollable
-
-    @scrollable.setter
-    def scrollable(self, value: bool) -> None:
-        self._scrollable = bool(value)
-
     def _check_open(self) -> None:
         if self._closed:
             raise InterfaceError('cursor is closed')
         if self._connection is None or self._connection._writer is None:
             raise InterfaceError('connection is closed')
-
-    @property
-    def description(self) -> list[tuple] | None:
-        return self._description
-
-    @property
-    def annotations(self) -> list[dict | None] | None:
-        """Per-column SQL annotations (23ai) for the last SELECT, aligned with
-        `description`. See `seerdb.client.cursor.Cursor.annotations`."""
-        return self._annotations
-
-    @property
-    def rowcount(self) -> int:
-        # Lazy scrollable cursor: rows consumed so far (oracledb). See sync.
-        if self._scroll_active:
-            return self._scroll_consumed
-        return self._rowcount
-
-    @property
-    def connection(self):
-        return self._connection
-
-    @property
-    def rowfactory(self):
-        """Optional callable applied to each fetched row. See
-        `seerdb.client.cursor.Cursor.rowfactory`."""
-        return self._rowfactory
-
-    @rowfactory.setter
-    def rowfactory(self, value) -> None:
-        self._rowfactory = value
-
-    @property
-    def lastrowid(self):
-        """ROWID of the last row an INSERT / UPDATE / DELETE touched. See
-        `seerdb.client.cursor.Cursor.lastrowid`."""
-        return self._lastrowid
 
     async def close(self) -> None:
         self._release_scroll_cursor()
@@ -368,11 +295,6 @@ class AsyncCursor:
         Nested._row_index = 0
         return Nested
 
-    def var(self, typ, size=None) -> Var:
-        """Create a bind variable for an OUT / IN OUT argument. See
-        `seerdb.client.cursor.Cursor.var`."""
-        return Var(typ, size)
-
     def arrayvar(self, typ, value_or_numelements, size=None) -> Var:
         """Bulk-array bind for a PL/SQL associative array (#122). See
         `seerdb.client.cursor.Cursor.arrayvar`."""
@@ -437,46 +359,7 @@ class AsyncCursor:
             ArrayDmlRowCounts=arraydmlrowcounts,
         )
 
-    def getbatcherrors(self) -> list:
-        """Errors collected by the most recent
-        ``executemany(batcherrors=True)``. See
-        `seerdb.client.cursor.Cursor.getbatcherrors`."""
-        Out = []
-        for E in getattr(self, '_batcherrors', []):
-            Code = E.get('code')
-            Exc = from_ora_code(Code)(E.get('message') or f'ORA-{Code:05d}', code=Code)
-            Exc.offset = E.get('offset')
-            Out.append(Exc)
-        return Out
-
-    def getarraydmlrowcounts(self) -> list:
-        """Per-iteration row counts from the most recent
-        ``executemany(arraydmlrowcounts=True)``. See
-        `seerdb.client.cursor.Cursor.getarraydmlrowcounts`."""
-        return list(getattr(self, '_arraydmlrowcounts', []))
-
     # --- Server-side scroll window helpers (#181), see seerdb.client.cursor.Cursor ---
-
-    def _init_scroll_window(
-        self, cursor_id: int, colmeta: list, server_rowcount, batch_len: int, eof: bool
-    ) -> None:
-        self._scroll_active = True
-        self._scroll_cursor_id = cursor_id
-        self._scroll_rowformat = colmeta
-        self._scroll_set_window(server_rowcount, batch_len)
-        self._scroll_eof = eof
-
-    def _scroll_set_window(self, server_rowcount, batch_len: int) -> None:
-        if batch_len <= 0:
-            self._scroll_buf_min = self._scroll_buf_max = 0
-            self._scroll_consumed = 0
-            self._row_index = 0
-            return
-        Srv = server_rowcount if isinstance(server_rowcount, int) else batch_len
-        self._scroll_buf_min = Srv - batch_len + 1
-        self._scroll_buf_max = self._scroll_buf_min + batch_len
-        self._scroll_consumed = self._scroll_buf_min - 1
-        self._row_index = 0
 
     async def _scroll_refill(self) -> None:
         # Continue with orient CURRENT at the next absolute row (oracledb fetches
@@ -579,22 +462,6 @@ class AsyncCursor:
             return await self._scroll_server(value, mode)
         return self._scroll_buffered(value, mode)
 
-    def _scroll_buffered(self, value: int, mode: str) -> None:
-        Count = len(self._rows)
-        if mode == 'relative':
-            Target = self._row_index + value
-        elif mode == 'absolute':
-            Target = value
-        elif mode == 'first':
-            Target = 1
-        elif mode == 'last':
-            Target = Count
-        else:
-            raise ProgrammingError(f'invalid scroll mode: {mode!r}')
-        if Target < 1 or Target > Count:
-            raise IndexError('scroll operation would leave the result set')
-        self._row_index = Target - 1
-
     async def _scroll_server(self, value: int, mode: str) -> None:
         from seerdb.common.tns_consts import (
             TNS_FETCH_ORIENTATION_ABSOLUTE,
@@ -645,12 +512,6 @@ class AsyncCursor:
         self._rows = Batch
         self._scroll_set_window(ServerRowCount, len(Batch))
         self._scroll_eof = Eof
-
-    def setinputsizes(self, sizes) -> None:
-        pass
-
-    def setoutputsize(self, size, column=None) -> None:
-        pass
 
     # ----- async iteration -----
 
