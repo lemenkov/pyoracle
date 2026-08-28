@@ -816,39 +816,6 @@ class OracleConnect(_ConnectionLogic):
         self.seq = self.seq % MAX_SEQ_NUM + 1
         return seq
 
-    def _make_dict(self, Type: DictionaryType, **extra) -> dict:
-        d = {
-            'env': {
-                'host': self.host,
-                'port': self.port,
-                'user': self.user,
-                'proxy_user': self.proxy_user,
-                'cclass': self.cclass,
-                'purity': self.purity,
-                'password': self.password,
-                'sid': self.sid,
-                'service_name': self.service_name,
-                'ssl': self.ssl,
-                'socket_options': self.socket_options,
-                'conn_state': self.conn_state,
-                'timeout': self.timeout,
-                'autocommit': self.autocommit,
-                'fetch': self.fetch,
-                'role': self.role,
-                'charset': self.charset,
-                'prelim': self.prelim,
-                'app_name': self.app_name,
-            },
-            'sdu': self.sdu,
-            'type': Type,
-            'req': self.charset,
-            'seq': self._next_seq(),
-            'field_version': self.field_version,
-            'supports_eor': self._supports_eor,
-        }
-        d.update(extra)
-        return d
-
     def state_to_dict(self, Type: DictionaryType) -> dict:
         return self._make_dict(Type)
 
