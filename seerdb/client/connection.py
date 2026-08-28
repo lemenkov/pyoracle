@@ -791,20 +791,6 @@ class OracleConnect(_ConnectionLogic):
         self._object_type_cache: dict[tuple[str, str], 'DbObjectType'] = {}
 
     @property
-    def stmtcachesize(self) -> int:
-        """Number of server-side cursors kept in the statement cache (PEP 249
-        extension / oracledb-compatible). Setting it smaller evicts the oldest
-        entries immediately; 0 disables caching."""
-        return self._cursor_cache_max
-
-    @stmtcachesize.setter
-    def stmtcachesize(self, value: int) -> None:
-        self._cursor_cache_max = max(0, int(value))
-        while len(self._cursor_cache) > self._cursor_cache_max:
-            Oldest = next(iter(self._cursor_cache))
-            self._cursor_cache.pop(Oldest, None)
-
-    @property
     def version(self) -> str | None:
         """Server version as a dotted release string (e.g. '11.2.0.2.0'), or
         None before authentication. Decoded from the packed AUTH_VERSION_NO the
@@ -1984,19 +1970,6 @@ class OracleConnect(_ConnectionLogic):
             raise Exception('Connection closed during LOBOPS')
         self._raise_lobops_error(Received[1])
 
-    def _raise_lobops_error(self, Packet: bytes) -> None:
-        # Decode the OER trailing a content-free LOBOPS response and raise on a
-        # real ORA error. decode_lobops_oer skips the RPA's binary locator and
-        # matches the OER regardless of call status (which is 5, not 1,
-        # immediately after a PL/SQL execute — the case that desynced the temp
-        # LOB write following a temp-LOB-bind exec).
-        from seerdb.common.exceptions import from_ora_code
-        from seerdb.common.tns import decode_lobops_oer
-
-        (ErrCode, Message) = decode_lobops_oer(Packet, self.field_version)
-        if ErrCode and ErrCode not in (0, 1403):
-            raise from_ora_code(ErrCode)(Message or f'ORA-{ErrCode:05d}', code=ErrCode)
-
     def bfile_read_native(self, Locator: bytes) -> bytes:
         # Read a BFILE natively over TTI_LOBOPS (#46): FILE_OPEN -> READ ->
         # FILE_CLOSE, no PL/SQL helper. FILE_OPEN returns an *updated* locator
@@ -2831,26 +2804,6 @@ class OracleConnect(_ConnectionLogic):
         return _decode_aq_array(
             self._aq_request(Data), queue, TNS_AQ_ARRAY_DEQ, Placeholders
         )
-
-    @property
-    def call_timeout(self) -> int:
-        """Per-call timeout in milliseconds (0 = none). A call that runs longer
-        is interrupted with an in-band break and raises a timeout error
-        (#123/#144, oracledb-compatible)."""
-        return self._call_timeout
-
-    @call_timeout.setter
-    def call_timeout(self, value: int) -> None:
-        self._call_timeout = max(0, int(value or 0))
-
-    def cancel(self) -> None:
-        """Interrupt the call currently executing on this connection (#123/#144).
-
-        Sends a break (an out-of-band urgent byte when the server advertised
-        attention support, otherwise an in-band INTERRUPT marker); the thread
-        blocked in the call drains the server's interrupt response and raises
-        ORA-01013. Safe to call from another thread (e.g. a timer/signal)."""
-        self._send_break()
 
     def _send_break(self) -> None:
         # Interrupt the running call. Two paths, matching python-oracledb (#144):

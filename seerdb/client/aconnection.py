@@ -260,19 +260,6 @@ class AsyncOracleConnect(_ConnectionLogic):
         self._object_type_cache: dict[tuple[str, str], 'DbObjectType'] = {}
 
     @property
-    def stmtcachesize(self) -> int:
-        """Number of server-side cursors kept in the statement cache. See
-        `OracleConnect.stmtcachesize`."""
-        return self._cursor_cache_max
-
-    @stmtcachesize.setter
-    def stmtcachesize(self, value: int) -> None:
-        self._cursor_cache_max = max(0, int(value))
-        while len(self._cursor_cache) > self._cursor_cache_max:
-            Oldest = next(iter(self._cursor_cache))
-            self._cursor_cache.pop(Oldest, None)
-
-    @property
     def version(self) -> str | None:
         """Server version as a dotted release string. See
         `OracleConnect.version`."""
@@ -1446,16 +1433,6 @@ class AsyncOracleConnect(_ConnectionLogic):
             raise Exception('Connection closed during LOBOPS')
         self._raise_lobops_error(Received[1])
 
-    def _raise_lobops_error(self, Packet: bytes) -> None:
-        """Decode the OER trailing a content-free LOBOPS response and raise on a
-        real ORA error (call status agnostic — see the sync docstring)."""
-        from seerdb.common.exceptions import from_ora_code
-        from seerdb.common.tns import decode_lobops_oer
-
-        (ErrCode, Message) = decode_lobops_oer(Packet, self.field_version)
-        if ErrCode and ErrCode not in (0, 1403):
-            raise from_ora_code(ErrCode)(Message or f'ORA-{ErrCode:05d}', code=ErrCode)
-
     async def bfile_read_native(self, Locator: bytes) -> bytes:
         """Async port of the sync `bfile_read_native` (#46): FILE_OPEN ->
         READ -> FILE_CLOSE over TTI_LOBOPS, using the open-flagged locator the
@@ -1686,22 +1663,6 @@ class AsyncOracleConnect(_ConnectionLogic):
         self.password = new_password
 
     # ----- teardown -----
-
-    @property
-    def call_timeout(self) -> int:
-        """Per-call timeout in milliseconds (0 = none); see OracleConnect (#123)."""
-        return self._call_timeout
-
-    @call_timeout.setter
-    def call_timeout(self, value: int) -> None:
-        self._call_timeout = max(0, int(value or 0))
-
-    def cancel(self) -> None:
-        """Interrupt the call currently executing on this connection (#123/#144).
-        Async port of OracleConnect.cancel(); a plain (non-coroutine) method so
-        it can fire from a timer/callback. Sends a break (OOB urgent byte when
-        the server supports it, otherwise an in-band INTERRUPT marker)."""
-        self._send_break()
 
     def _send_break(self) -> None:
         # In-band INTERRUPT marker break (#144), the async port of OracleConnect.
