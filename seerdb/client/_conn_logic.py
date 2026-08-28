@@ -21,6 +21,7 @@ the pure methods here.
 
 from __future__ import annotations
 
+import struct
 from typing import TYPE_CHECKING
 
 from seerdb.client.dialect import Dialect, Fv2Dialect, O8iDialect
@@ -42,9 +43,13 @@ from seerdb.common.tns_consts import (
     FIELD_VERSION_10_2,
     FIELD_VERSION_12_1,
     FIELD_VERSION_23_1,
+    TNS_DATA,
     TNS_SESSION_STATE_REQUEST_BEGIN,
     DictionaryType,
 )
+
+if TYPE_CHECKING:
+    from seerdb.common.ano_session import AnoChannel
 
 
 class _ConnectionLogic:
@@ -85,6 +90,9 @@ class _ConnectionLogic:
     _supports_eor: bool
     _timed_out: bool
     _dialect: Dialect | None
+    _wallet_server_dn: str | None
+    _large_packets: bool
+    _ano: AnoChannel | None
 
     if TYPE_CHECKING:
 
@@ -306,6 +314,71 @@ class _ConnectionLogic:
         }
         d.update(extra)
         return d
+
+    # --- TLS wallet / ANO encryption helpers -------------------------------
+
+    def _apply_wallet(
+        self,
+        WalletLocation: str | None,
+        WalletPassword: str | None,
+        ConfigDir: str | None,
+        Dsn: str | None,
+    ) -> None:
+        # Resolve an Oracle wallet into connect parameters + a client SSLContext
+        # (#127). Imported lazily so the `cryptography` dependency is only needed
+        # when a wallet connection is actually requested.
+        from seerdb.client import wallet as _wallet
+
+        Location = WalletLocation or ConfigDir
+        if not Location:
+            raise _wallet.WalletError('wallet_location or config_dir is required')
+        Wal = _wallet.open_wallet(Location, WalletPassword, Dsn)
+        Info = Wal.connect
+        if Info is not None:
+            # A resolved DSN supplies host/port/service — but an explicitly
+            # passed host/port/service still wins (left at the constructor
+            # defaults means "take it from the wallet").
+            if self.host == 'localhost':
+                self.host = Info.host
+            if self.port == 1521:
+                self.port = Info.port
+            if not self.service_name and Info.service_name:
+                self.service_name = Info.service_name
+            if not self.sid and Info.sid:
+                self.sid = Info.sid
+            if Info.dn_match and Info.server_dn:
+                self._wallet_server_dn = Info.server_dn
+        self.ssl = _wallet.build_client_context(Wal)
+
+    def _check_server_dn(self, PeerCert: dict | None) -> None:
+        # Oracle SSL_SERVER_DN_MATCH (#127): the server is authenticated by its
+        # certificate subject DN, not its hostname. The chain was already
+        # verified by the TLS stack against the wallet CA; here we assert the DN.
+        if self._wallet_server_dn is None:
+            return
+        import ssl as _ssl
+
+        from seerdb.client import wallet as _wallet
+
+        if not _wallet.server_dn_matches(self._wallet_server_dn, PeerCert):
+            raise _ssl.SSLError(
+                f'server certificate DN does not match {self._wallet_server_dn!r}'
+            )
+
+    def _encode_ano_packet(self, Data: bytes) -> tuple[bytes, bytes | None]:
+        # One encrypted TNS_DATA packet (#437): a plaintext chunk small enough
+        # that, after the MAC + cipher padding + fold flag, the framed packet
+        # still fits the SDU. Non-final packets carry data flags 0x0020.
+        from seerdb.common.tns import _packet_header
+
+        assert self._ano is not None  # only called while the ANO cipher is active
+        MaxPlain = self.sdu - 64
+        Chunk = Data[:MaxPlain]
+        Rest = Data[MaxPlain:] or None
+        Payload = self._ano.wrap(Chunk)
+        DataFlag = 0x0000 if Rest is None else 0x0020
+        Header = _packet_header(len(Payload) + 10, TNS_DATA, self._large_packets)
+        return (Header + struct.pack('>H', DataFlag) + Payload, Rest)
 
     # --- Capability / dialect / misc pure helpers --------------------------
 
