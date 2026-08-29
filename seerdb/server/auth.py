@@ -40,6 +40,7 @@ from secrets import token_bytes
 
 from Crypto.Cipher import AES
 
+from seerdb.common import oci
 from seerdb.common.crypto import cat_key, conn_key, pad2
 from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import (
@@ -206,8 +207,6 @@ def encode_challenge(challenge: Challenge) -> bytes:
 
 # The 11g SHA-1 password verifier type, carried as AUTH_VFR_DATA's trailing flag.
 _VERIFIER_TYPE_11G = 0x1B25
-_OCI_SESSKEY_HEXLEN = 96
-_OCI_SALT_HEXLEN = 20
 
 # The Mirror's fixed 11g identity, from the live XE 11.2 capture. The
 # session-identity fields (AUTH_SESSION_ID / _SERIAL_NUM / _SERVER_PID) are kept
@@ -307,7 +306,7 @@ def encode_challenge_oci(challenge: Challenge) -> bytes:
     """
     sesskey = _hexval(challenge.auth_sesskey)
     salt = _hexval(challenge.salt)
-    if len(sesskey) != _OCI_SESSKEY_HEXLEN or len(salt) != _OCI_SALT_HEXLEN:
+    if len(sesskey) != oci.OCI_SESSKEY_HEXLEN or len(salt) != oci.OCI_SALT_HEXLEN:
         raise InterfaceError(
             'OCI challenge needs a 48-byte server session and a 10-byte salt, '
             f'got {len(challenge.auth_sesskey)}/{len(challenge.salt)} bytes'
@@ -388,7 +387,7 @@ def parse_osesskey(payload: bytes) -> bytes:
 # constant (confirmed against live sqlplus 11.2 for usernames of different
 # lengths), so the ub1-length-prefixed username sits at a fixed offset (#265):
 #   03(TTI_FUN) subtype seq | IND | ub4 ub4 | IND | ub4 ub4 | IND | IND | ub1+user
-_OCI_IND = b'\xfe\xff\xff\xff\xff\xff\xff\xff'
+# The 8-byte indicator (0xFFFFFFFFFFFFFFFE LE) is the shared oci.OCI_INDICATOR.
 
 
 def _parse_oci_fun_username(payload: bytes, subtype: int, what: str) -> bytes:
@@ -403,7 +402,7 @@ def _parse_oci_fun_username(payload: bytes, subtype: int, what: str) -> bytes:
     # Indicators sit at these offsets; between the 1st/2nd and 3rd/4th come the
     # two ub4 length-field pairs that make up the gaps.
     for expected_ind_off in (3, 19, 35, 43):
-        if payload[expected_ind_off : expected_ind_off + 8] != _OCI_IND:
+        if payload[expected_ind_off : expected_ind_off + 8] != oci.OCI_INDICATOR:
             raise InterfaceError(
                 f'OCI {what}: no indicator at offset {expected_ind_off}'
             )

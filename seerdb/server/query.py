@@ -18,6 +18,7 @@ import struct
 from dataclasses import dataclass, field
 from decimal import Decimal
 
+from seerdb.common import oci
 from seerdb.common.datatypes import IntervalYM
 from seerdb.common.exceptions import DataError, InterfaceError
 from seerdb.common.tns import (
@@ -325,7 +326,6 @@ def parse_exec(payload: bytes, bind_types: list | None = None) -> ExecRequest:
 # SQL lengths), so the SQL, a ub1-length-prefixed text field, sits at a fixed
 # offset (#265). The preamble also carries 3x the SQL byte length as a ub4 (the
 # worst-case max-byte buffer for the DB charset), which cross-checks the parse.
-_OCI_ALL8_IND = b'\xfe\xff\xff\xff\xff\xff\xff\xff'
 _OCI_ALL8_IND_OFF = 11  # the SQL pointer indicator; absent on a re-execute
 _OCI_ALL8_CURSOR_OFF = 7  # ub4 LE; 0 = a new statement
 _OCI_ALL8_SQLLEN3_OFF = 19  # ub4 LE = 3 x the SQL byte length
@@ -350,7 +350,7 @@ def parse_exec_oci(payload: bytes) -> ExecRequest:
     # Validate the indicators where the thin form has 0x01 flags, so a
     # differently-shaped message errors rather than yielding a garbage SQL.
     for ind_off in (11, 27):
-        if payload[ind_off : ind_off + 8] != _OCI_ALL8_IND:
+        if payload[ind_off : ind_off + 8] != oci.OCI_INDICATOR:
             raise InterfaceError(f'OCI OALL8: no indicator at offset {ind_off}')
     cursor = int.from_bytes(
         payload[_OCI_ALL8_CURSOR_OFF : _OCI_ALL8_CURSOR_OFF + 4], 'little'
@@ -401,7 +401,7 @@ def is_reexecute_oci(payload: bytes) -> bool:
         len(payload) > _OCI_ALL8_IND_OFF + 8
         and payload[0] == TTI_FUN
         and payload[1] == TTI_ALL8
-        and payload[_OCI_ALL8_IND_OFF : _OCI_ALL8_IND_OFF + 8] != _OCI_ALL8_IND
+        and payload[_OCI_ALL8_IND_OFF : _OCI_ALL8_IND_OFF + 8] != oci.OCI_INDICATOR
     )
 
 
@@ -548,14 +548,14 @@ def _oci_ub4(n: int) -> bytes:
 # sqlplus prints "Connected to: <banner>". The reply is a TTI_RPA carrying the
 # banner as a DALC (ub2 count + ub1-chunked string) plus a fixed 10-byte packed
 # version/flags trailer (#265).
-_OCI_VERSION_CALL = b'\x11\x6b'
+# The version-call marker (0x11 0x6b) is the shared oci.OCI_VERSION_CALL.
 # Packed 11.2 version + capability flags, as the real XE 11.2 listener returns.
 _OCI_VERSION_TRAILER = bytes.fromhex('02200b09010000000300')
 
 
 def is_version_call_oci(payload: bytes) -> bool:
     """True if this is the sqlplus / thick-OCI post-login version request."""
-    return payload[:2] == _OCI_VERSION_CALL
+    return payload[:2] == oci.OCI_VERSION_CALL
 
 
 def encode_version_banner_oci(banner: bytes) -> bytes:
@@ -777,18 +777,14 @@ _OCI_OER_ENVELOPE = bytes.fromhex(
     '0000000020f6310a0000000000000000000000000000000000000000000000000000'
     '00000000000000000000000000000000000000000000000000000000000000000000'
 )
-_OCI_OER_STATUS_SUCCESS = 0x01
-_OCI_OER_STATUS_ERROR = 0x05
-_OCI_OER_ROW_KIND_NONE = 0x00
-_OCI_OER_ROW_KIND_LOB = 0x01
-_OCI_OER_ROW_KIND_LONG = 0x02
+# The OER status + row-kind codes are the shared oci.OCI_OER_* constants.
 
 
 def encode_oci_oer(
     status: int,
     *,
     sequence: int,
-    row_kind: int = _OCI_OER_ROW_KIND_NONE,
+    row_kind: int = oci.OCI_OER_ROW_KIND_NONE,
     error_pos: int = 0,
     error_code: int = 0,
 ) -> bytes:
@@ -819,7 +815,7 @@ def encode_long_fetch_row_oci(columns: list[ColumnMeta], row: tuple) -> bytes:
         _encode_oci_value(v, col) for v, col in zip(row, columns)
     )
     status = encode_oci_oer(
-        _OCI_OER_STATUS_SUCCESS, sequence=0x11, row_kind=_OCI_OER_ROW_KIND_LONG
+        oci.OCI_OER_STATUS_SUCCESS, sequence=0x11, row_kind=oci.OCI_OER_ROW_KIND_LONG
     )
     return bytes(out) + status
 
@@ -857,7 +853,7 @@ def encode_error_oci(ora_code: int, message: str) -> bytes:
     "cursor drained" — so the two must not be conflated (#265, #350).
     """
     oer = encode_oci_oer(
-        _OCI_OER_STATUS_ERROR, sequence=0x13, error_pos=0x0E, error_code=ora_code
+        oci.OCI_OER_STATUS_ERROR, sequence=0x13, error_pos=0x0E, error_code=ora_code
     )
     text = f'ORA-{ora_code:05d}: {message}\n'.encode('utf-8')
     return oer + bytes([len(text)]) + text
@@ -1788,7 +1784,7 @@ def _encode_oci_value(value: object, col: ColumnMeta) -> bytes:
 # not drained (a following fetch after the LOBOPS reads draws the terminator,
 # #405). The same OER envelope as the LONG-row status, marked LOB (§36).
 _OCI_LOB_FETCH_STATUS = encode_oci_oer(
-    _OCI_OER_STATUS_SUCCESS, sequence=0x10, row_kind=_OCI_OER_ROW_KIND_LOB
+    oci.OCI_OER_STATUS_SUCCESS, sequence=0x10, row_kind=oci.OCI_OER_ROW_KIND_LOB
 )
 
 
