@@ -14,7 +14,7 @@ from functools import reduce
 
 from seerdb.client.cursor import cursor
 from seerdb.common import oci
-from seerdb.common.crypto import encrypt_password, o5logon
+from seerdb.common.crypto import encrypt_password, o5logon, server_proof
 from seerdb.common.datatypes import (
     JSON,
     BinaryDouble,
@@ -1659,6 +1659,76 @@ def encode_token_result(
     (token auth has no ConnKey, so there is nothing for the client to validate)."""
     return encode_rpa_kv(
         [
+            (b'AUTH_VERSION_NO', str(version_no).encode('ascii')),
+            (b'AUTH_SESSION_ID', str(session_id).encode('ascii')),
+        ]
+    )
+
+
+@dataclass(frozen=True)
+class Challenge:
+    """The per-connection O5LOGON challenge state, held until the response."""
+
+    salt: bytes
+    server_session: bytes
+    key_sess: bytes
+    auth_sesskey: bytes  # the AUTH_SESSKEY value put on the wire
+
+
+def _hexval(raw: bytes) -> bytes:
+    # The wire form for AUTH_SESSKEY / AUTH_VFR_DATA / AUTH_SVR_RESPONSE: an
+    # uppercase-hex ASCII string (the client bytes.fromhex()es it back).
+    return raw.hex().upper().encode('ascii')
+
+
+def encode_challenge(challenge: Challenge) -> bytes:
+    """The auth-challenge RPA payload — AUTH_SESSKEY + the salt (AUTH_VFR_DATA).
+
+    Returns the TTC payload starting at the TTI_RPA token, ready for
+    ``PacketStream.write_packet(TNS_DATA, …)``. Decodes back through the
+    client's ``decode_token_rpa`` as a ``TTI_SESS`` challenge.
+    """
+    return encode_rpa_kv(
+        [
+            (b'AUTH_SESSKEY', _hexval(challenge.auth_sesskey)),
+            (b'AUTH_VFR_DATA', _hexval(challenge.salt)),
+        ]
+    )
+
+
+# --- Generating the sqlplus / thick-OCI (deadbeef dialect) O5LOGON packets ---
+#
+# The challenge and result are lists of AUTH_* key-value pairs in the OCI dialect
+# (the read side is _oci_auth_value) behind the 10-byte TNS DATA header, followed
+# by a fixed capability/status trailer. Everything except the crypto values and
+# the salt is the Mirror's constant pinned-11g identity, captured once from a live
+# XE 11.2 server. encode_kv_oci computes the framing so the packets are generated
+# rather than replayed verbatim; the byte-for-byte match to the original captures
+# is pinned by tests/test_oci_auth_generation.py (#265).
+
+# The 11g SHA-1 password verifier type (crypto.VFR_11G_SHA1) is carried as
+# AUTH_VFR_DATA's trailing flag.
+
+# The Mirror's fixed 11g identity, from the live XE 11.2 capture. The
+# session-identity fields (AUTH_SESSION_ID / _SERIAL_NUM / _SERVER_PID) are kept
+# as captured — the client does not cryptographically check them. AUTH_SVR_RESPONSE
+# is the one per-login value and is appended by encode_result_oci.
+
+
+def encode_result(
+    session_key: bytes,
+    *,
+    session_id: int = 0,
+    version_no: int = _SERVER_VERSION_NO,
+) -> bytes:
+    """The auth-result RPA payload — the server proof, version, and session id.
+
+    Decodes back through ``decode_token_rpa`` as a ``TTI_AUTH`` result whose
+    ``AUTH_SVR_RESPONSE`` the client's ``validate()`` accepts.
+    """
+    return encode_rpa_kv(
+        [
+            (b'AUTH_SVR_RESPONSE', _hexval(server_proof(session_key))),
             (b'AUTH_VERSION_NO', str(version_no).encode('ascii')),
             (b'AUTH_SESSION_ID', str(session_id).encode('ascii')),
         ]

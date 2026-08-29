@@ -18,14 +18,14 @@ from seerdb.common.crypto import o5logon, server_proof, validate
 from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import (
     decode_token_rpa,
+    encode_challenge,
     encode_dictionary_auth,
     encode_dictionary_sess,
+    encode_result,
 )
 from seerdb.common.tns_consts import TTI_AUTH, TTI_SESS
 from seerdb.server.auth import (
     derive_conn_key,
-    encode_challenge,
-    encode_result,
     make_challenge,
     parse_auth_response,
     parse_osesskey,
