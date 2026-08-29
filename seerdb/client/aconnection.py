@@ -715,8 +715,7 @@ class AsyncOracleConnect(_ConnectionLogic):
         if Received is False:
             raise OperationalError('ANO negotiation: connection closed by server')
         (_Type, Payload) = Received
-        Start = Payload.index(b'\xde\xad\xbe\xef')
-        Response = ano.decode_ano(Payload[Start:])
+        Response = ano.decode_container(Payload)
         ByType = {S['type']: S for S in Response['services']}
         EncId = ByType[ano.SERVICE_ENCRYPTION]['subpackets'][1][1]
         IntId = ByType[ano.SERVICE_DATA_INTEGRITY]['subpackets'][1][1]

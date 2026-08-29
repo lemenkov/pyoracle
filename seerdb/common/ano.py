@@ -309,6 +309,16 @@ def decode_ano(Data: bytes) -> dict:
     return {'version': Version, 'services': Services}
 
 
+def decode_container(Payload: bytes) -> dict:
+    """Locate the ANO negotiation container inside ``Payload`` and decode it.
+
+    A negotiation packet arrives behind a leading header (the TNS/TTC bytes the
+    magic follows), so seek to the :data:`ANO_MAGIC_BYTES` prefix before handing
+    the container to :func:`decode_ano`. Raises :class:`ValueError` if the magic
+    is absent."""
+    return decode_ano(Payload[Payload.index(ANO_MAGIC_BYTES) :])
+
+
 # --------------------------------------------------------------------------- #
 # Diffie-Hellman key exchange (carried in the data-integrity service).
 # --------------------------------------------------------------------------- #

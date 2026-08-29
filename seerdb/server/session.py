@@ -181,7 +181,7 @@ def _negotiate_ano_server(
         # Plaintext stance: the null-algorithm reply, session stays clear.
         stream.send_raw(encode_ano_null_reply(sdu=stream.sdu))
         return
-    request = ano.decode_ano(request_body[request_body.index(b'\xde\xad\xbe\xef') :])
+    request = ano.decode_container(request_body)
     enc_id = _select_algorithm(
         ano.offered_algorithm_ids(request, ano.SERVICE_ENCRYPTION),
         _SERVER_ENC_PREF,
@@ -207,9 +207,7 @@ def _negotiate_ano_server(
     if round2 is None:
         raise InterfaceError('client closed during ANO key exchange')
     (_type, r2_body) = round2
-    client_pub = ano.client_public_key(
-        ano.decode_ano(r2_body[r2_body.index(b'\xde\xad\xbe\xef') :])
-    )
+    client_pub = ano.client_public_key(ano.decode_container(r2_body))
     shared = sdh.derive(client_pub)
     stream.activate_ano(
         AnoChannel(enc_id, int_id, shared, ano.DH_SERVER_IV, ClientSide=False)
