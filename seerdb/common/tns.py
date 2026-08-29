@@ -4074,23 +4074,19 @@ _OCI_COMMIT_STATUS = bytes.fromhex('09050000001200')
 _OCI_LOGOFF_STATUS = bytes.fromhex('09010000000000')
 
 
-# The 136-byte OER-shaped capability/status block trailing an OCI auth key-value
-# list. The challenge and result replies share this frame and differ only in a
-# subtype byte (at offsets 5 and 49) — 2 for the challenge, 3 for the result.
-# The frame below carries the challenge's subtype; the builder overwrites it.
-_OCI_AUTH_TRAILER_FRAME = bytes.fromhex(
-    '04010000000200010000000000000000000000000000000000000000000000000000'
-    '00000000000000000000000000000002000000000000360100000000000000000000'
-    '0000000020f6310a0000000000000000000000000000000000000000000000000000'
-    '00000000000000000000000000000000000000000000000000000000000000000000'
-)
-_OCI_AUTH_TRAILER_SUBTYPE_OFFSETS = (5, 49)
+def _oci_auth_trailer(sequence: int) -> bytes:
+    """The 136-byte OER-shaped status block trailing an OCI auth key-value list.
 
-
-def _oci_auth_trailer(Subtype: int) -> bytes:
-    trailer = bytearray(_OCI_AUTH_TRAILER_FRAME)
-    for Offset in _OCI_AUTH_TRAILER_SUBTYPE_OFFSETS:
-        trailer[Offset] = Subtype
+    It is the same OER frame as :data:`_OCI_OER_ENVELOPE` (§36.1) with the
+    auth-reply fields set: success status (offset 1), the reply sequence (offset
+    5, echoed at offset 49 *as-is* — the return-status OER instead echoes it as
+    ``+2``), and no command type. The sequence is the only thing distinguishing
+    the challenge reply (2) from the result reply (3).
+    """
+    trailer = bytearray(_OCI_OER_ENVELOPE)
+    trailer[1] = oci.OCI_OER_STATUS_SUCCESS
+    trailer[5] = trailer[49] = sequence
+    trailer[18] = trailer[22] = trailer[52] = 0
     return bytes(trailer)
 
 
