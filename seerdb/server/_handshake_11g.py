@@ -15,7 +15,8 @@ packet header is added by ``encode_packet``). Two dialects (§4.1):
   builder serves both). The thin DTY reply is the type-conversion table.
 - **sqlplus `deadbeef`** — the PRO reply is an ANO null-negotiation response
   (built field-by-field from the ANO codec, §4.1.1); the extra third-round type
-  reply is an opaque negotiation block kept verbatim.
+  reply is a DTY reply carrying the DB time zone and timezone-file version (§4.2),
+  built field-by-field.
 
 The values are the server's identity, captured once from a live XE 11.2 server;
 ``tests/test_handshake_generation.py`` pins the builders to those captures
@@ -86,10 +87,19 @@ _DEADBEEF_CONTAINER_VERSION = 0x00000000  # sqlplus/OCI stamp (not ANO_VERSION)
 _DEADBEEF_AUTH_STATUS = 0xFBFF  # auth service status (thin sends 0xFCFF)
 _NULL_ALGO = 0  # null cipher / null checksum selected → plaintext
 
-# --- opaque deadbeef third-round type reply (kept verbatim) ---
-_TYPE_REPLY_SQLPLUS_PAYLOAD = bytes.fromhex(  # 26B third-round type reply
-    '02800000003c3c3c800000000000000e'
-)
+# --- the deadbeef third-round type reply: a DTY reply (§4.2) ---
+# After DTY, sqlplus / thick OCI runs a third negotiation round the server answers
+# with this 16-byte TTC payload (a 26-byte DATA packet). It is a data-type reply
+# carrying the server's DB session time zone (UTC here) and its timezone-file
+# version. Each of the h/m/s offset fields is biased by +60 (Oracle's TZ
+# encoding), so a stored 60 means a zero offset.
+_DTY_TZ_BIAS = 60  # Oracle biases each of hours/min/sec by +60
+_DB_TZ_HMS = (0, 0, 0)  # DB session time zone = UTC (+00:00:00)
+_TZFILE_VERSION = 14  # the 11.2 default timezone-file (DST rules) version
+# The fixed framing of the 11-byte time-zone block, with the biased h/m/s triplet
+# spliced in at offsets 4..6. The other bytes are the block's fixed 11.2 identity.
+_DB_TZ_FRAME_HEAD = bytes.fromhex('80000000')  # bytes [0..3]
+_DB_TZ_FRAME_TAIL = bytes.fromhex('80000000')  # bytes [7..10]
 
 
 def build_caps_block_reply() -> bytes:
@@ -158,5 +168,17 @@ def build_pro_sqlplus_reply() -> bytes:
 
 
 def build_type_reply_sqlplus() -> bytes:
-    """The deadbeef dialect's third-round type reply payload (#265)."""
-    return _TYPE_REPLY_SQLPLUS_PAYLOAD
+    """The deadbeef dialect's third-round type reply payload (#265, #565).
+
+    A DTY (data-type negotiation) reply carrying the server's DB session time zone
+    and its timezone-file version (§4.2): the ``TTI_DTY`` message code, an 11-byte
+    time-zone block (its h/m/s offset fields at bytes 4..6, each biased by +60),
+    then the timezone-file version as a big-endian ub4.
+    """
+    (Hours, Minutes, Seconds) = _DB_TZ_HMS
+    tz_block = (
+        _DB_TZ_FRAME_HEAD
+        + bytes([Hours + _DTY_TZ_BIAS, Minutes + _DTY_TZ_BIAS, Seconds + _DTY_TZ_BIAS])
+        + _DB_TZ_FRAME_TAIL
+    )
+    return bytes([TTI_DTY]) + tz_block + struct.pack('>I', _TZFILE_VERSION)
