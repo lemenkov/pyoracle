@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Protocol, runtime_checkable
 
-from seerdb.server.query import ColumnMeta
+from seerdb.common.tns import ColumnMeta
 
 # A username → secret map, the usual shape a backend authenticates against.
 Credentials = Mapping[str, str]

@@ -4,6 +4,7 @@
 import base64
 import datetime
 import platform
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, cast
 
@@ -211,6 +212,117 @@ from seerdb.common.tns_consts import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# --- The Mirror's wire request/reply data model (parsed requests + describe
+# metadata the codec passes around). Moved here so common holds the codec's
+# data types alongside its encode/decode functions. ---
+
+
+# AL32UTF8 (AL32UTF8_CHARSET) — what seerdb advertises and what an 11g DUAL
+# column reports. _CSFRM_DB is the database charset form (not the national one).
+_CSFRM_DB = 1
+
+
+@dataclass(frozen=True)
+class ColumnMeta:
+    """One result column's metadata for the describe (11g scalar column)."""
+
+    name: bytes
+    data_type: int
+    data_length: int
+    max_size: int
+    charset: int = AL32UTF8_CHARSET
+    csfrm: int = _CSFRM_DB
+    precision: int = 0
+    scale: int = 0
+    null_ok: int = 1
+    # Object-type identity for an ADT / REF column (#119/#494): the referenced
+    # type's 16-byte OID, owner schema, and name — carried in the describe so the
+    # client can label a REF (``ref.type_name``) and lay out an object.
+    type_oid: bytes = b''
+    type_schema: bytes = b''
+    type_name: bytes = b''
+
+
+@dataclass(frozen=True)
+class ExecRequest:
+    """A parsed execute: the SQL text, its options, and any bind values."""
+
+    sql: str
+    cursor: int
+    bind_count: int
+    fetch: int
+    binds: list = field(default_factory=list)
+    # One entry per array-DML (executemany) iteration; a plain execute has a
+    # single row equal to ``binds`` (empty for a statement with no binds).
+    bind_rows: list = field(default_factory=list)
+    # Per-bind (tns_type, max_size) from the OACs, in bind order — the type +
+    # return-buffer size a PL/SQL block's OUT binds need (#483).
+    bind_meta: list = field(default_factory=list)
+    # Per-bind (tns_type, csfrm, max_size) — the bind format the Mirror remembers
+    # for a cursor so a cached re-execute (no OACs on the wire) can decode its RXD
+    # values (#80/#486).
+    bind_types: list = field(default_factory=list)
+    autocommit: bool = False
+    # Array-DML batcherrors mode (#18): apply the good rows and collect per-row
+    # failures rather than aborting the whole executemany.
+    batcherrors: bool = False
+    # Server-side scrollable cursor (#181/#485): the SCROLLABLE exec flag on the
+    # opening execute, and the fetch orientation + 1-based position a scroll
+    # re-execute carries in al8i4[10]/al8i4[11]. Zero orientation means "no
+    # scroll" (a plain execute).
+    scrollable: bool = False
+    scroll_orientation: int = 0
+    scroll_position: int = 0
+
+
+@dataclass(frozen=True)
+class TempLobRef:
+    """A bind that arrived as a temp-LOB locator, not an inline value (#412).
+
+    A programmatic client that wrote a large LOB over ``TTI_LOBOPS`` binds the
+    minted locator instead of the bytes. The session resolves ``locator`` to the
+    content accumulated by the WRITE calls before handing it to the backend."""
+
+    locator: bytes
+    is_blob: bool
+
+
+@dataclass(frozen=True)
+class LobOpsRequest:
+    """A parsed TTI_LOBOPS request: which op, and the fields it carries (#412)."""
+
+    kind: str  # 'create_temp' | 'write' | 'read'
+    is_blob: bool = False
+    locator: bytes = b''
+    payload: bytes = b''
+
+
+@dataclass(frozen=True)
+class ScalarOutBind:
+    """A scalar PL/SQL OUT bind value + its declared type, for the IOV reply."""
+
+    value: object
+    tns_type: int
+
+
+@dataclass(frozen=True)
+class RefCursorOutBind:
+    """A REF CURSOR OUT bind: the nested result's columns and the cursor id the
+    Mirror parked its rows on. The client drains that id with ``TTI_FETCH``."""
+
+    columns: list[ColumnMeta]
+    cursor_id: int
+
+
+@dataclass(frozen=True)
+class FetchRequest:
+    """A parsed ``TTI_FETCH``: which cursor, and how many rows to return."""
+
+    cursor: int
+    fetch: int
+
 
 # The TTC field version negotiated for the connection whose response we are
 # currently decoding. Set by `decode_packet` at the top of each response and
