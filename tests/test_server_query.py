@@ -1205,7 +1205,8 @@ def test_encode_out_bind_response_oci_marshals_each_bind() -> None:
     # Bind count (offset 4) and one 0x10 define marker per OUT value; the RXD row
     # carries each value as a DALC followed by a 2-byte per-bind return code. A
     # VARCHAR OUT bind rides the same frame as a NUMBER one (#347).
-    from seerdb.server.query import TTI_RXD, encode_out_bind_response_oci
+    from seerdb.common.tns_consts import TTI_RXD
+    from seerdb.server.query import encode_out_bind_response_oci
 
     two = encode_out_bind_response_oci([7, 9])
     assert two[4] == 2  # bind count
