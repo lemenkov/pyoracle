@@ -4126,7 +4126,7 @@ to real 11g, varying one thing at a time. Offsets are from the `0x04` token:
 | `27..40` | | rowid of the touched row (DML only) | capture-specific; the Mirror reuses a fixed frame |
 | `49..51` | ub2 LE | echo of the sequence field | `sequence + 2` for row/return statuses; `0` in the outbind reply |
 | `52` | 1 | constant `0x01` | constant across captures |
-| `56..58` | ub2 LE | constant `0x0136` (310) | constant across captures |
+| `56..58` | ub2 LE | TTC protocol version — `0x0136` (310) | in the TNS-version family (the Mirror pins 11g at 314 = `0x013a`); carried from the 11.2 capture |
 | `72..76` | | fixed `20 f6 31 0a` instance marker | constant across captures |
 
 The rest of the 136-byte frame (SCN region, cursor/rowid slots) is a fixed
@@ -4134,7 +4134,11 @@ zero-filled envelope. For an error, the `ORA-NNNNN: <message>` DALC follows the
 136-byte OER. Offsets `18` and `49` carry values whose exact semantics are not
 yet pinned down (a non-zero position under a *success* describe status, an echo
 that is `+2` for some replies and `0` for others); they are carried from the
-captures byte-for-byte.
+captures byte-for-byte. Offset `56` looks like the session's negotiated TTC
+protocol version (`310` sits in the same `0x013x` family as the versions the
+handshake negotiates); the Mirror emits the captured value rather than its own,
+which sqlplus accepts — whether the field must track the live negotiation is
+not confirmed.
 
 ### 36.2 Generation
 
