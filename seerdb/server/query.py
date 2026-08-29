@@ -550,7 +550,6 @@ def _oci_ub4(n: int) -> bytes:
 # sqlplus prints "Connected to: <banner>". The reply is a TTI_RPA carrying the
 # banner as a DALC (ub2 count + ub1-chunked string) plus a fixed 10-byte packed
 # version/flags trailer (#265).
-# The version-call marker (0x11 0x6b) is the shared oci.OCI_VERSION_CALL.
 # Packed 11.2 version + capability flags, as the real XE 11.2 listener returns.
 _OCI_VERSION_TRAILER = bytes.fromhex('02200b09010000000300')
 
@@ -779,7 +778,6 @@ _OCI_OER_ENVELOPE = bytes.fromhex(
     '0000000020f6310a0000000000000000000000000000000000000000000000000000'
     '00000000000000000000000000000000000000000000000000000000000000000000'
 )
-# The OER status + row-kind codes are the shared oci.OCI_OER_* constants.
 
 
 def encode_oci_oer(

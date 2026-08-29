@@ -122,9 +122,6 @@ def derive_conn_key(challenge: Challenge, client_auth_sesskey: bytes) -> bytes:
     return conn_key(combined, None, _BITS_11G)
 
 
-# server_proof (the 16-byte AUTH_SVR_RESPONSE) now lives in crypto.py next to its
-# counterpart validate(); it is imported above and used by encode_result below.
-
 # The OCI dialect's AUTH_SVR_RESPONSE is 48 bytes, not the thin 16: the real 11g
 # listener encrypts a 16-byte nonce, the SERVER_TO_CLIENT marker, and a full
 # PKCS7 pad block (verified byte-exact against a live capture). The client finds
@@ -384,7 +381,6 @@ def parse_osesskey(payload: bytes) -> bytes:
 # constant (confirmed against live sqlplus 11.2 for usernames of different
 # lengths), so the ub1-length-prefixed username sits at a fixed offset (#265):
 #   03(TTI_FUN) subtype seq | IND | ub4 ub4 | IND | ub4 ub4 | IND | IND | ub1+user
-# The 8-byte indicator (0xFFFFFFFFFFFFFFFE LE) is the shared oci.OCI_INDICATOR.
 
 
 def _parse_oci_fun_username(payload: bytes, subtype: int, what: str) -> bytes:
