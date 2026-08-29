@@ -4297,48 +4297,83 @@ _END_OF_FETCH = (
 # with the CLOB template, sqlplus decodes a BLOB's content as characters and
 # mangles it (raw `CA FE BA BE` → `??`). Both are captured from live 11g
 # out-of-line reads (a 2000-char CLOB / a 4000-byte BLOB), keyed by is_clob.
+# The body of the 105-byte persistent-LOB locator (offset 9 onward): the charset
+# id (offsets 31..33, `03 69` = AL32UTF8 for a CLOB, `00 00` for a BLOB), the
+# physical **LOB Locator ID** (object id, three segment DBAs at offsets 36/80/102,
+# an SCN at 52) and the content byte-size slot (offset 91, ub4 BE, patched per
+# value). Keyed by is_clob.
+# FIXME: the physical LID is the captured LOB's real address in the 11.2 DB. It is
+# opaque to the client (echoed on every LOB op), so the Mirror reuses it; minting
+# a synthetic LID would remove the captured bytes but needs live 11g validation
+# that sqlplus round-trips it (§14.6).
+_OCI_LOB_LOCATOR_BODY = {
+    True: bytes.fromhex(
+        '000000010000005643350001b58f0001b58e00020002036900020040b52300000000'
+        '0000000000000000005bfd6e00000000000000000000000000000000000000000001'
+        'b58e0040b519000000140500000000000fa00000000000020040b523'
+    ),
+    False: bytes.fromhex(
+        '0000000100000056471d0001b6490001b64800020002000000020040b58300000000'
+        '0000000000000000005d0d5e00000000000000000000000000000000000000000001'
+        'b6480040b579000000140500000000000fa00000000000020040b583'
+    ),
+}
+
+
+def _oci_lob_locator(is_clob: bool) -> bytes:
+    """The 105-byte persistent-LOB locator sqlplus binds and echoes (§14.6). The
+    9-byte header is generated from the LOB kind; the body (charset id + physical
+    LID) is carried per kind (see :data:`_OCI_LOB_LOCATOR_BODY`)."""
+    header = bytes(
+        [
+            0x68,
+            0x00,
+            0x01,  # locator length + version
+            0x02 if is_clob else 0x01,  # charset form (CLOB char / BLOB binary)
+            0x0C,
+            0x88 if is_clob else 0x08,  # flags — bit 0x80 = variable-width charset
+            0x00,
+            0x00,
+            0x02 if is_clob else 0x01,  # LOB type
+        ]
+    )
+    return header + _OCI_LOB_LOCATOR_BODY[is_clob]
+
+
+# The RXD value for a LOB column: a ub4 LE + ub2 LE length (both 106) then the
+# locator. The content byte size at offset 97 is patched per value.
 _OCI_LOB_ROW_VALUE = {
-    True: bytes.fromhex(
-        '6a0000006a00680001020c88000002000000010000005643350001b58f0001b58e00'
-        '020002036900020040b523000000000000000000000000005bfd6e00000000000000'
-        '000000000000000000000000000001b58e0040b519000000140500000000000fa000'
-        '00000000020040b523'
-    ),
-    False: bytes.fromhex(
-        '6a0000006a00680001010c080000010000000100000056471d0001b6490001b64800'
-        '020002000000020040b583000000000000000000000000005d0d5e00000000000000'
-        '000000000000000000000000000001b6480040b579000000140500000000000fa000'
-        '00000000020040b583'
-    ),
+    is_clob: struct.pack('<I', 106) + struct.pack('<H', 106) + _oci_lob_locator(is_clob)
+    for is_clob in (True, False)
 }
 
 
-# The TTI_LOBOPS READ reply tail after the LOB_DATA content: TTI_RPA (the echoed
-# locator + amount read) then the OER call status. sqlplus skips the RPA to the
-# OER, but the echoed locator's byte size and the amount are patched so they stay
-# consistent with the content delivered. Same CLOB/BLOB split as the row value.
-_OCI_LOB_READ_TAIL = {
-    True: bytes.fromhex(
-        '0800680001020c88000002000000010000005643350001b58f0001b58e0002000203'
-        '6900020040b523000000000000000000000000005bfd6e0000000000000000000000'
-        '0000000000000000000001b58e0040b519000000140500000000000fa00000000000'
-        '020040b523d007000000000000040100000011000101000000000000000000000000'
-        '00000000000000000000000000000000000000000000000000000000130000010000'
-        '003601000000000000000000000000000020f6310a00000000000000000000000000'
-        '00000000000000000000000000000000000000000000000000000000000000000000'
-        '00000000000000000000000000'
-    ),
-    False: bytes.fromhex(
-        '0800680001010c080000010000000100000056471d0001b6490001b6480002000200'
-        '0000020040b583000000000000000000000000005d0d5e0000000000000000000000'
-        '0000000000000000000001b6480040b579000000140500000000000fa00000000000'
-        '020040b583a00f000000000000040100000011000101000000000000000000000000'
-        '00000000000000000000000000000000000000000000000000000000130000010000'
-        '003601000000000000000000000000000020f6310a00000000000000000000000000'
-        '00000000000000000000000000000000000000000000000000000000000000000000'
-        '00000000000000000000000000'
-    ),
-}
+def _oci_lob_read_tail(is_clob: bool) -> bytes:
+    # The TTI_LOBOPS READ reply tail after the LOB_DATA content: a TTI_RPA (0x08
+    # 0x00, the echoed locator, then the ub4 LE amount read — characters for a
+    # CLOB, bytes for a BLOB) then the LOB-row OER call status. The echoed
+    # locator's byte size (offset 93) and the amount (offset 107) are patched to
+    # stay consistent with the content delivered.
+    oer = bytearray(
+        encode_oci_oer(
+            oci.OCI_OER_STATUS_SUCCESS,
+            sequence=17,
+            row_kind=oci.OCI_OER_ROW_KIND_LOB,
+            command_type=0,
+        )
+    )
+    oer[18] = 0  # FIXME: the LOB read-status OER zeroes offset 18 (see §36.1)
+    amount = 2000 if is_clob else 4000
+    return (
+        b'\x08\x00'
+        + _oci_lob_locator(is_clob)
+        + struct.pack('<I', amount)
+        + b'\x00' * 4
+        + bytes(oer)
+    )
+
+
+_OCI_LOB_READ_TAIL = {is_clob: _oci_lob_read_tail(is_clob) for is_clob in (True, False)}
 
 
 # --- Mirror deadbeef/OCI codec (parse/describe/rows/status/LOB, #265) ---
