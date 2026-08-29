@@ -780,6 +780,77 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
     return (Col, Rest)
 
 
+def _str_with_length(data: bytes) -> bytes:
+    # Inverse of _read_str_with_length: a ub4 char-count then a DALC. An empty
+    # value is just the zero count (the reader returns b'' without a DALC).
+    if not data:
+        return encode_sb4(0)
+    return encode_sb4(len(data)) + _bytes_with_length(data)
+
+
+def _encode_signed_sb4(value: int) -> bytes:
+    # The 11g describe encodes scale as a variable-length *signed* integer: a
+    # negative value sets the 0x80 bit of the length byte over the magnitude
+    # bytes (so NUMBER's -127 "no scale" default is 0x81 0x7f). encode_sb4 only
+    # covers the non-negative case; the client's decode_ub4 reads both.
+    if value >= 0:
+        return encode_sb4(value)
+    magnitude = (-value).to_bytes(4, 'big').lstrip(b'\x00') or b'\x00'
+    return bytes([0x80 | len(magnitude)]) + magnitude
+
+
+def _encode_dcb_column(col: ColumnMeta, position: int) -> bytes:
+    # Inverse of _decode_dcb_column (11g / fv < 12.2). Fields the client skips
+    # are written as well-formed zeros; only type/precision/scale/length/
+    # charset/csfrm/max_size/null_ok/name carry meaning.
+    return (
+        bytes([col.data_type, 0, col.precision & 0xFF])
+        + _encode_signed_sb4(col.scale)
+        + encode_sb4(col.data_length)  # buffer size
+        + encode_sb4(0)  # max array elements
+        + encode_sb4(0)  # cont flags
+        # For an ADT / REF column the referenced type's OID (else absent) (#494).
+        + _str_with_length(col.type_oid)
+        + encode_sb4(0)  # version
+        + encode_sb4(col.charset)
+        + bytes([col.csfrm])
+        + encode_sb4(col.max_size)
+        + bytes([col.null_ok, 0])  # null_ok + (skipped) v7 name length
+        + _str_with_length(col.name)
+        + _str_with_length(col.type_schema)  # type schema (ADT owner)
+        + _str_with_length(col.type_name)  # type name
+        + encode_sb4(position)  # column position
+        + encode_sb4(0)  # uds flags (11g addition)
+    )
+
+
+def _encode_describe_body(columns: list[ColumnMeta]) -> bytes:
+    # The describe body shared by the TTI_DCB block and a REF CURSOR OUT bind's
+    # inline describe (#483): max row size, column count, the per-column DCB
+    # metadata, then the current-date / flag / query-cache-key trailer.
+    body = encode_sb4(sum(c.max_size for c in columns))  # max row size (skipped)
+    body += encode_sb4(len(columns))
+    if columns:
+        body += bytes([0])  # reserved
+    for position, col in enumerate(columns, start=1):
+        body += _encode_dcb_column(col, position)
+    body += _bytes_with_length(b'')  # current date (skipped)
+    body += encode_sb4(0) * 4  # dcbflag / dcbmdbz / dcbmnpr / dcbmxpr
+    body += _bytes_with_length(b'')  # dcbqcky query-cache key (11g)
+    return body
+
+
+def encode_describe(columns: list[ColumnMeta]) -> bytes:
+    """Build the describe (TTI_DCB) block for a result's columns — §19.1 (11g).
+
+    Returns the TTC payload starting at the TTI_DCB token. The cursor-uuid
+    preamble is empty (the client skips it); the row tokens are appended
+    separately by the exec-response encoder.
+    """
+    preamble = _bytes_with_length(b'')  # cursor uuid / timestamp (skipped)
+    return bytes([TTI_DCB]) + preamble + _encode_describe_body(columns)
+
+
 def decode_token_iov(Data: bytes, Acc: tuple) -> tuple:
     # I/O vector for an anonymous PL/SQL block's binds (section 6.5). Layout
     # cross-referenced with python-oracledb's _process_io_vector and verified
