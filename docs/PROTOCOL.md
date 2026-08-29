@@ -600,6 +600,32 @@ build speaks 10g through 23ai. (Reference field versions: 10.2 = 4, 11.2 = 6,
 > section) and the version-gated formats. seerdb logs in and runs its full
 > test suite against 11g, **12c+ (21c, 23ai)** and 10g from one build.
 
+#### 4.2.1 The deadbeef third-round type reply (server-side / the Mirror)
+
+sqlplus / thick OCI runs an **extra data-type round** after DTY, before it sends
+OSESSKEY (a thin client jumps straight to OSESSKEY — §4.1.2). The server answers
+that third `ttc=02` request with a fixed **16-byte TTC payload** (a 26-byte DATA
+packet). Despite living outside the ordinary DTY exchange, it is an ordinary
+**data-type reply carrying the DB session time zone and the server's
+timezone-file version** (#565) — not an opaque blob. The Mirror builds it
+field-by-field (`build_type_reply_sqlplus`):
+
+```
+02                       TTI_DTY message code
+80 00 00 00              time-zone block bytes [0..3]  (fixed framing)
+3c 3c 3c                 the h/m/s offset triplet, each biased by +60
+                           → (60,60,60) − 60 = +00:00:00  → DB time zone = UTC
+80 00 00 00              time-zone block bytes [7..10]  (fixed framing)
+00 00 00 0e              timezone-file version (ub4 BE) = 14
+```
+
+The `+60` bias on each of the hours / minutes / seconds fields is Oracle's
+time-zone encoding (a real client reads each byte back as `value − 60`), so the
+stored `3c 3c 3c` decodes to a zero offset. `0x0E` (14) is the 11.2 default
+timezone-file (DST-rules) version. The 8 fixed framing bytes around the triplet
+are the block's captured 11.2 identity. `tests/test_handshake_generation.py`
+pins the built bytes to the live 11g capture.
+
 ### 4.3 Session Setup (TTI_FUN/TTI_SESS)
 
 ```
