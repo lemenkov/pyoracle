@@ -13,6 +13,7 @@ from seerdb.common.tns import (
     _decode_describe_body,
     _skip_chunked_bytes,
     decode_packet,
+    encode_rows,
 )
 from seerdb.common.tns_consts import (
     FIELD_VERSION_11_2,
@@ -25,7 +26,6 @@ from seerdb.common.tns_consts import (
 from seerdb.server.query import (
     ColumnMeta,
     encode_describe,
-    encode_rows,
     parse_exec,
     parse_exec_oci,
 )
@@ -212,8 +212,7 @@ def test_unsupported_value_type_raises() -> None:
 
 
 def test_encode_error_reports_the_ora_code_and_message() -> None:
-    from seerdb.common.tns import decode_token_oer
-    from seerdb.server.query import encode_error
+    from seerdb.common.tns import decode_token_oer, encode_error
 
     _DECODE_FIELD_VERSION.set(FIELD_VERSION_11_2)
     result = decode_token_oer(
@@ -224,8 +223,7 @@ def test_encode_error_reports_the_ora_code_and_message() -> None:
 
 
 def test_more_rows_terminator_carries_cursor_id() -> None:
-    from seerdb.common.tns import decode_token_oer
-    from seerdb.server.query import encode_more_rows
+    from seerdb.common.tns import decode_token_oer, encode_more_rows
 
     # The "more rows" status: call_status 1, no error, and the cursor id — what
     # the client's _drain_cursor keys on to issue follow-up TTI_FETCH calls.
@@ -1339,11 +1337,10 @@ def test_scroll_terminator_carries_rowcount_and_eof() -> None:
 
 
 def test_scroll_response_bodies_frame_rows_and_describe() -> None:
+    from seerdb.common.tns import encode_rows
+    from seerdb.common.tns_consts import TTI_DCB, TTI_RXH
     from seerdb.server.query import (
-        TTI_DCB,
-        TTI_RXH,
         _scroll_terminator,
-        encode_rows,
         encode_scroll_open_response,
         encode_scroll_response,
     )
@@ -1609,8 +1606,7 @@ def test_encode_out_bind_response_thin_refcursor_entry() -> None:
 
 
 def test_encode_batch_errors_status_roundtrips_via_client() -> None:
-    from seerdb.common.tns import decode_token_oer
-    from seerdb.server.query import encode_batch_errors_status
+    from seerdb.common.tns import decode_token_oer, encode_batch_errors_status
 
     _DECODE_FIELD_VERSION.set(FIELD_VERSION_11_2)
     # Two rows of a 5-row executemany violated the PK (offsets 2 and 4); the

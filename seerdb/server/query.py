@@ -18,7 +18,6 @@ from seerdb.common import oci
 from seerdb.common.exceptions import DataError, InterfaceError
 from seerdb.common.tns import (
     _CSFRM_DB,
-    _END_OF_FETCH,
     _OCI_COMMIT_STATUS,
     _OCI_DCB_MARKER,
     _OCI_DDL_STATUS_FRAME,
@@ -43,11 +42,15 @@ from seerdb.common.tns import (
     RefCursorOutBind,
     ScalarOutBind,
     TempLobRef,
-    _bytes_with_length,
+    _encode_describe_body,
+    _encode_oer,
     decode_dalc,
     decode_oac_fields,
     decode_ub4,
+    encode_describe,
+    encode_rows,
     encode_sb4,
+    encode_status,
     encode_value,
 )
 from seerdb.common.tns_consts import (
@@ -81,10 +84,8 @@ from seerdb.common.tns_consts import (
     TTI_FUN,
     TTI_IOV,
     TTI_LOB,
-    TTI_OER,
     TTI_RPA,
     TTI_RXD,
-    TTI_RXH,
 )
 from seerdb.common.types import decode_value
 
@@ -434,50 +435,6 @@ def _read_chunked_sql(data: bytes, total_len: int) -> bytes:
         out += data[i : i + chunk_len]
         i += chunk_len
     return bytes(out[:total_len])
-
-
-def _str_with_length(data: bytes) -> bytes:
-    # Inverse of _read_str_with_length: a ub4 char-count then a DALC. An empty
-    # value is just the zero count (the reader returns b'' without a DALC).
-    if not data:
-        return encode_sb4(0)
-    return encode_sb4(len(data)) + _bytes_with_length(data)
-
-
-def _encode_signed_sb4(value: int) -> bytes:
-    # The 11g describe encodes scale as a variable-length *signed* integer: a
-    # negative value sets the 0x80 bit of the length byte over the magnitude
-    # bytes (so NUMBER's -127 "no scale" default is 0x81 0x7f). encode_sb4 only
-    # covers the non-negative case; the client's decode_ub4 reads both.
-    if value >= 0:
-        return encode_sb4(value)
-    magnitude = (-value).to_bytes(4, 'big').lstrip(b'\x00') or b'\x00'
-    return bytes([0x80 | len(magnitude)]) + magnitude
-
-
-def _encode_dcb_column(col: ColumnMeta, position: int) -> bytes:
-    # Inverse of _decode_dcb_column (11g / fv < 12.2). Fields the client skips
-    # are written as well-formed zeros; only type/precision/scale/length/
-    # charset/csfrm/max_size/null_ok/name carry meaning.
-    return (
-        bytes([col.data_type, 0, col.precision & 0xFF])
-        + _encode_signed_sb4(col.scale)
-        + encode_sb4(col.data_length)  # buffer size
-        + encode_sb4(0)  # max array elements
-        + encode_sb4(0)  # cont flags
-        # For an ADT / REF column the referenced type's OID (else absent) (#494).
-        + _str_with_length(col.type_oid)
-        + encode_sb4(0)  # version
-        + encode_sb4(col.charset)
-        + bytes([col.csfrm])
-        + encode_sb4(col.max_size)
-        + bytes([col.null_ok, 0])  # null_ok + (skipped) v7 name length
-        + _str_with_length(col.name)
-        + _str_with_length(col.type_schema)  # type schema (ADT owner)
-        + _str_with_length(col.type_name)  # type name
-        + encode_sb4(position)  # column position
-        + encode_sb4(0)  # uds flags (11g addition)
-    )
 
 
 def _oci_ub4(n: int) -> bytes:
@@ -992,33 +949,6 @@ def _decode_describe_oci(payload: bytes) -> list[dict]:
     return cols
 
 
-def _encode_describe_body(columns: list[ColumnMeta]) -> bytes:
-    # The describe body shared by the TTI_DCB block and a REF CURSOR OUT bind's
-    # inline describe (#483): max row size, column count, the per-column DCB
-    # metadata, then the current-date / flag / query-cache-key trailer.
-    body = encode_sb4(sum(c.max_size for c in columns))  # max row size (skipped)
-    body += encode_sb4(len(columns))
-    if columns:
-        body += bytes([0])  # reserved
-    for position, col in enumerate(columns, start=1):
-        body += _encode_dcb_column(col, position)
-    body += _bytes_with_length(b'')  # current date (skipped)
-    body += encode_sb4(0) * 4  # dcbflag / dcbmdbz / dcbmnpr / dcbmxpr
-    body += _bytes_with_length(b'')  # dcbqcky query-cache key (11g)
-    return body
-
-
-def encode_describe(columns: list[ColumnMeta]) -> bytes:
-    """Build the describe (TTI_DCB) block for a result's columns — §19.1 (11g).
-
-    Returns the TTC payload starting at the TTI_DCB token. The cursor-uuid
-    preamble is empty (the client skips it); the row tokens are appended
-    separately by the exec-response encoder.
-    """
-    preamble = _bytes_with_length(b'')  # cursor uuid / timestamp (skipped)
-    return bytes([TTI_DCB]) + preamble + _encode_describe_body(columns)
-
-
 # --- OCI LONG / LONG RAW row value (#407) ---
 # A LONG (type 8, character) or LONG RAW (type 24, binary) column is streamed
 # inline in the RXD — no LOB locator. The value is always the chunked form
@@ -1358,135 +1288,6 @@ def encode_lob_fetch_rows_oci(columns: list[ColumnMeta], rows: list[tuple]) -> b
     return bytes(out) + _OCI_LOB_FETCH_STATUS
 
 
-def encode_rows(
-    rows: list[tuple], columns: list[ColumnMeta], *, fetch: int = 15
-) -> bytes:
-    """Build the row-transfer tokens for a fetch — §6.2 (11g).
-
-    One row-header (TTI_RXH) followed by one TTI_RXD per row, each carrying the
-    columns' values as DALC blobs. The caller frames these after the describe
-    and before the fetch terminator. ``columns`` fixes the value order.
-    """
-    header = (
-        bytes([TTI_RXH, 0])  # token + (skipped) flags
-        + encode_sb4(1)  # num requests
-        + encode_sb4(0)  # iteration number
-        + encode_sb4(fetch)  # num iterations
-        + encode_sb4(0)  # buffer length
-        + encode_sb4(0)  # bit-vector length (no column compression)
-        + _bytes_with_length(b'')  # rxhrid
-    )
-    body = b''
-    for row in rows:
-        if len(row) != len(columns):
-            raise InterfaceError('row width does not match the column count')
-        body += bytes([TTI_RXD]) + b''.join(
-            encode_value(v, col.data_type) for v, col in zip(row, columns)
-        )
-    return header + body
-
-
-def _encode_batch_ub4_array(values: list[int]) -> bytes:
-    # An array-DML batch field (#18): a ub4 count, then a DALC blob packing that
-    # many ub4 values back-to-back (the inverse of _read_batch_ub4_array). Empty
-    # is a bare zero count.
-    if not values:
-        return encode_sb4(0)
-    blob = b''.join(encode_sb4(v) for v in values)
-    return encode_sb4(len(values)) + _bytes_with_length(blob)
-
-
-def _encode_batch_messages(messages: list[str]) -> bytes:
-    # The batch-error message array (#18): a ub4 count, a 1-byte indicator, then
-    # per message a ub4 length + the length-prefixed text + a 2-byte trailer.
-    if not messages:
-        return encode_sb4(0)
-    out = bytearray(encode_sb4(len(messages)) + bytes([1]))
-    for message in messages:
-        text = message.encode('utf-8')
-        out += encode_sb4(len(text)) + _bytes_with_length(text) + bytes([0, 0])
-    return bytes(out)
-
-
-def _encode_oer(
-    call_status: int,
-    ora_code: int,
-    rowcount: int,
-    message: bytes,
-    cursor_id: int = 0,
-    batch_errors: list[tuple[int, int, str]] | None = None,
-) -> bytes:
-    # An OER return-status token (§6.5, 11g) — the terminal of every response.
-    # Rowid fields are zero; call status, the ORA error number, the affected-row
-    # count, the cursor id (for a mid-fetch "more rows" status), and the message
-    # text carry meaning. ``batch_errors`` is (offset, code, message) per row that
-    # failed in an array-DML batcherrors execute — the three arrays line up by
-    # position (#18).
-    batch_errors = batch_errors or []
-    codes = [code for _offset, code, _msg in batch_errors]
-    offsets = [offset for offset, _code, _msg in batch_errors]
-    messages = [msg for _offset, _code, msg in batch_errors]
-    return (
-        bytes([TTI_OER])
-        + encode_sb4(call_status)
-        + encode_sb4(0)  # end-to-end seq
-        + encode_sb4(rowcount)  # current row number == DML affected rows on 11g
-        + encode_sb4(ora_code)  # the ORA error number (0 on success)
-        + encode_sb4(0)  # array element error 1
-        + encode_sb4(0)  # array element error 2
-        + encode_sb4(cursor_id)  # current cursor id
-        + encode_sb4(0)  # error position
-        + bytes(6)  # sql_type, fatal, flags, user_cursor_opts, upi_param, warn
-        + encode_sb4(0)  # rowid data object number
-        + encode_sb4(0)  # rowid relative file number
-        + bytes(1)  # rowid reserved
-        + encode_sb4(0)  # rowid block number
-        + encode_sb4(0)  # rowid slot number
-        + encode_sb4(0)  # os error
-        + bytes(2)  # statement number, call number
-        + encode_sb4(0)  # padding
-        + encode_sb4(1)  # successful iterations
-        + _bytes_with_length(b'')  # oerrdd (logical rowid)
-        + _encode_batch_ub4_array(codes)  # batch error codes
-        + _encode_batch_ub4_array(offsets)  # batch error row offsets
-        + _encode_batch_messages(messages)  # batch error messages
-        + _bytes_with_length(message)  # the message DALC (read only when ora_code≠0)
-    )
-
-
-def encode_error(ora_code: int, message: str) -> bytes:
-    """OER reporting an error: the client raises ``ORA-<code>: <message>`` and
-    the connection stays usable."""
-    return _encode_oer(1, ora_code, 0, message.encode('utf-8'))
-
-
-def encode_status(rowcount: int = 0, cursor_id: int = 0) -> bytes:
-    """OER reporting success for a non-query (DDL / DML), with the affected-row
-    count. No describe, no rows — the client just sees the statement completed.
-    A non-zero ``cursor_id`` lets the client's cursor cache remember the server
-    handle and re-execute the same DML by id with an empty query (#80/#486)."""
-    return _encode_oer(0, 0, rowcount, b'', cursor_id=cursor_id)
-
-
-# ORA-24381: the array-DML summary code the server returns when a batcherrors
-# execute collected per-row failures — non-fatal, the client reads the errors
-# from getbatcherrors() rather than raising (#18).
-_ARRAY_DML_ERRORS = 24381
-
-
-def encode_batch_errors_status(
-    rowcount: int, batch_errors: list[tuple[int, int, str]]
-) -> bytes:
-    """OER for an array-DML ``batcherrors`` execute that collected per-row
-    failures (#18): ORA-24381 with the (offset, code, message) arrays, and the
-    affected-row count of the rows that applied. The client surfaces the errors
-    through ``getbatcherrors()`` instead of raising."""
-    message = f'ORA-{_ARRAY_DML_ERRORS:05d}: error(s) in array DML'.encode()
-    return _encode_oer(
-        0, _ARRAY_DML_ERRORS, rowcount, message, batch_errors=batch_errors
-    )
-
-
 def _encode_refcursor_out(bind: RefCursorOutBind) -> bytes:
     # A REF CURSOR OUT value in the IOV's RXD (#483/#84), the inverse of the
     # client's _read_refcursor_out: a 1-byte length, the inline describe body
@@ -1533,49 +1334,6 @@ def encode_out_bind_response_thin(
         else:
             rxd += encode_value(bind.value, bind.tns_type) + encode_sb4(0)
     return iov + bytes(rxd) + encode_status(0)
-
-
-def encode_more_rows(cursor_id: int) -> bytes:
-    """Terminate a batch that did NOT drain the cursor: ``call_status = 1``, no
-    error, and the cursor id — the client reads this as "more rows on cursor N"
-    and issues ``TTI_FETCH`` for the rest (§5.2). The ``1403`` end-of-fetch
-    (:data:`_END_OF_FETCH`) is sent only once the cursor is drained."""
-    return _encode_oer(1, 0, 0, b'', cursor_id=cursor_id)
-
-
-def _terminator(cursor_id: int, more: bool) -> bytes:
-    return encode_more_rows(cursor_id) if more else _END_OF_FETCH
-
-
-def encode_query_response(
-    columns: list[ColumnMeta],
-    rows: list[tuple],
-    *,
-    cursor_id: int = 0,
-    more: bool = False,
-) -> bytes:
-    """Assemble a SELECT execute response: describe + rows + terminator (§6).
-
-    ``more=True`` ends the batch with a "more rows on ``cursor_id``" status
-    instead of the ``ORA-01403`` end-of-fetch, so the client fetches the rest.
-    """
-    return (
-        encode_describe(columns)
-        + encode_rows(rows, columns)
-        + _terminator(cursor_id, more)
-    )
-
-
-def encode_fetch_response(
-    columns: list[ColumnMeta],
-    rows: list[tuple],
-    *,
-    cursor_id: int = 0,
-    more: bool = False,
-) -> bytes:
-    """Assemble a ``TTI_FETCH`` continuation response: rows + terminator, with
-    **no** describe (the column metadata was established on the execute)."""
-    return encode_rows(rows, columns) + _terminator(cursor_id, more)
 
 
 def scroll_start_row(orientation: int, position: int, total: int) -> int:
