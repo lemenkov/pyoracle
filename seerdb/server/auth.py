@@ -60,8 +60,7 @@ from seerdb.common.tns import (
     decode_dalc,
     decode_kv,
     decode_ub4,
-    encode_kv,
-    encode_sb4,
+    encode_rpa_kv,
 )
 from seerdb.common.tns_consts import (
     FIELD_VERSION_12_2,
@@ -180,11 +179,11 @@ def encode_challenge(challenge: Challenge) -> bytes:
     ``PacketStream.write_packet(TNS_DATA, …)``. Decodes back through the
     client's ``decode_token_rpa`` as a ``TTI_SESS`` challenge.
     """
-    return (
-        bytes([TTI_RPA])
-        + encode_sb4(2)
-        + encode_kv(b'AUTH_SESSKEY', _hexval(challenge.auth_sesskey), 1)
-        + encode_kv(b'AUTH_VFR_DATA', _hexval(challenge.salt), 1)
+    return encode_rpa_kv(
+        [
+            (b'AUTH_SESSKEY', _hexval(challenge.auth_sesskey)),
+            (b'AUTH_VFR_DATA', _hexval(challenge.salt)),
+        ]
     )
 
 
@@ -323,12 +322,12 @@ def encode_result(
     Decodes back through ``decode_token_rpa`` as a ``TTI_AUTH`` result whose
     ``AUTH_SVR_RESPONSE`` the client's ``validate()`` accepts.
     """
-    return (
-        bytes([TTI_RPA])
-        + encode_sb4(3)
-        + encode_kv(b'AUTH_SVR_RESPONSE', _hexval(server_proof(session_key)), 1)
-        + encode_kv(b'AUTH_VERSION_NO', str(version_no).encode('ascii'), 1)
-        + encode_kv(b'AUTH_SESSION_ID', str(session_id).encode('ascii'), 1)
+    return encode_rpa_kv(
+        [
+            (b'AUTH_SVR_RESPONSE', _hexval(server_proof(session_key))),
+            (b'AUTH_VERSION_NO', str(version_no).encode('ascii')),
+            (b'AUTH_SESSION_ID', str(session_id).encode('ascii')),
+        ]
     )
 
 

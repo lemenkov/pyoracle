@@ -1641,16 +1641,27 @@ def encode_fetch_terminator_oci() -> bytes:
 _SERVER_VERSION_NO = 186647040
 
 
+def encode_rpa_kv(pairs: list[tuple[bytes, bytes]]) -> bytes:
+    """A TTI_RPA payload carrying key-value pairs — the shared framing of every
+    auth challenge / result RPA: the RPA token, the pair count, then each pair as
+    a flag-1 key-value. Decodes back through :func:`decode_token_rpa`."""
+    return (
+        bytes([TTI_RPA])
+        + encode_sb4(len(pairs))
+        + b''.join(encode_kv(Key, Value, 1) for Key, Value in pairs)
+    )
+
+
 def encode_token_result(
     *, session_id: int = 0, version_no: int = _SERVER_VERSION_NO
 ) -> bytes:
     """The token-auth result RPA — version + session id, and no server proof
     (token auth has no ConnKey, so there is nothing for the client to validate)."""
-    return (
-        bytes([TTI_RPA])
-        + encode_sb4(2)
-        + encode_kv(b'AUTH_VERSION_NO', str(version_no).encode('ascii'), 1)
-        + encode_kv(b'AUTH_SESSION_ID', str(session_id).encode('ascii'), 1)
+    return encode_rpa_kv(
+        [
+            (b'AUTH_VERSION_NO', str(version_no).encode('ascii')),
+            (b'AUTH_SESSION_ID', str(session_id).encode('ascii')),
+        ]
     )
 
 
