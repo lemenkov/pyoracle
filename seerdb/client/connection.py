@@ -73,6 +73,7 @@ from seerdb.common.tns_consts import (
     TNS_DATA,
     TNS_DATA_FLAGS_BEGIN_PIPELINE,
     TNS_DATA_FLAGS_END_OF_REQUEST,
+    TNS_DATA_FLAGS_MORE,
     TNS_FETCH_ORIENTATION_CURRENT,
     TNS_GSO_CAN_RECV_ATTENTION,
     TNS_MARKER,
@@ -2575,7 +2576,7 @@ class OracleConnect(_ConnectionLogic):
         BodyMax = self.sdu - 10
         First = True
         while len(Data) > BodyMax:
-            Flags = 0x0020 | (FirstFlags if First else 0)
+            Flags = TNS_DATA_FLAGS_MORE | (FirstFlags if First else 0)
             self._sock.send(
                 encode_data_packet(Data[:BodyMax], Flags, self._large_packets)
             )

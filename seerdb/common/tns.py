@@ -105,6 +105,7 @@ from seerdb.common.tns_consts import (
     TNS_BIND_DIR_INPUT,
     TNS_CCAP_END_OF_RESPONSE,
     TNS_DATA,
+    TNS_DATA_FLAGS_MORE,
     TNS_END_TO_END_ACTION,
     TNS_END_TO_END_CLIENT_IDENTIFIER,
     TNS_END_TO_END_CLIENT_INFO,
@@ -2656,7 +2657,7 @@ def encode_packet(
             BodySize = Length - 10
             return (
                 _packet_header(BodySize + 10, Type, Large)
-                + struct.pack('>h', 0x0020)
+                + struct.pack('>h', TNS_DATA_FLAGS_MORE)
                 + Data[:BodySize],
                 Data[BodySize:],
             )
