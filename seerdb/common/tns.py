@@ -3956,8 +3956,26 @@ _DTY_8I = bytes.fromhex(
 # seerdb/server/ import them.
 
 
-# Packed 11.2 version + capability flags, as the real XE 11.2 listener returns.
-_OCI_VERSION_TRAILER = bytes.fromhex('02200b09010000000300')
+# The capability word trailing the packed version in the post-login version reply
+# (§39). Bytes [0:5] are stable across releases; the last two are a version-era
+# capability level (3 on 10.2 / 11.2, larger on 21c) — the Mirror pins the 11.2
+# value. Verified live by capturing sqlplus against 10.2 / 11.2 / 21c.
+_OCI_VERSION_CAPS = bytes.fromhex('09010000000300')
+
+
+def _oci_version_trailer(
+    major: int, minor: int, component: int, patchset: int
+) -> bytes:
+    """The packed-version + capability trailer sqlplus reads after the banner.
+    The version is the low three bytes of Oracle's packed version word in
+    little-endian order — patchset, ``(minor << 4) | component``, major — then
+    the capability word. Confirmed live: 10.2.0.5 → ``05 20 0a``, 11.2.0.2 →
+    ``02 20 0b``, 21.0.0.0 → ``00 00 15``."""
+    packed = (major << 24) | (minor << 20) | (component << 12) | (patchset << 8)
+    return packed.to_bytes(4, 'big')[:3][::-1] + _OCI_VERSION_CAPS
+
+
+_OCI_VERSION_TRAILER = _oci_version_trailer(11, 2, 0, 2)  # XE 11.2.0.2.0
 
 
 _OCI_DCB_MARKER = bytes.fromhex('060122')  # a required 3-byte descriptor marker
