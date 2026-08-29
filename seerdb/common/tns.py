@@ -2860,6 +2860,152 @@ _DTY_8I = bytes.fromhex(
 )
 
 
+# --- Captured deadbeef / thick-OCI reply templates (opaque, staged here) ---
+# These byte blobs are the sqlplus / thick-OCI (deadbeef) codec's captured 11.2
+# reply templates (OER status envelopes, describe/outbind/version trailers, the
+# auth challenge/result trailers). They are reproduced from live XE 11.2 captures
+# and are still opaque; they are collected here alongside the 8i blobs above to be
+# decoded and restructured later (PROTOCOL.md §36, §39). The Mirror's encoders in
+# seerdb/server/ import them.
+
+
+# Packed 11.2 version + capability flags, as the real XE 11.2 listener returns.
+_OCI_VERSION_TRAILER = bytes.fromhex('02200b09010000000300')
+
+
+_OCI_DCB_MARKER = bytes.fromhex('060122')  # a required 3-byte descriptor marker
+
+
+_OCI_EXEC_OER = bytes.fromhex(
+    '000000040100000013000101000000000000000000020000000300000000000000'
+)
+
+
+# The 136-byte OCI OER return-status token, reverse-engineered against live 11g
+# (docs/PROTOCOL.md §36). All three of the Mirror's OER status trailers — the
+# error OER, the LONG-row fetch status, and the LOB-row fetch status — are this
+# one envelope differing only in a handful of named fields, so build them rather
+# than storing three near-identical blobs. The bulk (SCN/rowid/instance region,
+# the fixed 0x20f6310a marker) is the same fixed frame; the fields below vary.
+_OCI_OER_ENVELOPE = bytes.fromhex(
+    '04000000000000010000000000000000000002000000030000000000000000000000'
+    '00000000000000000000000000000000000001000000360100000000000000000000'
+    '0000000020f6310a0000000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000000000'
+)
+
+
+_OCI_FETCH_OER_HEADER = bytes.fromhex(
+    '0401000000140001010000007b0500000000020000000300'
+)
+
+
+_OCI_FETCH_CONST = bytes.fromhex('f6310a')
+
+
+# The execute reply for a LOB SELECT is a describe with NO row inline — sqlplus
+# sets up its LOB define from it and fetches the locator rows separately. It is
+# NOT the ordinary describe: instead of the 83-byte DCB tail that precedes inline
+# rows it carries a 33-byte describe tail (a describe-timestamp form, no DCB
+# marker), and its own execute status/OER. Both are reduced from a live 11g CLOB
+# describe with the instance-specific bytes (the timestamp, the SCN) zeroed (#405).
+_OCI_LOB_DESCRIBE_TAIL = bytes.fromhex(
+    '0007000000070000000000000000000000e81f0000000000000000000000000000'
+)
+
+
+_OCI_LOB_DESCRIBE_STATUS = bytes.fromhex(
+    '08060000000000000000000200000000000000000000000000000000000000000000'
+    '0004010000000f00010000000000000000000002000e000300000000000000000000'
+    '00000000000000000000000000000000110000010000003601000000000000000000'
+    '000000000020f6310a00000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000000000'
+    '00'
+)
+
+
+# The reply for a statement that returns no rows — a PL/SQL block or DDL. Same
+# shape as the row-status trailer (:func:`_oci_row_status`), but its own sentinel
+# and OER (this one reports zero rows). Structure only; the SCN / counts a live
+# reply carries are zero (#265).
+_OCI_STATUS_OER = bytes.fromhex(
+    '000000040100000007000101000000000000000000010000002f00000000000000'
+)
+
+
+_OCI_DML_STATUS_FRAME = bytes.fromhex(
+    '08060000e85b00000000000200000001000000000000000000000000000000000000'
+    '0004020000001300010000000000000000000002000c000000000000007fb5010001'
+    '000000b1b40000000000000000000000150000010000003601000000000000000000'
+    '000000000020f6310a000000000d0000000000000000000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000000000'
+    '000d000d010001b57f00010000b4b10000'
+)
+
+
+_OCI_DDL_STATUS_FRAME = bytes.fromhex(
+    '08060000eb5b00000000000000000000000000000000000000000000000000000000'
+    '00040100000011000100000000000000000000010000000000000000000000000000'
+    '00000000000000000000000000000000130000010000003601000000000000000000'
+    '000000000020f6310a00000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000000000'
+    '00'
+)
+
+
+# The sqlplus / thick-OCI reply to a PL/SQL block that assigned OUT binds — the
+# ``VARIABLE v NUMBER`` / ``EXEC :v := 42`` flow. The client parked bind buffers
+# and expects their values back: a ttc=0b01 message whose body is a fixed header
+# (bind count at offset 4), one 0x10 define-marker per bind, then an RXD row
+# (``0x07`` + one DALC per OUT value, each followed by a 2-byte per-bind return
+# code) and a fixed status/OER tail. Reduced to structure from live 11g replies
+# (single NUMBER, two NUMBERs, VARCHAR): the server pointer (@18), SCN and an
+# internal sequence counter are instance-specific and zeroed; everything else is
+# computed from the OUT values (#347).
+_OCI_OUTBIND_HEADER = bytes.fromhex(
+    '0b0105cc000000000000010000000000000000000000000000000000e807000000000000'
+    '0000000000000000000000000000'
+)
+
+
+_OCI_OUTBIND_TAIL = bytes.fromhex(
+    '08060000000000000000000200000000000000000000000000000000000000000000000401000000'
+    '00000101000000000000000000020000002f00000000000000000000000000000000000000000000'
+    '00000000000000010000003601000000000000000000000000000020f6310a000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000000000000000000000'
+    '0000000000000000000000'
+)
+
+
+# A live commit reply — a small TTI_STA status (the value is the affected-row
+# count / message length, zero here). sqlplus sends a bare commit before the
+# user's statement; this acknowledges it.
+_OCI_COMMIT_STATUS = bytes.fromhex('09050000001200')
+
+
+# sqlplus waits for this TTI_STA acknowledgement of its logoff before closing;
+# without it the client sees an abrupt EOF and reports ORA-03113 on exit.
+_OCI_LOGOFF_STATUS = bytes.fromhex('09010000000000')
+
+
+# The 136-byte capability/status block trailing the key-value list (an opaque
+# OER-shaped status); challenge and result differ only in one subtype byte.
+_CHALLENGE_TRAILER = bytes.fromhex(
+    '04010000000200010000000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000002000000000000360100000000000000000000'
+    '0000000020f6310a0000000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000000000'
+)
+
+
+_RESULT_TRAILER = bytes.fromhex(
+    '04010000000300010000000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000003000000000000360100000000000000000000'
+    '0000000020f6310a0000000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000000000'
+)
+
+
 def encode_dictionary_dty(Dictionary: dict) -> bytes:
     # TTI_DTY (Data Type Negotiation). Sent during the TTC handshake right
     # after TTI_PRO. Tells the server which native Oracle data types this

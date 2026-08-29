@@ -18,6 +18,21 @@ from dataclasses import dataclass, field
 from seerdb.common import oci
 from seerdb.common.exceptions import DataError, InterfaceError
 from seerdb.common.tns import (
+    _OCI_COMMIT_STATUS,
+    _OCI_DCB_MARKER,
+    _OCI_DDL_STATUS_FRAME,
+    _OCI_DML_STATUS_FRAME,
+    _OCI_EXEC_OER,
+    _OCI_FETCH_CONST,
+    _OCI_FETCH_OER_HEADER,
+    _OCI_LOB_DESCRIBE_STATUS,
+    _OCI_LOB_DESCRIBE_TAIL,
+    _OCI_LOGOFF_STATUS,
+    _OCI_OER_ENVELOPE,
+    _OCI_OUTBIND_HEADER,
+    _OCI_OUTBIND_TAIL,
+    _OCI_STATUS_OER,
+    _OCI_VERSION_TRAILER,
     _bytes_with_length,
     decode_dalc,
     decode_oac_fields,
@@ -533,8 +548,6 @@ def _oci_ub4(n: int) -> bytes:
 # sqlplus prints "Connected to: <banner>". The reply is a TTI_RPA carrying the
 # banner as a DALC (ub2 count + ub1-chunked string) plus a fixed 10-byte packed
 # version/flags trailer (#265).
-# Packed 11.2 version + capability flags, as the real XE 11.2 listener returns.
-_OCI_VERSION_TRAILER = bytes.fromhex('02200b09010000000300')
 
 
 def is_version_call_oci(payload: bytes) -> bool:
@@ -651,7 +664,6 @@ def encode_describe_oci(columns: list[ColumnMeta]) -> bytes:
 _OCI_DCB_TAIL_LEN = 83
 _OCI_DCB_DATE_LEN = 7  # describe-time DALC: length is load-bearing, value is not
 _OCI_DCB_MARKER_OFF = 33
-_OCI_DCB_MARKER = bytes.fromhex('060122')  # a required 3-byte descriptor marker
 # The column count sits one byte past the marker; the client reads it to know how
 # many values to expect in each row, so it is load-bearing for a multi-column
 # result (verified: 1/2/3 across live 1/2/3-column describes).
@@ -661,9 +673,6 @@ _OCI_DCB_NUMCOLS_OFF = 37
 # as a unit — the row-count fields inside are constant for the single-row replies
 # handled so far; generalising it is a follow-up.
 _OCI_EXEC_OER_OFF = 32
-_OCI_EXEC_OER = bytes.fromhex(
-    '000000040100000013000101000000000000000000020000000300000000000000'
-)
 _OCI_ROW_STATUS_LEN = 171
 
 
@@ -749,20 +758,6 @@ def encode_reexec_row_oci(
     return bytes(out)
 
 
-# The 136-byte OCI OER return-status token, reverse-engineered against live 11g
-# (docs/PROTOCOL.md §36). All three of the Mirror's OER status trailers — the
-# error OER, the LONG-row fetch status, and the LOB-row fetch status — are this
-# one envelope differing only in a handful of named fields, so build them rather
-# than storing three near-identical blobs. The bulk (SCN/rowid/instance region,
-# the fixed 0x20f6310a marker) is the same fixed frame; the fields below vary.
-_OCI_OER_ENVELOPE = bytes.fromhex(
-    '04000000000000010000000000000000000002000000030000000000000000000000'
-    '00000000000000000000000000000000000001000000360100000000000000000000'
-    '0000000020f6310a0000000000000000000000000000000000000000000000000000'
-    '00000000000000000000000000000000000000000000000000000000000000000000'
-)
-
-
 def encode_oci_oer(
     status: int,
     *,
@@ -810,11 +805,7 @@ def encode_long_fetch_row_oci(columns: list[ColumnMeta], row: tuple) -> bytes:
 # 24-byte OER header (call status + the 1403 code) and one instance constant,
 # the rest zero, then the message computed.
 _OCI_FETCH_OER_LEN = 136
-_OCI_FETCH_OER_HEADER = bytes.fromhex(
-    '0401000000140001010000007b0500000000020000000300'
-)
 _OCI_FETCH_CONST_OFF = 73
-_OCI_FETCH_CONST = bytes.fromhex('f6310a')
 _OCI_END_OF_FETCH_MSG = b'ORA-01403: no data found\n'
 
 
@@ -863,25 +854,6 @@ def encode_query_response_oci(
     return bytes(out)
 
 
-# The execute reply for a LOB SELECT is a describe with NO row inline — sqlplus
-# sets up its LOB define from it and fetches the locator rows separately. It is
-# NOT the ordinary describe: instead of the 83-byte DCB tail that precedes inline
-# rows it carries a 33-byte describe tail (a describe-timestamp form, no DCB
-# marker), and its own execute status/OER. Both are reduced from a live 11g CLOB
-# describe with the instance-specific bytes (the timestamp, the SCN) zeroed (#405).
-_OCI_LOB_DESCRIBE_TAIL = bytes.fromhex(
-    '0007000000070000000000000000000000e81f0000000000000000000000000000'
-)
-_OCI_LOB_DESCRIBE_STATUS = bytes.fromhex(
-    '08060000000000000000000200000000000000000000000000000000000000000000'
-    '0004010000000f00010000000000000000000002000e000300000000000000000000'
-    '00000000000000000000000000000000110000010000003601000000000000000000'
-    '000000000020f6310a00000000000000000000000000000000000000000000000000'
-    '00000000000000000000000000000000000000000000000000000000000000000000'
-    '00'
-)
-
-
 def encode_lob_describe_oci(columns: list[ColumnMeta]) -> bytes:
     """The execute reply for a LOB (CLOB/BLOB) SELECT (#405): the TTI_DCB block +
     a 33-byte describe tail + the LOB execute status — describe only, no row (the
@@ -893,15 +865,6 @@ def encode_lob_describe_oci(columns: list[ColumnMeta]) -> bytes:
         + _OCI_LOB_DESCRIBE_TAIL
         + _OCI_LOB_DESCRIBE_STATUS
     )
-
-
-# The reply for a statement that returns no rows — a PL/SQL block or DDL. Same
-# shape as the row-status trailer (:func:`_oci_row_status`), but its own sentinel
-# and OER (this one reports zero rows). Structure only; the SCN / counts a live
-# reply carries are zero (#265).
-_OCI_STATUS_OER = bytes.fromhex(
-    '000000040100000007000101000000000000000000010000002f00000000000000'
-)
 
 
 def encode_status_oci() -> bytes:
@@ -986,24 +949,6 @@ def ddl_command_type(sql: str) -> int | None:
     )
 
 
-_OCI_DML_STATUS_FRAME = bytes.fromhex(
-    '08060000e85b00000000000200000001000000000000000000000000000000000000'
-    '0004020000001300010000000000000000000002000c000000000000007fb5010001'
-    '000000b1b40000000000000000000000150000010000003601000000000000000000'
-    '000000000020f6310a000000000d0000000000000000000000000000000000000000'
-    '00000000000000000000000000000000000000000000000000000000000000000000'
-    '000d000d010001b57f00010000b4b10000'
-)
-_OCI_DDL_STATUS_FRAME = bytes.fromhex(
-    '08060000eb5b00000000000000000000000000000000000000000000000000000000'
-    '00040100000011000100000000000000000000010000000000000000000000000000'
-    '00000000000000000000000000000000130000010000003601000000000000000000'
-    '000000000020f6310a00000000000000000000000000000000000000000000000000'
-    '00000000000000000000000000000000000000000000000000000000000000000000'
-    '00'
-)
-
-
 def encode_dml_status_oci(keyword: str, rowcount: int) -> bytes:
     """OCI reply for a DML — success carrying the affected-row count so sqlplus
     prints ``N rows created/updated/deleted``. ``keyword`` (INSERT/UPDATE/DELETE)
@@ -1026,29 +971,9 @@ def encode_ddl_status_oci(command_type: int) -> bytes:
     return bytes(status)
 
 
-# The sqlplus / thick-OCI reply to a PL/SQL block that assigned OUT binds — the
-# ``VARIABLE v NUMBER`` / ``EXEC :v := 42`` flow. The client parked bind buffers
-# and expects their values back: a ttc=0b01 message whose body is a fixed header
-# (bind count at offset 4), one 0x10 define-marker per bind, then an RXD row
-# (``0x07`` + one DALC per OUT value, each followed by a 2-byte per-bind return
-# code) and a fixed status/OER tail. Reduced to structure from live 11g replies
-# (single NUMBER, two NUMBERs, VARCHAR): the server pointer (@18), SCN and an
-# internal sequence counter are instance-specific and zeroed; everything else is
-# computed from the OUT values (#347).
-_OCI_OUTBIND_HEADER = bytes.fromhex(
-    '0b0105cc000000000000010000000000000000000000000000000000e807000000000000'
-    '0000000000000000000000000000'
-)
 _OCI_OUTBIND_BINDCOUNT_OFF = 4
 _OCI_OUTBIND_DEFINE_MARKER = 0x10
 _OCI_OUTBIND_RETCODE = b'\x00\x00'
-_OCI_OUTBIND_TAIL = bytes.fromhex(
-    '08060000000000000000000200000000000000000000000000000000000000000000000401000000'
-    '00000101000000000000000000020000002f00000000000000000000000000000000000000000000'
-    '00000000000000010000003601000000000000000000000000000020f6310a000000000000000000'
-    '00000000000000000000000000000000000000000000000000000000000000000000000000000000'
-    '0000000000000000000000'
-)
 
 
 def encode_out_bind_response_oci(values: list[object]) -> bytes:
@@ -1067,20 +992,9 @@ def encode_out_bind_response_oci(values: list[object]) -> bytes:
     return bytes(header) + define_markers + rxd + _OCI_OUTBIND_TAIL
 
 
-# A live commit reply — a small TTI_STA status (the value is the affected-row
-# count / message length, zero here). sqlplus sends a bare commit before the
-# user's statement; this acknowledges it.
-_OCI_COMMIT_STATUS = bytes.fromhex('09050000001200')
-
-
 def encode_commit_status_oci() -> bytes:
     """OCI reply to a bare commit / rollback — a TTI_STA acknowledgement."""
     return _OCI_COMMIT_STATUS
-
-
-# sqlplus waits for this TTI_STA acknowledgement of its logoff before closing;
-# without it the client sees an abrupt EOF and reports ORA-03113 on exit.
-_OCI_LOGOFF_STATUS = bytes.fromhex('09010000000000')
 
 
 def encode_logoff_status_oci() -> bytes:
