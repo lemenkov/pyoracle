@@ -84,7 +84,6 @@ _SERVER_DTY_TABLE = bytes.fromhex(  # 913-byte type-conversion table
 # plaintext. This same reply doubles as the deadbeef PRO reply. The container
 # version is 0, but each service still echoes the modern ANO_VERSION.
 _DEADBEEF_CONTAINER_VERSION = 0x00000000  # sqlplus/OCI stamp (not ANO_VERSION)
-_DEADBEEF_AUTH_STATUS = 0xFBFF  # auth service status (thin sends 0xFCFF)
 _NULL_ALGO = 0  # null cipher / null checksum selected → plaintext
 
 # --- the deadbeef third-round type reply: a DTY reply (§4.2) ---
@@ -153,7 +152,7 @@ def build_pro_sqlplus_reply() -> bytes:
         ),
         ano.encode_service(
             ano.SERVICE_AUTH,
-            [ano.sp_version(), ano.sp_status(_DEADBEEF_AUTH_STATUS)],
+            [ano.sp_version(), ano.sp_status(ano.AUTH_STATUS_DEADBEEF)],
         ),
         ano.encode_service(
             ano.SERVICE_ENCRYPTION,
