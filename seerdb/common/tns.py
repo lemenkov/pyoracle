@@ -4144,10 +4144,17 @@ _OCI_DDL_FRAME_PREFIX = bytes.fromhex(
 # (single NUMBER, two NUMBERs, VARCHAR): the server pointer (@18), SCN and an
 # internal sequence counter are instance-specific and zeroed; everything else is
 # computed from the OUT values (#347).
-_OCI_OUTBIND_HEADER = bytes.fromhex(
-    '0b0105cc000000000000010000000000000000000000000000000000e807000000000000'
-    '0000000000000000000000000000'
-)
+def _oci_outbind_header(bind_count: int) -> bytes:
+    """The 50-byte OCI OUT-bind reply header (#347): the TTC out-bind opcode
+    (0b 01) and two fixed bytes, the bind count at offset 4, and the fixed 11.2
+    identity bytes at offsets 10 and 28..29 (a row-buffer size). The rest is the
+    instance state (server pointer, SCN, sequence) the Mirror leaves zeroed."""
+    header = bytearray(50)
+    header[0:4] = b'\x0b\x01\x05\xcc'
+    header[4] = bind_count
+    header[10] = 0x01
+    header[28:30] = b'\xe8\x07'
+    return bytes(header)
 
 
 # The outbind (PL/SQL OUT-bind) reply's trailing execute status: the shared
@@ -4172,15 +4179,25 @@ def _oci_outbind_tail() -> bytes:
 _OCI_OUTBIND_TAIL = _oci_outbind_tail()
 
 
-# A live commit reply — a small TTI_STA status (the value is the affected-row
-# count / message length, zero here). sqlplus sends a bare commit before the
-# user's statement; this acknowledges it.
-_OCI_COMMIT_STATUS = bytes.fromhex('09050000001200')
+def _oci_tti_sta(call_status: int, value: int) -> bytes:
+    """A small TTI_STA acknowledgement — a ``TTI_STA`` token, the OER call status
+    (ub4 LE) and a ub2 value (row count / message length), carried from the
+    capture. The commit and logoff acks sqlplus waits for share this shape."""
+    return (
+        bytes([TTI_STA])
+        + call_status.to_bytes(4, 'little')
+        + value.to_bytes(2, 'little')
+    )
 
 
-# sqlplus waits for this TTI_STA acknowledgement of its logoff before closing;
-# without it the client sees an abrupt EOF and reports ORA-03113 on exit.
-_OCI_LOGOFF_STATUS = bytes.fromhex('09010000000000')
+# A live commit reply. sqlplus sends a bare commit before the user's statement;
+# this acknowledges it.
+_OCI_COMMIT_STATUS = _oci_tti_sta(5, 0x12)
+
+
+# sqlplus waits for this ack of its logoff before closing; without it the client
+# sees an abrupt EOF and reports ORA-03113 on exit.
+_OCI_LOGOFF_STATUS = _oci_tti_sta(1, 0)
 
 
 def _oci_auth_trailer(sequence: int) -> bytes:
@@ -4925,9 +4942,6 @@ def encode_ddl_status_oci(command_type: int) -> bytes:
     return _OCI_DDL_FRAME_PREFIX + bytes(oer)
 
 
-_OCI_OUTBIND_BINDCOUNT_OFF = 4
-
-
 _OCI_OUTBIND_DEFINE_MARKER = 0x10
 
 
@@ -4941,13 +4955,12 @@ def encode_out_bind_response_oci(values: list[object]) -> bytes:
     DALC (the same wire form as a fetched column) so the client reads it back into
     its bound buffer. The header/tail are computed structure, not blobs (#347).
     """
-    header = bytearray(_OCI_OUTBIND_HEADER)
-    header[_OCI_OUTBIND_BINDCOUNT_OFF] = len(values)
+    header = _oci_outbind_header(len(values))
     define_markers = bytes([_OCI_OUTBIND_DEFINE_MARKER]) * len(values)
     rxd = bytes([TTI_RXD]) + b''.join(
         encode_value(v, 0) + _OCI_OUTBIND_RETCODE for v in values
     )
-    return bytes(header) + define_markers + rxd + _OCI_OUTBIND_TAIL
+    return header + define_markers + rxd + _OCI_OUTBIND_TAIL
 
 
 def encode_commit_status_oci() -> bytes:
