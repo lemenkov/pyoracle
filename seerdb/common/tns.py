@@ -3973,6 +3973,10 @@ _OCI_EXEC_OER = bytes.fromhex(
 # one envelope differing only in a handful of named fields, so build them rather
 # than storing three near-identical blobs. The bulk (SCN/rowid/instance region,
 # the fixed 0x20f6310a marker) is the same fixed frame; the fields below vary.
+# FIXME: the offset-56 ub2 (0x0136 = 310) looks like the session's negotiated
+# TTC protocol version (the 0x013x family; the Mirror pins 11g at 314) but is
+# emitted as the captured constant, unconfirmed. Offsets 7 and 52 (both 0x01)
+# are unnamed constants carried from the capture. See §36.1.
 _OCI_OER_ENVELOPE = bytes.fromhex(
     '04000000000000010000000000000000000002000000030000000000000000000000'
     '00000000000000000000000000000000000001000000360100000000000000000000'
@@ -4005,6 +4009,9 @@ def encode_oci_oer(
     oer[8] = row_kind
     oer[20] = error_pos
     oer[22] = command_type
+    # FIXME: the offset-49 echo is only reliably `sequence + 2` for the row /
+    # return statuses; the outbind reply carries 0 there instead, so this is not
+    # a settled rule. Semantics of the field are unpinned (see §36.1).
     struct.pack_into('<H', oer, 49, sequence + 2)
     struct.pack_into('<I', oer, 12, error_code)
     return bytes(oer)
@@ -4102,6 +4109,8 @@ def _oci_outbind_tail() -> bytes:
             command_type=oci.OCI_CMD_PLSQL,
         )
     )
+    # FIXME: why this reply zeroes the offset-49 echo while the describe / DDL
+    # statuses carry `sequence + 2` there is unknown (see §36.1).
     oer[49] = 0
     return _OCI_STATUS_FRAME_PREFIX + bytes(oer)
 
@@ -4824,7 +4833,9 @@ def encode_ddl_status_oci(command_type: int) -> bytes:
             oci.OCI_OER_STATUS_SUCCESS, sequence=17, command_type=command_type
         )
     )
-    oer[18] = 1  # DDL sets this field to 1 (query/PL-SQL leave the envelope's 2)
+    # FIXME: DDL sets offset 18 to 1 (query / PL-SQL leave the envelope's 2);
+    # the field's meaning is unknown — carried from the capture.
+    oer[18] = 1
     return _OCI_DDL_FRAME_PREFIX + bytes(oer)
 
 
