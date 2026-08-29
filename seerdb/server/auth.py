@@ -56,6 +56,7 @@ from seerdb.common.tns import (
     _CHALLENGE_TRAILER,
     _DECODE_FIELD_VERSION,
     _RESULT_TRAILER,
+    _SERVER_VERSION_NO,
     decode_dalc,
     decode_kv,
     decode_ub4,
@@ -75,10 +76,6 @@ _BITS_11G = 192
 # A server session key is 40 random bytes + an 8-byte pad2 tail, so the client
 # recognises it and mints a matching 48-byte session key (see crypto.o5logon0).
 _SERVER_SESSION_LEN = 40
-# Packed server version returned in the auth result (AUTH_VERSION_NO), from a
-# real XE 11.2 auth result: 186647040 = 11.2.0.x. On the wire all these values
-# (session key, salt, proof) are uppercase-hex ASCII.
-_SERVER_VERSION_NO = 186647040
 
 
 @dataclass(frozen=True)
@@ -500,16 +497,3 @@ def parse_token_auth(payload: bytes) -> tuple[bytes, bytes | None, bytes | None]
     if token is None:
         raise InterfaceError('token AUTH missing AUTH_TOKEN')
     return token, kvs.get(b'AUTH_HEADER'), kvs.get(b'AUTH_SIGNATURE')
-
-
-def encode_token_result(
-    *, session_id: int = 0, version_no: int = _SERVER_VERSION_NO
-) -> bytes:
-    """The token-auth result RPA — version + session id, and no server proof
-    (token auth has no ConnKey, so there is nothing for the client to validate)."""
-    return (
-        bytes([TTI_RPA])
-        + encode_sb4(2)
-        + encode_kv(b'AUTH_VERSION_NO', str(version_no).encode('ascii'), 1)
-        + encode_kv(b'AUTH_SESSION_ID', str(session_id).encode('ascii'), 1)
-    )
