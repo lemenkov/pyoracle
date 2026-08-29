@@ -170,11 +170,18 @@ def encode_service(ServiceType: int, SubPackets: list[bytes]) -> bytes:
     return _SERVICE_HEADER.pack(ServiceType, len(SubPackets), 0) + Body
 
 
-def encode_ano(Services: list[bytes]) -> bytes:
-    """Wrap already-encoded services (in wire order) in a container header."""
+def encode_ano(Services: list[bytes], ContainerVersion: int = ANO_VERSION) -> bytes:
+    """Wrap already-encoded services (in wire order) in a container header.
+
+    ``ContainerVersion`` is the version stamped in the container header; it
+    defaults to :data:`ANO_VERSION` (what a modern thin client sends). The classic
+    sqlplus / thick-OCI null-negotiation reply stamps ``0x00000000`` here instead
+    (its per-service versions stay :data:`ANO_VERSION`) — see the Mirror's
+    ``build_pro_sqlplus_reply``.
+    """
     Body = b''.join(Services)
     Total = _HEADER_LEN + len(Body)
-    return _HEADER.pack(ANO_MAGIC, Total, ANO_VERSION, len(Services), 0) + Body
+    return _HEADER.pack(ANO_MAGIC, Total, ContainerVersion, len(Services), 0) + Body
 
 
 # --------------------------------------------------------------------------- #

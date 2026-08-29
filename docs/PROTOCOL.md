@@ -428,6 +428,30 @@ OCI. Both replay the captured 11g bytes so the client negotiates field version 6
 The `deadbeef` DTY reply (238 B) carries the same capability block the `TTI_PRO`
 dialect puts in its PRO reply, just packaged into the other message.
 
+**The 127 B `deadbeef` PRO reply is an ANO null-negotiation response** (#564). The
+name is not incidental: `0xDEADBEEF` is the ANO / Native Services container magic
+(§33.2). sqlplus / thick OCI opens its login with an ANO negotiation, and the
+server answers by selecting the *null* algorithm for every service, so no cipher
+or MAC is activated and the session stays plaintext. This is the byte-identical
+twin of the reply the thin ANO path (§33) replays as its null response — it *is*
+that response. The Mirror builds it field-by-field from the ANO codec
+(`build_pro_sqlplus_reply`), no longer a verbatim blob. Its 117 B TTC payload
+decodes (via the project's own `decode_ano`) as a container plus four services:
+
+| Field | Value | Note |
+|-------|-------|------|
+| container magic / length / **version** / count | `DEADBEEF` / 117 / **`0x00000000`** / 4 | the sqlplus/OCI stamp — a modern thin client's container stamps `0x0B200200` here instead |
+| supervisor (svc 4) | version `0x0B200200`, status `31` (OK), service-array `[4, 1]` | announces the supervisor + auth services |
+| auth (svc 1) | version `0x0B200200`, status `0xFBFF` | (a thin client's auth status is `0xFCFF`) |
+| encryption (svc 2) | version `0x0B200200`, selected-algo **`0`** | null cipher — plaintext |
+| data-integrity (svc 3) | version `0x0B200200`, selected-algo **`0`** | null checksum — no MAC |
+
+The container version is `0x00000000` while every *service* still echoes the
+modern `ANO_VERSION` (`0x0B200200`) — the one wrinkle that separates this reply
+from `encode_ano_response` (§33), together with the `0xFBFF` auth status and the
+null algorithm selections. `tests/test_handshake_generation.py` pins the built
+bytes to the live 11g capture.
+
 #### 4.1.2 The deadbeef / OCI auth phase (server-side / the Mirror)
 
 Past the handshake, sqlplus / thick OCI marshals the whole O5LOGON exchange

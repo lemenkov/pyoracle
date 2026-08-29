@@ -13,8 +13,9 @@ packet header is added by ``encode_packet``). Two dialects (§4.1):
 - **TTI_PRO (0x01)** — python-oracledb / seerdb. The same capability block is the
   thin PRO reply *and* the sqlplus/deadbeef DTY reply (byte-identical, so one
   builder serves both). The thin DTY reply is the type-conversion table.
-- **sqlplus `deadbeef`** — the PRO reply and the extra third-round type reply are
-  opaque negotiation blocks kept verbatim.
+- **sqlplus `deadbeef`** — the PRO reply is an ANO null-negotiation response
+  (built field-by-field from the ANO codec, §4.1.1); the extra third-round type
+  reply is an opaque negotiation block kept verbatim.
 
 The values are the server's identity, captured once from a live XE 11.2 server;
 ``tests/test_handshake_generation.py`` pins the builders to those captures
@@ -23,6 +24,7 @@ byte-for-byte so the Mirror stays wire-identical to the real server.
 
 import struct
 
+from seerdb.common import ano
 from seerdb.common.tns_consts import (
     AL32UTF8_CHARSET,
     FIELD_VERSION_11_2,
@@ -74,13 +76,17 @@ _SERVER_DTY_TABLE = bytes.fromhex(  # 913-byte type-conversion table
     '00'
 )
 
-# --- opaque deadbeef-dialect blocks (kept verbatim) ---
-_PRO_SQLPLUS_PAYLOAD = bytes.fromhex(  # 117-byte deadbeef PRO / ANO reply
-    'deadbeef0075000000000004000004000300000000000400050b20020000020006001f000e00'
-    '01deadbeef000300000002000400010001000200000000000400050b20020000020006fbff00'
-    '02000200000000000400050b20020000010002000003000200000000000400050b2002000001'
-    '000200'
-)
+# --- the deadbeef PRO reply: an ANO null-negotiation response (§4.1.1) ---
+# sqlplus / thick OCI leads its login with an ANO negotiation whose container
+# stamps version 0x00000000 (vs a thin client's 0x0B200200); the server answers
+# by selecting the null algorithm for every service, so the session stays
+# plaintext. This same reply doubles as the deadbeef PRO reply. The container
+# version is 0, but each service still echoes the modern ANO_VERSION.
+_DEADBEEF_CONTAINER_VERSION = 0x00000000  # sqlplus/OCI stamp (not ANO_VERSION)
+_DEADBEEF_AUTH_STATUS = 0xFBFF  # auth service status (thin sends 0xFCFF)
+_NULL_ALGO = 0  # null cipher / null checksum selected → plaintext
+
+# --- opaque deadbeef third-round type reply (kept verbatim) ---
 _TYPE_REPLY_SQLPLUS_PAYLOAD = bytes.fromhex(  # 26B third-round type reply
     '02800000003c3c3c800000000000000e'
 )
@@ -117,9 +123,38 @@ def build_dty_type_reply() -> bytes:
 
 
 def build_pro_sqlplus_reply() -> bytes:
-    """The sqlplus/deadbeef PRO reply payload (also the ANO null-negotiation
-    reply). An opaque negotiation block, kept verbatim."""
-    return _PRO_SQLPLUS_PAYLOAD
+    """The sqlplus/deadbeef PRO reply payload — an ANO null-negotiation response
+    (§4.1.1), built field-by-field from the ANO codec (#564).
+
+    Four services (supervisor, auth, encryption, data-integrity); encryption and
+    data-integrity both select the null algorithm, so no cipher/MAC is activated
+    and the session stays plaintext. The container stamps version 0x00000000 (the
+    sqlplus/OCI form); each service echoes ANO_VERSION. This is the same reply the
+    thin ANO path replays as its null-negotiation response — it *is* that response.
+    """
+    services = [
+        ano.encode_service(
+            ano.SERVICE_SUPERVISOR,
+            [
+                ano.sp_version(),  # ANO_VERSION
+                ano.sp_status(ano.SUPERVISOR_STATUS_OK),  # 31
+                ano.sp_ub2_array([ano.SERVICE_SUPERVISOR, ano.SERVICE_AUTH]),  # [4,1]
+            ],
+        ),
+        ano.encode_service(
+            ano.SERVICE_AUTH,
+            [ano.sp_version(), ano.sp_status(_DEADBEEF_AUTH_STATUS)],
+        ),
+        ano.encode_service(
+            ano.SERVICE_ENCRYPTION,
+            [ano.sp_version(), ano.sp_ub1(_NULL_ALGO)],
+        ),
+        ano.encode_service(
+            ano.SERVICE_DATA_INTEGRITY,
+            [ano.sp_version(), ano.sp_ub1(_NULL_ALGO)],
+        ),
+    ]
+    return ano.encode_ano(services, ContainerVersion=_DEADBEEF_CONTAINER_VERSION)
 
 
 def build_type_reply_sqlplus() -> bytes:
