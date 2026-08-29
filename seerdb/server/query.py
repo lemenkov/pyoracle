@@ -944,41 +944,37 @@ def encode_status_oci() -> bytes:
 _OCI_DML_ROWCOUNT_OFF = 43
 _OCI_CMD_TYPE_OFF = 57
 
-# V$SQL COMMAND_TYPE values sqlplus maps to the completion message. Confirmed
-# live: sqlplus renders the message purely from this field (docs/PROTOCOL.md §36).
-_OCI_CMD_INSERT = 2
-_OCI_CMD_UPDATE = 6
-_OCI_CMD_DELETE = 7
-_OCI_CMD_CREATE_TABLE = 1
-_OCI_CMD_DROP_TABLE = 12
+# The Mirror's SQL-verb → V$SQL command-type mapping — response-generation policy
+# over the shared oci.OCI_CMD_* vocabulary. sqlplus renders the completion message
+# purely from the command type (docs/PROTOCOL.md §36).
 _OCI_DML_CMD = {
-    'INSERT': _OCI_CMD_INSERT,
-    'UPDATE': _OCI_CMD_UPDATE,
-    'DELETE': _OCI_CMD_DELETE,
+    'INSERT': oci.OCI_CMD_INSERT,
+    'UPDATE': oci.OCI_CMD_UPDATE,
+    'DELETE': oci.OCI_CMD_DELETE,
 }
 
 # DDL / no-row statements, keyed by (verb, object). sqlplus prints e.g. "Index
 # created.", "Table altered.", "View dropped." from the command type. Verbs with
 # no object (GRANT/REVOKE) map on the verb alone. Verified live against sqlplus.
 _OCI_DDL_COMMAND_TYPE = {
-    ('CREATE', 'TABLE'): 1,
-    ('CREATE', 'INDEX'): 9,
-    ('CREATE', 'SEQUENCE'): 13,
-    ('CREATE', 'SYNONYM'): 19,
-    ('CREATE', 'VIEW'): 21,
-    ('ALTER', 'INDEX'): 11,
-    ('ALTER', 'SEQUENCE'): 14,
-    ('ALTER', 'TABLE'): 15,
-    ('DROP', 'INDEX'): 10,
-    ('DROP', 'TABLE'): 12,
-    ('DROP', 'SEQUENCE'): 16,
-    ('DROP', 'SYNONYM'): 20,
-    ('DROP', 'VIEW'): 22,
-    ('LOCK', 'TABLE'): 26,
-    ('TRUNCATE', 'TABLE'): 85,
+    ('CREATE', 'TABLE'): oci.OCI_CMD_CREATE_TABLE,
+    ('CREATE', 'INDEX'): oci.OCI_CMD_CREATE_INDEX,
+    ('CREATE', 'SEQUENCE'): oci.OCI_CMD_CREATE_SEQUENCE,
+    ('CREATE', 'SYNONYM'): oci.OCI_CMD_CREATE_SYNONYM,
+    ('CREATE', 'VIEW'): oci.OCI_CMD_CREATE_VIEW,
+    ('ALTER', 'INDEX'): oci.OCI_CMD_ALTER_INDEX,
+    ('ALTER', 'SEQUENCE'): oci.OCI_CMD_ALTER_SEQUENCE,
+    ('ALTER', 'TABLE'): oci.OCI_CMD_ALTER_TABLE,
+    ('DROP', 'INDEX'): oci.OCI_CMD_DROP_INDEX,
+    ('DROP', 'TABLE'): oci.OCI_CMD_DROP_TABLE,
+    ('DROP', 'SEQUENCE'): oci.OCI_CMD_DROP_SEQUENCE,
+    ('DROP', 'SYNONYM'): oci.OCI_CMD_DROP_SYNONYM,
+    ('DROP', 'VIEW'): oci.OCI_CMD_DROP_VIEW,
+    ('LOCK', 'TABLE'): oci.OCI_CMD_LOCK_TABLE,
+    ('TRUNCATE', 'TABLE'): oci.OCI_CMD_TRUNCATE_TABLE,
 }
 # Object-less verbs, and the object each bare verb falls back to.
-_OCI_DDL_VERB_COMMAND_TYPE = {'GRANT': 17, 'REVOKE': 18}
+_OCI_DDL_VERB_COMMAND_TYPE = {'GRANT': oci.OCI_CMD_GRANT, 'REVOKE': oci.OCI_CMD_REVOKE}
 _OCI_DDL_VERB_DEFAULT_OBJECT = {
     'CREATE': 'TABLE',
     'ALTER': 'TABLE',
@@ -1033,7 +1029,7 @@ def encode_dml_status_oci(keyword: str, rowcount: int) -> bytes:
     status[_OCI_DML_ROWCOUNT_OFF : _OCI_DML_ROWCOUNT_OFF + 4] = rowcount.to_bytes(
         4, 'little'
     )
-    status[_OCI_CMD_TYPE_OFF] = _OCI_DML_CMD.get(keyword, _OCI_CMD_INSERT)
+    status[_OCI_CMD_TYPE_OFF] = _OCI_DML_CMD.get(keyword, oci.OCI_CMD_INSERT)
     return bytes(status)
 
 
