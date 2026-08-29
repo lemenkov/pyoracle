@@ -73,12 +73,26 @@ VFR_LEGACY = 2361  # 0x0939 — 10g / legacy DES  (confirmed: live 10.2.0.5, emp
 VFR_11G_SHA1 = 6949  # 0x1B25 — 11g SHA-1  (confirmed: real 11g capture + live XE 11.2)
 VFR_12C_SHA2 = 18453  # 0x4815 — 12c SHA-2  (confirmed: live 23ai/26ai)
 
+# O5LOGON runs every AES-CBC step with an all-zero 16-byte IV.
+O5LOGON_IV = bytes(16)
+# The plaintext marker the server encrypts under the ConnKey to prove it holds the
+# session key; the client's validate() looks for this substring after decrypting
+# AUTH_SVR_RESPONSE. Both halves of the mutual auth share it.
+SERVER_TO_CLIENT = b'SERVER_TO_CLIENT'
+
 
 def _clamp_count(value: int | None, minimum: int) -> int:
     # Use the server's count when it is a sane value; otherwise the default.
     if value is None or value < minimum or value > _PBKDF2_COUNT_MAX:
         return minimum
     return value
+
+
+def key_sess_11g(Password: bytes, Salt: bytes) -> bytes:
+    # The 11g SHA-1 (192-bit) session-key material: SHA1(password + salt) (20
+    # bytes) + 4 zero bytes = a 24-byte AES-192 key. Shared by o5logon's SHA-1
+    # branches and the Mirror's challenge builder (seerdb/server/auth.py).
+    return sha1(Password + Salt).digest() + bytes(4)
 
 
 def o5logon(
@@ -105,7 +119,7 @@ def o5logon(
     # derivation (192-bit). Only this pre-SHA-2-on-modern case is special-cased;
     # every other path falls through unchanged.
     if VerifierType == VFR_11G_SHA1 and Salt is not None and DerivedSalt is not None:
-        KeySess = sha1(Password + Salt).digest() + bytes(4)
+        KeySess = key_sess_11g(Password, Salt)
         return o5logon0(Sess, KeySess, DerivedSalt, None, Password, 192, SderCount)
     # 10g (#47): an AES session key but NO verifier salt — the account has only
     # the legacy DES verifier. The AES key is that 8-byte verifier zero-padded to
@@ -128,7 +142,7 @@ def o5logon(
         return o5logon0(Sess, KeySess, DerivedSalt, None, Password, 128, SderCount)
     # 192 bits
     elif (Salt is not None) and (DerivedSalt is None):
-        KeySess = sha1(Password + Salt).digest() + bytes(4)
+        KeySess = key_sess_11g(Password, Salt)
         return o5logon0(Sess, KeySess, DerivedSalt, None, Password, 192, SderCount)
     # 256 bits
     elif (Salt is not None) and (DerivedSalt is not None):
@@ -154,7 +168,7 @@ def o5logon0(
     Bits: int,
     SderCount: int = _SDER_COUNT_DEFAULT,
 ) -> tuple[bytes, bytes, bytes, int, bytes]:
-    IVec = bytes(16)
+    IVec = O5LOGON_IV
 
     cipher = AES.new(KeySess, AES.MODE_CBC, IVec)
     SrvSess = cipher.decrypt(Sess)
@@ -190,7 +204,7 @@ def encrypt_password(ConnKey: bytes, Password: bytes) -> bytes:
     # changepassword flow can reuse it for AUTH_NEWPASSWORD with the session key
     # established at login (#21). pad1 prepends a fixed 16-byte block the server
     # discards, so a fresh random prefix (as oracledb sends) is not required.
-    cipher = AES.new(ConnKey, AES.MODE_CBC, bytes(16))
+    cipher = AES.new(ConnKey, AES.MODE_CBC, O5LOGON_IV)
     return cipher.encrypt(pad1(Password))
 
 
@@ -199,7 +213,7 @@ def decrypt_password(ConnKey: bytes, Cipher: bytes) -> bytes:
     # drop the leading 16-byte block pad1 prepends, then strip the PKCS7 tail
     # pad2 appended. The Mirror uses this to recover the changepassword old / new
     # passwords a client encrypted under the login ConnKey (#21/#486).
-    plain = AES.new(ConnKey, AES.MODE_CBC, bytes(16)).decrypt(Cipher)
+    plain = AES.new(ConnKey, AES.MODE_CBC, O5LOGON_IV).decrypt(Cipher)
     body = plain[16:]
     pad_len = body[-1] if body else 0
     if 0 < pad_len <= len(body):
@@ -208,12 +222,18 @@ def decrypt_password(ConnKey: bytes, Cipher: bytes) -> bytes:
 
 
 def validate(Resp: bytes, Key: bytes) -> bool:
-    IVec = bytes(16)
-    cipher = AES.new(Key, AES.MODE_CBC, IVec)
-    Haystack = cipher.decrypt(Resp)
+    # The client half of the mutual auth: decrypt AUTH_SVR_RESPONSE under the
+    # ConnKey and confirm the server's proof marker is present.
+    Haystack = AES.new(Key, AES.MODE_CBC, O5LOGON_IV).decrypt(Resp)
+    return SERVER_TO_CLIENT in Haystack
 
-    Needle = b'SERVER_TO_CLIENT'
-    return Needle in Haystack
+
+def server_proof(SessionKey: bytes) -> bytes:
+    """The AUTH_SVR_RESPONSE value: SERVER_TO_CLIENT encrypted under the ConnKey.
+
+    The server half of the mutual auth — the token the client's :func:`validate`
+    decrypts and checks. Used by the Mirror (seerdb/server/auth.py)."""
+    return AES.new(SessionKey, AES.MODE_CBC, O5LOGON_IV).encrypt(SERVER_TO_CLIENT)
 
 
 ##

@@ -14,7 +14,7 @@ from binascii import unhexlify
 
 import pytest
 
-from seerdb.common.crypto import o5logon, validate
+from seerdb.common.crypto import o5logon, server_proof, validate
 from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import (
     decode_token_rpa,
@@ -29,7 +29,6 @@ from seerdb.server.auth import (
     make_challenge,
     parse_auth_response,
     parse_osesskey,
-    server_proof,
     verify_password,
 )
 
