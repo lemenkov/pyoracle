@@ -14,6 +14,7 @@ import re
 import struct
 from dataclasses import dataclass
 
+from seerdb.common import ano
 from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import encode_packet
 from seerdb.common.tns_consts import TNS_ACCEPT, TNS_DATA
@@ -59,10 +60,9 @@ _ACCEPT_FLAGS = 0x0020
 _ACCEPT_RESERVED = 0x4141
 _DEFAULT_TDU = 0xFFFF
 
-# The classic sqlplus / thick-OCI PRO request leads its TTC payload with this
-# magic instead of TTI_PRO (0x01); the Mirror must answer that request in the
-# matching `deadbeef` dialect (#265).
-_SQLPLUS_PRO_MAGIC = bytes.fromhex('deadbeef')
+# The classic sqlplus / thick-OCI PRO request leads its TTC payload with the ANO
+# container magic (0xDEADBEEF) instead of TTI_PRO (0x01); the Mirror must answer
+# that request in the matching `deadbeef` dialect (#265).
 
 
 def pro_is_sqlplus(pro_body: bytes) -> bool:
@@ -76,7 +76,7 @@ def pro_is_sqlplus(pro_body: bytes) -> bool:
     for a DATA packet), so the magic sits at the very start — verified against a
     live sqlplus 11.2, which is exactly where a wrong offset misfires (#265).
     """
-    return pro_body[:4] == _SQLPLUS_PRO_MAGIC
+    return pro_body[:4] == ano.ANO_MAGIC_BYTES
 
 
 _SERVICE_RE = re.compile(rb'\(SERVICE_NAME\s*=\s*([^)\s]+)', re.IGNORECASE)
@@ -173,14 +173,14 @@ def encode_accept(request: ConnectRequest, *, sdu: int = DEFAULT_SDU) -> bytes:
 # ANO but stamps version 0x00000000, and its whole login is handled by the
 # `deadbeef`-dialect path (#265) — so the modern version is what tells the two
 # apart here. (#437)
-_ANO_MAGIC = b'\xde\xad\xbe\xef'
-_ANO_MODERN_VERSION = bytes.fromhex('0b200200')
 
 
 def is_ano_negotiation(pro_body: bytes) -> bool:
     """Whether a post-ACCEPT packet is a modern thin client's ANO negotiation
     (vs a TTI_PRO or the sqlplus/OCI ANO, both handled by other paths)."""
-    return pro_body[:4] == _ANO_MAGIC and pro_body[6:10] == _ANO_MODERN_VERSION
+    return (
+        pro_body[:4] == ano.ANO_MAGIC_BYTES and pro_body[6:10] == ano.ANO_VERSION_BYTES
+    )
 
 
 def encode_ano_null_reply(*, sdu: int = DEFAULT_SDU) -> bytes:

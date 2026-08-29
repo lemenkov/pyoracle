@@ -45,6 +45,14 @@ ANO_MAGIC = 0xDEADBEEF
 # a live 26ai server requiring AES256 (#437).
 ANO_VERSION = 0x0B200200
 
+# The big-endian wire forms of the two values above. The magic and the modern
+# version both appear as raw byte prefixes on the wire (a negotiation container
+# leads with the magic; a modern thin client's container carries the version at
+# body offset 6), so a client or server that only needs to *recognise* them wants
+# the bytes, not the ints.
+ANO_MAGIC_BYTES = ANO_MAGIC.to_bytes(4, 'big')  # b'\xde\xad\xbe\xef'
+ANO_VERSION_BYTES = ANO_VERSION.to_bytes(4, 'big')  # b'\x0b\x20\x02\x00'
+
 # Service types.
 SERVICE_AUTH = 1
 SERVICE_ENCRYPTION = 2
