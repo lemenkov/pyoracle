@@ -13,13 +13,15 @@ a time (rowcount, error, command type) to locate each field.
 
 import unittest
 
+from seerdb.common.oci import (
+    OCI_OER_ROW_KIND_LOB,
+    OCI_OER_ROW_KIND_LONG,
+    OCI_OER_STATUS_ERROR,
+    OCI_OER_STATUS_SUCCESS,
+)
 from seerdb.server.query import (
     _OCI_CMD_TYPE_OFF,
     _OCI_DML_ROWCOUNT_OFF,
-    _OCI_OER_ROW_KIND_LOB,
-    _OCI_OER_ROW_KIND_LONG,
-    _OCI_OER_STATUS_ERROR,
-    _OCI_OER_STATUS_SUCCESS,
     encode_ddl_status_oci,
     encode_dml_status_oci,
     encode_error_oci,
@@ -51,7 +53,7 @@ class TestOciOerGeneration(unittest.TestCase):
     def test_long_fetch_status(self):
         self.assertEqual(
             encode_oci_oer(
-                _OCI_OER_STATUS_SUCCESS, sequence=0x11, row_kind=_OCI_OER_ROW_KIND_LONG
+                OCI_OER_STATUS_SUCCESS, sequence=0x11, row_kind=OCI_OER_ROW_KIND_LONG
             ),
             LONG_FETCH_STATUS,
         )
@@ -59,7 +61,7 @@ class TestOciOerGeneration(unittest.TestCase):
     def test_lob_fetch_status(self):
         self.assertEqual(
             encode_oci_oer(
-                _OCI_OER_STATUS_SUCCESS, sequence=0x10, row_kind=_OCI_OER_ROW_KIND_LOB
+                OCI_OER_STATUS_SUCCESS, sequence=0x10, row_kind=OCI_OER_ROW_KIND_LOB
             ),
             LOB_FETCH_STATUS,
         )
@@ -74,9 +76,9 @@ class TestOciOerGeneration(unittest.TestCase):
 
     def test_error_oer_status_and_code(self):
         oer = encode_oci_oer(
-            _OCI_OER_STATUS_ERROR, sequence=0x13, error_pos=0x0E, error_code=1017
+            OCI_OER_STATUS_ERROR, sequence=0x13, error_pos=0x0E, error_code=1017
         )
-        self.assertEqual(oer[1], _OCI_OER_STATUS_ERROR)
+        self.assertEqual(oer[1], OCI_OER_STATUS_ERROR)
         self.assertEqual(int.from_bytes(oer[12:16], 'little'), 1017)
         self.assertEqual(len(oer), 136)
 
@@ -88,7 +90,7 @@ class TestOciOerGeneration(unittest.TestCase):
 
     def test_sequence_echo_is_plus_two(self):
         # offset 49 echoes the sequence field + 2 (a derived internal field).
-        oer = encode_oci_oer(_OCI_OER_STATUS_SUCCESS, sequence=0x20)
+        oer = encode_oci_oer(OCI_OER_STATUS_SUCCESS, sequence=0x20)
         self.assertEqual(oer[5], 0x20)
         self.assertEqual(oer[49], 0x22)
 

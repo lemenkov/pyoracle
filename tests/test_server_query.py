@@ -709,9 +709,10 @@ def test_encode_describe_oci_long_column_is_streamed() -> None:
 def test_is_reexecute_oci_detects_the_sql_less_reexecute() -> None:
     # A fresh OCI execute carries the SQL pointer indicator at offset 11; a
     # re-execute (the LONG fetch step) omits it (#407).
-    from seerdb.server.query import _OCI_ALL8_IND, is_reexecute_oci
+    from seerdb.common.oci import OCI_INDICATOR
+    from seerdb.server.query import is_reexecute_oci
 
-    fresh = bytes([0x03, 0x5E, 0x01]) + b'\x00' * 8 + _OCI_ALL8_IND + b'\x00' * 240
+    fresh = bytes([0x03, 0x5E, 0x01]) + b'\x00' * 8 + OCI_INDICATOR + b'\x00' * 240
     reexec = bytes([0x03, 0x5E, 0x01]) + b'\x00' * 8 + b'\x00' * 8 + b'\x00' * 240
     assert is_reexecute_oci(reexec) is True
     assert is_reexecute_oci(fresh) is False
