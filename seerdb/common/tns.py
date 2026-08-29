@@ -7207,13 +7207,30 @@ def encode_dictionary_sess(Dictionary: dict) -> bytes:
 # (verified — see tests/test_tns_encode.py). The terminal/machine/osuser/program
 # strings are session metadata the server does not authenticate on, so we send
 # the same values JDBC does; only the username and (phase two) the password vary.
-_O3_ENV = b'unknown' + b'o9i' + b'root' + b'JDBC Thin Client'
-# Fixed header skeleton between the length fields and the string blob, captured
-# from JDBC (it bakes in the env-string lengths above).
-_O3_MID1 = bytes.fromhex(
-    '00000000000001010701010301010402100000000101100000000001011001'
+# The session-metadata strings JDBC sends: terminal / machine / osuser / program.
+_O3_TERMINAL, _O3_MACHINE, _O3_OSUSER, _O3_PROGRAM = (
+    b'unknown',
+    b'o9i',
+    b'root',
+    b'JDBC Thin Client',
 )
-_O3_MID2 = bytes.fromhex('0000000001010701010301010402100000000101100000000000011000')
+_O3_ENV = _O3_TERMINAL + _O3_MACHINE + _O3_OSUSER + _O3_PROGRAM
+
+
+# The header skeleton between the length fields and the string blob (captured from
+# JDBC) bakes in those four string lengths, so generate it from them rather than
+# from a blob — a `01 01 <len>` attribute for terminal/machine/osuser, `02 <len>`
+# for program, then the program length once more, framed by phase-specific
+# padding (the two encoders below differ only in that framing).
+def _o3_mid(head_pad: int, tail: bytes) -> bytes:
+    T, M, U = len(_O3_TERMINAL), len(_O3_MACHINE), len(_O3_OSUSER)
+    P = len(_O3_PROGRAM)
+    attrs = bytes([1, 1, T, 1, 1, M, 1, 1, U, 2, P, 0, 0, 0, 1, 1, P])
+    return bytes(head_pad) + attrs + tail
+
+
+_O3_MID1 = _o3_mid(6, bytes([0, 0, 0, 0, 1, 1, len(_O3_PROGRAM), 1]))  # TTI_3LOGA
+_O3_MID2 = _o3_mid(4, bytes([0, 0, 0, 0, 0, 1, len(_O3_PROGRAM), 0]))  # TTI_3LOGON
 
 
 def encode_o3logon_phase1(Seq: int, User: bytes) -> bytes:
