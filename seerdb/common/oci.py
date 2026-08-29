@@ -53,12 +53,11 @@ OCI_OER_ROW_KIND_LONG = 0x02
 # Mirror's SQL-verb → code mapping (which of these a given statement produces) is
 # response-generation policy and lives with the rest of the codec in common/tns.py. All confirmed
 # live against sqlplus 11.2.
-OCI_CMD_SELECT = 3
 OCI_CMD_CREATE_TABLE = 1
 OCI_CMD_INSERT = 2
+OCI_CMD_SELECT = 3
 OCI_CMD_UPDATE = 6
 OCI_CMD_DELETE = 7
-OCI_CMD_PLSQL = 47  # anonymous PL/SQL block (EXEC / OUT-bind reply)
 OCI_CMD_CREATE_INDEX = 9
 OCI_CMD_DROP_INDEX = 10
 OCI_CMD_ALTER_INDEX = 11
@@ -74,4 +73,5 @@ OCI_CMD_DROP_SYNONYM = 20
 OCI_CMD_CREATE_VIEW = 21
 OCI_CMD_DROP_VIEW = 22
 OCI_CMD_LOCK_TABLE = 26
+OCI_CMD_PLSQL = 47  # anonymous PL/SQL block (EXEC / OUT-bind reply)
 OCI_CMD_TRUNCATE_TABLE = 85
