@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from seerdb.common import oci
 from seerdb.common.exceptions import DataError, InterfaceError
 from seerdb.common.tns import (
+    _END_OF_FETCH,
     _OCI_COMMIT_STATUS,
     _OCI_DCB_MARKER,
     _OCI_DDL_STATUS_FRAME,
@@ -1455,17 +1456,6 @@ def encode_rows(
             encode_value(v, col.data_type) for v, col in zip(row, columns)
         )
     return header + body
-
-
-# The end-of-fetch OER (ORA-01403 "no data found"), captured verbatim from a real
-# 11g response. It terminates a fetch that has returned all of its rows; the
-# client reads the 1403 status as "cursor drained" rather than an error.
-_END_OF_FETCH = (
-    bytes.fromhex(
-        '0401010104010102057b00000101010e03000000000000000000000000070001010000000019'
-    )
-    + b'ORA-01403: no data found\n'
-)
 
 
 def _encode_batch_ub4_array(values: list[int]) -> bytes:
