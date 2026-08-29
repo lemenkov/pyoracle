@@ -2288,6 +2288,38 @@ of the wrong shape.
   Instant Client), and the ack already keeps the wire in sync. `READ` (and any
   unrecognised op) still routes to the #413 read path, unchanged.
 
+### 14.6 Persistent-LOB locator field map (Mirror, deadbeef dialect)
+
+The Mirror hands sqlplus a **persistent-LOB locator** in the row value
+(`encode_lob_locator_oci`) and echoes it in the READ reply. It is a 105-byte
+structure; both the row value and the read-tail embed the *same* locator, so
+`_oci_lob_locator(is_clob)` builds it once. Offsets are within the locator:
+
+| off | field | CLOB / BLOB | kind |
+|---|---|---|---|
+| `0..2` | length `0x68 0x00` + version `0x01` | same | structural |
+| `3` | **charset form** | `02` (char) / `01` (binary) | generated |
+| `4..5` | **flags** `0x0c __` — bit `0x80` = variable-width charset | `0c 88` / `0c 08` | generated |
+| `8` | **LOB type** | `02` / `01` | generated |
+| `16` | LID marker `0x56` | same | structural |
+| `17..26`, `36..38`, `80..82`, `102..104` | **physical LID** — object id + three segment DBAs (`40 b5 __`) | capture-specific | carried |
+| `31..32` | **charset id** (ub2 BE) | `0369` (873 = AL32UTF8) / `0000` | carried (in body) |
+| `52..54` | **SCN** | capture-specific | carried |
+| `91..94` | content byte size (ub4 BE) | patched per value | runtime |
+
+The 9-byte header (`0..8`) is generated from `is_clob`; the body (`9..104`) —
+charset id + physical LID — is carried per kind in `_OCI_LOB_LOCATOR_BODY`. The
+read-tail is `08 00` + this locator + the ub4-LE amount read (2000 chars for the
+CLOB capture, 4000 bytes for the BLOB) + the LOB-row OER, which is now generated
+by `encode_oci_oer(SUCCESS, sequence=17, row_kind=LOB, command_type=0)` (offset
+18 zeroed) rather than embedded verbatim.
+
+**The physical LID is opaque to the client** — go-ora and other drivers echo the
+locator without interpreting it (only reading flag bits `[6]&0x80` /
+`[7]&0x40`). So the Mirror reuses the captured LOB's real object id / DBAs / SCN.
+A `FIXME` marks these: a Mirror-minted synthetic LID would remove the captured
+bytes, but needs live 11g validation that sqlplus round-trips it — deferred.
+
 ## 15. TNS Marker Protocol
 
 TNS_MARKER packets serve as break/attention signals. The marker body is 3 bytes:
