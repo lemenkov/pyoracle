@@ -41,7 +41,7 @@ from secrets import token_bytes
 from Crypto.Cipher import AES
 
 from seerdb.common import oci
-from seerdb.common.crypto import cat_key, conn_key, pad2
+from seerdb.common.crypto import VFR_11G_SHA1, cat_key, conn_key, pad2
 from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import (
     _DECODE_FIELD_VERSION,
@@ -205,8 +205,8 @@ def encode_challenge(challenge: Challenge) -> bytes:
 # rather than replayed verbatim; the byte-for-byte match to the original captures
 # is pinned by tests/test_oci_auth_generation.py (#265).
 
-# The 11g SHA-1 password verifier type, carried as AUTH_VFR_DATA's trailing flag.
-_VERIFIER_TYPE_11G = 0x1B25
+# The 11g SHA-1 password verifier type (crypto.VFR_11G_SHA1) is carried as
+# AUTH_VFR_DATA's trailing flag.
 
 # The Mirror's fixed 11g identity, from the live XE 11.2 capture. The
 # session-identity fields (AUTH_SESSION_ID / _SERIAL_NUM / _SERVER_PID) are kept
@@ -313,7 +313,7 @@ def encode_challenge_oci(challenge: Challenge) -> bytes:
         )
     pairs = [
         (b'AUTH_SESSKEY', sesskey, 0),
-        (b'AUTH_VFR_DATA', salt, _VERIFIER_TYPE_11G),
+        (b'AUTH_VFR_DATA', salt, VFR_11G_SHA1),
         (b'AUTH_GLOBALLY_UNIQUE_DBID\x00', _AUTH_GLOBALLY_UNIQUE_DBID, 0),
     ]
     return _oci_auth_packet(pairs, _CHALLENGE_TRAILER)

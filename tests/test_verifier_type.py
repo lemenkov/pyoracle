@@ -19,7 +19,7 @@ from hashlib import sha1
 
 from Crypto.Cipher import AES
 
-from seerdb.common.crypto import _VFR_11G_SHA1, cat_key, conn_key, o5logon
+from seerdb.common.crypto import VFR_11G_SHA1, cat_key, conn_key, o5logon
 from seerdb.common.tns import decode_token_rpa, encode_kv, encode_sb4
 
 
@@ -27,10 +27,10 @@ def test_decode_surfaces_the_verifier_type_flag() -> None:
     data = (
         encode_sb4(2)
         + encode_kv(b'AUTH_SESSKEY', b'AABBCC', 1)
-        + encode_kv(b'AUTH_VFR_DATA', b'DDEEFF', _VFR_11G_SHA1)
+        + encode_kv(b'AUTH_VFR_DATA', b'DDEEFF', VFR_11G_SHA1)
     )
     _kind, _sess, _salt, _derived, _vgen, _sder, vfr = decode_token_rpa(data, ())
-    assert vfr == _VFR_11G_SHA1
+    assert vfr == VFR_11G_SHA1
 
 
 def test_192_with_derived_salt_is_additive() -> None:
@@ -51,7 +51,7 @@ def test_o5logon_picks_192_for_sha1_verifier_on_a_modern_server() -> None:
     sess = AES.new(key_sess, AES.MODE_CBC, bytes(16)).encrypt(server_session)
 
     *_, conn_192 = o5logon(
-        sess, salt, derived, b'PYO', password, None, None, _VFR_11G_SHA1
+        sess, salt, derived, b'PYO', password, None, None, VFR_11G_SHA1
     )
     assert len(conn_192) == 24
 
