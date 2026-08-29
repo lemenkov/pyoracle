@@ -676,7 +676,7 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
     # (sb1), and an extra ub4 `oaccolid` follows max_size. 11g keeps an
     # sb4-style variable scale (so NUMBER's -127 default arrives as 0x81 0x7f)
     # and has no oaccolid. precision is sb1 in both.
-    Is12c = _DECODE_FIELD_VERSION.get() >= 8  # FIELD_VERSION_12_2
+    Is12c = _DECODE_FIELD_VERSION.get() >= FIELD_VERSION_12_2
     DataType = Rest[0]
     Precision = Rest[2]  # sb1
     Rest = Rest[3:]
@@ -716,7 +716,7 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
         # server across 1/2/6-column, mixed-type and 0-row describes.
         (_, Rest) = decode_ub4(Rest)  # uds flags
     DomainSchema = DomainName = b''
-    if _DECODE_FIELD_VERSION.get() >= 17:  # FIELD_VERSION_23_1
+    if _DECODE_FIELD_VERSION.get() >= FIELD_VERSION_23_1:
         # 23c (field version 17) appends the column's SQL-domain schema and
         # name, each a ub4-counted DALC string (the same codec as the column
         # name above) — empty (a single 0x00) for a column with no domain.
@@ -1985,10 +1985,10 @@ def decode_token_oer(Data: bytes, Acc: tuple) -> tuple:
     # 20.1+ adds a ub4 sql type + ub4 server checksum (oracledb
     # _process_error_info). Skip them so the message DALC stays aligned.
     FieldVersion = _DECODE_FIELD_VERSION.get()
-    if FieldVersion >= 7:  # FIELD_VERSION_12_1
+    if FieldVersion >= FIELD_VERSION_12_1:
         (_, Rest) = decode_ub4(Rest)  # extended error number
         (_, Rest) = decode_ub4(Rest)  # extended rowcount (ub8)
-        if FieldVersion >= 14:  # FIELD_VERSION_20_1
+        if FieldVersion >= FIELD_VERSION_20_1:
             (_, Rest) = decode_ub4(Rest)  # sql type
             (_, Rest) = decode_ub4(Rest)  # server checksum
     Message = None
@@ -2491,7 +2491,7 @@ def _read_long_column(Rest: bytes) -> tuple[bytes | None, bytes]:
     elif Marker == 0xFE:
         Rest = Rest[1:]
         Chunks = b''
-        if _DECODE_FIELD_VERSION.get() >= 8:  # FIELD_VERSION_12_2
+        if _DECODE_FIELD_VERSION.get() >= FIELD_VERSION_12_2:
             # 12c+ prefixes each chunk with a ub4 length (zero-length terminator)
             # rather than 11g's single length byte.
             while Rest:
@@ -7489,7 +7489,7 @@ def decode_chr(Bytes: bytes) -> tuple[bytes, bytes]:
         # ends with a zero-length chunk (same framing as _skip_chunked_bytes);
         # 11g uses a single length byte per chunk. The decode field version is
         # set by decode_packet for the current response.
-        if _DECODE_FIELD_VERSION.get() >= 8:  # FIELD_VERSION_12_2
+        if _DECODE_FIELD_VERSION.get() >= FIELD_VERSION_12_2:
             Rest = Bytes[1:]
             Out = b''
             while True:
@@ -7514,7 +7514,7 @@ def decode_chr(Bytes: bytes) -> tuple[bytes, bytes]:
 
 def encode_chr(String: str | bytes) -> bytes:
     Bytes = String.encode('utf-8') if isinstance(String, str) else String
-    if _ENCODE_FIELD_VERSION.get() >= 8:  # FIELD_VERSION_12_2
+    if _ENCODE_FIELD_VERSION.get() >= FIELD_VERSION_12_2:
         # 12c+ bind data follows write_bytes_with_length: a single length byte
         # for values < 254, otherwise the 254 marker + ub4-prefixed chunks.
         # 11g instead chunks anything over 64 bytes with single-byte lengths;
@@ -7670,7 +7670,7 @@ def encode_token_rxd(Token: object) -> bytes:
         # `02 01 <0/1>` (TRUE = 01 01, FALSE = 01 00; captured from
         # python-oracledb). Pre-23ai servers have no BOOLEAN type, so fall back
         # to the historical NUMBER 0/1 binding there (bool is an int subclass).
-        if _ENCODE_FIELD_VERSION.get() >= 17:  # FIELD_VERSION_23_1
+        if _ENCODE_FIELD_VERSION.get() >= FIELD_VERSION_23_1:
             return bytes([2, 1, 1 if Token else 0])
         Bytes = encode_token_num(int(Token))
         return bytes([len(Bytes)]) + Bytes
@@ -7836,7 +7836,7 @@ def encode_token_oac(Token: object) -> bytes:
         # Native BOOLEAN OAC on 23ai (#54): type 252, fixed size 4 (matches
         # python-oracledb's `fc 01 00 00 01 04 …`). Pre-23ai falls back to the
         # NUMBER OAC, pairing with the NUMBER value in encode_token_rxd.
-        if _ENCODE_FIELD_VERSION.get() >= 17:  # FIELD_VERSION_23_1
+        if _ENCODE_FIELD_VERSION.get() >= FIELD_VERSION_23_1:
             return encode_token_raw(TNS_TYPE_BOOLEAN, 4, 0, 0, 0)
         return encode_token_raw(TNS_TYPE_NUMBER, 22, 0, 0, 0)
     if isinstance(Token, (int, float, complex, Decimal)):
@@ -8596,7 +8596,7 @@ def encode_token_raw(
     # TNS_BIND_ARRAY (0x40) and the max-number-of-array-elements field carries
     # the array's declared capacity (0 for a scalar bind).
     FormOfUse = 2 if Charset == AL16UTF16_CHARSET else 1
-    if _ENCODE_FIELD_VERSION.get() >= 8:  # FIELD_VERSION_12_2
+    if _ENCODE_FIELD_VERSION.get() >= FIELD_VERSION_12_2:
         # 12c+ bind OAC (oracledb _write_column_metadata): a fixed flag byte
         # (TNS_BIND_USE_INDICATORS = 1), a ub8 cont-flag, OID + version, the
         # bind charset as a ub2 (AL32UTF8 / AL16UTF16, 0 for non-char), the

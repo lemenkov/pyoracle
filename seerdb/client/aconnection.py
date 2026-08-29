@@ -84,6 +84,7 @@ from seerdb.common.tns_consts import (
     DEFAULT_SDU,
     FIELD_VERSION_10_2,
     FIELD_VERSION_12_1,
+    FIELD_VERSION_12_2,
     FIELD_VERSION_23_1,
     FIELD_VERSION_23_4,
     PURITY_DEFAULT,
@@ -1519,7 +1520,7 @@ class AsyncOracleConnect(_ConnectionLogic):
                         # single length byte per chunk. Without the 12c+ branch
                         # the chunk lengths misparse and the LOB read desyncs,
                         # hanging the next recv (mirrors the sync handler).
-                        if self.field_version >= 8:  # FIELD_VERSION_12_2
+                        if self.field_version >= FIELD_VERSION_12_2:
                             while Pos < len(Packet):
                                 NLen = Packet[Pos]
                                 Pos += 1
