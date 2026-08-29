@@ -44,6 +44,7 @@ from seerdb.common.tns_consts import (
     FIELD_VERSION_12_1,
     FIELD_VERSION_23_1,
     TNS_DATA,
+    TNS_DATA_FLAGS_MORE,
     TNS_SESSION_STATE_REQUEST_BEGIN,
     DictionaryType,
 )
@@ -381,7 +382,7 @@ class _ConnectionLogic:
         Chunk = Data[:MaxPlain]
         Rest = Data[MaxPlain:] or None
         Payload = self._ano.wrap(Chunk)
-        DataFlag = 0x0000 if Rest is None else 0x0020
+        DataFlag = 0x0000 if Rest is None else TNS_DATA_FLAGS_MORE
         Header = _packet_header(len(Payload) + 10, TNS_DATA, self._large_packets)
         return (Header + struct.pack('>H', DataFlag) + Payload, Rest)
 

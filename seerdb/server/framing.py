@@ -30,7 +30,7 @@ import struct
 from typing import TYPE_CHECKING
 
 from seerdb.common.tns import encode_data_packet, encode_packet
-from seerdb.common.tns_consts import DEFAULT_SDU, TNS_DATA
+from seerdb.common.tns_consts import DEFAULT_SDU, TNS_DATA, TNS_DATA_FLAGS_MORE
 
 if TYPE_CHECKING:
     from seerdb.common.ano_session import AnoChannel
@@ -41,7 +41,6 @@ __all__ = ['DEFAULT_SDU', 'PacketStream']
 # Non-final DATA fragment marker in the 2-byte data-flags that follow the
 # header (PROTOCOL.md §1.3). encode_packet stamps this on every fragment but
 # the last one.
-_DATA_FLAG_MORE = 0x0020
 
 _HEADER_LEGACY = struct.Struct('>HhBBh')  # size, cksum, type, flags, hdr-cksum
 _HEADER_LARGE = struct.Struct('>IBBh')  # size, type, flags, hdr-cksum
@@ -120,7 +119,7 @@ class PacketStream:
                 if self._ano is not None and self._ano.active:
                     fragment = self._ano.unwrap(fragment)
                 body += fragment
-                if data_flags & _DATA_FLAG_MORE:
+                if data_flags & TNS_DATA_FLAGS_MORE:
                     continue
                 return (TNS_DATA, body)
             return (packet_type, packet[8:size])
@@ -163,10 +162,14 @@ class PacketStream:
         magic = {self.sdu - 37, self.sdu - 81}
         data = body
         while len(data) > max_final:
-            self._sock.sendall(encode_data_packet(data[:cont_body], 0x0020, self.large))
+            self._sock.sendall(
+                encode_data_packet(data[:cont_body], TNS_DATA_FLAGS_MORE, self.large)
+            )
             data = data[cont_body:]
         if len(data) + 10 in magic:
-            self._sock.sendall(encode_data_packet(data[:alt_body], 0x0020, self.large))
+            self._sock.sendall(
+                encode_data_packet(data[:alt_body], TNS_DATA_FLAGS_MORE, self.large)
+            )
             data = data[alt_body:]
         self._sock.sendall(encode_data_packet(data, 0x0000, self.large))
 
@@ -183,7 +186,7 @@ class PacketStream:
             chunk = data[:max_plain]
             data = data[max_plain:]
             payload = self._ano.wrap(chunk)
-            flag = _DATA_FLAG_MORE if data else 0x0000
+            flag = TNS_DATA_FLAGS_MORE if data else 0x0000
             self._sock.sendall(encode_data_packet(payload, flag, self.large))
             if not data:
                 return
