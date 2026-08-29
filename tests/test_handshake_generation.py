@@ -97,5 +97,29 @@ class TestHandshakeGeneration(unittest.TestCase):
         self.assertIn(b'x86_64/Linux', H.build_caps_block_reply())
 
 
+class DtyTableCodecTest(unittest.TestCase):
+    """The fv2/8i DATA_TYPES conversion tables are generated from entry lists;
+    pin the codec round-trip and that it reproduces both tables byte-for-byte."""
+
+    def test_dty8i_and_server_tables_roundtrip(self):
+        from seerdb.common.tns import (
+            _DTY_8I,
+            _DTY_8I_ENTRIES,
+            _DTY_8I_HEADER,
+            _SERVER_DTY_ENTRIES,
+            _SERVER_DTY_TABLE,
+            decode_dty_table,
+            encode_dty_table,
+        )
+
+        # encode(entries) reproduces each table exactly
+        self.assertEqual(_SERVER_DTY_TABLE, encode_dty_table(_SERVER_DTY_ENTRIES))
+        self.assertEqual(_DTY_8I, _DTY_8I_HEADER + encode_dty_table(_DTY_8I_ENTRIES))
+        # decode is the inverse of encode
+        for entries in (_SERVER_DTY_ENTRIES, _DTY_8I_ENTRIES):
+            body = encode_dty_table(entries)
+            self.assertEqual(decode_dty_table(body), entries)
+
+
 if __name__ == '__main__':
     unittest.main()
