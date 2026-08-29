@@ -226,6 +226,9 @@ def data_integrity_service(AlgoNames: list[str]) -> bytes:
 # Authentication service markers (no NTS/Kerberos selected by a thin client).
 AUTH_MARKER = 0xE0E1
 AUTH_STATUS_NONE = 0xFCFF
+# The auth-service status the server returns in the classic sqlplus / thick-OCI
+# (deadbeef) null-negotiation reply, in place of the thin AUTH_STATUS_NONE.
+AUTH_STATUS_DEADBEEF = 0xFBFF
 
 
 def auth_service() -> bytes:
