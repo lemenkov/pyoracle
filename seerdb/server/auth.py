@@ -35,13 +35,22 @@ from __future__ import annotations
 import struct
 from binascii import unhexlify
 from dataclasses import dataclass
-from hashlib import sha1
 from secrets import token_bytes
 
 from Crypto.Cipher import AES
 
 from seerdb.common import oci
-from seerdb.common.crypto import VFR_11G_SHA1, cat_key, conn_key, pad2
+from seerdb.common.crypto import (
+    O5LOGON_IV,
+    SERVER_TO_CLIENT,
+    VFR_11G_SHA1,
+    cat_key,
+    conn_key,
+    decrypt_password,
+    key_sess_11g,
+    pad2,
+    server_proof,
+)
 from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import (
     _DECODE_FIELD_VERSION,
@@ -59,13 +68,8 @@ from seerdb.common.tns_consts import (
     TTI_SESS,
 )
 
-# O5LOGON uses AES-CBC with an all-zero IV throughout.
-_IV = bytes(16)
 # 11g accounts carry the SHA1 verifier → the 192-bit AES key schedule.
 _BITS_11G = 192
-# The plaintext the server encrypts under ConnKey to prove it holds the session
-# key. Exactly one AES block; the client's validate() looks for this substring.
-_SERVER_PROOF = b'SERVER_TO_CLIENT'
 # A server session key is 40 random bytes + an 8-byte pad2 tail, so the client
 # recognises it and mints a matching 48-byte session key (see crypto.o5logon0).
 _SERVER_SESSION_LEN = 40
@@ -73,12 +77,6 @@ _SERVER_SESSION_LEN = 40
 # real XE 11.2 auth result: 186647040 = 11.2.0.x. On the wire all these values
 # (session key, salt, proof) are uppercase-hex ASCII.
 _SERVER_VERSION_NO = 186647040
-
-
-def _key_sess(password: bytes, salt: bytes) -> bytes:
-    # 11g 192-bit: SHA1(password + salt) (20 bytes) + 4 zero bytes = 24-byte
-    # AES-192 key. Mirrors the salted branch of crypto.o5logon.
-    return sha1(password + salt).digest() + bytes(4)
 
 
 @dataclass(frozen=True)
@@ -106,8 +104,8 @@ def make_challenge(
         salt = token_bytes(16)
     if server_session is None:
         server_session = token_bytes(_SERVER_SESSION_LEN) + pad2(b'', 8)
-    key_sess = _key_sess(password, salt)
-    auth_sesskey = AES.new(key_sess, AES.MODE_CBC, _IV).encrypt(server_session)
+    key_sess = key_sess_11g(password, salt)
+    auth_sesskey = AES.new(key_sess, AES.MODE_CBC, O5LOGON_IV).encrypt(server_session)
     return Challenge(salt, server_session, key_sess, auth_sesskey)
 
 
@@ -117,17 +115,15 @@ def derive_conn_key(challenge: Challenge, client_auth_sesskey: bytes) -> bytes:
     Recovers the client session key and combines it with the server's — the
     result equals the ConnKey the client derived.
     """
-    client_session = AES.new(challenge.key_sess, AES.MODE_CBC, _IV).decrypt(
+    client_session = AES.new(challenge.key_sess, AES.MODE_CBC, O5LOGON_IV).decrypt(
         client_auth_sesskey
     )
     combined = cat_key(challenge.server_session, client_session, None, _BITS_11G)
     return conn_key(combined, None, _BITS_11G)
 
 
-def server_proof(session_key: bytes) -> bytes:
-    """The AUTH_SVR_RESPONSE value: SERVER_TO_CLIENT encrypted under ConnKey."""
-    return AES.new(session_key, AES.MODE_CBC, _IV).encrypt(_SERVER_PROOF)
-
+# server_proof (the 16-byte AUTH_SVR_RESPONSE) now lives in crypto.py next to its
+# counterpart validate(); it is imported above and used by encode_result below.
 
 # The OCI dialect's AUTH_SVR_RESPONSE is 48 bytes, not the thin 16: the real 11g
 # listener encrypts a 16-byte nonce, the SERVER_TO_CLIENT marker, and a full
@@ -149,8 +145,8 @@ def server_proof_oci(session_key: bytes, *, nonce: bytes | None = None) -> bytes
         nonce = token_bytes(_PROOF_NONCE_LEN)
     if len(nonce) != _PROOF_NONCE_LEN:
         raise InterfaceError(f'proof nonce must be {_PROOF_NONCE_LEN} bytes')
-    plain = nonce + _SERVER_PROOF + _PKCS7_FULL_BLOCK
-    return AES.new(session_key, AES.MODE_CBC, _IV).encrypt(plain)
+    plain = nonce + SERVER_TO_CLIENT + _PKCS7_FULL_BLOCK
+    return AES.new(session_key, AES.MODE_CBC, O5LOGON_IV).encrypt(plain)
 
 
 def verify_password(
@@ -169,9 +165,10 @@ def verify_password(
     """
     if not auth_password or len(auth_password) % 16 != 0:
         return False
-    plain = AES.new(session_key, AES.MODE_CBC, _IV).decrypt(auth_password)
-    remainder = 16 - (len(password) % 16)
-    return plain[16:] == pad2(password, remainder)
+    # decrypt_password reverses the exact AUTH_PASSWORD transform (AES-CBC decrypt
+    # under the ConnKey, drop pad1's 16-byte prefix, strip the PKCS7 tail). A wrong
+    # password gives a different ConnKey and so garbage that will not equal it.
+    return decrypt_password(session_key, auth_password) == password
 
 
 def _hexval(raw: bytes) -> bytes:
