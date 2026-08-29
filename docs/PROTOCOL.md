@@ -4157,3 +4157,58 @@ thin wire. seerdb exposes `subscribe` / `unsubscribe` for API parity but raises
 `NotSupportedError` (`_reject_cqn`), so code ported from a thin driver gets the
 recognizable exception rather than an `AttributeError`. A downstream thin
 implementation should do the same.
+
+## 39. The Mirror's fixed 11.2-identity constants (#566)
+
+The Mirror (`seerdb/server/`) presents itself to a client as a real XE **11.2**
+listener, so its handshake and post-login replies pin that server's identity as
+a set of fixed byte constants. Some are **computed** — assembled field-by-field
+by a real codec, with the meaningful fields parameterized and only the parts a
+client skips left zero. Others are **captured verbatim** — a byte string lifted
+from a live 11.2 capture and replayed as-is. This section says which is which and,
+for the verbatim ones, why they cannot currently be regenerated. It is the
+transparency baseline any later decision about un-pinning the Mirror from field
+version 11.2 has to build on.
+
+**Everything here is the 11.2 identity by design.** "Captured verbatim" is not a
+gap to be closed for its own sake — while the Mirror deliberately answers *as* an
+11.2 server, these bytes simply *are* that server's identity. The distinction that
+matters is whether a value has been *decoded* (its structure understood) or is
+still an undifferentiated blob.
+
+### 39.1 Handshake identity — `_handshake_11g.py` (§4.1, §4.2)
+
+The PRO / DTY capability block is **computed** (`build_caps_block_reply` frames
+the banner, charset id, and the pieces below into the TTC payload), but the pieces
+it frames are captured 11.2 constants:
+
+| Constant | Size | What it is | Status |
+|----------|-----:|------------|--------|
+| version banner, charset id | — | `x86_64/Linux …` banner + AL32UTF8 (873) | computed (literal) |
+| `_PRO_CHARSET_ELEMENTS` | 50 B | 10 × 5-byte charset-conversion elements | captured verbatim — the 11.2 charset-map identity |
+| `_PRO_FDO` | 100 B | the fixed descriptor block (FDO) | captured verbatim — internal layout not decoded |
+| `_SERVER_COMPILE_CAPS` | 39 B | the 11g **compile** capability vector | captured verbatim — this *is* the field-version-6 identity (§4.2); the client negotiates off it |
+| `_SERVER_RUNTIME_CAPS` | 7 B | the 11g **runtime** capability vector | captured verbatim — same |
+| `_SERVER_DTY_TABLE` | 913 B | the type-conversion matrix (thin DTY reply) | captured verbatim — per-type `(type, conv, repr, flags)` table; structure known (§4.2) but replayed whole |
+| `_PRO_SQLPLUS_PAYLOAD` | 117 B | the `deadbeef` PRO reply | **computed (#564)** — an ANO null-negotiation response, built field-by-field from the ANO codec (§4.1.1) |
+| `_TYPE_REPLY_SQLPLUS_PAYLOAD` | 16 B | the `deadbeef` third-round type reply | **computed (#565)** — a DTY reply carrying the DB time zone + timezone-file version (§4.2.1) |
+
+The two `deadbeef` blocks were the last opaque negotiation blobs; #564 and #565
+decoded both, so nothing in the handshake path is now an undifferentiated blob —
+the verbatim rows are all the fixed capability / charset identity, replayed
+because the Mirror pins 11.2, not because their meaning is unknown.
+
+### 39.2 Query path — `query.py` (§36)
+
+| Constant | Size | What it is | Status |
+|----------|-----:|------------|--------|
+| `_OCI_VERSION_TRAILER` | 10 B | packed 11.2 version + capability-flags word on the post-login version-call reply (`encode_version_banner_oci`) | captured verbatim — the packed-word bit layout is not decoded; it is the 11.2 version identity sqlplus prints |
+| OCI describe column trailer | 13 B + 23 B | the zeroed post-name block (`_OCI_DCB_COL_POSTNAME`) and cursor-uuid preamble on `encode_describe_oci` | **computed** — every meaningful field (type/precision/scale/length/charset/csfrm/max_size/null_ok/name) is built; only the describe-timestamp / instance-id region the client skips is emitted as zeros |
+| OER return-status trailers | var | the execute / DML / DDL / fetch / commit / logoff status envelopes | **computed** — reduced to load-bearing structure (§36); meaningful fields parameterized, opaque regions zeroed |
+
+The verbatim `_OCI_VERSION_TRAILER` is a packed version/flags word: its bits
+encode the 11.2 release and some capability flags, but the exact bit layout has
+not been reverse-engineered — a client only echoes the banner text back, so the
+trailer has never needed decoding. It is the one remaining verbatim query-path
+constant that is a blob rather than the deliberate 11.2 identity; everything else
+in the query path is a real codec.
