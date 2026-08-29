@@ -4002,7 +4002,13 @@ def encode_oci_oer(
     ``sequence`` is the OER's per-context internal field (a ub2 LE at offset 5,
     carried from the live capture); its echo (ub2 LE at offset 49) is
     ``sequence + 2`` for the row/return statuses. The caller appends the
-    ``ORA-…`` message DALC for the error case."""
+    ``ORA-…`` message DALC for the error case.
+
+    FIXME: every caller pins ``sequence`` to the value from its capture. It is
+    most likely a monotonically-increasing per-session counter, so the fixed
+    value is only correct because the Mirror starts each session from the
+    beginning and the client does not appear to validate it. Needs testing
+    against a session that has already advanced the counter (§36.1)."""
     oer = bytearray(_OCI_OER_ENVELOPE)
     oer[1] = status
     struct.pack_into('<H', oer, 5, sequence)

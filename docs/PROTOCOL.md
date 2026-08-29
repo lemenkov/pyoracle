@@ -4115,7 +4115,7 @@ to real 11g, varying one thing at a time. Offsets are from the `0x04` token:
 |---|---|---|---|
 | `0` | 1 | token tag `0x04` (TTI_OER) | constant |
 | `1` | 1 | **status** — `0x01` success, `0x05` error | error vs success replies |
-| `5..7` | ub2 LE | sequence (per-context internal field) | carried from capture; high byte `0` in every capture |
+| `5..7` | ub2 LE | sequence (per-context internal field) | carried from capture; high byte `0` in every capture; **likely a monotonic per-session counter** (see below) |
 | `7` | 1 | constant `0x01` | constant across captures |
 | `8` | 1 | **row kind** — `0` none, `1` LOB row, `2` LONG row | LOB vs LONG fetch status |
 | `8..12` | ub4 LE | **rowcount** (affected rows) | ins1→1, ins3→3, upd/del→4 |
@@ -4139,6 +4139,13 @@ protocol version (`310` sits in the same `0x013x` family as the versions the
 handshake negotiates); the Mirror emits the captured value rather than its own,
 which sqlplus accepts — whether the field must track the live negotiation is
 not confirmed.
+
+The `sequence` at offset `5` is most likely a **monotonically-increasing
+per-session counter**: each reply pins it to the value seen in its capture,
+which only works because the Mirror starts every session from the beginning and
+sqlplus does not appear to validate it. This is untested against a session that
+has already advanced the counter (a mid-session capture, or replaying many
+statements) — a `FIXME` to confirm someday.
 
 ### 36.2 Generation
 
