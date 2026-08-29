@@ -57,8 +57,6 @@ from seerdb.common.exceptions import (
 from seerdb.common.tns import (
     _DTY_8I,
     CCAP_FIELD_VERSION,
-    FIELD_VERSION_10_2,
-    FIELD_VERSION_12_1,
     assemble_packet,
     decode_packet,
     decode_token_pro,
@@ -84,6 +82,8 @@ from seerdb.common.tns_consts import (
     CONN_STATE_CONNECTED,
     CONN_STATE_DISCONNECTED,
     DEFAULT_SDU,
+    FIELD_VERSION_10_2,
+    FIELD_VERSION_12_1,
     FIELD_VERSION_23_1,
     FIELD_VERSION_23_4,
     PURITY_DEFAULT,

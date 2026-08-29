@@ -19,7 +19,12 @@ from seerdb.common.tns import (
     encode_dictionary_tran,
     encode_packet,
 )
-from seerdb.common.tns_consts import TNS_CONNECT, TNS_DATA, DictionaryType
+from seerdb.common.tns_consts import (
+    FIELD_VERSION_9_2,
+    TNS_CONNECT,
+    TNS_DATA,
+    DictionaryType,
+)
 
 
 class TestTnsCommandEncoders(unittest.TestCase):
@@ -2179,7 +2184,8 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
         # #381: the PRO request is TTI_PRO + the 6..0 version vector, then a
         # single NUL-terminated client banner that identifies seerdb and carries
         # the platform. Platform-independent structural assertions.
-        from seerdb.common.tns import TTI_PRO, encode_dictionary_pro
+        from seerdb.common.tns import encode_dictionary_pro
+        from seerdb.common.tns_consts import TTI_PRO
 
         Msg = encode_dictionary_pro({})
         self.assertEqual(Msg[:8], bytes([TTI_PRO, 6, 5, 4, 3, 2, 1, 0]))
@@ -2627,7 +2633,7 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
     def test_capability_arrays_11_2(self):
         # The default (11.2) capability vectors must stay byte-identical to the
         # historical seerdb 11g handshake (this is what test_tns_dty_* pin).
-        from seerdb.common.tns import FIELD_VERSION_11_2
+        from seerdb.common.tns_consts import FIELD_VERSION_11_2
 
         cc, rc = capability_arrays()
         self.assertEqual(
@@ -2681,7 +2687,7 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
     def test_capability_arrays_21_1(self):
         # The 21.1 vectors must match python-oracledb 4.0.1 captured against
         # Oracle 21c XE (issue #27 Phase 0 reference bytes).
-        from seerdb.common.tns import FIELD_VERSION_21_1
+        from seerdb.common.tns_consts import FIELD_VERSION_21_1
 
         cc, rc = capability_arrays(FIELD_VERSION_21_1)
         self.assertEqual(
@@ -2697,7 +2703,7 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
         # An intermediate 12c+ version (e.g. 19.1 = 12) renders the 21.1 base
         # vector with the field-version byte patched in, so the client can
         # negotiate down to any 12c+ server.
-        from seerdb.common.tns import FIELD_VERSION_19_1, FIELD_VERSION_21_1
+        from seerdb.common.tns_consts import FIELD_VERSION_19_1, FIELD_VERSION_21_1
 
         cc19, _ = capability_arrays(FIELD_VERSION_19_1)
         cc21, _ = capability_arrays(FIELD_VERSION_21_1)
@@ -2713,7 +2719,7 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
     def test_tns_sess_12c(self, mock_gethostname, mock_getpid):
         # 12c+ OSESSKEY: 5 key/value pairs led by AUTH_TERMINAL, and the
         # username is length-prefixed (3, "pyo") rather than raw.
-        from seerdb.common.tns import FIELD_VERSION_21_1
+        from seerdb.common.tns_consts import FIELD_VERSION_21_1
 
         mock_getpid.return_value = 18967
         mock_gethostname.return_value = 'ExampleHost'
@@ -2888,11 +2894,14 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
 
         from seerdb.common.tns import (
             _ENCODE_FIELD_VERSION,
-            FIELD_VERSION_11_2,
-            FIELD_VERSION_21_1,
             encode_token_raw,
         )
-        from seerdb.common.tns_consts import TNS_TYPE_NUMBER, TNS_TYPE_VARCHAR
+        from seerdb.common.tns_consts import (
+            FIELD_VERSION_11_2,
+            FIELD_VERSION_21_1,
+            TNS_TYPE_NUMBER,
+            TNS_TYPE_VARCHAR,
+        )
 
         UTF8 = 871
 
@@ -2942,7 +2951,7 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
     def test_dty_12c_message_shape(self):
         # field_version 21.1 selects the 2-byte table and encoding flag 3
         # (oracledb's MULTI_BYTE|CONV_LENGTH); 11.2 keeps flag 1.
-        from seerdb.common.tns import FIELD_VERSION_21_1
+        from seerdb.common.tns_consts import FIELD_VERSION_21_1
 
         Dict = {'type': DictionaryType.dty, 'req': 'utf-8'}
         self.assertEqual(encode_dictionary_dty(Dict)[5], 1)
@@ -2993,16 +3002,16 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
         # 23ai (fv > 17, #89) appends one extra pointer byte after the sequence
         # number on every function message; the legacy form (fv <= 17) does not.
         from seerdb.common.tns import (
-            FIELD_VERSION_11_2,
-            FIELD_VERSION_23_1,
-            TTI_FUN,
             _fun_header,
         )
         from seerdb.common.tns_consts import (
+            FIELD_VERSION_11_2,
+            FIELD_VERSION_23_1,
             FIELD_VERSION_23_4,
             TTI_ALL8,
             TTI_COMMIT,
             TTI_FETCH,
+            TTI_FUN,
         )
 
         for Token in (TTI_ALL8, TTI_FETCH, TTI_COMMIT):
@@ -6226,7 +6235,6 @@ if __name__ == '__main__':
 
 
 from seerdb.common.tns import (
-    FIELD_VERSION_9_2,
     encode_o3logon_phase1,
     encode_o3logon_phase2,
 )
