@@ -2742,6 +2742,15 @@ READ returns empty on 9i):
    is the only reliable stop signal (`decode_fv2_lob_chunks`). Content may span
    packets.
 
+The **op middle** is a flag block (go-ora's LOB request layout, sb4-encoded on
+fv2): has-dest, dest length, source offset, dest offset, charset-present, a reply
+flag (`1` except for FILE_CLOSE), null-o2u, the **operation** (`TNS_LOB_OP_*` —
+GET_LENGTH `0x01`, READ `0x02`, FILE_OPEN `0x0100`, FILE_CLOSE `0x0200`), has-scn,
+scn length. Across the four ops only the operation, the READ's source offset (`1`)
+and the reply flag change, so `_o7_lobop_mid(operation, …)` generates all four
+(and `_o8i_lobop_mid` the 8i form — the same block with fixed ub4-LE fields,
+§19.17).
+
 An **empty** LOB (`EMPTY_CLOB()` / `EMPTY_BLOB()`) has a valid locator but GETLEN
 returns amount 0, so no READ is issued and the value is `""` / `b""`. CLOB content
 arrives in the column's **DB charset** (a single-byte run on a typical 9i, **not**
