@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: © 2026 Peter Lemenkov
+# SPDX-License-Identifier: CC0-1.0
+
+# CodeQL configuration for seerdb.
+#
+# ── Why this file exists: two "insecure crypto" queries are filtered ──────────
+#
+# seerdb is a driver for Oracle's TNS/TTC wire protocol. Oracle's authentication
+# handshakes (O3LOGON, O5LOGON) MANDATE specific legacy primitives on the wire —
+# they are fixed by the protocol, not chosen by us:
+#
+#   * DES   — the pre-11g password verifier, and the 9i O3LOGON session cipher
+#   * MD5   — the 128-bit O5LOGON connection-key derivation
+#   * SHA-1 — the 11g 192-bit session-key material, SHA1(password + salt)
+#
+# We cannot substitute a stronger algorithm without failing to authenticate
+# against real Oracle servers (8i–11g, plus the SHA-1-verifier path modern
+# servers still choose for legacy accounts). Every use is confined to
+# seerdb/common/crypto.py and is validated byte-for-byte against live Oracle
+# captures. So for THIS project these two queries are unfixable-by-design false
+# positives, and we had been dismissing each instance by hand (code-scanning
+# alerts #177–#190) — where they re-surface as brand-new alerts every time the
+# crypto code is moved or refactored to a different line.
+#
+# We filter by QUERY ID, deliberately NOT by path: seerdb/common/crypto.py stays
+# under every other CodeQL query, so a genuine, unrelated problem in that file is
+# still reported. The only cost is that these two specific queries no longer fire
+# anywhere in the tree — acceptable because the sole weak crypto in the codebase
+# is this protocol-mandated core, and any newly introduced crypto would be caught
+# in code review rather than by these queries. If that ever stops being true,
+# delete the two entries below and dismiss the crypto-core alerts individually
+# again.
+#
+# `queries: security-extended` stays declared in the workflow (.github/
+# workflows/codeql.yml); the filters below apply on top of the resolved set.
+
+query-filters:
+  - exclude:
+      id: py/weak-cryptographic-algorithm  # flags the mandated DES / MD5 uses
+  - exclude:
+      id: py/weak-sensitive-data-hashing   # flags the mandated SHA-1 key material
