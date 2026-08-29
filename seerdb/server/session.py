@@ -34,6 +34,7 @@ from seerdb.common.tns import (
     ddl_command_type,
     decode_ub4,
     encode_batch_errors_status,
+    encode_challenge,
     encode_commit_status_oci,
     encode_create_temp_response,
     encode_ddl_status_oci,
@@ -55,6 +56,7 @@ from seerdb.common.tns import (
     encode_query_response,
     encode_query_response_oci,
     encode_reexec_row_oci,
+    encode_result,
     encode_scroll_open_response,
     encode_scroll_response,
     encode_status,
@@ -95,9 +97,7 @@ from seerdb.common.tns_consts import (
 )
 from seerdb.server.auth import (
     derive_conn_key,
-    encode_challenge,
     encode_challenge_oci,
-    encode_result,
     encode_result_oci,
     is_token_auth,
     make_challenge,
