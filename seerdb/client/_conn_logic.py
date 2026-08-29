@@ -21,7 +21,6 @@ the pure methods here.
 
 from __future__ import annotations
 
-import struct
 from typing import TYPE_CHECKING
 
 from seerdb.client.dialect import Dialect, Fv2Dialect, O8iDialect
@@ -34,6 +33,7 @@ from seerdb.common.tns import (
     CCAP_TTC4_EXPLICIT_BOUNDARY,
     RCAP_TTC,
     RCAP_TTC_SESSION_STATE_OPS,
+    encode_ano_fragment,
     encode_close_cursors_piggyback,
     encode_end_to_end_piggyback,
     encode_end_user_sec_piggyback,
@@ -43,8 +43,6 @@ from seerdb.common.tns_consts import (
     FIELD_VERSION_10_2,
     FIELD_VERSION_12_1,
     FIELD_VERSION_23_1,
-    TNS_DATA,
-    TNS_DATA_FLAGS_MORE,
     TNS_SESSION_STATE_REQUEST_BEGIN,
     DictionaryType,
 )
@@ -372,19 +370,10 @@ class _ConnectionLogic:
             )
 
     def _encode_ano_packet(self, Data: bytes) -> tuple[bytes, bytes | None]:
-        # One encrypted TNS_DATA packet (#437): a plaintext chunk small enough
-        # that, after the MAC + cipher padding + fold flag, the framed packet
-        # still fits the SDU. Non-final packets carry data flags 0x0020.
-        from seerdb.common.tns import _packet_header
-
+        # One encrypted TNS_DATA fragment (#437); shared with the Mirror's
+        # PacketStream._write_data_ano via encode_ano_fragment.
         assert self._ano is not None  # only called while the ANO cipher is active
-        MaxPlain = self.sdu - 64
-        Chunk = Data[:MaxPlain]
-        Rest = Data[MaxPlain:] or None
-        Payload = self._ano.wrap(Chunk)
-        DataFlag = 0x0000 if Rest is None else TNS_DATA_FLAGS_MORE
-        Header = _packet_header(len(Payload) + 10, TNS_DATA, self._large_packets)
-        return (Header + struct.pack('>H', DataFlag) + Payload, Rest)
+        return encode_ano_fragment(Data, self.sdu, self._ano, self._large_packets)
 
     # --- Capability / dialect / misc pure helpers --------------------------
 

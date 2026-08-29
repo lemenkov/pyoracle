@@ -29,7 +29,7 @@ import socket
 import struct
 from typing import TYPE_CHECKING
 
-from seerdb.common.tns import encode_data_packet, encode_packet
+from seerdb.common.tns import encode_ano_fragment, encode_data_packet, encode_packet
 from seerdb.common.tns_consts import DEFAULT_SDU, TNS_DATA, TNS_DATA_FLAGS_MORE
 
 if TYPE_CHECKING:
@@ -37,10 +37,6 @@ if TYPE_CHECKING:
 
 # Re-exported for the server modules that frame at the default SDU.
 __all__ = ['DEFAULT_SDU', 'PacketStream']
-
-# Non-final DATA fragment marker in the 2-byte data-flags that follow the
-# header (PROTOCOL.md §1.3). encode_packet stamps this on every fragment but
-# the last one.
 
 _HEADER_LEGACY = struct.Struct('>HhBBh')  # size, cksum, type, flags, hdr-cksum
 _HEADER_LARGE = struct.Struct('>IBBh')  # size, type, flags, hdr-cksum
@@ -174,22 +170,13 @@ class PacketStream:
         self._sock.sendall(encode_data_packet(data, 0x0000, self.large))
 
     def _write_data_ano(self, body: bytes) -> None:
-        # Encrypted DATA fragmentation (#448), mirroring the client's
-        # _encode_ano_packet: a plaintext chunk small enough that, after the MAC
-        # + cipher padding + fold flag, the framed packet still fits the SDU;
-        # non-final fragments carry the 0x0020 "more" flag, each independently
-        # encrypted so the client decrypts it per packet.
+        # Encrypted DATA fragmentation (#448) — shared with the client's
+        # _encode_ano_packet via encode_ano_fragment; loop until it says no more.
         assert self._ano is not None
-        max_plain = self.sdu - 64
-        data = body
-        while True:
-            chunk = data[:max_plain]
-            data = data[max_plain:]
-            payload = self._ano.wrap(chunk)
-            flag = TNS_DATA_FLAGS_MORE if data else 0x0000
-            self._sock.sendall(encode_data_packet(payload, flag, self.large))
-            if not data:
-                return
+        data: bytes | None = body
+        while data is not None:
+            packet, data = encode_ano_fragment(data, self.sdu, self._ano, self.large)
+            self._sock.sendall(packet)
 
     def send_raw(self, packet: bytes) -> None:
         """Send an already-framed packet verbatim (it includes its TNS header).

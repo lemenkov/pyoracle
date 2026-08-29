@@ -9,6 +9,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
+    from seerdb.common.ano_session import AnoChannel
     from seerdb.common.dbobject import DbObject, DbRef
 from functools import reduce
 
@@ -2637,6 +2638,23 @@ def encode_data_packet(Body: bytes, DataFlags: int, Large: bool = False) -> byte
         + struct.pack('>H', DataFlags)
         + Body
     )
+
+
+def encode_ano_fragment(
+    Data: bytes, Sdu: int, Channel: 'AnoChannel', Large: bool = False
+) -> tuple[bytes, bytes | None]:
+    """Frame the next encrypted DATA fragment of ``Data`` (#437/#448).
+
+    Peels a plaintext chunk small enough that, after ``Channel`` adds the MAC +
+    cipher padding + fold flag, the framed packet still fits the SDU (``Sdu - 64``
+    plaintext), wraps it, and frames it as a DATA packet — carrying
+    ``TNS_DATA_FLAGS_MORE`` when more remains. Returns ``(packet, rest)`` where
+    ``rest`` is ``None`` once ``Data`` is exhausted; the caller loops on ``rest``.
+    Each fragment is an independent encrypt+MAC unit, decrypted per packet."""
+    MaxPlain = Sdu - 64
+    Rest = Data[MaxPlain:] or None
+    Flag = TNS_DATA_FLAGS_MORE if Rest is not None else 0x0000
+    return encode_data_packet(Channel.wrap(Data[:MaxPlain]), Flag, Large), Rest
 
 
 def encode_packet(
