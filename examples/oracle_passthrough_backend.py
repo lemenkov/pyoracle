@@ -21,9 +21,9 @@ from dataclasses import replace
 
 import seerdb
 from seerdb.common.datatypes import dbtype_for_oracle_type
+from seerdb.common.tns import ColumnMeta
 from seerdb.common.tns_consts import TNS_TYPE_REF, TNS_TYPE_REFCURSOR
 from seerdb.server.backend import BackendError, BindVar, CursorResult, Result
-from seerdb.server.query import ColumnMeta
 
 
 class OraclePassthroughBackend:

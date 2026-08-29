@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """Golden test: the OCI OER return-status trailers are now GENERATED from named
-fields (seerdb.server.query.encode_oci_oer) rather than stored as three
+fields (seerdb.common.tns.encode_oci_oer) rather than stored as three
 near-identical 136-byte blobs. The captures below (live 11g via sqlplus) pin the
 generator byte-for-byte so the Mirror stays wire-identical to the real server.
 
@@ -19,7 +19,7 @@ from seerdb.common.oci import (
     OCI_OER_STATUS_ERROR,
     OCI_OER_STATUS_SUCCESS,
 )
-from seerdb.server.query import (
+from seerdb.common.tns import (
     _OCI_CMD_TYPE_OFF,
     _OCI_DML_ROWCOUNT_OFF,
     encode_ddl_status_oci,

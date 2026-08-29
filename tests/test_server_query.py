@@ -10,10 +10,14 @@ import pytest
 from seerdb.common.exceptions import DataError, InterfaceError
 from seerdb.common.tns import (
     _DECODE_FIELD_VERSION,
+    ColumnMeta,
     _decode_describe_body,
     _skip_chunked_bytes,
     decode_packet,
+    encode_describe,
     encode_rows,
+    parse_exec,
+    parse_exec_oci,
 )
 from seerdb.common.tns_consts import (
     FIELD_VERSION_11_2,
@@ -22,12 +26,6 @@ from seerdb.common.tns_consts import (
     TTI_DCB,
     TTI_LOB,
     TTI_STA,
-)
-from seerdb.server.query import (
-    ColumnMeta,
-    encode_describe,
-    parse_exec,
-    parse_exec_oci,
 )
 
 
@@ -235,8 +233,7 @@ def test_more_rows_terminator_carries_cursor_id() -> None:
 
 
 def test_parse_fetch_extracts_cursor_and_count() -> None:
-    from seerdb.common.tns import encode_dictionary_fetch
-    from seerdb.server.query import parse_fetch
+    from seerdb.common.tns import encode_dictionary_fetch, parse_fetch
 
     msg = encode_dictionary_fetch(
         {'seq': 4, 'field_version': 6, 'cursor': 7, 'fetch': 50}
@@ -509,7 +506,7 @@ def test_parse_exec_oci_rejects_a_non_oci_message() -> None:
 def test_encode_describe_oci_roundtrips_the_meaningful_fields() -> None:
     # The thin client can't parse the OCI describe, so round-trip through the
     # codec's own reader: every meaningful field survives (#265).
-    from seerdb.server.query import _decode_describe_oci, encode_describe_oci
+    from seerdb.common.tns import _decode_describe_oci, encode_describe_oci
 
     cols = [
         ColumnMeta(
@@ -542,7 +539,7 @@ def test_encode_dcb_column_oci_reproduces_the_live_column_block() -> None:
     # describe for `select 1 from dual` (the NUMBER '1' column). This is ground
     # truth from the wire, not a hand-derived fixture — an earlier hand-typed
     # fixture hid a one-byte field shift that a live sqlplus caught (#265).
-    from seerdb.server.query import _encode_dcb_column_oci
+    from seerdb.common.tns import _encode_dcb_column_oci
 
     captured = bytes.fromhex(
         '51010200008102000000000000000000000000000000000000000000000000'
@@ -569,7 +566,7 @@ def test_encode_describe_oci_maxrowsize_is_nonzero() -> None:
     # (the thin client ignores the field) (#265).
     import struct
 
-    from seerdb.server.query import _OCI_DCB_PREAMBLE_LEN, encode_describe_oci
+    from seerdb.common.tns import _OCI_DCB_PREAMBLE_LEN, encode_describe_oci
 
     col = ColumnMeta(name=b'1', data_type=TNS_TYPE_NUMBER, data_length=22, max_size=22)
     payload = encode_describe_oci([col])
@@ -580,7 +577,7 @@ def test_encode_describe_oci_maxrowsize_is_nonzero() -> None:
 def test_encode_version_banner_oci_matches_the_captured_reply() -> None:
     # The sqlplus / thick-OCI version reply (TTI_RPA + banner DALC + packed
     # version trailer), byte-for-byte against a live 11.2 capture (#265).
-    from seerdb.server.query import encode_version_banner_oci, is_version_call_oci
+    from seerdb.common.tns import encode_version_banner_oci, is_version_call_oci
 
     banner = (
         b'Oracle Database 11g Express Edition Release 11.2.0.2.0 - 64bit Production'
@@ -600,7 +597,7 @@ def test_encode_query_response_oci_structure() -> None:
     # The OCI execute response: describe + DCB tail + RXD row + status, computed
     # (not a captured blob). Renders live in sqlplus 11.2 (validated by replay
     # substitution); here we check the structure holds together offline (#265).
-    from seerdb.server.query import _decode_describe_oci, encode_query_response_oci
+    from seerdb.common.tns import _decode_describe_oci, encode_query_response_oci
 
     col = ColumnMeta(
         name=b'1', data_type=TNS_TYPE_NUMBER, data_length=2, max_size=0, scale=-127
@@ -613,7 +610,7 @@ def test_encode_query_response_oci_structure() -> None:
 def test_oci_trailers_are_computed_mostly_zero() -> None:
     # The two trailers are computed as mostly-zero with a few load-bearing
     # structural constants — not replayed capture bytes (#265).
-    from seerdb.server.query import _oci_dcb_tail, _oci_row_status
+    from seerdb.common.tns import _oci_dcb_tail, _oci_row_status
 
     tail = _oci_dcb_tail(1)
     status = _oci_row_status()
@@ -625,7 +622,7 @@ def test_encode_fetch_terminator_oci_signals_end_of_fetch() -> None:
     # The OCI end-of-fetch reply: an OER carrying ORA-01403, which sqlplus reads
     # as "cursor drained". Computed (mostly-zero OER + the message), not a blob;
     # renders live when the execute already returned the rows (#265).
-    from seerdb.server.query import encode_fetch_terminator_oci
+    from seerdb.common.tns import encode_fetch_terminator_oci
 
     term = encode_fetch_terminator_oci()
     assert len(term) == 162
@@ -636,7 +633,7 @@ def test_encode_fetch_terminator_oci_signals_end_of_fetch() -> None:
 def test_strip_oci_piggyback_unwraps_the_execute() -> None:
     # sqlplus wraps every statement past the first in an OCCA close-cursors
     # piggyback (0x11 0x69 + fixed prefix + cursor entries), then the execute.
-    from seerdb.server.query import strip_oci_piggyback
+    from seerdb.common.tns import strip_oci_piggyback
 
     # a real 1169 prefix (count=1 -> 23-byte header) + a stub execute
     wrapped = (
@@ -651,7 +648,7 @@ def test_strip_oci_piggyback_unwraps_the_execute() -> None:
 def test_encode_status_oci_and_commit_shapes() -> None:
     # The no-row reply (PL/SQL / DDL) is the 0x08 0x06 status; commit is a small
     # TTI_STA acknowledgement (#265).
-    from seerdb.server.query import encode_commit_status_oci, encode_status_oci
+    from seerdb.common.tns import encode_commit_status_oci, encode_status_oci
 
     status = encode_status_oci()
     assert status[:3] == b'\x08\x06\x00' and len(status) == 171
@@ -661,7 +658,7 @@ def test_encode_status_oci_and_commit_shapes() -> None:
 def test_encode_long_value_oci_matches_the_captured_wire() -> None:
     # A LONG value streams inline as 0xFE-chunked bytes + a zero trailing ub4,
     # reproduced byte-for-byte from a live 11g LONG SELECT (#407).
-    from seerdb.server.query import encode_long_value_oci
+    from seerdb.common.tns import encode_long_value_oci
 
     got = encode_long_value_oci('LONG-value-inline-0123456789-abcdefghij')
     assert got == bytes.fromhex(
@@ -687,8 +684,8 @@ def test_encode_long_value_oci_matches_the_captured_wire() -> None:
 def test_encode_describe_oci_long_column_is_streamed() -> None:
     # A LONG column describes as a character type (charset + 0x80 flag) with its
     # sizes zero — the value is streamed inline, not fixed-width (#407).
+    from seerdb.common.tns import ColumnMeta, encode_describe_oci
     from seerdb.common.tns_consts import TNS_TYPE_LONG, TNS_TYPE_LONGRAW
-    from seerdb.server.query import ColumnMeta, encode_describe_oci
 
     long_col = ColumnMeta(name=b'V', data_type=TNS_TYPE_LONG, data_length=0, max_size=0)
     body = encode_describe_oci([long_col])
@@ -708,7 +705,7 @@ def test_is_reexecute_oci_detects_the_sql_less_reexecute() -> None:
     # A fresh OCI execute carries the SQL pointer indicator at offset 11; a
     # re-execute (the LONG fetch step) omits it (#407).
     from seerdb.common.oci import OCI_INDICATOR
-    from seerdb.server.query import is_reexecute_oci
+    from seerdb.common.tns import is_reexecute_oci
 
     fresh = bytes([0x03, 0x5E, 0x01]) + b'\x00' * 8 + OCI_INDICATOR + b'\x00' * 240
     reexec = bytes([0x03, 0x5E, 0x01]) + b'\x00' * 8 + b'\x00' * 8 + b'\x00' * 240
@@ -719,12 +716,12 @@ def test_is_reexecute_oci_detects_the_sql_less_reexecute() -> None:
 def test_long_row_replies_carry_the_right_status() -> None:
     # The re-execute reply ends with the execute row-status (0x08 0x06); a
     # fetch-delivered LONG row ends with the "more rows" OER status (#407).
-    from seerdb.common.tns_consts import TNS_TYPE_LONG
-    from seerdb.server.query import (
+    from seerdb.common.tns import (
         ColumnMeta,
         encode_long_fetch_row_oci,
         encode_reexec_row_oci,
     )
+    from seerdb.common.tns_consts import TNS_TYPE_LONG
 
     col = ColumnMeta(name=b'V', data_type=TNS_TYPE_LONG, data_length=0, max_size=0)
     reexec = encode_reexec_row_oci([col], [('hi',)], more=True)
@@ -739,7 +736,7 @@ def test_lob_locator_carries_the_content_byte_size() -> None:
     # The row locator's size field is the content BYTE count (big-endian): a CLOB
     # is UTF-16 (2 bytes per char), a BLOB is its raw bytes. NULL is a lone 0x00
     # (no read). This unit is what makes sqlplus accept the locator (#405).
-    from seerdb.server.query import (
+    from seerdb.common.tns import (
         _OCI_LOB_ROW_SIZE_OFF,
         encode_lob_locator_oci,
     )
@@ -760,7 +757,7 @@ def test_lob_locator_carries_the_content_byte_size() -> None:
 def test_lob_read_response_selects_clob_or_blob_locator() -> None:
     # The READ reply echoes the character (CLOB) or binary (BLOB) locator template,
     # matching the row locator so sqlplus renders the content correctly (#406).
-    from seerdb.server.query import encode_lob_read_response_oci
+    from seerdb.common.tns import encode_lob_read_response_oci
 
     clob_reply = encode_lob_read_response_oci(b'\x00A', 1, 2, is_clob=True)
     blob_reply = encode_lob_read_response_oci(b'\xca\xfe', 2, 2, is_clob=False)
@@ -774,7 +771,7 @@ def test_parse_lobops_read_extracts_offset_and_amount() -> None:
     # sqlplus's TTI_LOBOPS READ carries a 1-based source offset (ub8-LE @91) and an
     # amount (ub8-LE @269); the Mirror serves exactly that slice so the read loop
     # terminates (#405). A short/garbled request falls back to read-all.
-    from seerdb.server.query import (
+    from seerdb.common.tns import (
         _OCI_LOBOPS_AMOUNT_OFF,
         _OCI_LOBOPS_OFFSET_OFF,
         parse_lobops_read,
@@ -801,8 +798,8 @@ def test_encode_lob_describe_oci_omits_the_dcb_tail() -> None:
     # The LOB execute reply is a describe with a distinct 33-byte tail + LOB status,
     # NOT the ordinary inline-row DCB tail (which carries the 0x06 0x01 0x22 marker)
     # — this is what makes sqlplus accept the locator row (#405).
+    from seerdb.common.tns import ColumnMeta, encode_lob_describe_oci
     from seerdb.common.tns_consts import TNS_TYPE_CLOB
-    from seerdb.server.query import ColumnMeta, encode_lob_describe_oci
 
     col = ColumnMeta(name=b'C', data_type=TNS_TYPE_CLOB, data_length=4000, max_size=0)
     reply = encode_lob_describe_oci([col])
@@ -814,7 +811,7 @@ def test_encode_lob_describe_oci_omits_the_dcb_tail() -> None:
 def test_encode_lob_read_response_slices_and_reports_totals() -> None:
     # The READ reply carries the requested slice as LOB_DATA and reports the whole
     # LOB's byte size in the echoed locator plus this read's amount (#405).
-    from seerdb.server.query import (
+    from seerdb.common.tns import (
         _OCI_LOB_TAIL_AMOUNT_OFF,
         _OCI_LOB_TAIL_SIZE_OFF,
         encode_lob_read_response_oci,
@@ -839,8 +836,8 @@ def test_encode_lob_read_response_slices_and_reports_totals() -> None:
 def test_oci_lob_contents_reports_type_and_wire_bytes() -> None:
     # Each non-NULL LOB cell yields (wire-content, is_clob): CLOB is UTF-16BE, BLOB
     # is raw; NULL LOBs are skipped (they draw no read) (#405).
+    from seerdb.common.tns import ColumnMeta, oci_lob_contents
     from seerdb.common.tns_consts import TNS_TYPE_BLOB, TNS_TYPE_CLOB
-    from seerdb.server.query import ColumnMeta, oci_lob_contents
 
     cols = [
         ColumnMeta(name=b'C', data_type=TNS_TYPE_CLOB, data_length=4000, max_size=0),
@@ -871,7 +868,7 @@ def test_encode_value_emits_a_thin_lob_locator_for_lob_columns() -> None:
 def test_encode_lob_read_response_thin_carries_content_then_a_success_oer() -> None:
     # The thin READ reply is the whole LOB as LOB_DATA followed by a success OER:
     # the client reads the content, scans to the 04 01 XX OER, and stops (#413).
-    from seerdb.server.query import (
+    from seerdb.common.tns import (
         _oci_lob_data,
         encode_lob_read_response_thin,
     )
@@ -888,8 +885,7 @@ def test_encode_lob_read_response_thin_carries_content_then_a_success_oer() -> N
 def test_parse_lobops_request_classifies_create_temp() -> None:
     # CREATE_TEMP drives the temp-LOB write flow (#412): the Mirror recognises the
     # client's fixed block and the CLOB / BLOB type byte in it.
-    from seerdb.common.tns import encode_dictionary_lobops
-    from seerdb.server.query import parse_lobops_request
+    from seerdb.common.tns import encode_dictionary_lobops, parse_lobops_request
 
     for is_blob in (False, True):
         body = encode_dictionary_lobops(
@@ -904,9 +900,8 @@ def test_parse_lobops_request_extracts_the_write_locator_and_payload() -> None:
     # WRITE carries the ub2-prefixed locator and a 0x0E chunked payload; the Mirror
     # pulls both out to append to the temp LOB (#412). Cover both the single-chunk
     # (<= 0xFC) and the multi-chunk (0xFE-marked) payload forms.
-    from seerdb.common.tns import encode_dictionary_lobops
+    from seerdb.common.tns import encode_dictionary_lobops, parse_lobops_request
     from seerdb.common.tns_consts import TNS_LOB_OP_WRITE
-    from seerdb.server.query import parse_lobops_request
 
     locator = b'\x00seerdb-mirror-temp-lob-\x00\x00\x00\x00\x00'
     for payload in (b'short-payload', bytes(range(256)) * 200):  # 51200 B multi-chunk
@@ -928,8 +923,8 @@ def test_temp_lob_responses_round_trip_through_the_client_decoders() -> None:
     # The Mirror's CREATE_TEMP / WRITE replies must parse with the client's own
     # readers: CREATE_TEMP returns the minted locator in a bare RPA, the content-
     # free ack an RPA (skipped by its ub2 length) then a success OER (#412).
-    from seerdb.common.tns import decode_lobops_oer
-    from seerdb.server.query import (
+    from seerdb.common.tns import (
+        decode_lobops_oer,
         encode_create_temp_response,
         encode_lobops_ack,
         mint_temp_lob_locator,
@@ -978,6 +973,7 @@ def test_parse_lobops_request_classifies_the_state_opcodes() -> None:
     # FREE_TEMP releases a temp LOB (its own kind, so the session drops the
     # buffer); OPEN / CLOSE / TRIM / GET_CHUNK_SIZE are acknowledged; each carries
     # the locator so the reply can echo it (#417).
+    from seerdb.common.tns import parse_lobops_request
     from seerdb.common.tns_consts import (
         TNS_LOB_OP_CLOSE,
         TNS_LOB_OP_FREE_TEMP,
@@ -985,7 +981,6 @@ def test_parse_lobops_request_classifies_the_state_opcodes() -> None:
         TNS_LOB_OP_OPEN,
         TNS_LOB_OP_TRIM,
     )
-    from seerdb.server.query import parse_lobops_request
 
     locator = b'\x00seerdb-mirror-temp-lob-\x00\x00\x00\x00\x01'
     req = parse_lobops_request(_lobops_op_request(TNS_LOB_OP_FREE_TEMP, locator))
@@ -1007,8 +1002,7 @@ def test_parse_exec_decodes_a_temp_lob_bind_as_a_reference() -> None:
     # not a plain DALC — parse_exec keeps it as a TempLobRef for the session to
     # resolve (#412). Built with the client's own execute encoder.
     from seerdb.common.datatypes import TempLob
-    from seerdb.common.tns import encode_dictionary_exec
-    from seerdb.server.query import TempLobRef, parse_exec
+    from seerdb.common.tns import TempLobRef, encode_dictionary_exec, parse_exec
 
     locator = b'\x00seerdb-mirror-temp-lob-\x00\x00\x00\x00\x01'
     payload = encode_dictionary_exec(
@@ -1040,7 +1034,7 @@ def test_encode_dml_status_oci_carries_the_verb_and_rowcount() -> None:
     # Each DML verb has its own captured template (sqlplus reads the verb from the
     # statement-type fields), and the affected-row count is injected as a ub4-LE at
     # offset 43 of the body so sqlplus prints "N rows created/updated/deleted".
-    from seerdb.server.query import _OCI_DML_ROWCOUNT_OFF, encode_dml_status_oci
+    from seerdb.common.tns import _OCI_DML_ROWCOUNT_OFF, encode_dml_status_oci
 
     off = _OCI_DML_ROWCOUNT_OFF
     for keyword in ('INSERT', 'UPDATE', 'DELETE'):
@@ -1066,7 +1060,7 @@ def test_encode_ddl_status_oci_carries_the_command_type() -> None:
     # One frame carries the V$SQL command code at offset 57; sqlplus renders it as
     # "Table created." (1) / "Table dropped." (12) / "Index created." (9) etc. DDL
     # affects no rows — nothing but that field varies.
-    from seerdb.server.query import ddl_command_type, encode_ddl_status_oci
+    from seerdb.common.tns import ddl_command_type, encode_ddl_status_oci
 
     create = encode_ddl_status_oci(1)
     drop = encode_ddl_status_oci(12)
@@ -1091,7 +1085,7 @@ def test_encode_ddl_status_oci_carries_the_command_type() -> None:
 def test_read_chunked_sql_reassembles_the_chunks() -> None:
     # Long OCI SQL is chunked: 0xFE marker, then <ub1 len><chunk> runs. The reader
     # reassembles them up to the declared total (#265).
-    from seerdb.server.query import _read_chunked_sql
+    from seerdb.common.tns import _read_chunked_sql
 
     data = b'\xfe\x03abc\x02de\x00tail'
     assert _read_chunked_sql(data, 5) == b'abcde'
@@ -1100,7 +1094,7 @@ def test_read_chunked_sql_reassembles_the_chunks() -> None:
 def test_encode_error_oci_matches_the_captured_ora_error() -> None:
     # Byte-for-byte against a real 11g OCI error reply (ORA-00942): the OER frame
     # with call-status 0x05, the code at offset 12, and the message (#265, #350).
-    from seerdb.server.query import encode_error_oci
+    from seerdb.common.tns import encode_error_oci
 
     captured = bytes.fromhex(
         '040500000013000100000000ae030000000002000e0003000000000000000000'
@@ -1116,7 +1110,7 @@ def test_encode_error_oci_matches_the_captured_ora_error() -> None:
 def test_oci_dcb_tail_is_column_aware() -> None:
     # The DCB tail carries the column count; the client reads it to parse each
     # row, so it is load-bearing for a multi-column result (#265, #346).
-    from seerdb.server.query import (
+    from seerdb.common.tns import (
         _OCI_DCB_MARKER_OFF,
         _OCI_DCB_NUMCOLS_OFF,
         _oci_dcb_tail,
@@ -1130,7 +1124,7 @@ def test_oci_dcb_tail_is_column_aware() -> None:
 
 def test_encode_query_response_oci_signals_more_rows() -> None:
     # more=True flips the status byte sqlplus reads as "fetch for the rest" (#351).
-    from seerdb.server.query import (
+    from seerdb.common.tns import (
         _OCI_MORE_ROWS_OFF,
         _OCI_ROW_STATUS_LEN,
         encode_query_response_oci,
@@ -1147,7 +1141,7 @@ def test_encode_query_response_oci_signals_more_rows() -> None:
 
 def test_encode_fetch_batch_oci_carries_rows_and_terminator() -> None:
     # A fetch batch: RXH + one RXD per remaining row + the end-of-fetch OER (#351).
-    from seerdb.server.query import encode_fetch_batch_oci
+    from seerdb.common.tns import encode_fetch_batch_oci
 
     col = ColumnMeta(
         name=b'N', data_type=TNS_TYPE_NUMBER, data_length=2, max_size=0, scale=-127
@@ -1187,7 +1181,7 @@ def test_encode_out_bind_response_oci_matches_captured_11g_reply() -> None:
     # are instance-specific, zeroed). The encoder reproduces it byte-for-byte: a
     # ttc=0b01 body with the bind count at offset 4, one 0x10 define marker, an
     # RXD row (07 + NUMBER 7 DALC + a 2-byte return code) and the fixed tail (#347).
-    from seerdb.server.query import encode_out_bind_response_oci
+    from seerdb.common.tns import encode_out_bind_response_oci
 
     captured_n7 = bytes.fromhex(
         '0b0105cc010000000000010000000000000000000000000000000000e80700000000000000'
@@ -1205,8 +1199,8 @@ def test_encode_out_bind_response_oci_marshals_each_bind() -> None:
     # Bind count (offset 4) and one 0x10 define marker per OUT value; the RXD row
     # carries each value as a DALC followed by a 2-byte per-bind return code. A
     # VARCHAR OUT bind rides the same frame as a NUMBER one (#347).
+    from seerdb.common.tns import encode_out_bind_response_oci
     from seerdb.common.tns_consts import TTI_RXD
-    from seerdb.server.query import encode_out_bind_response_oci
 
     two = encode_out_bind_response_oci([7, 9])
     assert two[4] == 2  # bind count
@@ -1293,12 +1287,12 @@ def test_parse_exec_reads_scroll_request() -> None:
 
 
 def test_scroll_start_row_maps_orientation() -> None:
+    from seerdb.common.tns import scroll_start_row
     from seerdb.common.tns_consts import (
         TNS_FETCH_ORIENTATION_ABSOLUTE,
         TNS_FETCH_ORIENTATION_FIRST,
         TNS_FETCH_ORIENTATION_LAST,
     )
-    from seerdb.server.query import scroll_start_row
 
     assert scroll_start_row(TNS_FETCH_ORIENTATION_FIRST, 0, 10) == 1
     assert scroll_start_row(TNS_FETCH_ORIENTATION_LAST, 0, 10) == 10
@@ -1309,8 +1303,7 @@ def test_scroll_start_row_maps_orientation() -> None:
 
 
 def test_scroll_terminator_carries_rowcount_and_eof() -> None:
-    from seerdb.common.tns import decode_token_oer
-    from seerdb.server.query import _scroll_terminator
+    from seerdb.common.tns import _scroll_terminator, decode_token_oer
 
     _DECODE_FIELD_VERSION.set(FIELD_VERSION_11_2)
 
@@ -1338,13 +1331,13 @@ def test_scroll_terminator_carries_rowcount_and_eof() -> None:
 
 
 def test_scroll_response_bodies_frame_rows_and_describe() -> None:
-    from seerdb.common.tns import encode_rows
-    from seerdb.common.tns_consts import TTI_DCB, TTI_RXH
-    from seerdb.server.query import (
+    from seerdb.common.tns import (
         _scroll_terminator,
+        encode_rows,
         encode_scroll_open_response,
         encode_scroll_response,
     )
+    from seerdb.common.tns_consts import TTI_DCB, TTI_RXH
 
     col = ColumnMeta(name=b'ID', data_type=TNS_TYPE_NUMBER, data_length=22, max_size=22)
 
@@ -1509,8 +1502,8 @@ def test_decode_oac_fields_exposes_csfrm() -> None:
 
 
 def test_decode_bind_value_honours_national_csfrm() -> None:
+    from seerdb.common.tns import _decode_bind_value
     from seerdb.common.tns_consts import TNS_TYPE_VARCHAR
-    from seerdb.server.query import _decode_bind_value
 
     text = 'café—Ω—日本'
     raw = text.encode('utf-16-be')  # how an NCHAR / NVARCHAR bind arrives
@@ -1527,9 +1520,12 @@ def test_decode_bind_value_honours_national_csfrm() -> None:
 def test_encode_out_bind_response_thin_roundtrips_via_client() -> None:
     from seerdb.client.cursor import _assign_out_binds
     from seerdb.common.datatypes import NUMBER, STRING, Var
-    from seerdb.common.tns import decode_packet
+    from seerdb.common.tns import (
+        ScalarOutBind,
+        decode_packet,
+        encode_out_bind_response_thin,
+    )
     from seerdb.common.tns_consts import TNS_TYPE_NUMBER, TNS_TYPE_VARCHAR
-    from seerdb.server.query import ScalarOutBind, encode_out_bind_response_thin
 
     _DECODE_FIELD_VERSION.set(FIELD_VERSION_11_2)
     # callproc([21, out NUMBER, io VARCHAR]) — the Mirror marks every bind OUT and
@@ -1584,8 +1580,11 @@ def test_parse_exec_exposes_bind_meta() -> None:
 
 def test_encode_out_bind_response_thin_refcursor_entry() -> None:
     from seerdb.common.datatypes import CURSOR, Var
-    from seerdb.common.tns import decode_packet
-    from seerdb.server.query import RefCursorOutBind, encode_out_bind_response_thin
+    from seerdb.common.tns import (
+        RefCursorOutBind,
+        decode_packet,
+        encode_out_bind_response_thin,
+    )
 
     _DECODE_FIELD_VERSION.set(FIELD_VERSION_11_2)
     cols = [
@@ -1661,8 +1660,7 @@ def test_parse_exec_reads_batcherrors_flag() -> None:
 
 
 def test_peek_exec_cursor_reads_cursor_and_query_presence() -> None:
-    from seerdb.common.tns import encode_dictionary_exec
-    from seerdb.server.query import peek_exec_cursor
+    from seerdb.common.tns import encode_dictionary_exec, peek_exec_cursor
 
     def msg(cursor: int, query: str) -> bytes:
         return encode_dictionary_exec(
@@ -1731,8 +1729,8 @@ def test_parse_exec_cached_reexecute_decodes_binds_without_oacs() -> None:
 
 def test_ref_column_describe_and_value_roundtrip() -> None:
     from seerdb.common.dbobject import DbRef
+    from seerdb.common.tns import encode_describe, encode_rows
     from seerdb.common.tns_consts import TNS_TYPE_REF, TTI_STA
-    from seerdb.server.query import encode_describe, encode_rows
 
     # A REF column carries the referenced type's identity in the describe and the
     # opaque locator bytes in the row; the client rebuilds a typed DbRef.

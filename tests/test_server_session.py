@@ -16,10 +16,10 @@ import threading
 import pytest
 
 import seerdb
+from seerdb.common.tns import ColumnMeta
 from seerdb.common.tns_consts import TNS_TYPE_VARCHAR
 from seerdb.server.backend import Result, UnsupportedFeature, credential_lookup
 from seerdb.server.framing import PacketStream
-from seerdb.server.query import ColumnMeta
 from seerdb.server.session import handle_login, serve_session
 
 _CREDS = {'PYO': 'pyo123'}
@@ -363,13 +363,13 @@ def test_is_plsql_block_detects_begin_and_declare() -> None:
 
 
 def test_plsql_bind_vars_wraps_block_binds_with_type_and_size() -> None:
+    from seerdb.common.tns import ExecRequest
     from seerdb.common.tns_consts import (
         TNS_TYPE_NUMBER,
         TNS_TYPE_REFCURSOR,
         TNS_TYPE_VARCHAR,
     )
     from seerdb.server.backend import BindVar
-    from seerdb.server.query import ExecRequest
     from seerdb.server.session import _plsql_bind_vars
 
     block = ExecRequest(

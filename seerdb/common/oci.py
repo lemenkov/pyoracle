@@ -51,7 +51,7 @@ OCI_OER_ROW_KIND_LONG = 0x02
 # ("Table created.", "5 rows updated.") purely from this field. A thick-OCI
 # client reads the same codes back off a reply, so the vocabulary is shared; the
 # Mirror's SQL-verb → code mapping (which of these a given statement produces) is
-# response-generation policy and stays in seerdb/server/query.py. All confirmed
+# response-generation policy and lives with the rest of the codec in common/tns.py. All confirmed
 # live against sqlplus 11.2.
 OCI_CMD_CREATE_TABLE = 1
 OCI_CMD_INSERT = 2
