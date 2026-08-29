@@ -23,7 +23,7 @@ from seerdb.common.datatypes import (
     Var,
 )
 from seerdb.common.date import date
-from seerdb.common.exceptions import DataError
+from seerdb.common.exceptions import DataError, InterfaceError
 from seerdb.common.vector import (
     VECTOR_BIND_DESCRIPTOR,
     VECTOR_BIND_OAC,
@@ -1026,6 +1026,525 @@ def encode_fetch_response(
     """Assemble a ``TTI_FETCH`` continuation response: rows + terminator, with
     **no** describe (the column metadata was established on the execute)."""
     return encode_rows(rows, columns) + _terminator(cursor_id, more)
+
+
+from seerdb.common.tns_consts import (
+    TNS_BIND_DIR_OUTPUT,
+    TNS_FETCH_ORIENTATION_FIRST,
+    TNS_FETCH_ORIENTATION_LAST,
+    TNS_LOB_OP_CLOSE,
+    TNS_LOB_OP_FREE_TEMP,
+    TNS_LOB_OP_GET_CHUNK_SIZE,
+    TNS_LOB_OP_OPEN,
+    TNS_LOB_OP_TRIM,
+)
+
+# The 11g tail between the fixed header and the SQL: a [0, 0, 1] marker and a
+# 5-byte server-version slot (empty only when the client thinks it is talking to
+# 10g; an 11g-pinned Mirror always gets the 5-byte form).
+_MARKER_LEN = 3
+
+
+_SERVER_VERSION_SLOT = 5
+
+
+# The autocommit bit in the OALL8 options word: the client sets it (0x100) when
+# the connection is in autocommit mode, asking the server to commit after this
+# statement (set_opts encodes it as Param * 256 into the options word).
+_EXEC_OPTION_COMMIT = 0x100
+
+
+# The array-DML batcherrors bit (0x80000): the client sets it to ask the server
+# to apply the good rows and collect per-row failures rather than aborting (#18).
+_EXEC_OPTION_BATCH_ERRORS = 0x80000
+
+
+# A TTI_LOBOPS READ request carries the slice sqlplus wants: a 1-based source
+# offset and an amount, both counts (characters for a CLOB, bytes for a BLOB),
+# at these fixed ub8-LE offsets in the OCI request. sqlplus loops over them (in
+# SET LONGCHUNKSIZE-sized steps) until a read returns fewer than it asked for.
+_OCI_LOBOPS_OFFSET_OFF = 91
+
+
+_OCI_LOBOPS_AMOUNT_OFF = 269
+
+
+_OCI_LOB_CHUNK = 0xFF  # content bytes per 11g LOB_DATA chunk (matches live 11g)
+
+
+def _oci_lob_data(content: bytes) -> bytes:
+    # TTI_LOB content: token + single-byte-length chunks (the 11g form). Content up
+    # to one chunk is a plain <len><data>; larger content uses the 0xFE chunked
+    # form, a run of <ub1 len><bytes> terminated by a zero-length chunk.
+    if len(content) <= _OCI_LOB_CHUNK:
+        return bytes([TTI_LOB, len(content)]) + content
+    out = bytearray([TTI_LOB, 0xFE])
+    for start in range(0, len(content), _OCI_LOB_CHUNK):
+        chunk = content[start : start + _OCI_LOB_CHUNK]
+        out += bytes([len(chunk)]) + chunk
+    out += bytes([0])  # zero-length chunk terminates the run
+    return bytes(out)
+
+
+# --- Mirror thin request parsers + LOB / out-bind / scroll codec ---
+
+
+# The LOB-descriptor prefix a temp-LOB locator bind carries (shared with the
+# native VECTOR / JSON binds): 01 28 28 then a ub2 locator length + locator.
+_TEMP_LOB_BIND_PREFIX = b'\x01\x28\x28'
+
+
+def _read_bind_value(data_type: int, csfrm: int, after: bytes) -> tuple[object, bytes]:
+    # One RXD bind value and the bytes past it. A CLOB / BLOB bind is a temp-LOB
+    # descriptor (#412), not a plain DALC: 01 28 28 | ub2 loclen | locator, with
+    # no outer length — the server reads it by type (the descriptor's leading
+    # 0x01 would otherwise be mistaken for a DALC length). Everything else is the
+    # ordinary DALC value decoded by its OAC type and charset form.
+    if (
+        data_type in (TNS_TYPE_CLOB, TNS_TYPE_BLOB)
+        and after[:3] == _TEMP_LOB_BIND_PREFIX
+    ):
+        loclen = (after[3] << 8) | after[4]
+        locator = after[5 : 5 + loclen]
+        # Kept as a reference; the session swaps in the bytes streamed over
+        # TTI_LOBOPS WRITE (the backend never sees a locator, only the value).
+        return TempLobRef(locator, data_type == TNS_TYPE_BLOB), after[5 + loclen :]
+    raw, after = decode_dalc(after)
+    return _decode_bind_value(data_type, csfrm, raw), after
+
+
+def _decode_bind_value(data_type: int, csfrm: int, raw: bytes | list) -> object:
+    from seerdb.common.types import decode_value
+
+    # A bind value from the RXD, decoded by its OAC type. An empty/NULL DALC
+    # (reported as a list by decode_dalc) is None. csfrm selects the char
+    # encoding: 2 (national) decodes an NCHAR / NVARCHAR value as UTF-16BE, 1
+    # (ordinary) as AL32UTF8 — decode_value keys on it via _string_charset (#484).
+    if isinstance(raw, list) or not raw:
+        return None
+    raw = bytes(raw)
+    column = {
+        'data_type': data_type,
+        'data_length': 0,
+        'precision': 0,
+        'data_scale': 0,
+        'charset': AL32UTF8_CHARSET,
+        'csfrm': csfrm or _CSFRM_DB,
+    }
+    return decode_value(column, bytes(raw))
+
+
+def peek_exec_cursor(payload: bytes) -> tuple[int, bool]:
+    """The cursor id and whether SQL is present, read from an OALL8 header without
+    a full parse (#80/#486). A cached re-execute (cursor set, no SQL) carries no
+    OACs, so the session uses this to supply the remembered bind types to
+    :func:`parse_exec`. Returns ``(0, True)`` for anything that isn't an OALL8."""
+    if len(payload) < 3 or payload[0] != TTI_FUN or payload[1] != TTI_ALL8:
+        return (0, True)
+    rest = payload[3:]
+    _options, rest = decode_ub4(rest)
+    cursor, rest = decode_ub4(rest)
+    query_flag = rest[0] if rest else 0
+    return (cursor, bool(query_flag))
+
+
+def parse_exec(payload: bytes, bind_types: list | None = None) -> ExecRequest:
+    """Parse an OALL8 execute payload (the TTC message from ``read_packet``).
+
+    Extracts the SQL text and any bind values (positional, decoded by their OAC
+    type). Raises :class:`InterfaceError` if the message is not a TTI_ALL8
+    execute.
+
+    A cached-cursor re-execute (#80/#486) carries the bind values but **no** OAC
+    descriptors — the server is expected to remember the bind format from the
+    first parse. Pass the remembered ``bind_types`` (the ``(data_type, csfrm,
+    max_size)`` list from that first parse, exposed as ``ExecRequest.bind_types``)
+    so the RXD values decode without re-reading OACs.
+    """
+    if len(payload) < 3 or payload[0] != TTI_FUN or payload[1] != TTI_ALL8:
+        raise InterfaceError('not an OALL8 execute')
+
+    rest = payload[3:]  # skip TTI_FUN, TTI_ALL8, seq
+    options, rest = decode_ub4(rest)
+    autocommit = bool(options & _EXEC_OPTION_COMMIT)
+    batcherrors = bool(options & _EXEC_OPTION_BATCH_ERRORS)
+    cursor, rest = decode_ub4(rest)
+    query_flag, rest = rest[0], rest[1:]
+    query_len, rest = decode_ub4(rest)
+    _all8_flag, rest = rest[0], rest[1:]
+    all8_len, rest = decode_ub4(rest)
+    rest = rest[2:]  # two reserved bytes
+    _lmax, rest = decode_ub4(rest)
+    fetch, rest = decode_ub4(rest)
+    _max, rest = decode_ub4(rest)
+    _bind_flag, rest = rest[0], rest[1:]
+    bind_count, rest = decode_ub4(rest)
+    rest = rest[5:]  # five reserved bytes
+    _def_flag, rest = rest[0], rest[1:]
+    _def_len, rest = decode_ub4(rest)
+
+    rest = rest[_MARKER_LEN + _SERVER_VERSION_SLOT :]
+    sql = rest[:query_len].decode('utf-8') if query_flag else ''
+
+    # The al8i4 option array follows the SQL text; decode all `all8_len` sb4
+    # elements so `after` lands on the OAC/RXD tokens and the scroll request
+    # (al8i4[9] exec flags, [10] orientation, [11] position) is available. A
+    # scroll re-execute carries no binds, so this must run unconditionally, not
+    # only in the bind path (#181/#485).
+    after = rest[query_len:]
+    al8: list[int] = []
+    for _ in range(all8_len):
+        al8_elem, after = decode_ub4(after)
+        al8.append(al8_elem)
+    scrollable = len(al8) > 9 and bool(al8[9] & TNS_EXEC_FLAGS_SCROLLABLE)
+    scroll_orientation = al8[10] if len(al8) > 10 else 0
+    scroll_position = al8[11] if len(al8) > 11 else 0
+
+    binds: list = []
+    bind_rows: list = []
+    bind_meta: list = []
+    if bind_count > 0:
+        # After the al8 array (already consumed above): one OAC (type descriptor)
+        # per bind column, then one RXD row of values per array-DML iteration
+        # (an ordinary single execute is just one row). A cached re-execute omits
+        # the OACs, so `after` already sits on the first RXD — use the remembered
+        # bind types instead of decoding OACs (#80/#486).
+        if bind_types is not None:
+            types = list(bind_types)
+        else:
+            types = []
+            for _ in range(bind_count):
+                (
+                    data_type,
+                    maxlen,
+                    _scale,
+                    _charset,
+                    csfrm,
+                    after,
+                ) = decode_oac_fields(after)
+                if data_type in (TNS_TYPE_CLOB, TNS_TYPE_BLOB):
+                    # A thin CLOB / BLOB bind is the temp-LOB locator form (#412),
+                    # whose OAC appends a trailing oaccolid field the shared
+                    # decoder stops short of — swallow it so the next OAC aligns.
+                    after = after[1:]
+                # csfrm distinguishes an NCHAR / NVARCHAR bind (2 → UTF-16BE) from
+                # an ordinary char bind (1); maxlen is the OUT return-buffer size a
+                # PL/SQL OUT bind needs (#483/#484). Both ride alongside the type.
+                types.append((data_type, csfrm, maxlen))
+        # Each row is a TTI_RXD token followed by one value per bind column; loop
+        # until the rows run out (executemany sends N, a plain execute sends 1).
+        while after and after[0] == TTI_RXD:
+            after = after[1:]
+            row = []
+            for data_type, csfrm, _maxlen in types:
+                value, after = _read_bind_value(data_type, csfrm, after)
+                row.append(value)
+            bind_rows.append(row)
+        if bind_rows:
+            binds = bind_rows[0]
+        # Per-bind (tns_type, max_size) — what a PL/SQL block's OUT binds need to
+        # be registered on the backend with a correctly-sized buffer (#483).
+        bind_meta = [(data_type, maxlen) for data_type, _csfrm, maxlen in types]
+        bind_type_list = list(types)
+    else:
+        bind_type_list = []
+
+    return ExecRequest(
+        sql=sql,
+        cursor=cursor,
+        bind_count=bind_count,
+        fetch=fetch,
+        binds=binds,
+        bind_rows=bind_rows,
+        bind_meta=bind_meta,
+        bind_types=bind_type_list,
+        autocommit=autocommit,
+        batcherrors=batcherrors,
+        scrollable=scrollable,
+        scroll_orientation=scroll_orientation,
+        scroll_position=scroll_position,
+    )
+
+
+def _read_chunked_sql(data: bytes, total_len: int) -> bytes:
+    # `data` starts at the 0xFE chunk marker; collect <ub1 len><chunk> runs until
+    # the declared total is reached or a zero-length chunk terminates it.
+    out = bytearray()
+    i = 1  # skip the 0xFE marker
+    while len(out) < total_len and i < len(data):
+        chunk_len = data[i]
+        i += 1
+        if chunk_len == 0:
+            break
+        out += data[i : i + chunk_len]
+        i += chunk_len
+    return bytes(out[:total_len])
+
+
+def parse_lobops_read(body: bytes) -> tuple[int, int]:
+    """Extract ``(source_offset, amount)`` from an OCI TTI_LOBOPS READ (#405) —
+    both 1-based counts (characters for a CLOB, bytes for a BLOB). A malformed /
+    short request falls back to reading the whole LOB from the start."""
+    if len(body) < _OCI_LOBOPS_AMOUNT_OFF + 8:
+        return 1, 2**31
+    offset = int.from_bytes(
+        body[_OCI_LOBOPS_OFFSET_OFF : _OCI_LOBOPS_OFFSET_OFF + 8], 'little'
+    )
+    amount = int.from_bytes(
+        body[_OCI_LOBOPS_AMOUNT_OFF : _OCI_LOBOPS_AMOUNT_OFF + 8], 'little'
+    )
+    return max(offset, 1), amount
+
+
+def encode_lob_read_response_thin(content: bytes) -> bytes:
+    """The thin TTI_LOBOPS READ reply (#413): the whole LOB content as LOB_DATA
+    then a success OER (the client reads the content, skips to the OER, and stops).
+    ``content`` is UTF-16BE for a CLOB, raw for a BLOB."""
+    return _oci_lob_data(content) + _encode_oer(1, 0, 0, b'')
+
+
+def mint_temp_lob_locator(index: int, is_blob: bool) -> bytes:
+    """A unique opaque locator for the ``index``-th temp LOB of a session (#412).
+
+    The value is echoed back verbatim on WRITE and on the bind, so it only has to
+    be stable and distinct per temp LOB — the Mirror keys its buffer on it."""
+    return (
+        _TEMP_LOB_LOCATOR_PREFIX
+        + struct.pack('>I', index)
+        + (b'\x01' if is_blob else b'\x00')
+    )
+
+
+# CREATE_TEMP sends a fixed field block (no source locator), captured from the
+# thin client: it opens 01 01 28 and CLOB / BLOB differ only in the LOB type byte
+# (0x70 / 0x71). That opener is unmistakable against the WRITE / READ layout,
+# whose second field is a locator length (~40-86), never 0x01.
+_CREATE_TEMP_PREFIX = b'\x01\x01\x28'
+
+
+_TEMP_LOB_LOCATOR_PREFIX = b'\x00seerdb-mirror-temp-lob-'
+
+
+def _decode_lobops_chunked(data: bytes) -> bytes:
+    # The WRITE payload after the 0x0E marker: a single <ub1 len><bytes> when the
+    # data is <= 0xFC bytes, else a 0xFE marker then <sb4 len><chunk> repeated
+    # until a zero-length terminator (§14.2). Inverse of the client encoder.
+    if not data:
+        return b''
+    if data[0] != 0xFE:
+        return data[1 : 1 + data[0]]
+    rest = data[1:]
+    out = bytearray()
+    while rest:
+        chunk_len, rest = decode_ub4(rest)
+        if chunk_len == 0:
+            break
+        out += rest[:chunk_len]
+        rest = rest[chunk_len:]
+    return bytes(out)
+
+
+# The opcodes the Mirror acknowledges with a content-free RPA+OER but does not
+# yet act on (#417): OPEN / CLOSE bracket a write, TRIM truncates. Recognising
+# them (instead of mis-routing to the READ path) is what keeps a programmatic
+# client from desyncing. FREE_TEMP is handled apart (it drops the temp buffer).
+# The value-returning form of GET_CHUNK_SIZE / TRIM is a #421 follow-up.
+_LOBOPS_ACK_OPS = frozenset(
+    {TNS_LOB_OP_OPEN, TNS_LOB_OP_CLOSE, TNS_LOB_OP_TRIM, TNS_LOB_OP_GET_CHUNK_SIZE}
+)
+
+
+def _lobops_locator_after_operation(rest: bytes) -> bytes:
+    # From just past the operation code, walk the shared §14.1 tail to the
+    # ub2-length-prefixed locator (WRITE / FREE_TEMP / OPEN / CLOSE / TRIM /
+    # GET_CHUNK_SIZE all carry it identically; only what follows differs).
+    rest = rest[2:]  # scn-array pointer + length
+    _src_offset, rest = decode_ub4(rest)
+    _dest_offset, rest = decode_ub4(rest)
+    rest = rest[1:]  # amount pointer flag
+    rest = rest[6:]  # three reserved ub2 array-LOB slots
+    loc_len = struct.unpack('>H', rest[:2])[0]
+    return rest[2 : 2 + loc_len]
+
+
+def parse_lobops_request(body: bytes) -> LobOpsRequest:
+    """Classify a TTI_LOBOPS message (``body`` from ``read_packet``).
+
+    CREATE_TEMP / WRITE drive the temp-LOB write flow (#412); FREE_TEMP releases a
+    temp LOB and the OPEN / CLOSE / TRIM / GET_CHUNK_SIZE state ops are
+    acknowledged (#417); anything else (a READ of an emitted column locator) is
+    served by the #413 read path."""
+    payload = body[3:]  # skip TTI_FUN, TTI_LOBOPS, seq
+    if payload[:3] == _CREATE_TEMP_PREFIX:
+        # CLOB vs BLOB is the LOB type byte (0x70 / 0x71) in the fixed block.
+        return LobOpsRequest(kind='create_temp', is_blob=0x71 in payload)
+    # The common request layout (§14.1); walk the fields to the operation, then to
+    # the ub2-prefixed locator (and, for a WRITE, the 0x0E payload).
+    rest = payload[1:]  # source_pointer_flag
+    _loc_len_plus2, rest = decode_ub4(rest)
+    rest = rest[1:]  # dest_pointer_flag
+    _dest_length, rest = decode_ub4(rest)
+    _short_src_off, rest = decode_ub4(rest)
+    _short_dst_off, rest = decode_ub4(rest)
+    rest = rest[3:]  # charset / short-amount / null-lob pointer flags
+    operation, rest = decode_ub4(rest)
+    if operation == TNS_LOB_OP_WRITE:
+        rest = rest[2:]  # scn-array pointer + length
+        _src_offset, rest = decode_ub4(rest)
+        _dest_offset, rest = decode_ub4(rest)
+        rest = rest[1:]  # amount pointer flag
+        rest = rest[6:]  # three reserved ub2 array-LOB slots
+        loc_len = struct.unpack('>H', rest[:2])[0]
+        rest = rest[2:]
+        locator = rest[:loc_len]
+        rest = rest[loc_len:]
+        if rest and rest[0] == 0x0E:
+            rest = rest[1:]
+        return LobOpsRequest(
+            kind='write', locator=locator, payload=_decode_lobops_chunked(rest)
+        )
+    if operation == TNS_LOB_OP_FREE_TEMP:
+        return LobOpsRequest(
+            kind='free_temp', locator=_lobops_locator_after_operation(rest)
+        )
+    if operation in _LOBOPS_ACK_OPS:
+        return LobOpsRequest(kind='ack', locator=_lobops_locator_after_operation(rest))
+    # READ (the #413 column-LOB read) and anything else fall through to the read
+    # path — unchanged, so an unrecognised op behaves as before rather than worse.
+    return LobOpsRequest(kind='read')
+
+
+def encode_create_temp_response(locator: bytes) -> bytes:
+    """The CREATE_TEMP reply (#412): a bare TTI_RPA carrying the minted locator —
+    0x08, ub2 length, then the locator bytes (what the client reads back)."""
+    return bytes([TTI_RPA]) + struct.pack('>H', len(locator)) + locator
+
+
+def encode_lobops_ack(locator: bytes) -> bytes:
+    """A content-free TTI_LOBOPS reply: a TTI_RPA echoing the (ub2-prefixed)
+    locator then a success OER. The client skips the locator via its length prefix
+    and walks to the OER (``decode_lobops_oer``), so no real content is carried.
+    Used for WRITE (#412) and for the FREE_TEMP / OPEN / CLOSE / TRIM /
+    GET_CHUNK_SIZE state ops the Mirror acknowledges (#417)."""
+    rpa = bytes([TTI_RPA]) + struct.pack('>H', len(locator)) + locator
+    return rpa + _encode_oer(1, 0, 0, b'')
+
+
+def _encode_refcursor_out(bind: RefCursorOutBind) -> bytes:
+    # A REF CURSOR OUT value in the IOV's RXD (#483/#84), the inverse of the
+    # client's _read_refcursor_out: a 1-byte length, the inline describe body
+    # (the same per-column DCB metadata a describe carries), the nested cursor
+    # id, and a 1-byte present indicator.
+    return (
+        bytes([1])  # length prefix (skipped by the client)
+        + _encode_describe_body(bind.columns)
+        + encode_sb4(bind.cursor_id)
+        + bytes([1])  # per-value present indicator
+    )
+
+
+def encode_out_bind_response_thin(
+    out_binds: list[ScalarOutBind | RefCursorOutBind],
+) -> bytes:
+    """The thin reply returning a PL/SQL block's OUT bind values (#483): a
+    TTI_IOV vector + a TTI_RXD row of the values + a success OER.
+
+    ``out_binds`` is one entry per bind, in bind order — the Mirror can't tell IN
+    from OUT (the wire has no direction), so it marks them all OUT and returns
+    each value; the client keeps only the positions it bound as a ``Var``
+    (``_assign_out_binds``). A scalar rides as a DALC + ub4 return code; a REF
+    CURSOR rides as its inline describe + cursor id. The IOV header mirrors what
+    ``_read_iov`` decodes: a flag, the bind count (num_requests + num_iters*256),
+    the zeroed iter / buffer / bit-vector / rowid fields, then a direction byte
+    per bind."""
+    count = len(out_binds)
+    num_requests, num_iters = count % 256, count // 256
+    iov = (
+        bytes([TTI_IOV, 0])  # token + flag
+        + encode_sb4(num_requests)
+        + encode_sb4(num_iters)
+        + encode_sb4(1)  # num iters this time
+        + encode_sb4(0)  # uac buffer length
+        + encode_sb4(0)  # fast-fetch bit vector length
+        + encode_sb4(0)  # rowid length
+        + bytes([TNS_BIND_DIR_OUTPUT]) * count  # direction per bind
+    )
+    rxd = bytearray([TTI_RXD])
+    for bind in out_binds:
+        if isinstance(bind, RefCursorOutBind):
+            rxd += _encode_refcursor_out(bind)
+        else:
+            rxd += encode_value(bind.value, bind.tns_type) + encode_sb4(0)
+    return iov + bytes(rxd) + encode_status(0)
+
+
+def scroll_start_row(orientation: int, position: int, total: int) -> int:
+    """The 1-based absolute row a scroll re-execute positions on (#181/#485).
+
+    FIRST -> row 1, LAST -> the final row. For ABSOLUTE / RELATIVE / CURRENT /
+    NEXT the client resolves the request to an absolute target itself and sends
+    it as ``position`` (oracledb thin's ``_post_process_scroll``), so the Mirror
+    takes it verbatim. A result yields 0 (an off-the-end position) when empty.
+    """
+    if orientation == TNS_FETCH_ORIENTATION_FIRST:
+        return 1
+    if orientation == TNS_FETCH_ORIENTATION_LAST:
+        return total
+    return position
+
+
+def _scroll_terminator(cursor_id: int, server_rowcount: int, eof: bool) -> bytes:
+    # The OER that ends a scroll batch (#181/#485). It carries the cumulative
+    # row number (the absolute 1-based position of the last row delivered) in the
+    # rowcount field — the client reads it as ``server_rowcount`` to place its
+    # buffer window — and reports ORA-01403 once the batch reaches the end so the
+    # client stops pulling. The cursor id ties the opening execute's response to
+    # the kept-open scrollable cursor; a re-execute carries no id (0).
+    if eof:
+        return _encode_oer(0, 1403, server_rowcount, b'', cursor_id=cursor_id)
+    return _encode_oer(1, 0, server_rowcount, b'', cursor_id=cursor_id)
+
+
+def encode_scroll_open_response(
+    columns: list[ColumnMeta],
+    rows: list[tuple],
+    cursor_id: int,
+    *,
+    server_rowcount: int,
+    eof: bool,
+) -> bytes:
+    """A scrollable open reply (#181/#485): describe + the prefetched first batch
+    + a scroll terminator carrying the cursor id and cumulative row number. The
+    cursor stays open (the client drives later scroll re-executes against it)."""
+    return (
+        encode_describe(columns)
+        + encode_rows(rows, columns)
+        + _scroll_terminator(cursor_id, server_rowcount, eof)
+    )
+
+
+def encode_scroll_response(
+    columns: list[ColumnMeta],
+    rows: list[tuple],
+    *,
+    server_rowcount: int,
+    eof: bool,
+) -> bytes:
+    """A scroll re-execute reply (#181/#485): the repositioned batch + terminator,
+    with **no** describe (the metadata was established on the open). An empty
+    batch (scrolled off the end) is a bare ``ORA-01403`` terminator."""
+    return encode_rows(rows, columns) + _scroll_terminator(0, server_rowcount, eof)
+
+
+def parse_fetch(payload: bytes) -> FetchRequest:
+    """Parse a ``TTI_FETCH`` message: ``[TTI_FUN, TTI_FETCH, seq]`` + ub4 cursor
+    id + ub4 row count (the inverse of ``encode_dictionary_fetch``)."""
+    if len(payload) < 3 or payload[0] != TTI_FUN or payload[1] != TTI_FETCH:
+        raise InterfaceError('not a TTI_FETCH')
+    rest = payload[3:]  # skip TTI_FUN, TTI_FETCH, seq
+    cursor, rest = decode_ub4(rest)
+    fetch, _rest = decode_ub4(rest)
+    return FetchRequest(cursor=cursor, fetch=fetch)
 
 
 def decode_token_iov(Data: bytes, Acc: tuple) -> tuple:

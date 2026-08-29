@@ -23,12 +23,18 @@ observation listener that decodes and logs what a client puts on the wire.
 from __future__ import annotations
 
 from seerdb.common.tns import (
+    ColumnMeta,
+    ExecRequest,
+    FetchRequest,
+    encode_describe,
     encode_error,
     encode_fetch_response,
     encode_more_rows,
     encode_query_response,
     encode_rows,
     encode_status,
+    parse_exec,
+    parse_fetch,
 )
 from seerdb.server.backend import (
     Backend,
@@ -50,14 +56,6 @@ from seerdb.server.handshake import (
     parse_connect,
 )
 from seerdb.server.listener import Listener
-from seerdb.server.query import (
-    ColumnMeta,
-    ExecRequest,
-    FetchRequest,
-    encode_describe,
-    parse_exec,
-    parse_fetch,
-)
 from seerdb.server.service import BackendFactory, Server, serve
 from seerdb.server.session import handle_login, serve_session
 
