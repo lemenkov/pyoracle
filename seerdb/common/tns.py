@@ -3962,8 +3962,32 @@ _OCI_VERSION_TRAILER = bytes.fromhex('02200b09010000000300')
 _OCI_DCB_MARKER = bytes.fromhex('060122')  # a required 3-byte descriptor marker
 
 
-_OCI_EXEC_OER = bytes.fromhex(
-    '000000040100000013000101000000000000000000020000000300000000000000'
+# The compact 24-byte OCI OER token — the short form of _OCI_OER_ENVELOPE (§36)
+# used by the simple exec / fetch-terminator / no-row status replies. Same
+# logical fields as the envelope (status success at 1, sequence ub2 at 5,
+# error_code ub4 at 12, statement category at 18, V$SQL command type at 22),
+# packed into 24 bytes; offsets 7 and 8 are the constant 0x01.
+_OCI_OER_SHORT = bytes.fromhex('040100000000000101000000000000000000000000000000')
+
+
+def _oci_oer_short(
+    *, sequence: int, command_type: int, category: int, error_code: int = 0
+) -> bytes:
+    oer = bytearray(_OCI_OER_SHORT)
+    struct.pack_into('<H', oer, 5, sequence)
+    struct.pack_into('<I', oer, 12, error_code)
+    # FIXME: `category` at offset 18 (2 = row/value-producing, 1 = no-row) is the
+    # same murky field as the envelope's offset 18; carried from the capture.
+    oer[18] = category
+    oer[22] = command_type
+    return bytes(oer)
+
+
+# A SELECT execute's return status, wrapped in the exec-reply's zero padding.
+_OCI_EXEC_OER = (
+    b'\x00\x00\x00'
+    + _oci_oer_short(sequence=19, command_type=oci.OCI_CMD_SELECT, category=2)
+    + b'\x00' * 6
 )
 
 
@@ -4032,8 +4056,9 @@ _OCI_STATUS_FRAME_PREFIX = bytes.fromhex(
 )
 
 
-_OCI_FETCH_OER_HEADER = bytes.fromhex(
-    '0401000000140001010000007b0500000000020000000300'
+# The fetch-terminator OER: a compact OER carrying ORA-01403 (no data found).
+_OCI_FETCH_OER_HEADER = _oci_oer_short(
+    sequence=20, command_type=oci.OCI_CMD_SELECT, category=2, error_code=1403
 )
 
 
@@ -4060,12 +4085,14 @@ _OCI_LOB_DESCRIBE_STATUS = _OCI_STATUS_FRAME_PREFIX + encode_oci_oer(
 )
 
 
-# The reply for a statement that returns no rows — a PL/SQL block or DDL. Same
-# shape as the row-status trailer (:func:`_oci_row_status`), but its own sentinel
-# and OER (this one reports zero rows). Structure only; the SCN / counts a live
-# reply carries are zero (#265).
-_OCI_STATUS_OER = bytes.fromhex(
-    '000000040100000007000101000000000000000000010000002f00000000000000'
+# The reply for a statement that returns no rows — a PL/SQL block or DDL: a
+# compact PL/SQL-block OER (category 1 = no rows), wrapped in the exec-reply's
+# zero padding. Structure only; the SCN / counts a live reply carries are zero
+# (#265).
+_OCI_STATUS_OER = (
+    b'\x00\x00\x00'
+    + _oci_oer_short(sequence=7, command_type=oci.OCI_CMD_PLSQL, category=1)
+    + b'\x00' * 6
 )
 
 
