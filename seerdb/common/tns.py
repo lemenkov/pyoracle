@@ -3995,16 +3995,17 @@ def encode_oci_oer(
     ``row_kind`` marks a LOB/LONG-row status; ``error_pos`` and ``error_code``
     (ub4 LE at offset 12) carry an ORA error; ``command_type`` is the V$SQL
     command type at offset 22 (SELECT by default — the envelope's value).
-    ``sequence`` is the OER's per-context internal field, carried from the live
-    capture; its echo at offset 49 is ``sequence + 2`` for the row/return
-    statuses. The caller appends the ``ORA-…`` message DALC for the error case."""
+    ``sequence`` is the OER's per-context internal field (a ub2 LE at offset 5,
+    carried from the live capture); its echo (ub2 LE at offset 49) is
+    ``sequence + 2`` for the row/return statuses. The caller appends the
+    ``ORA-…`` message DALC for the error case."""
     oer = bytearray(_OCI_OER_ENVELOPE)
     oer[1] = status
-    oer[5] = sequence
+    struct.pack_into('<H', oer, 5, sequence)
     oer[8] = row_kind
     oer[20] = error_pos
     oer[22] = command_type
-    oer[49] = sequence + 2
+    struct.pack_into('<H', oer, 49, sequence + 2)
     struct.pack_into('<I', oer, 12, error_code)
     return bytes(oer)
 

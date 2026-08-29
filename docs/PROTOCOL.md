@@ -4115,7 +4115,7 @@ to real 11g, varying one thing at a time. Offsets are from the `0x04` token:
 |---|---|---|---|
 | `0` | 1 | token tag `0x04` (TTI_OER) | constant |
 | `1` | 1 | **status** — `0x01` success, `0x05` error | error vs success replies |
-| `5` | 1 | sequence (per-context internal field) | carried from capture |
+| `5..7` | ub2 LE | sequence (per-context internal field) | carried from capture; high byte `0` in every capture |
 | `7` | 1 | constant `0x01` | constant across captures |
 | `8` | 1 | **row kind** — `0` none, `1` LOB row, `2` LONG row | LOB vs LONG fetch status |
 | `8..12` | ub4 LE | **rowcount** (affected rows) | ins1→1, ins3→3, upd/del→4 |
@@ -4124,7 +4124,7 @@ to real 11g, varying one thing at a time. Offsets are from the `0x04` token:
 | `20` | 1 | error position | ORA-00942 → `0x0e` |
 | `22` | 1 | **V$SQL command type** | INSERT=2, UPDATE=6, DELETE=7, SELECT=3, CREATE TABLE=1, DROP TABLE=12, PL/SQL=47 |
 | `27..40` | | rowid of the touched row (DML only) | capture-specific; the Mirror reuses a fixed frame |
-| `49` | 1 | echo of the sequence field | `sequence + 2` for row/return statuses; `0` in the outbind reply |
+| `49..51` | ub2 LE | echo of the sequence field | `sequence + 2` for row/return statuses; `0` in the outbind reply |
 | `52` | 1 | constant `0x01` | constant across captures |
 | `56..58` | ub2 LE | constant `0x0136` (310) | constant across captures |
 | `72..76` | | fixed `20 f6 31 0a` instance marker | constant across captures |
