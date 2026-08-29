@@ -4293,9 +4293,9 @@ _END_OF_FETCH = (
 #   * the locator row is fetched (_oci_lob_rxh) and ends with a non-terminator
 #     "more" OER (encode_lob_fetch_rows_oci); a following fetch draws the 1403;
 #   * the READ reply's LOB_DATA uses 0xFF-byte chunks (matches 11g).
-# The row locator template and the READ reply tail below come from ONE live 11g
-# out-of-line CLOB capture (2000 chars → 4000 content bytes), so they echo the
-# same opaque locator and stay mutually consistent.
+# The row value and the READ reply tail below share ONE generated locator
+# (:func:`_oci_lob_locator`), so they stay mutually consistent. The reply shapes
+# were reduced from a live 11g out-of-line CLOB read (2000 chars → 4000 bytes).
 #
 # KNOWN LIMITATION (follow-up): the read returns the WHOLE LOB regardless of the
 # amount sqlplus requested in the TTI_LOBOPS call, so the client must read it in
@@ -4311,39 +4311,36 @@ _END_OF_FETCH = (
 # BLOB counts its raw bytes. The content never rides in the locator (out-of-line):
 # it returns in the READ reply's LOB_DATA. A ub4-LE num_bytes frames the locator
 # in the row; a NULL LOB is num_bytes 0, no READ.
-# CLOB and BLOB locators are the same shape but differ in the LOB **type** bytes
-# (offsets 9/11/14 in the row value) and the **charset** (offset 37: `03 69` =
-# 873 AL32UTF8 for a CLOB, `00 00` binary for a BLOB). The charset is load-bearing:
-# with the CLOB template, sqlplus decodes a BLOB's content as characters and
-# mangles it (raw `CA FE BA BE` → `??`). Both are captured from live 11g
-# out-of-line reads (a 2000-char CLOB / a 4000-byte BLOB), keyed by is_clob.
-# The body of the 105-byte persistent-LOB locator (offset 9 onward): the charset
-# id (offsets 31..33, `03 69` = AL32UTF8 for a CLOB, `00 00` for a BLOB), the
-# physical **LOB Locator ID** (object id, three segment DBAs at offsets 36/80/102,
-# an SCN at 52) and the content byte-size slot (offset 91, ub4 BE, patched per
-# value). Keyed by is_clob.
-# FIXME: the physical LID is the captured LOB's real address in the 11.2 DB. It is
-# opaque to the client (echoed on every LOB op), so the Mirror reuses it; minting
-# a synthetic LID would remove the captured bytes but needs live 11g validation
-# that sqlplus round-trips it (§14.6).
-_OCI_LOB_LOCATOR_BODY = {
-    True: bytes.fromhex(
-        '000000010000005643350001b58f0001b58e00020002036900020040b52300000000'
-        '0000000000000000005bfd6e00000000000000000000000000000000000000000001'
-        'b58e0040b519000000140500000000000fa00000000000020040b523'
-    ),
-    False: bytes.fromhex(
-        '0000000100000056471d0001b6490001b64800020002000000020040b58300000000'
-        '0000000000000000005d0d5e00000000000000000000000000000000000000000001'
-        'b6480040b579000000140500000000000fa00000000000020040b583'
-    ),
-}
+# The body of the 105-byte persistent-LOB locator (offset 9 onward). Its physical
+# **LOB Locator ID** — the object id, three segment DBAs and an SCN of a real LOB
+# in the source database — is opaque to the client, which only echoes the locator
+# on each LOB op. The Mirror has no such segment, so it emits a **synthetic LID of
+# zeros**: verified live against sqlplus 11.2 over the Mirror, which reads the CLOB
+# and BLOB content back correctly with the physical fields zeroed (drivers such as
+# go-ora only interpret the header flag bits, never the LID). With the physical
+# LID gone the CLOB and BLOB bodies are identical bar the charset id, so one
+# template serves both; the charset id (offset 31, ub2 BE) is generated. The
+# content byte-size slot (offset 91, ub4 BE) is patched per value.
+_OCI_LOB_LOCATOR_BODY = bytes.fromhex(
+    '00000001000000560000000100000001000000020002000000020000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000000001'
+    '000000000000000000140500000000000fa000000000000200000000'
+)
+
+_OCI_LOB_CHARSET_ID_OFF = 31 - 9  # charset id ub2 BE, within the body
+_OCI_LOB_CHARSET_ID_AL32UTF8 = 0x0369  # a CLOB's charset; a BLOB carries 0
 
 
 def _oci_lob_locator(is_clob: bool) -> bytes:
-    """The 105-byte persistent-LOB locator sqlplus binds and echoes (§14.6). The
-    9-byte header is generated from the LOB kind; the body (charset id + physical
-    LID) is carried per kind (see :data:`_OCI_LOB_LOCATOR_BODY`)."""
+    """The 105-byte persistent-LOB locator sqlplus binds and echoes (§14.6),
+    generated field by field. The 9-byte header carries the LOB kind (charset
+    form, flags, LOB type); the body is the shared structural template with the
+    charset id set for a CLOB and a zeroed synthetic LID."""
+    body = bytearray(_OCI_LOB_LOCATOR_BODY)
+    if is_clob:
+        struct.pack_into(
+            '>H', body, _OCI_LOB_CHARSET_ID_OFF, _OCI_LOB_CHARSET_ID_AL32UTF8
+        )
     header = bytes(
         [
             0x68,
@@ -4357,7 +4354,7 @@ def _oci_lob_locator(is_clob: bool) -> bytes:
             0x02 if is_clob else 0x01,  # LOB type
         ]
     )
-    return header + _OCI_LOB_LOCATOR_BODY[is_clob]
+    return header + bytes(body)
 
 
 # The RXD value for a LOB column: a ub4 LE + ub2 LE length (both 106) then the
