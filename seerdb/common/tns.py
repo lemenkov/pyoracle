@@ -5200,6 +5200,104 @@ def encode_long_value_thin(Value: object) -> bytes:
     return bytes(Out) + _THIN_LONG_TRAILER
 
 
+# The RXD value the Mirror mints for a thin LOB column: an opaque locator the
+# client echoes back over TTI_LOBOPS, the content following in the read reply.
+_THIN_LOB_LOCATOR = b'\x00seerdb-mirror-lob-locator-0000000000\x00'
+
+
+def encode_lob_locator_thin() -> bytes:
+    """The RXD value for a thin LOB column (#413): a minted opaque locator the
+    client echoes back over TTI_LOBOPS. The content follows in the read reply."""
+    return encode_sb4(len(_THIN_LOB_LOCATOR)) + _bytes_with_length(_THIN_LOB_LOCATOR)
+
+
+def _encode_temporal(Value: datetime.date, DataType: int) -> bytes:
+    # A temporal column has a fixed wire width fixed by its *type*, not by the
+    # particular value — so we dispatch on the column's data_type rather than
+    # letting encode_token_datetime() pick 7/11/13 bytes from the value. A plain
+    # date is promoted to midnight of that day.
+    Dt = (
+        Value
+        if isinstance(Value, datetime.datetime)
+        else datetime.datetime(Value.year, Value.month, Value.day)
+    )
+    if DataType == TNS_TYPE_TIMESTAMPTZ:
+        # 13 bytes: DATE prefix + nanoseconds + offset. Assume UTC if the value
+        # carries no zone (a naive value in a TZ column).
+        Aware = (
+            Dt if Dt.tzinfo is not None else Dt.replace(tzinfo=datetime.timezone.utc)
+        )
+        return encode_token_datetime(Aware)
+    if DataType == TNS_TYPE_TIMESTAMP:
+        # 11 bytes always: DATE prefix + 4 BE nanosecond bytes (zero when the
+        # value has no sub-second part), keeping the column a fixed width.
+        Naive = Dt.replace(tzinfo=None)
+        return _encode_date_prefix(Naive) + (Naive.microsecond * 1000).to_bytes(
+            4, 'big'
+        )
+    # Oracle DATE: date + time to the second, 7 bytes. Sub-second and zone parts
+    # are dropped (that is what DATE, as distinct from TIMESTAMP, means).
+    return _encode_date_prefix(Dt.replace(microsecond=0, tzinfo=None))
+
+
+def encode_value(Value: object, DataType: int) -> bytes:
+    """A scalar column value as its RXD wire form — the inverse of
+    :func:`~seerdb.common.types.decode_value`.
+
+    Most types are a DALC (1-byte length + data): NULL is the empty DALC, text is
+    UTF-8, a number is Oracle's base-100 NUMBER encoding, a datetime/date per the
+    column's temporal type. ROWID / UROWID / LONG carry their own framing (a NULL
+    still carries it, so they skip the bare-0x00 NULL path), and a LOB rides as a
+    minted locator with its content following over TTI_LOBOPS."""
+    from seerdb.common.exceptions import InterfaceError
+
+    if DataType == TNS_TYPE_RID:
+        return encode_rowid_value(Value)
+    if DataType == TNS_TYPE_UROWID:
+        return encode_urowid_value(Value)
+    if DataType in (TNS_TYPE_LONG, TNS_TYPE_LONGRAW):
+        return encode_long_value_thin(Value)
+    if Value is None:
+        return bytes([0])
+    if DataType == TNS_TYPE_REF:
+        # An object REF (#119/#494) rides as a plain DALC of its opaque locator
+        # bytes; the type identity travels in the describe, not the value.
+        return _bytes_with_length(getattr(Value, 'bytes', b''))
+    if DataType == TNS_TYPE_INTERVALDS and isinstance(Value, datetime.timedelta):
+        return _bytes_with_length(encode_token_interval_ds(Value))
+    if DataType == TNS_TYPE_INTERVALYM and isinstance(Value, IntervalYM):
+        return _bytes_with_length(encode_token_interval_ym(Value))
+    if DataType in (TNS_TYPE_CLOB, TNS_TYPE_BLOB):
+        # A thin CLOB / BLOB value is delivered as an opaque locator, not inline;
+        # the content follows over TTI_LOBOPS (#413).
+        return encode_lob_locator_thin()
+    if isinstance(Value, bool):
+        # No 11g BOOLEAN type; a bool is a NUMBER 0/1 (bool is an int subclass, so
+        # match it before the int branch would silently swallow it).
+        return _bytes_with_length(encode_token_num(int(Value)))
+    if isinstance(Value, (int, float)):
+        # A BINARY_FLOAT / BINARY_DOUBLE column carries the IEEE-754 value in
+        # Oracle's order-preserving form, not base-100 NUMBER.
+        if DataType == TNS_TYPE_BDOUBLE:
+            return _bytes_with_length(encode_token_binary_double(float(Value)))
+        if DataType == TNS_TYPE_BFLOAT:
+            return _bytes_with_length(encode_token_binary_float(float(Value)))
+        return _bytes_with_length(encode_token_num(Value))
+    if isinstance(Value, Decimal):
+        # NUMBER via the exact base-100 Decimal encoder: high-precision values
+        # (beyond float's ~15 significant digits) round-trip unchanged.
+        return _bytes_with_length(encode_token_decimal(Value))
+    if isinstance(Value, datetime.date):
+        # datetime is a date subclass, so this covers both; the column's data_type
+        # decides DATE / TIMESTAMP / TIMESTAMPTZ width.
+        return _bytes_with_length(_encode_temporal(Value, DataType))
+    if isinstance(Value, (str, bytes)):
+        # A VARCHAR2 / RAW column value: length-prefixed data, chunked when it
+        # exceeds the single-byte length, honouring the negotiated field version.
+        return encode_chr(Value)
+    raise InterfaceError(f'unsupported column value type: {type(Value).__name__}')
+
+
 def decode_dalc(Bytes: bytes) -> tuple[bytes | list, bytes]:
     # Data with Attached Length Code (PROTOCOL.md §12.2). 0x00 = empty,
     # 0xFF = null marker (no data follows), 0xFE = chunked, otherwise the

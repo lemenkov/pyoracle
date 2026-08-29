@@ -855,19 +855,19 @@ def test_oci_lob_contents_reports_type_and_wire_bytes() -> None:
 def test_encode_value_emits_a_thin_lob_locator_for_lob_columns() -> None:
     # A thin (oracledb/seerdb) client's LOB column carries a minted opaque locator
     # inline; the content follows over TTI_LOBOPS. NULL is a bare 0x00 (#413).
-    from seerdb.common.tns_consts import TNS_TYPE_BLOB, TNS_TYPE_CLOB
-    from seerdb.server.query import (
+    from seerdb.common.tns import (
         _THIN_LOB_LOCATOR,
-        _encode_value,
         encode_lob_locator_thin,
+        encode_value,
     )
+    from seerdb.common.tns_consts import TNS_TYPE_BLOB, TNS_TYPE_CLOB
 
     for lob_type in (TNS_TYPE_CLOB, TNS_TYPE_BLOB):
-        locator = _encode_value('anything', lob_type)
+        locator = encode_value('anything', lob_type)
         assert locator == encode_lob_locator_thin()
         # sb4 length prefix, then the length-led locator bytes the client keeps.
         assert _THIN_LOB_LOCATOR in locator
-        assert _encode_value(None, lob_type) == b'\x00'
+        assert encode_value(None, lob_type) == b'\x00'
 
 
 def test_encode_lob_read_response_thin_carries_content_then_a_success_oer() -> None:
@@ -1377,31 +1377,37 @@ def test_encode_value_dispatches_interval_columns() -> None:
     import datetime
 
     from seerdb.common.datatypes import IntervalYM
-    from seerdb.common.tns import encode_token_interval_ds, encode_token_interval_ym
+    from seerdb.common.tns import (
+        encode_token_interval_ds,
+        encode_token_interval_ym,
+        encode_value,
+    )
     from seerdb.common.tns_consts import TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM
-    from seerdb.server.query import _encode_value
 
     # The scalar-value encoder must route an INTERVAL column's Python value
     # (timedelta / IntervalYM) to the interval encoder, DALC-wrapped — otherwise
     # it falls through to the isinstance chain and raises, dropping the wire.
     td = datetime.timedelta(days=1, hours=2)
-    assert _encode_value(td, TNS_TYPE_INTERVALDS) == bytes(
+    assert encode_value(td, TNS_TYPE_INTERVALDS) == bytes(
         [11]
     ) + encode_token_interval_ds(td)
     iy = IntervalYM(1, 2)
-    assert _encode_value(iy, TNS_TYPE_INTERVALYM) == bytes(
+    assert encode_value(iy, TNS_TYPE_INTERVALYM) == bytes(
         [5]
     ) + encode_token_interval_ym(iy)
     # NULL stays the empty DALC regardless of type.
-    assert _encode_value(None, TNS_TYPE_INTERVALDS) == bytes([0])
+    assert encode_value(None, TNS_TYPE_INTERVALDS) == bytes([0])
 
 
 # --- LONG / LONG RAW inline column values (#484) -------------------------------
 
 
 def test_encode_long_value_thin_roundtrips_via_client_reader() -> None:
-    from seerdb.common.tns import _DECODE_FIELD_VERSION, _read_long_column
-    from seerdb.server.query import encode_long_value_thin
+    from seerdb.common.tns import (
+        _DECODE_FIELD_VERSION,
+        _read_long_column,
+        encode_long_value_thin,
+    )
 
     _DECODE_FIELD_VERSION.set(FIELD_VERSION_11_2)  # 11g single-byte chunk form
     for content in (
@@ -1423,18 +1429,18 @@ def test_encode_long_value_thin_roundtrips_via_client_reader() -> None:
 
 
 def test_encode_value_routes_long_columns_and_null_carries_trailers() -> None:
+    from seerdb.common.tns import encode_long_value_thin, encode_value
     from seerdb.common.tns_consts import TNS_TYPE_LONG, TNS_TYPE_LONGRAW
-    from seerdb.server.query import _encode_value, encode_long_value_thin
 
     # A LONG / LONG RAW column must use the inline streaming form, not a DALC —
     # and a NULL LONG must still carry the two trailing indicators (the bare-0x00
     # DALC NULL would desync the client's _read_long_column).
-    assert _encode_value('abc', TNS_TYPE_LONG) == encode_long_value_thin('abc')
-    assert _encode_value(b'\x00\x01', TNS_TYPE_LONGRAW) == encode_long_value_thin(
+    assert encode_value('abc', TNS_TYPE_LONG) == encode_long_value_thin('abc')
+    assert encode_value(b'\x00\x01', TNS_TYPE_LONGRAW) == encode_long_value_thin(
         b'\x00\x01'
     )
-    assert _encode_value(None, TNS_TYPE_LONG) == encode_long_value_thin(None)
-    assert _encode_value(None, TNS_TYPE_LONG) != bytes([0])  # not the DALC NULL
+    assert encode_value(None, TNS_TYPE_LONG) == encode_long_value_thin(None)
+    assert encode_value(None, TNS_TYPE_LONG) != bytes([0])  # not the DALC NULL
 
 
 # --- ROWID / UROWID column values (#484) ---------------------------------------
@@ -1449,8 +1455,7 @@ def test_string_to_rowid_inverts_rowid_to_string() -> None:
 
 
 def test_encode_rowid_value_roundtrips_via_client_reader() -> None:
-    from seerdb.common.tns import _read_rowid_column
-    from seerdb.server.query import encode_rowid_value
+    from seerdb.common.tns import _read_rowid_column, encode_rowid_value
 
     for text in ('AAAAB0AABAAAAOhAAA', 'AAAK6JAAEAAACGPAAA'):
         val, rest = _read_rowid_column(encode_rowid_value(text) + b'\xaa')
@@ -1463,8 +1468,7 @@ def test_encode_rowid_value_roundtrips_via_client_reader() -> None:
 
 
 def test_encode_urowid_value_roundtrips_via_client_reader() -> None:
-    from seerdb.common.tns import _read_urowid_column
-    from seerdb.server.query import encode_urowid_value
+    from seerdb.common.tns import _read_urowid_column, encode_urowid_value
 
     for text in ('*BAEALAMCwQL+', '*BAEAGYMCwQL+'):
         val, rest = _read_urowid_column(encode_urowid_value(text) + b'\xaa')
@@ -1476,17 +1480,17 @@ def test_encode_urowid_value_roundtrips_via_client_reader() -> None:
 
 
 def test_encode_value_routes_rowid_columns() -> None:
-    from seerdb.common.tns_consts import TNS_TYPE_RID, TNS_TYPE_UROWID
-    from seerdb.server.query import (
-        _encode_value,
+    from seerdb.common.tns import (
         encode_rowid_value,
         encode_urowid_value,
+        encode_value,
     )
+    from seerdb.common.tns_consts import TNS_TYPE_RID, TNS_TYPE_UROWID
 
-    assert _encode_value('AAAAB0AABAAAAOhAAA', TNS_TYPE_RID) == encode_rowid_value(
+    assert encode_value('AAAAB0AABAAAAOhAAA', TNS_TYPE_RID) == encode_rowid_value(
         'AAAAB0AABAAAAOhAAA'
     )
-    assert _encode_value('*BAEALAMCwQL+', TNS_TYPE_UROWID) == encode_urowid_value(
+    assert encode_value('*BAEALAMCwQL+', TNS_TYPE_UROWID) == encode_urowid_value(
         '*BAEALAMCwQL+'
     )
 
