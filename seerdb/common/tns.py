@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 from functools import reduce
 
 from seerdb.client.cursor import cursor
+from seerdb.common import oci
 from seerdb.common.crypto import encrypt_password, o5logon
 from seerdb.common.datatypes import (
     JSON,
@@ -1545,6 +1546,98 @@ def parse_fetch(payload: bytes) -> FetchRequest:
     cursor, rest = decode_ub4(rest)
     fetch, _rest = decode_ub4(rest)
     return FetchRequest(cursor=cursor, fetch=fetch)
+
+
+# --- Mirror deadbeef/OCI: version-call, piggyback, re-exec, fetch terminator ---
+
+
+# The classic sqlplus / thick-OCI (deadbeef) OALL8 marshals the same execute
+# fields as the thin form above, but with the OCI conventions: an 8-byte
+# 0xFE indicator (0xFFFFFFFFFFFFFFFE LE) stands in for each thin 0x01 pointer
+# flag, and lengths are fixed 4-byte little-endian ub4s. For a single statement
+# with no binds the header up to the SQL is a **fixed 195-byte preamble** (the
+# token sequence is constant — verified across captured executes of different
+# SQL lengths), so the SQL, a ub1-length-prefixed text field, sits at a fixed
+# offset (#265). The preamble also carries 3x the SQL byte length as a ub4 (the
+# worst-case max-byte buffer for the DB charset), which cross-checks the parse.
+_OCI_ALL8_IND_OFF = 11  # the SQL pointer indicator; absent on a re-execute
+
+
+def is_reexecute_oci(payload: bytes) -> bool:
+    """True if an OCI OALL8 is a re-execute of an already-described cursor — it
+    carries no SQL (the SQL pointer at offset 11 is absent). sqlplus issues one
+    to pull a LONG / LONG RAW row after setting up its streaming define, so the
+    Mirror answers it with the row it parked on the describe (#407)."""
+    return (
+        len(payload) > _OCI_ALL8_IND_OFF + 8
+        and payload[0] == TTI_FUN
+        and payload[1] == TTI_ALL8
+        and payload[_OCI_ALL8_IND_OFF : _OCI_ALL8_IND_OFF + 8] != oci.OCI_INDICATOR
+    )
+
+
+def is_version_call_oci(payload: bytes) -> bool:
+    """True if this is the sqlplus / thick-OCI post-login version request."""
+    return payload[:2] == oci.OCI_VERSION_CALL
+
+
+def encode_version_banner_oci(banner: bytes) -> bytes:
+    """Build the sqlplus / thick-OCI version reply — the server's banner (#265).
+
+    Returns the TTC payload from the TTI_RPA token: the banner as a DALC value
+    (ub2 count + single ub1 chunk, since the banner is well under 254 bytes) and
+    the fixed packed-version trailer.
+    """
+    return (
+        bytes([TTI_RPA])
+        + len(banner).to_bytes(2, 'little')
+        + bytes([len(banner)])
+        + banner
+        + b'\x00'  # DALC terminator
+        + _OCI_VERSION_TRAILER
+    )
+
+
+# The classic sqlplus / thick-OCI OALL8 arrives wrapped in an OCCA (close-cursors)
+# piggyback for every statement past the first: `0x11 0x69`, then a fixed prefix
+# (seq, an 8-byte indicator, the ub4 cursor count, and one 8-byte entry per closed
+# cursor), then the real TTI_FUN execute. Strip it so the execute can be parsed.
+_OCI_PIGGYBACK = b'\x11\x69'
+
+
+_OCI_PIGGYBACK_FIXED = 3 + 8 + 4  # 0x11 0x69 seq | indicator | ub4 count
+
+
+def strip_oci_piggyback(body: bytes) -> bytes:
+    """Return the OALL8 execute inside an OCCA piggyback, or ``body`` unchanged."""
+    if body[:2] != _OCI_PIGGYBACK:
+        return body
+    count = int.from_bytes(body[11:15], 'little')
+    return body[_OCI_PIGGYBACK_FIXED + count * 8 :]
+
+
+_OCI_END_OF_FETCH_MSG = b'ORA-01403: no data found\n'
+
+
+_OCI_FETCH_CONST_OFF = 73
+
+
+# The OCI end-of-fetch terminator sqlplus reads after the execute's rows: an OER
+# carrying ORA-01403 ("no data found"), which the client treats as "cursor
+# drained" rather than an error (the thin path keeps the same thing as its
+# captured _END_OF_FETCH). Reduced to structure by live bisection (#265): a
+# 24-byte OER header (call status + the 1403 code) and one instance constant,
+# the rest zero, then the message computed.
+_OCI_FETCH_OER_LEN = 136
+
+
+def encode_fetch_terminator_oci() -> bytes:
+    """The sqlplus / thick-OCI end-of-fetch reply (ORA-01403 = cursor drained)."""
+    oer = bytearray(_OCI_FETCH_OER_LEN)
+    oer[0 : len(_OCI_FETCH_OER_HEADER)] = _OCI_FETCH_OER_HEADER
+    off = _OCI_FETCH_CONST_OFF
+    oer[off : off + len(_OCI_FETCH_CONST)] = _OCI_FETCH_CONST
+    return bytes(oer) + bytes([len(_OCI_END_OF_FETCH_MSG)]) + _OCI_END_OF_FETCH_MSG
 
 
 def decode_token_iov(Data: bytes, Acc: tuple) -> tuple:

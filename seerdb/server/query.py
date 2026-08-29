@@ -26,8 +26,6 @@ from seerdb.common.tns import (
     _OCI_DDL_STATUS_FRAME,
     _OCI_DML_STATUS_FRAME,
     _OCI_EXEC_OER,
-    _OCI_FETCH_CONST,
-    _OCI_FETCH_OER_HEADER,
     _OCI_LOB_DESCRIBE_STATUS,
     _OCI_LOB_DESCRIBE_TAIL,
     _OCI_LOB_READ_TAIL,
@@ -37,7 +35,6 @@ from seerdb.common.tns import (
     _OCI_OUTBIND_HEADER,
     _OCI_OUTBIND_TAIL,
     _OCI_STATUS_OER,
-    _OCI_VERSION_TRAILER,
     decode_dalc,
     encode_value,
 )
@@ -132,6 +129,9 @@ from seerdb.common.tns import (
     encode_error as encode_error,
 )
 from seerdb.common.tns import (
+    encode_fetch_terminator_oci as encode_fetch_terminator_oci,
+)
+from seerdb.common.tns import (
     encode_lob_read_response_thin as encode_lob_read_response_thin,
 )
 from seerdb.common.tns import (
@@ -156,6 +156,15 @@ from seerdb.common.tns import (
     encode_status as encode_status,
 )
 from seerdb.common.tns import (
+    encode_version_banner_oci as encode_version_banner_oci,
+)
+from seerdb.common.tns import (
+    is_reexecute_oci as is_reexecute_oci,
+)
+from seerdb.common.tns import (
+    is_version_call_oci as is_version_call_oci,
+)
+from seerdb.common.tns import (
     mint_temp_lob_locator as mint_temp_lob_locator,
 )
 from seerdb.common.tns import (
@@ -176,6 +185,9 @@ from seerdb.common.tns import (
 from seerdb.common.tns import (
     scroll_start_row as scroll_start_row,
 )
+from seerdb.common.tns import (
+    strip_oci_piggyback as strip_oci_piggyback,
+)
 from seerdb.common.tns_consts import (
     TNS_TYPE_BDOUBLE,
     TNS_TYPE_BFLOAT,
@@ -193,20 +205,9 @@ from seerdb.common.tns_consts import (
     TTI_ALL8,
     TTI_DCB,
     TTI_FUN,
-    TTI_RPA,
     TTI_RXD,
 )
 
-# The classic sqlplus / thick-OCI (deadbeef) OALL8 marshals the same execute
-# fields as the thin form above, but with the OCI conventions: an 8-byte
-# 0xFE indicator (0xFFFFFFFFFFFFFFFE LE) stands in for each thin 0x01 pointer
-# flag, and lengths are fixed 4-byte little-endian ub4s. For a single statement
-# with no binds the header up to the SQL is a **fixed 195-byte preamble** (the
-# token sequence is constant — verified across captured executes of different
-# SQL lengths), so the SQL, a ub1-length-prefixed text field, sits at a fixed
-# offset (#265). The preamble also carries 3x the SQL byte length as a ub4 (the
-# worst-case max-byte buffer for the DB charset), which cross-checks the parse.
-_OCI_ALL8_IND_OFF = 11  # the SQL pointer indicator; absent on a re-execute
 _OCI_ALL8_CURSOR_OFF = 7  # ub4 LE; 0 = a new statement
 _OCI_ALL8_SQLLEN3_OFF = 19  # ub4 LE = 3 x the SQL byte length
 _OCI_ALL8_SQL_OFF = 196  # SQL text; the ub1 length prefix is the byte before it
@@ -269,19 +270,6 @@ def parse_exec_oci(payload: bytes) -> ExecRequest:
         fetch=0,
         binds=binds,
         bind_rows=[binds] if binds else [],
-    )
-
-
-def is_reexecute_oci(payload: bytes) -> bool:
-    """True if an OCI OALL8 is a re-execute of an already-described cursor — it
-    carries no SQL (the SQL pointer at offset 11 is absent). sqlplus issues one
-    to pull a LONG / LONG RAW row after setting up its streaming define, so the
-    Mirror answers it with the row it parked on the describe (#407)."""
-    return (
-        len(payload) > _OCI_ALL8_IND_OFF + 8
-        and payload[0] == TTI_FUN
-        and payload[1] == TTI_ALL8
-        and payload[_OCI_ALL8_IND_OFF : _OCI_ALL8_IND_OFF + 8] != oci.OCI_INDICATOR
     )
 
 
@@ -348,28 +336,6 @@ def _oci_ub4(n: int) -> bytes:
 # sqlplus prints "Connected to: <banner>". The reply is a TTI_RPA carrying the
 # banner as a DALC (ub2 count + ub1-chunked string) plus a fixed 10-byte packed
 # version/flags trailer (#265).
-
-
-def is_version_call_oci(payload: bytes) -> bool:
-    """True if this is the sqlplus / thick-OCI post-login version request."""
-    return payload[:2] == oci.OCI_VERSION_CALL
-
-
-def encode_version_banner_oci(banner: bytes) -> bytes:
-    """Build the sqlplus / thick-OCI version reply — the server's banner (#265).
-
-    Returns the TTC payload from the TTI_RPA token: the banner as a DALC value
-    (ub2 count + single ub1 chunk, since the banner is well under 254 bytes) and
-    the fixed packed-version trailer.
-    """
-    return (
-        bytes([TTI_RPA])
-        + len(banner).to_bytes(2, 'little')
-        + bytes([len(banner)])
-        + banner
-        + b'\x00'  # DALC terminator
-        + _OCI_VERSION_TRAILER
-    )
 
 
 # The classic sqlplus / thick-OCI (deadbeef) describe (TTI_DCB) marshals the
@@ -598,26 +564,6 @@ def encode_long_fetch_row_oci(columns: list[ColumnMeta], row: tuple) -> bytes:
     return bytes(out) + status
 
 
-# The OCI end-of-fetch terminator sqlplus reads after the execute's rows: an OER
-# carrying ORA-01403 ("no data found"), which the client treats as "cursor
-# drained" rather than an error (the thin path keeps the same thing as its
-# captured _END_OF_FETCH). Reduced to structure by live bisection (#265): a
-# 24-byte OER header (call status + the 1403 code) and one instance constant,
-# the rest zero, then the message computed.
-_OCI_FETCH_OER_LEN = 136
-_OCI_FETCH_CONST_OFF = 73
-_OCI_END_OF_FETCH_MSG = b'ORA-01403: no data found\n'
-
-
-def encode_fetch_terminator_oci() -> bytes:
-    """The sqlplus / thick-OCI end-of-fetch reply (ORA-01403 = cursor drained)."""
-    oer = bytearray(_OCI_FETCH_OER_LEN)
-    oer[0 : len(_OCI_FETCH_OER_HEADER)] = _OCI_FETCH_OER_HEADER
-    off = _OCI_FETCH_CONST_OFF
-    oer[off : off + len(_OCI_FETCH_CONST)] = _OCI_FETCH_CONST
-    return bytes(oer) + bytes([len(_OCI_END_OF_FETCH_MSG)]) + _OCI_END_OF_FETCH_MSG
-
-
 def encode_error_oci(ora_code: int, message: str) -> bytes:
     """OCI error reply — an OER carrying ORA-<code>: <message>, connection intact.
 
@@ -800,22 +746,6 @@ def encode_commit_status_oci() -> bytes:
 def encode_logoff_status_oci() -> bytes:
     """OCI reply acknowledging a client logoff (TTI_LOGOFF)."""
     return _OCI_LOGOFF_STATUS
-
-
-# The classic sqlplus / thick-OCI OALL8 arrives wrapped in an OCCA (close-cursors)
-# piggyback for every statement past the first: `0x11 0x69`, then a fixed prefix
-# (seq, an 8-byte indicator, the ub4 cursor count, and one 8-byte entry per closed
-# cursor), then the real TTI_FUN execute. Strip it so the execute can be parsed.
-_OCI_PIGGYBACK = b'\x11\x69'
-_OCI_PIGGYBACK_FIXED = 3 + 8 + 4  # 0x11 0x69 seq | indicator | ub4 count
-
-
-def strip_oci_piggyback(body: bytes) -> bytes:
-    """Return the OALL8 execute inside an OCCA piggyback, or ``body`` unchanged."""
-    if body[:2] != _OCI_PIGGYBACK:
-        return body
-    count = int.from_bytes(body[11:15], 'little')
-    return body[_OCI_PIGGYBACK_FIXED + count * 8 :]
 
 
 def _decode_describe_oci(payload: bytes) -> list[dict]:
