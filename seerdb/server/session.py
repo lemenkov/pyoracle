@@ -24,7 +24,15 @@ from typing import NoReturn
 
 from seerdb.common.crypto import decrypt_password
 from seerdb.common.exceptions import InterfaceError
-from seerdb.common.tns import decode_ub4
+from seerdb.common.tns import (
+    ColumnMeta,
+    ExecRequest,
+    FetchRequest,
+    RefCursorOutBind,
+    ScalarOutBind,
+    TempLobRef,
+    decode_ub4,
+)
 from seerdb.common.tns_consts import (
     TNS_CONNECT,
     TNS_DATA,
@@ -80,12 +88,6 @@ from seerdb.server.handshake import (
     pro_is_sqlplus,
 )
 from seerdb.server.query import (
-    ColumnMeta,
-    ExecRequest,
-    FetchRequest,
-    RefCursorOutBind,
-    ScalarOutBind,
-    TempLobRef,
     ddl_command_type,
     encode_batch_errors_status,
     encode_commit_status_oci,
