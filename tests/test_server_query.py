@@ -1373,60 +1373,25 @@ def test_scroll_response_bodies_frame_rows_and_describe() -> None:
 # --- INTERVAL DAY TO SECOND / YEAR TO MONTH (#484) -----------------------------
 
 
-def test_encode_interval_ds_roundtrips_via_client_decoder() -> None:
-    import datetime
-
-    from seerdb.common.types import decode_interval_ds
-    from seerdb.server.query import encode_interval_ds
-
-    for td in (
-        datetime.timedelta(days=5, hours=3, minutes=2, seconds=1, microseconds=123456),
-        datetime.timedelta(
-            days=-5, hours=-3, minutes=-2, seconds=-1, microseconds=-123456
-        ),
-        datetime.timedelta(0),
-        datetime.timedelta(
-            days=999999999, hours=23, minutes=59, seconds=59, microseconds=999999
-        ),
-    ):
-        assert decode_interval_ds(encode_interval_ds(td)) == td
-
-
-def test_encode_interval_ym_roundtrips_via_client_decoder() -> None:
-    from seerdb.common.datatypes import IntervalYM
-    from seerdb.common.types import decode_interval_ym
-    from seerdb.server.query import encode_interval_ym
-
-    for iy in (
-        IntervalYM(2, 3),
-        IntervalYM(-2, -3),
-        IntervalYM(0, 0),
-        IntervalYM(999999999, 11),
-    ):
-        got = decode_interval_ym(encode_interval_ym(iy))
-        assert (got.years, got.months) == (iy.years, iy.months)
-
-
 def test_encode_value_dispatches_interval_columns() -> None:
     import datetime
 
     from seerdb.common.datatypes import IntervalYM
+    from seerdb.common.tns import encode_token_interval_ds, encode_token_interval_ym
     from seerdb.common.tns_consts import TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM
-    from seerdb.server.query import (
-        _encode_value,
-        encode_interval_ds,
-        encode_interval_ym,
-    )
+    from seerdb.server.query import _encode_value
 
     # The scalar-value encoder must route an INTERVAL column's Python value
     # (timedelta / IntervalYM) to the interval encoder, DALC-wrapped — otherwise
     # it falls through to the isinstance chain and raises, dropping the wire.
     td = datetime.timedelta(days=1, hours=2)
-    assert _encode_value(td, TNS_TYPE_INTERVALDS) == bytes([11]) + encode_interval_ds(
-        td
-    )
+    assert _encode_value(td, TNS_TYPE_INTERVALDS) == bytes(
+        [11]
+    ) + encode_token_interval_ds(td)
     iy = IntervalYM(1, 2)
-    assert _encode_value(iy, TNS_TYPE_INTERVALYM) == bytes([5]) + encode_interval_ym(iy)
+    assert _encode_value(iy, TNS_TYPE_INTERVALYM) == bytes(
+        [5]
+    ) + encode_token_interval_ym(iy)
     # NULL stays the empty DALC regardless of type.
     assert _encode_value(None, TNS_TYPE_INTERVALDS) == bytes([0])
 
