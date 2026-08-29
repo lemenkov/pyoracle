@@ -1640,6 +1640,25 @@ def encode_fetch_terminator_oci() -> bytes:
     return bytes(oer) + bytes([len(_OCI_END_OF_FETCH_MSG)]) + _OCI_END_OF_FETCH_MSG
 
 
+# Packed server version returned in the auth result (AUTH_VERSION_NO), from a
+# real XE 11.2 auth result: 186647040 = 11.2.0.x. On the wire all these values
+# (session key, salt, proof) are uppercase-hex ASCII.
+_SERVER_VERSION_NO = 186647040
+
+
+def encode_token_result(
+    *, session_id: int = 0, version_no: int = _SERVER_VERSION_NO
+) -> bytes:
+    """The token-auth result RPA — version + session id, and no server proof
+    (token auth has no ConnKey, so there is nothing for the client to validate)."""
+    return (
+        bytes([TTI_RPA])
+        + encode_sb4(2)
+        + encode_kv(b'AUTH_VERSION_NO', str(version_no).encode('ascii'), 1)
+        + encode_kv(b'AUTH_SESSION_ID', str(session_id).encode('ascii'), 1)
+    )
+
+
 def decode_token_iov(Data: bytes, Acc: tuple) -> tuple:
     # I/O vector for an anonymous PL/SQL block's binds (section 6.5). Layout
     # cross-referenced with python-oracledb's _process_io_vector and verified
