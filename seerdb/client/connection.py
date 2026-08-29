@@ -62,6 +62,7 @@ from seerdb.common.tns_consts import (
     FIELD_VERSION_9_2,
     FIELD_VERSION_10_2,
     FIELD_VERSION_12_1,
+    FIELD_VERSION_12_2,
     FIELD_VERSION_21_1,
     FIELD_VERSION_23_1,
     FIELD_VERSION_23_4,
@@ -2069,7 +2070,7 @@ class OracleConnect(_ConnectionLogic):
                         # Chunked content. 12c+ prefixes each chunk with a ub4
                         # length (terminated by a zero-length chunk); 11g uses a
                         # single length byte per chunk.
-                        if self.field_version >= 8:  # FIELD_VERSION_12_2
+                        if self.field_version >= FIELD_VERSION_12_2:
                             while Pos < len(Packet):
                                 NLen = Packet[Pos]
                                 Pos += 1
