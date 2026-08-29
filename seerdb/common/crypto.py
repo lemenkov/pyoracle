@@ -66,9 +66,12 @@ _PBKDF2_COUNT_MAX = 100_000_000
 # verifier type are independent signals, which is exactly why inferring the
 # scheme from salt presence alone misfires for a pre-SHA-2 account on a modern
 # server (#311). All three confirmed live on the wire:
-_VFR_LEGACY = 2361  # 0x0939 — 10g / legacy DES  (confirmed: live 10.2.0.5, empty salt)
-_VFR_11G_SHA1 = 6949  # 0x1B25 — 11g SHA-1  (confirmed: real 11g capture + live XE 11.2)
-_VFR_12C_SHA2 = 18453  # 0x4815 — 12c SHA-2  (confirmed: live 23ai/26ai)
+# The three password-verifier types, confirmed live on the wire. Public: they are
+# the shared vocabulary the server side (the Mirror, seerdb/server/auth.py) uses
+# to stamp AUTH_VFR_DATA, not just a client-side decode detail.
+VFR_LEGACY = 2361  # 0x0939 — 10g / legacy DES  (confirmed: live 10.2.0.5, empty salt)
+VFR_11G_SHA1 = 6949  # 0x1B25 — 11g SHA-1  (confirmed: real 11g capture + live XE 11.2)
+VFR_12C_SHA2 = 18453  # 0x4815 — 12c SHA-2  (confirmed: live 23ai/26ai)
 
 
 def _clamp_count(value: int | None, minimum: int) -> int:
@@ -101,7 +104,7 @@ def o5logon(
     # SHA-1, use the SHA-1 key material with the modern PBKDF2 session-key
     # derivation (192-bit). Only this pre-SHA-2-on-modern case is special-cased;
     # every other path falls through unchanged.
-    if VerifierType == _VFR_11G_SHA1 and Salt is not None and DerivedSalt is not None:
+    if VerifierType == VFR_11G_SHA1 and Salt is not None and DerivedSalt is not None:
         KeySess = sha1(Password + Salt).digest() + bytes(4)
         return o5logon0(Sess, KeySess, DerivedSalt, None, Password, 192, SderCount)
     # 10g (#47): an AES session key but NO verifier salt — the account has only

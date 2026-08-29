@@ -11,6 +11,7 @@ Mirror stays wire-identical to the real server (a wrong byte segfaults sqlplus).
 import struct
 import unittest
 
+from seerdb.common.crypto import VFR_11G_SHA1
 from seerdb.server import auth
 
 # --- captured golden packets (live XE 11.2, #265) ---
@@ -86,7 +87,7 @@ class TestOciAuthGeneration(unittest.TestCase):
     def test_challenge_regenerates_golden(self):
         pairs = [
             (b'AUTH_SESSKEY', _CAP_SESSKEY.encode(), 0),
-            (b'AUTH_VFR_DATA', _CAP_SALT.encode(), auth._VERIFIER_TYPE_11G),
+            (b'AUTH_VFR_DATA', _CAP_SALT.encode(), VFR_11G_SHA1),
             (b'AUTH_GLOBALLY_UNIQUE_DBID\x00', auth._AUTH_GLOBALLY_UNIQUE_DBID, 0),
         ]
         self.assertEqual(
