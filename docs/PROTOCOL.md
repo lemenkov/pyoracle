@@ -4113,38 +4113,58 @@ to real 11g, varying one thing at a time. Offsets are from the `0x04` token:
 
 | offset | width | field | evidence |
 |---|---|---|---|
+| `0` | 1 | token tag `0x04` (TTI_OER) | constant |
 | `1` | 1 | **status** — `0x01` success, `0x05` error | error vs success replies |
-| `5` | 1 | sequence (per-context internal field; echoed at `49` as `+2`) | carried from capture |
+| `5..7` | ub2 LE | sequence (per-context internal field) | carried from capture; high byte `0` in every capture |
+| `7` | 1 | constant `0x01` | constant across captures |
 | `8` | 1 | **row kind** — `0` none, `1` LOB row, `2` LONG row | LOB vs LONG fetch status |
 | `8..12` | ub4 LE | **rowcount** (affected rows) | ins1→1, ins3→3, upd/del→4 |
 | `12..16` | ub4 LE | **error code** | ORA-00942 → `ae 03`, ORA-01403 → `7b 05` |
+| `18` | 1 | statement category — `2` query / PL-SQL, `1` DDL | DDL vs describe/outbind frames |
 | `20` | 1 | error position | ORA-00942 → `0x0e` |
-| `22` | 1 | **V$SQL command type** | INSERT=2, UPDATE=6, DELETE=7, SELECT=3, CREATE TABLE=1, DROP TABLE=12 |
+| `22` | 1 | **V$SQL command type** | INSERT=2, UPDATE=6, DELETE=7, SELECT=3, CREATE TABLE=1, DROP TABLE=12, PL/SQL=47 |
 | `27..40` | | rowid of the touched row (DML only) | capture-specific; the Mirror reuses a fixed frame |
-| `48..52` | | fixed `20 f6 31 0a` instance marker | constant across captures |
+| `49..51` | ub2 LE | echo of the sequence field | `sequence + 2` for row/return statuses; `0` in the outbind reply |
+| `52` | 1 | constant `0x01` | constant across captures |
+| `56..58` | ub2 LE | TTC protocol version — `0x0136` (310) | in the TNS-version family (the Mirror pins 11g at 314 = `0x013a`); carried from the 11.2 capture |
+| `72..76` | | fixed `20 f6 31 0a` instance marker | constant across captures |
 
 The rest of the 136-byte frame (SCN region, cursor/rowid slots) is a fixed
 zero-filled envelope. For an error, the `ORA-NNNNN: <message>` DALC follows the
-136-byte OER.
+136-byte OER. Offsets `18` and `49` carry values whose exact semantics are not
+yet pinned down (a non-zero position under a *success* describe status, an echo
+that is `+2` for some replies and `0` for others); they are carried from the
+captures byte-for-byte. Offset `56` looks like the session's negotiated TTC
+protocol version (`310` sits in the same `0x013x` family as the versions the
+handshake negotiates); the Mirror emits the captured value rather than its own,
+which sqlplus accepts — whether the field must track the live negotiation is
+not confirmed.
 
 ### 36.2 Generation
 
-`encode_oci_oer(status, *, sequence, row_kind, error_pos, error_code)` builds the
-token from the named fields over the shared envelope; the error / LONG-row /
-LOB-row status trailers are three calls to it, pinned byte-for-byte to the live
-captures by `tests/test_oci_oer_generation.py`.
+`encode_oci_oer(status, *, sequence, row_kind, error_pos, error_code,
+command_type)` builds the token from the named fields over the shared
+`_OCI_OER_ENVELOPE`. Everything that ends in this OER is generated from it, not
+stored: the error / LONG-row / LOB-row **return-status trailers** (three direct
+calls, pinned by `tests/test_oci_oer_generation.py`) and the **describe / DDL /
+outbind execute-status frames**, each a short capture-specific preamble
+(`08 06 …`, plus a cursor id for DDL) followed by an OER from this builder. The
+describe and outbind frames set the murky `18`/`49` fields themselves.
 
-### 36.3 DML / DDL execute-status
+### 36.3 DML execute-status
 
-The DML and DDL execute-status replies wrap the OER in a larger status frame
-(SCN region, cursor/rowid trailer, the `0x20f6310a` marker). sqlplus renders the
-completion message from just **two** fields of that frame: the V$SQL **command
-type** at body offset `57` (INSERT=2, UPDATE=6, DELETE=7, CREATE TABLE=1, DROP
-TABLE=12) and — for DML — the affected-row **count** (ub4 LE) at offset `43`.
-`encode_dml_status_oci` / `encode_ddl_status_oci` generate from those two fields
-over one shared frame each (a live 11g INSERT / CREATE reply with the
-capture-order session counters at offsets `3/75/186` and `3/11` zeroed, since the
-Mirror has no per-statement sequence). **Verified live** against sqlplus over the
+The DML execute-status reply wraps the OER in a larger status frame (SCN region,
+cursor/rowid trailer, the `0x20f6310a` marker) that — unlike the describe / DDL /
+outbind statuses — carries live row/rowid data, so it is kept as one captured
+frame rather than built on the envelope. sqlplus renders the completion message
+from just **two** fields of it: the V$SQL **command type** at body offset `57`
+(= the embedded OER's offset `22`) and the affected-row **count** (ub4 LE) at
+offset `43`. `encode_dml_status_oci` generates from those two fields over the one
+shared frame (a live 11g INSERT reply with the capture-order session counters at
+offsets `3/75/186` zeroed, since the Mirror has no per-statement sequence). The
+DDL completion message (`Table created.` and the rest) comes from the same
+command-type field, now set on an envelope-built OER by `encode_ddl_status_oci`.
+**Verified live** against sqlplus over the
 Mirror: `insert/update/delete` print the right verb and count, `create/drop`
 print `Table created.` / `Table dropped.` (and, via the resolved command type, `Index created.`, `Table altered.`, `View dropped.`, `Table truncated.`, and the rest).
 
