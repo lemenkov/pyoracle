@@ -45,3 +45,31 @@ OCI_OER_STATUS_ERROR = 0x05
 OCI_OER_ROW_KIND_NONE = 0x00
 OCI_OER_ROW_KIND_LOB = 0x01
 OCI_OER_ROW_KIND_LONG = 0x02
+
+# V$SQL COMMAND_TYPE codes — the statement-kind vocabulary Oracle reports in an
+# execute reply's OER (PROTOCOL.md §36); sqlplus renders its completion line
+# ("Table created.", "5 rows updated.") purely from this field. A thick-OCI
+# client reads the same codes back off a reply, so the vocabulary is shared; the
+# Mirror's SQL-verb → code mapping (which of these a given statement produces) is
+# response-generation policy and stays in seerdb/server/query.py. All confirmed
+# live against sqlplus 11.2.
+OCI_CMD_CREATE_TABLE = 1
+OCI_CMD_INSERT = 2
+OCI_CMD_UPDATE = 6
+OCI_CMD_DELETE = 7
+OCI_CMD_CREATE_INDEX = 9
+OCI_CMD_DROP_INDEX = 10
+OCI_CMD_ALTER_INDEX = 11
+OCI_CMD_DROP_TABLE = 12
+OCI_CMD_CREATE_SEQUENCE = 13
+OCI_CMD_ALTER_SEQUENCE = 14
+OCI_CMD_ALTER_TABLE = 15
+OCI_CMD_DROP_SEQUENCE = 16
+OCI_CMD_GRANT = 17
+OCI_CMD_REVOKE = 18
+OCI_CMD_CREATE_SYNONYM = 19
+OCI_CMD_DROP_SYNONYM = 20
+OCI_CMD_CREATE_VIEW = 21
+OCI_CMD_DROP_VIEW = 22
+OCI_CMD_LOCK_TABLE = 26
+OCI_CMD_TRUNCATE_TABLE = 85
