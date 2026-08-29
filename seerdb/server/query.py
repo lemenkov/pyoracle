@@ -11,31 +11,19 @@ encoders that answer it are layered on separately.
 
 from __future__ import annotations
 
-import base64
-import datetime
 import re
 import struct
 from dataclasses import dataclass, field
-from decimal import Decimal
 
 from seerdb.common import oci
-from seerdb.common.datatypes import IntervalYM
 from seerdb.common.exceptions import DataError, InterfaceError
 from seerdb.common.tns import (
     _bytes_with_length,
-    _encode_date_prefix,
     decode_dalc,
     decode_oac_fields,
     decode_ub4,
-    encode_chr,
     encode_sb4,
-    encode_token_binary_double,
-    encode_token_binary_float,
-    encode_token_datetime,
-    encode_token_decimal,
-    encode_token_interval_ds,
-    encode_token_interval_ym,
-    encode_token_num,
+    encode_value,
 )
 from seerdb.common.tns_consts import (
     AL32UTF8_CHARSET,
@@ -55,17 +43,12 @@ from seerdb.common.tns_consts import (
     TNS_TYPE_CHAR,
     TNS_TYPE_CLOB,
     TNS_TYPE_DATE,
-    TNS_TYPE_INTERVALDS,
-    TNS_TYPE_INTERVALYM,
     TNS_TYPE_LONG,
     TNS_TYPE_LONGRAW,
     TNS_TYPE_NUMBER,
     TNS_TYPE_RAW,
-    TNS_TYPE_REF,
-    TNS_TYPE_RID,
     TNS_TYPE_TIMESTAMP,
     TNS_TYPE_TIMESTAMPTZ,
-    TNS_TYPE_UROWID,
     TNS_TYPE_VARCHAR,
     TTI_ALL8,
     TTI_DCB,
@@ -78,7 +61,7 @@ from seerdb.common.tns_consts import (
     TTI_RXD,
     TTI_RXH,
 )
-from seerdb.common.types import decode_value, string_to_rowid
+from seerdb.common.types import decode_value
 
 # AL32UTF8 (AL32UTF8_CHARSET) — what seerdb advertises and what an 11g DUAL
 # column reports. _CSFRM_DB is the database charset form (not the national one).
@@ -550,7 +533,6 @@ def _oci_ub4(n: int) -> bytes:
 # sqlplus prints "Connected to: <banner>". The reply is a TTI_RPA carrying the
 # banner as a DALC (ub2 count + ub1-chunked string) plus a fixed 10-byte packed
 # version/flags trailer (#265).
-# The version-call marker (0x11 0x6b) is the shared oci.OCI_VERSION_CALL.
 # Packed 11.2 version + capability flags, as the real XE 11.2 listener returns.
 _OCI_VERSION_TRAILER = bytes.fromhex('02200b09010000000300')
 
@@ -779,7 +761,6 @@ _OCI_OER_ENVELOPE = bytes.fromhex(
     '0000000020f6310a0000000000000000000000000000000000000000000000000000'
     '00000000000000000000000000000000000000000000000000000000000000000000'
 )
-# The OER status + row-kind codes are the shared oci.OCI_OER_* constants.
 
 
 def encode_oci_oer(
@@ -1081,7 +1062,7 @@ def encode_out_bind_response_oci(values: list[object]) -> bytes:
     header[_OCI_OUTBIND_BINDCOUNT_OFF] = len(values)
     define_markers = bytes([_OCI_OUTBIND_DEFINE_MARKER]) * len(values)
     rxd = bytes([TTI_RXD]) + b''.join(
-        _encode_value(v, 0) + _OCI_OUTBIND_RETCODE for v in values
+        encode_value(v, 0) + _OCI_OUTBIND_RETCODE for v in values
     )
     return bytes(header) + define_markers + rxd + _OCI_OUTBIND_TAIL
 
@@ -1181,174 +1162,6 @@ def encode_describe(columns: list[ColumnMeta]) -> bytes:
     """
     preamble = _bytes_with_length(b'')  # cursor uuid / timestamp (skipped)
     return bytes([TTI_DCB]) + preamble + _encode_describe_body(columns)
-
-
-def _encode_temporal(value: datetime.date, data_type: int) -> bytes:
-    # A temporal column has a fixed wire width fixed by its *type*, not by the
-    # particular value — so we dispatch on the column's data_type rather than
-    # letting encode_token_datetime() pick 7/11/13 bytes from the value. A plain
-    # date is promoted to midnight of that day.
-    dt = (
-        value
-        if isinstance(value, datetime.datetime)
-        else datetime.datetime(value.year, value.month, value.day)
-    )
-    if data_type == TNS_TYPE_TIMESTAMPTZ:
-        # 13 bytes: DATE prefix + nanoseconds + offset. Assume UTC if the value
-        # carries no zone (a naive value in a TZ column).
-        aware = (
-            dt if dt.tzinfo is not None else dt.replace(tzinfo=datetime.timezone.utc)
-        )
-        return encode_token_datetime(aware)
-    if data_type == TNS_TYPE_TIMESTAMP:
-        # 11 bytes always: DATE prefix + 4 BE nanosecond bytes (zero when the
-        # value has no sub-second part), keeping the column a fixed width.
-        naive = dt.replace(tzinfo=None)
-        return _encode_date_prefix(naive) + (naive.microsecond * 1000).to_bytes(
-            4, 'big'
-        )
-    # Oracle DATE: date + time to the second, 7 bytes. Sub-second and zone parts
-    # are dropped (that is what DATE, as distinct from TIMESTAMP, means).
-    return _encode_date_prefix(dt.replace(microsecond=0, tzinfo=None))
-
-
-# A thin (seerdb / oracledb-thin) LONG / LONG RAW value streams inline in the RXD
-# — no LOB locator — as a value followed by TWO trailing ub4 indicators (actual /
-# return lengths, 0 / 0 for an ordinary value), the inverse of the client's
-# _read_long_column. The value is the 0xFE-chunked form (a run of <ub1 len><bytes>
-# terminated by a zero-length chunk) even when it fits one chunk; a NULL is a bare
-# 0x00 marker. This is the thin analogue of encode_long_value_oci, which frames
-# the sqlplus / OCI dialect (a single ub4 trailer) instead. Character LONG content
-# is UTF-8, LONG RAW is raw bytes. Chunks stay ≤ 253 bytes (the single-byte DALC
-# boundary used throughout this codec).
-_THIN_LONG_CHUNK = 253
-_THIN_LONG_TRAILER = encode_sb4(0) + encode_sb4(0)  # two ub4 indicators (0, 0)
-
-
-def encode_long_value_thin(value: object) -> bytes:
-    """The thin RXD value for a LONG / LONG RAW column (#484): the content
-    streamed inline as 0xFE-chunked bytes (NULL is a bare 0x00), followed by the
-    two zero trailing indicators the client's ``_read_long_column`` consumes."""
-    if value is None:
-        return bytes([0]) + _THIN_LONG_TRAILER
-    if isinstance(value, str):
-        content = value.encode('utf-8')
-    elif isinstance(value, (bytes, bytearray)):
-        content = bytes(value)
-    else:
-        content = str(value).encode('utf-8')
-    out = bytearray([0xFE])
-    for start in range(0, len(content), _THIN_LONG_CHUNK):
-        chunk = content[start : start + _THIN_LONG_CHUNK]
-        out += bytes([len(chunk)]) + chunk
-    out += bytes([0])  # zero-length chunk terminates the run
-    return bytes(out) + _THIN_LONG_TRAILER
-
-
-# A physical ROWID (RID, type 11) reserves this many bytes on the wire — the
-# present indicator the client reads to tell a real rowid (any non-zero,
-# non-0xff value) from a NULL. The client only tests for 0 / 0xff, so the exact
-# size is cosmetic; 10 is a physical rowid's structured length.
-_RID_PRESENT = 0x0A
-# The leading type tag of a logical/universal rowid (UROWID, type 208). The
-# client strips it before rendering, so any value round-trips; 0x01 is the
-# logical-rowid tag.
-_UROWID_TAG = 0x01
-
-
-def encode_rowid_value(value: object) -> bytes:
-    """The physical ROWID (RID, type 11) RXD value (#484), the inverse of the
-    client's ``_read_rowid_column``: a present-indicator byte then the structured
-    rowid — data object / relative file / an unused field / block / slot, each a
-    ub4. ``value`` is the 18-char extended ROWID string; ``None`` (or empty) is a
-    bare ``0x00`` indicator (NULL)."""
-    if value is None or value == '':
-        return bytes([0])
-    obj, file, block, slot = string_to_rowid(str(value))
-    return (
-        bytes([_RID_PRESENT])
-        + encode_sb4(obj)
-        + encode_sb4(file)
-        + encode_sb4(0)  # unused field between file and block
-        + encode_sb4(block)
-        + encode_sb4(slot)
-    )
-
-
-def encode_urowid_value(value: object) -> bytes:
-    """The UROWID (logical/universal rowid, type 208) RXD value (#484), the
-    inverse of the client's ``_read_urowid_column``: a ub4 byte count, a 1-byte
-    length echo, then the rowid bytes (a leading type tag + the body). ``value``
-    is the ``*``-prefixed base64 string; ``None`` (or empty) is a zero count
-    (NULL)."""
-    if value is None or value == '':
-        return encode_sb4(0)
-    body = str(value)[1:]  # drop the leading '*'
-    raw = base64.b64decode(body + '=' * (-len(body) % 4))
-    payload = bytes([_UROWID_TAG]) + raw
-    return encode_sb4(len(payload)) + bytes([len(payload)]) + payload
-
-
-def _encode_value(value: object, data_type: int) -> bytes:
-    # A scalar column value as a DALC (1-byte length + data). NULL is the empty
-    # DALC; text is UTF-8; a number is Oracle's base-100 NUMBER encoding; a
-    # datetime/date is encoded per the column's temporal type.
-    if data_type == TNS_TYPE_RID:
-        # ROWID is a structured physical rowid, not a DALC; a NULL still carries
-        # its present indicator, so it can't take the bare-0x00 NULL path below.
-        return encode_rowid_value(value)
-    if data_type == TNS_TYPE_UROWID:
-        # UROWID is a length-framed rowid blob, not a DALC (same reasoning).
-        return encode_urowid_value(value)
-    if data_type in (TNS_TYPE_LONG, TNS_TYPE_LONGRAW):
-        # LONG columns are NOT a DALC: they stream inline with their own framing
-        # and trailing indicators, and a NULL LONG still carries them (so it can't
-        # take the bare-0x00 NULL path below).
-        return encode_long_value_thin(value)
-    if value is None:
-        return bytes([0])
-    if data_type == TNS_TYPE_REF:
-        # An object REF (#119/#494) rides as a plain DALC of its opaque locator
-        # bytes; the type identity travels in the describe, not the value.
-        return _bytes_with_length(getattr(value, 'bytes', b''))
-    if data_type == TNS_TYPE_INTERVALDS and isinstance(value, datetime.timedelta):
-        return _bytes_with_length(encode_token_interval_ds(value))
-    if data_type == TNS_TYPE_INTERVALYM and isinstance(value, IntervalYM):
-        return _bytes_with_length(encode_token_interval_ym(value))
-    if data_type in _OCI_LOB_TYPES:
-        # A thin (seerdb / oracledb-thin) CLOB / BLOB value is delivered as an
-        # opaque locator, not inline; the content follows over TTI_LOBOPS. The
-        # session registers each cell's content row-major and answers the reads
-        # in order (#413).
-        return encode_lob_locator_thin()
-    if isinstance(value, bool):
-        # No 11g BOOLEAN type; a bool is a NUMBER 0/1 (bool is an int subclass,
-        # so match it before the int branch would silently swallow it).
-        return _bytes_with_length(encode_token_num(int(value)))
-    if isinstance(value, (int, float)):
-        # A BINARY_FLOAT / BINARY_DOUBLE column carries the IEEE-754 value in
-        # Oracle's order-preserving form, not base-100 NUMBER.
-        if data_type == TNS_TYPE_BDOUBLE:
-            return _bytes_with_length(encode_token_binary_double(float(value)))
-        if data_type == TNS_TYPE_BFLOAT:
-            return _bytes_with_length(encode_token_binary_float(float(value)))
-        return _bytes_with_length(encode_token_num(value))
-    if isinstance(value, Decimal):
-        # NUMBER via the exact base-100 Decimal encoder: high-precision values
-        # (beyond float's ~15 significant digits) round-trip unchanged.
-        return _bytes_with_length(encode_token_decimal(value))
-    if isinstance(value, datetime.date):
-        # datetime is a date subclass, so this one branch covers both; the
-        # column's data_type decides DATE / TIMESTAMP / TIMESTAMPTZ width.
-        return _bytes_with_length(_encode_temporal(value, data_type))
-    if isinstance(value, (str, bytes)):
-        # A VARCHAR2 / RAW column value: length-prefixed data, chunked when it
-        # exceeds the single-byte length. encode_chr honours the negotiated field
-        # version (11g single-byte chunks vs 12c+ ub4 chunks) — _bytes_with_length
-        # always writes the 12c+ form, which an 11g client mis-decodes past 253
-        # bytes ("truncated DALC field").
-        return encode_chr(value)
-    raise InterfaceError(f'unsupported column value type: {type(value).__name__}')
 
 
 # --- OCI LONG / LONG RAW row value (#407) ---
@@ -1577,13 +1390,6 @@ def oci_lob_contents(
 # read loop). The Mirror therefore mints a fixed placeholder locator and answers
 # the reads from a row-major queue in order, matching the locators the row emits.
 # The RXD block is `ub4 num_bytes | DALC(locator)` (a NULL LOB is a lone 0x00).
-_THIN_LOB_LOCATOR = b'\x00seerdb-mirror-lob-locator-0000000000\x00'
-
-
-def encode_lob_locator_thin() -> bytes:
-    """The RXD value for a thin LOB column (#413): a minted opaque locator the
-    client echoes back over TTI_LOBOPS. The content follows in the read reply."""
-    return encode_sb4(len(_THIN_LOB_LOCATOR)) + _bytes_with_length(_THIN_LOB_LOCATOR)
 
 
 def encode_lob_read_response_thin(content: bytes) -> bytes:
@@ -1746,7 +1552,7 @@ def _encode_oci_value(value: object, col: ColumnMeta) -> bytes:
         return encode_lob_locator_oci(value, col.data_type == TNS_TYPE_CLOB)
     if col.data_type in _OCI_LONG_TYPES:
         return encode_long_value_oci(value)
-    return _encode_value(value, col.data_type)
+    return encode_value(value, col.data_type)
 
 
 # The OER status that trails a LOB locator row on the fetch — NOT the 1403
@@ -1808,7 +1614,7 @@ def encode_rows(
         if len(row) != len(columns):
             raise InterfaceError('row width does not match the column count')
         body += bytes([TTI_RXD]) + b''.join(
-            _encode_value(v, col.data_type) for v, col in zip(row, columns)
+            encode_value(v, col.data_type) for v, col in zip(row, columns)
         )
     return header + body
 
@@ -1986,7 +1792,7 @@ def encode_out_bind_response_thin(
         if isinstance(bind, RefCursorOutBind):
             rxd += _encode_refcursor_out(bind)
         else:
-            rxd += _encode_value(bind.value, bind.tns_type) + encode_sb4(0)
+            rxd += encode_value(bind.value, bind.tns_type) + encode_sb4(0)
     return iov + bytes(rxd) + encode_status(0)
 
 
