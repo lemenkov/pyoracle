@@ -4074,22 +4074,28 @@ _OCI_COMMIT_STATUS = bytes.fromhex('09050000001200')
 _OCI_LOGOFF_STATUS = bytes.fromhex('09010000000000')
 
 
-# The 136-byte capability/status block trailing the key-value list (an opaque
-# OER-shaped status); challenge and result differ only in one subtype byte.
-_CHALLENGE_TRAILER = bytes.fromhex(
+# The 136-byte OER-shaped capability/status block trailing an OCI auth key-value
+# list. The challenge and result replies share this frame and differ only in a
+# subtype byte (at offsets 5 and 49) — 2 for the challenge, 3 for the result.
+# The frame below carries the challenge's subtype; the builder overwrites it.
+_OCI_AUTH_TRAILER_FRAME = bytes.fromhex(
     '04010000000200010000000000000000000000000000000000000000000000000000'
     '00000000000000000000000000000002000000000000360100000000000000000000'
     '0000000020f6310a0000000000000000000000000000000000000000000000000000'
     '00000000000000000000000000000000000000000000000000000000000000000000'
 )
+_OCI_AUTH_TRAILER_SUBTYPE_OFFSETS = (5, 49)
 
 
-_RESULT_TRAILER = bytes.fromhex(
-    '04010000000300010000000000000000000000000000000000000000000000000000'
-    '00000000000000000000000000000003000000000000360100000000000000000000'
-    '0000000020f6310a0000000000000000000000000000000000000000000000000000'
-    '00000000000000000000000000000000000000000000000000000000000000000000'
-)
+def _oci_auth_trailer(Subtype: int) -> bytes:
+    trailer = bytearray(_OCI_AUTH_TRAILER_FRAME)
+    for Offset in _OCI_AUTH_TRAILER_SUBTYPE_OFFSETS:
+        trailer[Offset] = Subtype
+    return bytes(trailer)
+
+
+_CHALLENGE_TRAILER = _oci_auth_trailer(2)
+_RESULT_TRAILER = _oci_auth_trailer(3)
 
 
 # --- Captured 11g handshake-identity blobs (opaque, staged here) ---
