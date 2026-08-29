@@ -4202,18 +4202,19 @@ so it is carried, not fully pinned.
 
 ### 36.3 DML execute-status
 
-The DML execute-status reply wraps the OER in a larger status frame (SCN region,
-cursor/rowid trailer, the `0x20f6310a` marker) that — unlike the describe / DDL /
-outbind statuses — carries live row/rowid data, so it is kept as one captured
-frame rather than built on the envelope. sqlplus renders the completion message
-from just **two** fields of it: the V$SQL **command type** at body offset `57`
-(= the embedded OER's offset `22`) and the affected-row **count** (ub4 LE) at
-offset `43`. `encode_dml_status_oci` generates from those two fields over the one
-shared frame (a live 11g INSERT reply with the capture-order session counters at
-offsets `3/75/186` zeroed, since the Mirror has no per-statement sequence). The
-DDL completion message (`Table created.` and the rest) comes from the same
-command-type field, now set on an envelope-built OER by `encode_ddl_status_oci`.
-**Verified live** against sqlplus over the
+The DML execute-status reply wraps the OER in a larger status frame: a 35-byte
+preamble (with a cursor id) + the OER + a 16-byte trailer. Its OER **is** built
+on the envelope by `encode_oci_oer` (call status `2`, sequence `19`), with the
+touched row's physical **rowid** patched into offsets `27..40` (echoed
+byte-swapped in the trailer) — capture-specific and opaque to sqlplus, which
+renders the completion message from just **two** fields: the V$SQL **command
+type** at frame offset `57` (= the OER's offset `22`) and the affected-row
+**count** (ub4 LE) at offset `43`, both patched per call by
+`encode_dml_status_oci`. The DDL completion message (`Table created.` and the
+rest) comes from the same command-type field on an envelope-built OER via
+`encode_ddl_status_oci`. So every OER-bearing status now builds on
+`_OCI_OER_ENVELOPE`; only the physical rowid is carried (a `FIXME`, like the LOB
+LID in §14.6). **Verified live** against sqlplus over the
 Mirror: `insert/update/delete` print the right verb and count, `create/drop`
 print `Table created.` / `Table dropped.` (and, via the resolved command type, `Index created.`, `Table altered.`, `View dropped.`, `Table truncated.`, and the rest).
 

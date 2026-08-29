@@ -4096,14 +4096,34 @@ _OCI_STATUS_OER = (
 )
 
 
-_OCI_DML_STATUS_FRAME = bytes.fromhex(
-    '08060000e85b00000000000200000001000000000000000000000000000000000000'
-    '0004020000001300010000000000000000000002000c000000000000007fb5010001'
-    '000000b1b40000000000000000000000150000010000003601000000000000000000'
-    '000000000020f6310a000000000d0000000000000000000000000000000000000000'
-    '00000000000000000000000000000000000000000000000000000000000000000000'
-    '000d000d010001b57f00010000b4b10000'
+# The DML execute-status frame (§36.3): a 35-byte preamble (with a cursor id) +
+# the 136-byte OER + a 16-byte trailer. Unlike the describe/DDL/outbind statuses
+# its OER embeds the touched row's physical **rowid** (offsets 27..40 within the
+# OER, echoed byte-swapped in the trailer) — capture-specific, opaque to sqlplus
+# (which renders "N rows created" from only the rowcount and command type). The
+# rowcount (OER offset 8) and command type (OER offset 22) are patched per call.
+_OCI_DML_FRAME_PREFIX = bytes.fromhex(
+    '08060000e85b0000000000020000000100000000000000000000000000000000000000'
 )
+
+
+# The captured touched-row rowid (OER offsets 27..40) and the 16-byte trailer
+# echoing it. FIXME: real physical row identity from the capture; carried, like
+# the LOB LID (§14.6) — a synthetic value would need live 11g validation.
+_OCI_DML_ROWID = bytes.fromhex('007fb5010001000000b1b4000000')
+_OCI_DML_FRAME_TRAILER = bytes.fromhex('0d000d010001b57f00010000b4b10000')
+
+
+def _oci_dml_status_frame() -> bytes:
+    # status 2 is the DML call status (not the fetch/exec 1); offset-20 carries a
+    # non-zero value under it (the same murky field as the describe status, §36.1).
+    oer = bytearray(encode_oci_oer(2, sequence=19, error_pos=12, command_type=0))
+    oer[27 : 27 + len(_OCI_DML_ROWID)] = _OCI_DML_ROWID
+    oer[80] = 0x0D  # carried row/SCN byte
+    return _OCI_DML_FRAME_PREFIX + bytes(oer) + _OCI_DML_FRAME_TRAILER
+
+
+_OCI_DML_STATUS_FRAME = _oci_dml_status_frame()
 
 
 # The DDL execute-status preamble (§36.3): like _OCI_STATUS_FRAME_PREFIX but
