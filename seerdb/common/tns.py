@@ -4275,12 +4275,10 @@ _SERVER_DTY_TABLE = bytes.fromhex(  # 913-byte type-conversion table
 )
 
 
-# The fixed framing of the 11-byte time-zone block, with the biased h/m/s triplet
-# spliced in at offsets 4..6. The other bytes are the block's fixed 11.2 identity.
-_DB_TZ_FRAME_HEAD = bytes.fromhex('80000000')  # bytes [0..3]
-
-
-_DB_TZ_FRAME_TAIL = bytes.fromhex('80000000')  # bytes [7..10]
+# The fixed framing of the 11-byte time-zone block: the same 4-byte pad at both
+# ends (bytes [0..3] and [7..10]), with the biased h/m/s triplet spliced in at
+# offsets 4..6. The pad is the block's fixed 11.2 identity.
+_DB_TZ_FRAME_PAD = bytes.fromhex('80000000')
 
 
 # --- Captured thin reply-template blobs (opaque, staged here) ---

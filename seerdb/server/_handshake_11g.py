@@ -27,8 +27,7 @@ import struct
 
 from seerdb.common import ano
 from seerdb.common.tns import (
-    _DB_TZ_FRAME_HEAD,
-    _DB_TZ_FRAME_TAIL,
+    _DB_TZ_FRAME_PAD,
     _PRO_CHARSET_ELEMENTS,
     _PRO_FDO,
     _SERVER_COMPILE_CAPS,
@@ -137,8 +136,8 @@ def build_type_reply_sqlplus() -> bytes:
     """
     (Hours, Minutes, Seconds) = _DB_TZ_HMS
     tz_block = (
-        _DB_TZ_FRAME_HEAD
+        _DB_TZ_FRAME_PAD
         + bytes([Hours + _DTY_TZ_BIAS, Minutes + _DTY_TZ_BIAS, Seconds + _DTY_TZ_BIAS])
-        + _DB_TZ_FRAME_TAIL
+        + _DB_TZ_FRAME_PAD
     )
     return bytes([TTI_DTY]) + tz_block + struct.pack('>I', _TZFILE_VERSION)
