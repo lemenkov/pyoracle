@@ -3006,6 +3006,88 @@ _RESULT_TRAILER = bytes.fromhex(
 )
 
 
+# --- OCI LOB read round-trip (CLOB / BLOB SELECT, #405) ---
+# STATUS: WORKING — sqlplus displays CLOB and BLOB values over the Mirror
+# (single-packet and multi-packet content, session stays clean afterward). The
+# load-bearing pieces, verified against live 11g out-of-line CLOB captures:
+#   * the locator's size field is the content BYTE count (2× characters for a
+#     CLOB, raw bytes for a BLOB), big-endian — NOT the character count the first
+#     attempt used (the core unit bug);
+#   * the LOB execute reply is a describe with a distinct 33-byte tail + LOB
+#     status (encode_lob_describe_oci) and data_length 4000, NOT the ordinary
+#     inline-row DCB tail — THE UNLOCK; with the wrong describe sqlplus rejects
+#     even a byte-perfect locator row;
+#   * the locator row is fetched (_oci_lob_rxh) and ends with a non-terminator
+#     "more" OER (encode_lob_fetch_rows_oci); a following fetch draws the 1403;
+#   * the READ reply's LOB_DATA uses 0xFF-byte chunks (matches 11g).
+# The row locator template and the READ reply tail below come from ONE live 11g
+# out-of-line CLOB capture (2000 chars → 4000 content bytes), so they echo the
+# same opaque locator and stay mutually consistent.
+#
+# KNOWN LIMITATION (follow-up): the read returns the WHOLE LOB regardless of the
+# amount sqlplus requested in the TTI_LOBOPS call, so the client must read it in
+# one go — works when SET LONGCHUNKSIZE covers the content, but a default-settings
+# read (80-char chunks, looping) over-reads. Honoring the request's amount/offset
+# for a proper read loop is the next step.
+#
+# A LOB column is not sent inline: the row carries an opaque locator, and sqlplus
+# fetches the content with a separate TTI_LOBOPS READ (§14). The locator is opaque
+# to sqlplus (it echoes it back verbatim in the READ), so the Mirror mints it from
+# this one template, patching the content **byte** size (ub4 big-endian) that
+# sqlplus reads to size its READ — a CLOB counts UTF-16 bytes (2× characters), a
+# BLOB counts its raw bytes. The content never rides in the locator (out-of-line):
+# it returns in the READ reply's LOB_DATA. A ub4-LE num_bytes frames the locator
+# in the row; a NULL LOB is num_bytes 0, no READ.
+# CLOB and BLOB locators are the same shape but differ in the LOB **type** bytes
+# (offsets 9/11/14 in the row value) and the **charset** (offset 37: `03 69` =
+# 873 AL32UTF8 for a CLOB, `00 00` binary for a BLOB). The charset is load-bearing:
+# with the CLOB template, sqlplus decodes a BLOB's content as characters and
+# mangles it (raw `CA FE BA BE` → `??`). Both are captured from live 11g
+# out-of-line reads (a 2000-char CLOB / a 4000-byte BLOB), keyed by is_clob.
+_OCI_LOB_ROW_VALUE = {
+    True: bytes.fromhex(
+        '6a0000006a00680001020c88000002000000010000005643350001b58f0001b58e00'
+        '020002036900020040b523000000000000000000000000005bfd6e00000000000000'
+        '000000000000000000000000000001b58e0040b519000000140500000000000fa000'
+        '00000000020040b523'
+    ),
+    False: bytes.fromhex(
+        '6a0000006a00680001010c080000010000000100000056471d0001b6490001b64800'
+        '020002000000020040b583000000000000000000000000005d0d5e00000000000000'
+        '000000000000000000000000000001b6480040b579000000140500000000000fa000'
+        '00000000020040b583'
+    ),
+}
+
+
+# The TTI_LOBOPS READ reply tail after the LOB_DATA content: TTI_RPA (the echoed
+# locator + amount read) then the OER call status. sqlplus skips the RPA to the
+# OER, but the echoed locator's byte size and the amount are patched so they stay
+# consistent with the content delivered. Same CLOB/BLOB split as the row value.
+_OCI_LOB_READ_TAIL = {
+    True: bytes.fromhex(
+        '0800680001020c88000002000000010000005643350001b58f0001b58e0002000203'
+        '6900020040b523000000000000000000000000005bfd6e0000000000000000000000'
+        '0000000000000000000001b58e0040b519000000140500000000000fa00000000000'
+        '020040b523d007000000000000040100000011000101000000000000000000000000'
+        '00000000000000000000000000000000000000000000000000000000130000010000'
+        '003601000000000000000000000000000020f6310a00000000000000000000000000'
+        '00000000000000000000000000000000000000000000000000000000000000000000'
+        '00000000000000000000000000'
+    ),
+    False: bytes.fromhex(
+        '0800680001010c080000010000000100000056471d0001b6490001b6480002000200'
+        '0000020040b583000000000000000000000000005d0d5e0000000000000000000000'
+        '0000000000000000000001b6480040b579000000140500000000000fa00000000000'
+        '020040b583a00f000000000000040100000011000101000000000000000000000000'
+        '00000000000000000000000000000000000000000000000000000000130000010000'
+        '003601000000000000000000000000000020f6310a00000000000000000000000000'
+        '00000000000000000000000000000000000000000000000000000000000000000000'
+        '00000000000000000000000000'
+    ),
+}
+
+
 def encode_dictionary_dty(Dictionary: dict) -> bytes:
     # TTI_DTY (Data Type Negotiation). Sent during the TTC handshake right
     # after TTI_PRO. Tells the server which native Oracle data types this
