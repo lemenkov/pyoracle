@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2019 Peter Lemenkov <lemenkov@gmail.com>
 # SPDX-License-Identifier: MIT
 
+import base64
 import datetime
 import platform
 from decimal import Decimal
@@ -5120,6 +5121,83 @@ def encode_sb4(Val: int) -> bytes:
     # Out of ub4 range (or negative); raise here rather than via `case _` so
     # every branch is a value-return for flow analysis.
     raise Exception("Can't encode value", Val)
+
+
+# A physical ROWID (RID, type 11) reserves this many bytes on the wire — the
+# present indicator the client reads to tell a real rowid (any non-zero,
+# non-0xff value) from a NULL. The client only tests for 0 / 0xff, so the exact
+# size is cosmetic; 10 is a physical rowid's structured length.
+_RID_PRESENT = 0x0A
+# The leading type tag of a logical/universal rowid (UROWID, type 208). The
+# client strips it before rendering, so any value round-trips; 0x01 is the
+# logical-rowid tag.
+_UROWID_TAG = 0x01
+
+
+def encode_rowid_value(Value: object) -> bytes:
+    """The physical ROWID (RID, type 11) RXD value (#484), the inverse of
+    :func:`_read_rowid_column`: a present-indicator byte then the structured rowid
+    — data object / relative file / an unused field / block / slot, each a ub4.
+    ``Value`` is the 18-char extended ROWID string; ``None`` (or empty) is a bare
+    ``0x00`` indicator (NULL)."""
+    from seerdb.common.types import string_to_rowid
+
+    if Value is None or Value == '':
+        return bytes([0])
+    Obj, File, Block, Slot = string_to_rowid(str(Value))
+    return (
+        bytes([_RID_PRESENT])
+        + encode_sb4(Obj)
+        + encode_sb4(File)
+        + encode_sb4(0)  # unused field between file and block
+        + encode_sb4(Block)
+        + encode_sb4(Slot)
+    )
+
+
+def encode_urowid_value(Value: object) -> bytes:
+    """The UROWID (logical/universal rowid, type 208) RXD value (#484), the
+    inverse of :func:`_read_urowid_column`: a ub4 byte count, a 1-byte length
+    echo, then the rowid bytes (a leading type tag + the body). ``Value`` is the
+    ``*``-prefixed base64 string; ``None`` (or empty) is a zero count (NULL)."""
+    if Value is None or Value == '':
+        return encode_sb4(0)
+    Body = str(Value)[1:]  # drop the leading '*'
+    Raw = base64.b64decode(Body + '=' * (-len(Body) % 4))
+    Payload = bytes([_UROWID_TAG]) + Raw
+    return encode_sb4(len(Payload)) + bytes([len(Payload)]) + Payload
+
+
+# A thin (seerdb / oracledb-thin) LONG / LONG RAW value streams inline in the RXD
+# — no LOB locator — as a value followed by TWO trailing ub4 indicators (actual /
+# return lengths, 0 / 0 for an ordinary value), the inverse of :func:`_read_long_column`.
+# The value is the 0xFE-chunked form (a run of <ub1 len><bytes> terminated by a
+# zero-length chunk) even when it fits one chunk; a NULL is a bare 0x00 marker. The
+# sqlplus / OCI dialect frames it with a single ub4 trailer instead. Character LONG
+# content is UTF-8, LONG RAW is raw bytes. Chunks stay ≤ 253 bytes (the single-byte
+# DALC boundary used throughout this codec).
+_THIN_LONG_CHUNK = 253
+_THIN_LONG_TRAILER = encode_sb4(0) + encode_sb4(0)  # two ub4 indicators (0, 0)
+
+
+def encode_long_value_thin(Value: object) -> bytes:
+    """The thin RXD value for a LONG / LONG RAW column (#484): the content streamed
+    inline as 0xFE-chunked bytes (NULL is a bare 0x00), followed by the two zero
+    trailing indicators :func:`_read_long_column` consumes."""
+    if Value is None:
+        return bytes([0]) + _THIN_LONG_TRAILER
+    if isinstance(Value, str):
+        Content = Value.encode('utf-8')
+    elif isinstance(Value, (bytes, bytearray)):
+        Content = bytes(Value)
+    else:
+        Content = str(Value).encode('utf-8')
+    Out = bytearray([0xFE])
+    for Start in range(0, len(Content), _THIN_LONG_CHUNK):
+        Chunk = Content[Start : Start + _THIN_LONG_CHUNK]
+        Out += bytes([len(Chunk)]) + Chunk
+    Out += bytes([0])  # zero-length chunk terminates the run
+    return bytes(Out) + _THIN_LONG_TRAILER
 
 
 def decode_dalc(Bytes: bytes) -> tuple[bytes | list, bytes]:
