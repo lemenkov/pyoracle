@@ -945,7 +945,7 @@ class CursorIntegration(_IntegrationBase):
     def _require_12c(self):
         # arraydmlrowcounts is a 12.1+ server feature (it rides the 12c+ OALL8
         # al8pidmlrc block); skip the positive tests on an 11g server.
-        from seerdb.common.tns import FIELD_VERSION_12_1
+        from seerdb.common.tns_consts import FIELD_VERSION_12_1
 
         if self.conn.field_version < FIELD_VERSION_12_1:
             self.skipTest('arraydmlrowcounts needs a 12.1+ server')
@@ -993,7 +993,7 @@ class CursorIntegration(_IntegrationBase):
 
     def test_arraydmlrowcounts_unsupported_on_11g(self):
         # On an 11g server the feature is rejected up front (oracledb-compatible).
-        from seerdb.common.tns import FIELD_VERSION_12_1
+        from seerdb.common.tns_consts import FIELD_VERSION_12_1
 
         if self.conn.field_version >= FIELD_VERSION_12_1:
             self.skipTest('server supports arraydmlrowcounts')
@@ -3618,7 +3618,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_async_executemany_arraydmlrowcounts(self):
         # Async mirror of test_executemany_arraydmlrowcounts_update (#18).
-        from seerdb.common.tns import FIELD_VERSION_12_1
+        from seerdb.common.tns_consts import FIELD_VERSION_12_1
 
         async with await seerdb.connect_async(**self._kwargs()) as Conn:
             if Conn.field_version < FIELD_VERSION_12_1:
@@ -3654,7 +3654,7 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_async_arraydmlrowcounts_unsupported_on_11g(self):
         # On an 11g server the async feature is rejected up front, same as sync.
-        from seerdb.common.tns import FIELD_VERSION_12_1
+        from seerdb.common.tns_consts import FIELD_VERSION_12_1
 
         async with await seerdb.connect_async(**self._kwargs()) as Conn:
             if Conn.field_version >= FIELD_VERSION_12_1:

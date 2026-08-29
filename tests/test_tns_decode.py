@@ -405,7 +405,8 @@ class TestTnsCommandDecoders(unittest.TestCase):
         # would mis-parse, so it guards the version-gated decode path.
         import contextvars
 
-        from seerdb.common.tns import FIELD_VERSION_21_1, decode_packet
+        from seerdb.common.tns import decode_packet
+        from seerdb.common.tns_consts import FIELD_VERSION_21_1
 
         Resp = bytes.fromhex(
             '101735ebcd3cc510be7fdf53b18448bb2dda787e0608123633010201015c0200'
@@ -6279,10 +6280,12 @@ class TestFv2OutBinds(unittest.TestCase):
         import datetime
 
         from seerdb.common.tns import (
+            _o7_bind_oac,
+        )
+        from seerdb.common.tns_consts import (
             TNS_TYPE_DATE,
             TNS_TYPE_TIMESTAMP,
             TNS_TYPE_TIMESTAMPTZ,
-            _o7_bind_oac,
         )
 
         # OAC layout: type, 01, 00, 00, encode_sb4(max_size), ...; encode_sb4 is
@@ -6304,9 +6307,11 @@ class TestFv2OutBinds(unittest.TestCase):
 
         from seerdb.common.datatypes import IntervalYM
         from seerdb.common.tns import (
+            _o7_bind_oac,
+        )
+        from seerdb.common.tns_consts import (
             TNS_TYPE_INTERVALDS,
             TNS_TYPE_INTERVALYM,
-            _o7_bind_oac,
         )
 
         ds = _o7_bind_oac(datetime.timedelta(days=2, seconds=5))

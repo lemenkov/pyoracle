@@ -81,6 +81,7 @@ from seerdb.common.tns_consts import (
     DEFAULT_HOST,
     DEFAULT_PORT,
     DEFAULT_SID,
+    FIELD_VERSION_9_2,
     FIELD_VERSION_10_2,
     FIELD_VERSION_11_2,
     FIELD_VERSION_12_1,
@@ -204,12 +205,6 @@ from seerdb.common.tns_consts import (
     UTF8_CHARSET,
     CharsetDict,
     DictionaryType,
-)
-from seerdb.common.tns_consts import (
-    FIELD_VERSION_9_2 as FIELD_VERSION_9_2,
-)
-from seerdb.common.tns_consts import (
-    FIELD_VERSION_19_1 as FIELD_VERSION_19_1,
 )
 
 logger = logging.getLogger(__name__)

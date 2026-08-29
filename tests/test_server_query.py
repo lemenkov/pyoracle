@@ -1222,7 +1222,8 @@ def _scroll_exec(cursor: int, orientation: int, position: int, fetch: int) -> by
     # Build a SCROLLABLE OALL8 the way the thin client marshals a scroll
     # re-execute (an open cursor, empty query, the orientation/position in the
     # al8i4 array). field_version 6 is the Mirror's advertised 11.2 layout.
-    from seerdb.common.tns import FIELD_VERSION_11_2, encode_dictionary_exec
+    from seerdb.common.tns import encode_dictionary_exec
+    from seerdb.common.tns_consts import FIELD_VERSION_11_2
 
     return encode_dictionary_exec(
         {
