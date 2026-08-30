@@ -21,7 +21,7 @@ those idioms need no hand-rolled translation. Install it on the server (e.g.
 Alpine ``apk add postgresql-orafce`` for a matching PG major, or build from
 source with PGXS) — see ``examples/mirror-pg.Dockerfile``.
 
-The scalar Oracle functions orafce does *not* cover — ``hextoraw`` / ``rawtohex``,
+A handful of scalar Oracle functions — ``hextoraw`` / ``rawtohex``,
 ``empty_clob`` / ``empty_blob``, ``from_tz``, ``rowidtochar`` — the backend installs
 itself as real PostgreSQL functions at connect (see ``_HELPER_FUNCTIONS_DDL``), so
 those call sites resolve directly with no rewrite, the same way the ``ora_tstz``
@@ -143,8 +143,11 @@ _INTERVALYM_TYPE_DDL = (
 # case-insensitively to a same-named function on the search_path, so once these
 # exist the call text needs no translation at all. This is the same "install a
 # server-side object" pattern the ora_tstz composite and the ora_clob / ora_blob
-# domains already use, and it is exactly the shape the orafce upstream
-# contribution (#513) needs — none of these exist in orafce yet (checked 4.16).
+# domains already use. orafce 4.17 also ships hextoraw / rawtohex / empty_clob /
+# empty_blob / from_tz, but as plain text / bytea / timestamptz — the backend keeps
+# its own so empty_clob / empty_blob return the ora_clob / ora_blob domains and
+# from_tz returns the ora_tstz composite, which the LOB read-back and the
+# offset-preserving WITH TIME ZONE round-trip both rely on.
 # Only the parens-called functions move here; a bare pseudo-constant (SYSDATE,
 # BINARY_DOUBLE_INFINITY) or a literal / clause shape (a negative INTERVAL, the
 # `1.5f` suffix, CONNECT BY LEVEL) has no call to resolve and stays a rewrite in
@@ -172,11 +175,17 @@ _HELPER_FUNCTIONS_DDL = (
     # instant shown as naive UTC. STABLE, not IMMUTABLE: a named region's offset
     # depends on the tz database. The region *name* itself is not preserved — the
     # value carries the resolved offset, exactly like an explicit ±HH:MM literal.
+    # A numeric ±HH:MM offset is applied as an interval so it follows Oracle's ISO
+    # sign convention (east of UTC is positive); handing it straight to AT TIME ZONE
+    # as text would use PostgreSQL's inverted POSIX sign. The zone-applied instant is
+    # computed once in the subselect and reused for both composite fields.
     f'CREATE OR REPLACE FUNCTION from_tz(timestamp, text) RETURNS {_TSTZ_TYPE} '
     'LANGUAGE sql STABLE STRICT AS $$ SELECT ROW('
-    '$1 AT TIME ZONE $2, '
-    "EXTRACT(EPOCH FROM ($1 - (($1 AT TIME ZONE $2) AT TIME ZONE 'UTC')))::int"
-    f')::{_TSTZ_TYPE} $$;'
+    'z.i, '
+    "EXTRACT(EPOCH FROM ($1 - (z.i AT TIME ZONE 'UTC')))::int"
+    f')::{_TSTZ_TYPE} FROM (SELECT CASE '
+    "WHEN $2 ~ '^[+-]?[0-9]{1,2}:[0-9]{2}$' THEN $1 AT TIME ZONE ($2)::interval "
+    'ELSE $1 AT TIME ZONE $2 END) AS z(i) $$;'
     # ROWIDTOCHAR(rowid) → the VARCHAR2 form of a ROWID. The ROWID pseudo-column is
     # rewritten to `ctid::text` (already text), so this is the identity on that text.
     'CREATE OR REPLACE FUNCTION rowidtochar(text) RETURNS text '
