@@ -8,6 +8,7 @@ from seerdb.client._cursor_logic import _CursorLogic
 from seerdb.common.datatypes import (
     _DATE_TNS_TYPES,
     _NUMBER_TNS_TYPES,
+    RefCursorBind,
     TempLob,
     Var,
     dbtype_for_oracle_type,
@@ -39,10 +40,11 @@ from seerdb.common.tns_consts import (
 _NAMED_BIND_RE = re.compile(r':([A-Za-z_]\w*)')
 
 
-class cursor:
+class cursor(RefCursorBind):
     # Sentinel passed as a bind value to indicate a REFCURSOR slot. Consumed by
-    # the encoder in seerdb.common.tns (encode_token_oac / encode_token_rxd). Kept
-    # lowercase for backwards-compatibility with existing call sites.
+    # the encoder in seerdb.common.tns (encode_token_oac / encode_token_rxd),
+    # which detects it via the RefCursorBind base so common never imports the
+    # client. Kept lowercase for backwards-compatibility with existing call sites.
     id: int = 0
 
 

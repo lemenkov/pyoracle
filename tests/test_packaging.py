@@ -9,6 +9,7 @@ in the built package, and importing ``seerdb`` must never require it.
 
 from __future__ import annotations
 
+import ast
 import subprocess
 import sys
 import tarfile
@@ -17,6 +18,41 @@ from pathlib import Path
 import pytest
 
 _ROOT = Path(__file__).resolve().parent.parent
+_PKG = _ROOT / 'seerdb'
+
+
+def _imported_subpackages(module_path: Path) -> set[str]:
+    # Every seerdb subpackage (`client` / `common` / `server`) this module
+    # imports from, whether written `from seerdb.common...`, `from seerdb import
+    # common`, or a relative `from ..common...`. TYPE_CHECKING-only imports count
+    # too: the layering must hold in the type graph, not just at runtime.
+    rel = module_path.relative_to(_PKG).parts  # e.g. ('common', 'tns.py')
+    here = rel[0]
+    tree = ast.parse(module_path.read_text(), filename=str(module_path))
+    found: set[str] = set()
+
+    def note(dotted: str) -> None:
+        parts = dotted.split('.')
+        if parts[0] == 'seerdb' and len(parts) > 1:
+            found.add(parts[1])
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                note(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0:
+                note(node.module or '')
+            elif node.level == 1:
+                # `from . import common` inside seerdb/<here>/ -> sibling subpkg
+                for alias in node.names:
+                    found.add(alias.name)
+            elif node.level == 2:
+                # `from ..common import X` -> the named subpackage
+                if node.module:
+                    found.add(node.module.split('.')[0])
+    found.discard(here)
+    return found
 
 
 def test_import_seerdb_does_not_eagerly_load_the_mirror() -> None:
@@ -69,3 +105,26 @@ def test_built_sdist_ships_the_client_not_the_mirror(tmp_path) -> None:
     assert ships('client'), 'client driver missing from the sdist'
     assert ships('common'), 'common codec missing from the sdist'
     assert not ships('server'), 'the Mirror must NOT ship in the distribution'
+
+
+# Which subpackage may import which. `common` is the shared codec leaf: it must
+# depend on neither the client nor the Mirror. The client and the Mirror both
+# build on `common` but never on each other, so the Mirror stays fully
+# decoupled from the DB-API client (and vice versa).
+_FORBIDDEN_EDGES = {
+    'common': {'client', 'server'},
+    'client': {'server'},
+    'server': {'client'},
+}
+
+
+@pytest.mark.parametrize('layer', sorted(_FORBIDDEN_EDGES))
+def test_subpackage_layering_is_enforced(layer: str) -> None:
+    forbidden = _FORBIDDEN_EDGES[layer]
+    violations = []
+    for module_path in sorted((_PKG / layer).rglob('*.py')):
+        bad = _imported_subpackages(module_path) & forbidden
+        if bad:
+            rel = module_path.relative_to(_ROOT)
+            violations.append(f'{rel} imports from {sorted(bad)}')
+    assert not violations, 'subpackage layering violated:\n' + '\n'.join(violations)
