@@ -4555,11 +4555,46 @@ _PRO_CHARSET_ENTRIES = [
 _PRO_CHARSET_ELEMENTS = encode_charset_elements(_PRO_CHARSET_ENTRIES)
 
 
-_PRO_FDO = bytes.fromhex(  # 100-byte fixed descriptor block
-    '0000006001240f050b0c030c0c0504050d0609070805050505050f05050505050a0505050505'
-    '04050607080823472347081123081141b0470083036907d00300000000000000000000000000'
-    '000000000000000000000000000000000000000000000000'
+# The FDO (Fixed Data Object): a length-framed character-set descriptor. It ends
+# with the server's charset pair, which a client locates inside the block at offset
+# ``6 + fdo[5] + fdo[6]`` (the two section lengths) — how the reference clients read
+# the national charset out of it. Layout (100 bytes):
+#   u32 BE content length (block - 4) | 01 version | secA_len | secB_len |
+#   50-byte per-datatype representation vector | 83 tag |
+#   db charset (u16 BE) | national charset (u16 BE) | 03 tag | zero pad to 100.
+# The two charset ids are the decoded fields (AL32UTF8 = DB, AL16UTF16 = national);
+# the representation vector and the 0x83/0x03 frame tags are carried as captured
+# ground truth — even the reference clients skip the vector rather than interpret it.
+_FDO_SIZE = 100
+_FDO_VERSION = 0x01
+_FDO_SECTION_A = 0x24  # 36 — first section length (locates the charset pair, below)
+_FDO_SECTION_B = 0x0F  # 15 — second section length
+_FDO_CHARSET_TAG = 0x83  # marks the start of the trailing charset descriptor
+_FDO_CHARSET_END = 0x03  # closes the charset descriptor
+_FDO_TYPEREP = bytes.fromhex(  # 50-byte per-datatype representation vector (opaque)
+    '050b0c030c0c0504050d0609070805050505050f05050505050a05050505050405060708'
+    '0823472347081123081141b04700'
 )
+
+
+def _build_pro_fdo() -> bytes:
+    """Assemble the 100-byte FDO from its length header, the opaque type-rep vector,
+    and the named (DB, national) charset pair, zero-padded to size. The charset pair
+    lands at offset ``6 + fdo[5] + fdo[6]`` so a client parses the national charset
+    out of it exactly as the reference clients do."""
+    body = (
+        struct.pack('>I', _FDO_SIZE - 4)  # content length after this u32
+        + bytes([_FDO_VERSION, _FDO_SECTION_A, _FDO_SECTION_B])
+        + _FDO_TYPEREP
+        + bytes([_FDO_CHARSET_TAG])
+        + struct.pack('>H', AL32UTF8_CHARSET)  # DB charset
+        + struct.pack('>H', AL16UTF16_CHARSET)  # national charset
+        + bytes([_FDO_CHARSET_END])
+    )
+    return body + b'\x00' * (_FDO_SIZE - len(body))
+
+
+_PRO_FDO = _build_pro_fdo()
 
 
 _SERVER_COMPILE_CAPS = bytes.fromhex(  # 39-byte server 11g compile caps
