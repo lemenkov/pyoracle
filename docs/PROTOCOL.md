@@ -4299,16 +4299,17 @@ still an undifferentiated blob.
 ### 39.1 Handshake identity — `_handshake_11g.py` (§4.1, §4.2)
 
 The PRO / DTY capability block is **computed** (`build_caps_block_reply` frames
-the banner, charset id, and the pieces below into the TTC payload), but the pieces
-it frames are captured 11.2 constants:
+the banner, charset id, and the pieces below into the TTC payload); the pieces it
+frames are the fixed 11.2 identity, each now modelled by its own builder or named
+feature-map rather than a verbatim blob:
 
 | Constant | Size | What it is | Status |
 |----------|-----:|------------|--------|
 | version banner, charset id | — | `x86_64/Linux …` banner + AL32UTF8 (873) | computed (literal) |
 | `_PRO_CHARSET_ELEMENTS` | 50 B | 10 × 5-byte charset elements `<a> 03 <b> 03 <flag>` | **generated** — `encode_charset_elements` from a `(a, b, flag)` entry list; operands carried as captured NLS ground truth |
 | `_PRO_FDO` | 100 B | the fixed descriptor block (FDO) | **generated** — length-framed charset descriptor; the DB + national charset ids (AL32UTF8, AL16UTF16) are named, the type-representation vector carried opaque (§4.1) |
-| `_SERVER_COMPILE_CAPS` | 39 B | the 11g **compile** capability vector | captured verbatim — this *is* the field-version-6 identity (§4.2); the client negotiates off it |
-| `_SERVER_RUNTIME_CAPS` | 7 B | the 11g **runtime** capability vector | captured verbatim — same |
+| `_SERVER_COMPILE_CAPS` | 39 B | the 11g **compile** capability vector | **generated** — a named `{CCAP_*: value}` feature map (`_render_caps`); this *is* the field-version-6 identity (§4.2), the client negotiates off `[CCAP_FIELD_VERSION]` |
+| `_SERVER_RUNTIME_CAPS` | 7 B | the 11g **runtime** capability vector | **generated** — a named `{RCAP_*: value}` feature map (`_render_caps`) |
 | `_SERVER_DTY_TABLE` | 913 B | the type-conversion matrix (thin DTY reply) | captured verbatim — per-type `(type, conv, repr, flags)` table; structure known (§4.2) but replayed whole |
 | `_PRO_SQLPLUS_PAYLOAD` | 117 B | the `deadbeef` PRO reply | **computed (#564)** — an ANO null-negotiation response, built field-by-field from the ANO codec (§4.1.1) |
 | `_TYPE_REPLY_SQLPLUS_PAYLOAD` | 16 B | the `deadbeef` third-round type reply | **computed (#565)** — a DTY reply carrying the DB time zone + timezone-file version (§4.2.1) |
