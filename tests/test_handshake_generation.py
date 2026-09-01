@@ -121,5 +121,27 @@ class DtyTableCodecTest(unittest.TestCase):
             self.assertEqual(decode_dty_table(body), entries)
 
 
+class CharsetElementsCodecTest(unittest.TestCase):
+    """The TTI_PRO charset-element array is generated from an entry list; pin the
+    codec round-trip and that it reproduces the captured block byte-for-byte."""
+
+    def test_charset_elements_roundtrip(self):
+        from seerdb.common.tns import (
+            _PRO_CHARSET_ELEMENTS,
+            _PRO_CHARSET_ENTRIES,
+            decode_charset_elements,
+            encode_charset_elements,
+        )
+
+        # encode(entries) reproduces the captured array exactly
+        self.assertEqual(
+            _PRO_CHARSET_ELEMENTS, encode_charset_elements(_PRO_CHARSET_ENTRIES)
+        )
+        # decode is the inverse of encode
+        self.assertEqual(
+            decode_charset_elements(_PRO_CHARSET_ELEMENTS), _PRO_CHARSET_ENTRIES
+        )
+
+
 if __name__ == '__main__':
     unittest.main()

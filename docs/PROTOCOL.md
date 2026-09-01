@@ -393,6 +393,12 @@ TTI_PRO | server_version (UB1) | 0 |
   fdo_length (UB2 BE) | fdo[fdo_length] |
   compile_caps (UB1 len + bytes) | runtime_caps (UB1 len + bytes)
 ```
+Each charset element is a fixed 5-byte record `<a> 03 <b> 03 <flag>`: two operand
+bytes, each followed by a constant `03` tag, then a flag. The 11.2 server sends ten
+— a hub operand (`0x66`) paired both ways with `{0x40, 0x48, 0x52, 0x61, 0x1f}`,
+flag `0x01` except the forward `0x66`→`0x1f` pair (`0x08`); the operands are the
+server's NLS charset-conversion codes (`0x1f` is charset 31, WE8ISO8859P1).
+
 The server's field version is `compile_caps[7]` (`CCAP_FIELD_VERSION`, §4.2).
 seerdb stores the negotiated minimum as `connection.field_version` and sends
 it back in its own DTY; against 11g both sides are `6` (11.2). `server_version`
@@ -4291,7 +4297,7 @@ it frames are captured 11.2 constants:
 | Constant | Size | What it is | Status |
 |----------|-----:|------------|--------|
 | version banner, charset id | — | `x86_64/Linux …` banner + AL32UTF8 (873) | computed (literal) |
-| `_PRO_CHARSET_ELEMENTS` | 50 B | 10 × 5-byte charset-conversion elements | captured verbatim — the 11.2 charset-map identity |
+| `_PRO_CHARSET_ELEMENTS` | 50 B | 10 × 5-byte charset elements `<a> 03 <b> 03 <flag>` | **generated** — `encode_charset_elements` from a `(a, b, flag)` entry list; operands carried as captured NLS ground truth |
 | `_PRO_FDO` | 100 B | the fixed descriptor block (FDO) | captured verbatim — internal layout not decoded |
 | `_SERVER_COMPILE_CAPS` | 39 B | the 11g **compile** capability vector | captured verbatim — this *is* the field-version-6 identity (§4.2); the client negotiates off it |
 | `_SERVER_RUNTIME_CAPS` | 7 B | the 11g **runtime** capability vector | captured verbatim — same |
