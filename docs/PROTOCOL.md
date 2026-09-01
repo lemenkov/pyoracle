@@ -4314,7 +4314,7 @@ feature-map rather than a verbatim blob:
 | `_PRO_FDO` | 100 B | the fixed descriptor block (FDO) | **generated** — length-framed charset descriptor; the DB + national charset ids (AL32UTF8, AL16UTF16) are named, the type-representation vector carried opaque (§4.1) |
 | `_SERVER_COMPILE_CAPS` | 39 B | the 11g **compile** capability vector | **generated** — a named `{CCAP_*: value}` feature map (`_render_caps`); this *is* the field-version-6 identity (§4.2), the client negotiates off `[CCAP_FIELD_VERSION]` |
 | `_SERVER_RUNTIME_CAPS` | 7 B | the 11g **runtime** capability vector | **generated** — a named `{RCAP_*: value}` feature map (`_render_caps`) |
-| `_SERVER_DTY_TABLE` | 913 B | the type-conversion matrix (thin DTY reply) | captured verbatim — per-type `(type, conv, repr, flags)` table; structure known (§4.2) but replayed whole |
+| `_SERVER_DTY_TABLE` | 913 B | the type-conversion matrix (thin DTY reply) | **generated** — `encode_dty_table(_SERVER_DTY_ENTRIES)` from a readable per-type `(type, conv, rep)` entry list (#611); structure known (§4.2) |
 | `_PRO_SQLPLUS_PAYLOAD` | 117 B | the `deadbeef` PRO reply | **computed (#564)** — an ANO null-negotiation response, built field-by-field from the ANO codec (§4.1.1) |
 | `_TYPE_REPLY_SQLPLUS_PAYLOAD` | 16 B | the `deadbeef` third-round type reply | **computed (#565)** — a DTY reply carrying the DB time zone + timezone-file version (§4.2.1) |
 
