@@ -2890,7 +2890,11 @@ negotiates single-byte **WE8ISO8859P1 (31)**, not AL32UTF8 (873). Sending the
 modern DTY draws **ORA-03120** ("two-task conversion: integer overflow") on the
 following OSESSKEY. seerdb sends the captured `_DTY_8I` constant when `_is_8i`
 (the datatype negotiation does not vary with the workload, so it is a constant
-the same way §4.2's modern table is). The 8i **query** path is §19.9–19.10.
+the same way §4.2's modern table is). Its 42-byte header is built from named
+fields — `TTI_DTY` token, charset + national charset (both ISO Latin-1 = 31), the
+26-byte fv2 capability vector (captured 8i identity), and the DB time-zone block set
+to UTC (the `80000000` pad + the `+60`-biased `(60,60,60)` triplet) — followed by the
+conversion-entry list. The 8i **query** path is §19.9–19.10.
 
 ### 19.9 Oracle 8i SELECT — the 9.2-era OALL8 request (#244)
 
