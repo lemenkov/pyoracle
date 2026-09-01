@@ -29,6 +29,28 @@ from seerdb.common.tns_consts import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _pin_field_versions():
+    # These tests build and decode 11g-format responses. BOTH the encode and the
+    # decode paths pick their wire format from a field-version ContextVar
+    # (_ENCODE_FIELD_VERSION / _DECODE_FIELD_VERSION), which in production is
+    # established at the top of each encode/decode operation. The tests call the
+    # low-level encoders (encode_rows, encode_describe) directly, so they must
+    # establish those themselves — otherwise a version left behind by an earlier
+    # test (e.g. a 23ai encode) flips the chunk framing and the decode fails with
+    # "truncated DALC field". Pin both to 11.2 per test and restore after, so this
+    # module is immune to and free of cross-test field-version leakage.
+    from seerdb.common.tns import _ENCODE_FIELD_VERSION
+
+    enc = _ENCODE_FIELD_VERSION.set(FIELD_VERSION_11_2)
+    dec = _DECODE_FIELD_VERSION.set(FIELD_VERSION_11_2)
+    try:
+        yield
+    finally:
+        _ENCODE_FIELD_VERSION.reset(enc)
+        _DECODE_FIELD_VERSION.reset(dec)
+
+
 def _decode_describe(payload: bytes) -> list[dict]:
     # Decode a describe block with the client's own 11g decoder.
     _DECODE_FIELD_VERSION.set(FIELD_VERSION_11_2)
