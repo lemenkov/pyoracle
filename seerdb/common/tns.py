@@ -4512,10 +4512,47 @@ _RESULT_TRAILER = _oci_auth_trailer(3)
 
 
 # --- the TTI_PRO capability block (thin PRO reply == sqlplus DTY reply) ---
-_PRO_CHARSET_ELEMENTS = bytes.fromhex(  # 10 x 5-byte charset elements
-    '6603400301400366030166034803014803660301660352030152036603016603610301610366'
-    '030166031f03081f03660301'
-)
+# The block carries a count-prefixed array of 5-byte charset elements. Each element
+# is ``<a> 03 <b> 03 <flag>``: two operand bytes, each followed by a constant 0x03
+# tag, then a flag byte. The captured 11.2 server advertises ten elements — a hub
+# operand (0x66) paired both directions with {0x40, 0x48, 0x52, 0x61, 0x1f}; every
+# pair carries flag 0x01 except the forward 0x66->0x1f pair (0x08). The operands are
+# the server's captured NLS charset-conversion codes, carried as ground truth (0x1f
+# is charset 31, WE8ISO8859P1); the ratio semantics are not otherwise decoded, so
+# the entries stay captured constants like the DTY table's conversion numbers.
+_CHARSET_ELEM_SEP = 0x03  # constant tag following each operand in an element
+
+
+def encode_charset_elements(entries: list) -> bytes:
+    """Render the TTI_PRO charset-element array body — a flat concatenation of
+    5-byte ``<a> 03 <b> 03 <flag>`` records (the caller prefixes the ub2 count).
+    Inverse of :func:`decode_charset_elements`."""
+    out = bytearray()
+    for a, b, flag in entries:
+        out += bytes([a, _CHARSET_ELEM_SEP, b, _CHARSET_ELEM_SEP, flag])
+    return bytes(out)
+
+
+def decode_charset_elements(body: bytes) -> list:
+    """Parse a TTI_PRO charset-element array body into ``(a, b, flag)`` triples —
+    the inverse of :func:`encode_charset_elements`. The two 0x03 separator tags are
+    dropped."""
+    return [(body[i], body[i + 2], body[i + 4]) for i in range(0, len(body), 5)]
+
+
+_PRO_CHARSET_ENTRIES = [
+    (0x66, 0x40, 1),
+    (0x40, 0x66, 1),
+    (0x66, 0x48, 1),
+    (0x48, 0x66, 1),
+    (0x66, 0x52, 1),
+    (0x52, 0x66, 1),
+    (0x66, 0x61, 1),
+    (0x61, 0x66, 1),
+    (0x66, 0x1F, 8),
+    (0x1F, 0x66, 1),
+]
+_PRO_CHARSET_ELEMENTS = encode_charset_elements(_PRO_CHARSET_ENTRIES)
 
 
 _PRO_FDO = bytes.fromhex(  # 100-byte fixed descriptor block
