@@ -399,6 +399,14 @@ bytes, each followed by a constant `03` tag, then a flag. The 11.2 server sends 
 flag `0x01` except the forward `0x66`→`0x1f` pair (`0x08`); the operands are the
 server's NLS charset-conversion codes (`0x1f` is charset 31, WE8ISO8859P1).
 
+The `fdo` (Fixed Data Object) is a length-framed charset descriptor:
+`u32 BE content-length | 01 | secA_len | secB_len | 50-byte type-representation
+vector | 83 | db_charset (UB2 BE) | national_charset (UB2 BE) | 03 | zero pad`.
+A client locates the pair at offset `6 + fdo[5] + fdo[6]` (the two section lengths)
+and reads the national charset from it; the DB charset sits just before. Against
+11g these are AL32UTF8 (873) and AL16UTF16 (2000). The type-representation vector
+and the `0x83`/`0x03` frame tags are not interpreted by clients.
+
 The server's field version is `compile_caps[7]` (`CCAP_FIELD_VERSION`, §4.2).
 seerdb stores the negotiated minimum as `connection.field_version` and sends
 it back in its own DTY; against 11g both sides are `6` (11.2). `server_version`
@@ -4298,7 +4306,7 @@ it frames are captured 11.2 constants:
 |----------|-----:|------------|--------|
 | version banner, charset id | — | `x86_64/Linux …` banner + AL32UTF8 (873) | computed (literal) |
 | `_PRO_CHARSET_ELEMENTS` | 50 B | 10 × 5-byte charset elements `<a> 03 <b> 03 <flag>` | **generated** — `encode_charset_elements` from a `(a, b, flag)` entry list; operands carried as captured NLS ground truth |
-| `_PRO_FDO` | 100 B | the fixed descriptor block (FDO) | captured verbatim — internal layout not decoded |
+| `_PRO_FDO` | 100 B | the fixed descriptor block (FDO) | **generated** — length-framed charset descriptor; the DB + national charset ids (AL32UTF8, AL16UTF16) are named, the type-representation vector carried opaque (§4.1) |
 | `_SERVER_COMPILE_CAPS` | 39 B | the 11g **compile** capability vector | captured verbatim — this *is* the field-version-6 identity (§4.2); the client negotiates off it |
 | `_SERVER_RUNTIME_CAPS` | 7 B | the 11g **runtime** capability vector | captured verbatim — same |
 | `_SERVER_DTY_TABLE` | 913 B | the type-conversion matrix (thin DTY reply) | captured verbatim — per-type `(type, conv, repr, flags)` table; structure known (§4.2) but replayed whole |

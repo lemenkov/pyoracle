@@ -143,5 +143,36 @@ class CharsetElementsCodecTest(unittest.TestCase):
         )
 
 
+class FdoBuilderTest(unittest.TestCase):
+    """The FDO is built from named fields (the DB + national charset ids); pin that
+    it reproduces the captured block and that a client can still locate the national
+    charset inside it at offset 6 + fdo[5] + fdo[6]."""
+
+    def test_fdo_reproduces_capture_and_locates_charset(self):
+        import struct
+
+        from seerdb.common.tns import _PRO_FDO, _build_pro_fdo
+        from seerdb.common.tns_consts import AL16UTF16_CHARSET, AL32UTF8_CHARSET
+
+        # the captured 11.2 FDO, byte-for-byte
+        captured = bytes.fromhex(
+            '0000006001240f050b0c030c0c0504050d0609070805050505050f05050505050a0505050505'
+            '04050607080823472347081123081141b0470083036907d00300000000000000000000000000'
+            '000000000000000000000000000000000000000000000000'
+        )
+        self.assertEqual(_build_pro_fdo(), captured)
+        self.assertEqual(_PRO_FDO, captured)
+
+        # a client reads the national charset at 6 + fdo[5] + fdo[6]; the DB charset
+        # sits just before it — both are the driver's named constants.
+        num3 = 6 + _PRO_FDO[5] + _PRO_FDO[6]
+        self.assertEqual(
+            struct.unpack('>H', _PRO_FDO[num3 + 1 : num3 + 3])[0], AL32UTF8_CHARSET
+        )
+        self.assertEqual(
+            struct.unpack('>H', _PRO_FDO[num3 + 3 : num3 + 5])[0], AL16UTF16_CHARSET
+        )
+
+
 if __name__ == '__main__':
     unittest.main()
