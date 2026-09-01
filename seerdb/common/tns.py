@@ -13,7 +13,6 @@ if TYPE_CHECKING:
     from seerdb.common.dbobject import DbObject, DbRef
 from functools import reduce
 
-from seerdb.client.cursor import cursor
 from seerdb.common import oci
 from seerdb.common.crypto import encrypt_password, o5logon, server_proof
 from seerdb.common.datatypes import (
@@ -21,6 +20,7 @@ from seerdb.common.datatypes import (
     BinaryDouble,
     BinaryFloat,
     IntervalYM,
+    RefCursorBind,
     TempLob,
     Var,
 )
@@ -1777,7 +1777,7 @@ def decode_token_iov(Data: bytes, Acc: tuple) -> tuple:
 def _is_refcursor_bind(Bind: object) -> bool:
     if isinstance(Bind, Var):
         return Bind.dbtype.tns_type == TNS_TYPE_REFCURSOR
-    return isinstance(Bind, cursor)
+    return isinstance(Bind, RefCursorBind)
 
 
 def _read_iov(
@@ -3390,8 +3390,8 @@ CCAP_TTC4_EXPLICIT_BOUNDARY = 0x40
 # TNS_CCAP_FIELD_VERSION_* values (the byte written at CCAP_FIELD_VERSION) now
 # live in seerdb.common.tns_consts and are imported at the top of this module — kept
 # importable as `from seerdb.common.tns import FIELD_VERSION_*` for existing callers.
-# They moved to the leaf constants module so seerdb.client.cursor can import the 12.1
-# threshold without an import cycle (seerdb.common.tns imports seerdb.client.cursor).
+# They live in the leaf constants module so seerdb.client.cursor can import the 12.1
+# threshold from a lightweight leaf without pulling in the whole encoder.
 
 # Runtime capability indices + the flag bits we set:
 RCAP_COMPAT = 0
@@ -8411,7 +8411,7 @@ def encode_token_rxd(Token: object) -> bytes:
         # round-tripped them through utf-8 → utf-16be which corrupted
         # anything that wasn't ASCII (and outright failed on 0x80+ bytes).
         return encode_chr(bytes(Token))
-    if isinstance(Token, cursor):
+    if isinstance(Token, RefCursorBind):
         return bytes([1, 0])
     if isinstance(Token, date):
         # Legacy seerdb.common.date.date with has_timestamp / timestamptz flags;
@@ -8564,7 +8564,7 @@ def encode_token_oac(Token: object) -> bytes:
         # 0x80+) round-trip verbatim into RAW / BLOB columns. Size to the
         # actual value (see the str case) to avoid the LONG-reorder swap.
         return encode_token_raw(TNS_TYPE_RAW, max(len(Token), 1), 16, 0, 0)
-    if isinstance(Token, cursor):
+    if isinstance(Token, RefCursorBind):
         return encode_token_raw(TNS_TYPE_REFCURSOR, 1, 0, UTF8_CHARSET, 0)
     if isinstance(Token, date):
         if Token.has_timestamp and Token.timestamptz:

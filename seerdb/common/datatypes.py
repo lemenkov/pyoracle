@@ -316,3 +316,15 @@ class JSON:
 
     def __repr__(self) -> str:
         return f'JSON({self.value!r})'
+
+
+class RefCursorBind:
+    """Base marker for a REF CURSOR bind sentinel.
+
+    The encoder in ``seerdb.common.tns`` emits a REFCURSOR bind when a bind
+    value is an instance of this. It lives here in the leaf marker module (not
+    in the client) so the codec can recognise the sentinel without importing
+    anything from ``seerdb.client`` — keeping ``common`` a self-contained leaf
+    that both the client and the Mirror server build on. The client's public
+    ``cursor`` sentinel subclasses it.
+    """

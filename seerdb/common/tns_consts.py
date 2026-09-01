@@ -273,8 +273,8 @@ TTI_PING = 147
 # TNS_CCAP_FIELD_VERSION_* values (the byte written at CCAP_FIELD_VERSION). The
 # negotiated TTC field version gates the auth verifier and the version-specific
 # wire formats. Kept here in the leaf constants module (rather than seerdb.common.tns)
-# so seerdb.client.cursor can import the 12.1 threshold without forming an import cycle
-# — seerdb.common.tns imports seerdb.client.cursor.
+# so seerdb.client.cursor can import the 12.1 threshold from a lightweight leaf
+# without dragging in the whole encoder.
 FIELD_VERSION_9_2 = 2  # Oracle 9i (pre-10g O3LOGON thin auth, #90)
 FIELD_VERSION_10_2 = 4  # Oracle 10g — oldest tier using the O5LOGON path
 FIELD_VERSION_11_2 = 6
