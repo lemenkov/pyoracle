@@ -92,6 +92,7 @@ from seerdb.common.tns_consts import (
     FIELD_VERSION_20_1,
     FIELD_VERSION_21_1,
     FIELD_VERSION_23_1,
+    ISO_LATIN_1_CHARSET,
     TNS_AL8I4_ARRAY_DML_ROWCOUNTS,
     TNS_AQ_ARRAY_ENQ,
     TNS_AQ_ARRAY_FLAGS_RETURN_MESSAGE_ID,
@@ -3957,11 +3958,27 @@ def decode_dty_table(body: bytes) -> list:
 # header + the conversion-entry list (below) via encode_dty_table; sent verbatim
 # when the server is 8i (the negotiation does not vary with the workload).
 #
-# The 42-byte header: msgtype 02, charset + ncharset (31 = WE8ISO8859P1), a
-# 26-byte capability vector, then the DB TZ block (80000000 · 3c3c3c · 80000000).
-_DTY_8I_HEADER = bytes.fromhex(
-    '021f001f0002150601010105010102010101010101017f0f03060300020201'
-    '800000003c3c3c80000000'
+# The DB session time-zone block: the same 4-byte pad at both ends with the biased
+# h/m/s triplet spliced between. Oracle biases each of hours/min/sec by +60, so an
+# all-zero (UTC) offset is stored as (60, 60, 60). The pad is a fixed 11.2 identity.
+_DB_TZ_FRAME_PAD = bytes.fromhex('80000000')
+_DB_TZ_BIAS = 60  # Oracle biases each of the h/m/s offset fields by +60
+
+# The 42-byte 8i DTY header, built from its fields: the TTI_DTY message token, the
+# charset + national charset (both ISO Latin-1 / WE8ISO8859P1 = 31, the only charset
+# 8i speaks), the 26-byte fv2 capability vector (carried as the captured 8i identity),
+# then the DB time-zone block set to UTC.
+_DTY_8I_CAPS = bytes.fromhex(  # 26-byte 8i (fv2) capability vector, captured identity
+    '02150601010105010102010101010101017f0f03060300020201'
+)
+_DTY_8I_HEADER = (
+    bytes([TTI_DTY])
+    + struct.pack('<H', ISO_LATIN_1_CHARSET)  # charset
+    + struct.pack('<H', ISO_LATIN_1_CHARSET)  # national charset
+    + _DTY_8I_CAPS
+    + _DB_TZ_FRAME_PAD
+    + bytes([_DB_TZ_BIAS, _DB_TZ_BIAS, _DB_TZ_BIAS])  # h/m/s = 0 (UTC), each +60
+    + _DB_TZ_FRAME_PAD
 )
 
 
@@ -4921,12 +4938,6 @@ _SERVER_DTY_ENTRIES = [
 
 
 _SERVER_DTY_TABLE = encode_dty_table(_SERVER_DTY_ENTRIES)  # 913-byte type table
-
-
-# The fixed framing of the 11-byte time-zone block: the same 4-byte pad at both
-# ends (bytes [0..3] and [7..10]), with the biased h/m/s triplet spliced in at
-# offsets 4..6. The pad is the block's fixed 11.2 identity.
-_DB_TZ_FRAME_PAD = bytes.fromhex('80000000')
 
 
 # --- Captured thin reply-template blobs (opaque, staged here) ---
