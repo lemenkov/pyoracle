@@ -4597,12 +4597,72 @@ def _build_pro_fdo() -> bytes:
 _PRO_FDO = _build_pro_fdo()
 
 
-_SERVER_COMPILE_CAPS = bytes.fromhex(  # 39-byte server 11g compile caps
-    '060101010f010106010101010101017fff030a030301007f017fff010601013f01030600010302'
+# The 11g server's own capability vectors, modelled as {index: value} feature maps
+# (like the client vectors in _COMPILE_CAPS / _RUNTIME_CAPS) rather than hex blobs.
+# Named slots use the CCAP_* / RCAP_* indices; the slots seerdb has no name for are
+# kept by numeric index for byte-parity (the client vectors carry the same). This is
+# the *server's* advertised identity — the client negotiates the field version off
+# _SERVER_COMPILE_CAPS[CCAP_FIELD_VERSION] (§4.2).
+_SERVER_COMPILE_CAPS = _render_caps(
+    (
+        39,
+        {
+            CCAP_SQL_VERSION: 0x06,
+            CCAP_LOGON_TYPES: 0x0F,
+            CCAP_FEATURE_BACKPORT: 0x01,
+            CCAP_FIELD_VERSION: FIELD_VERSION_11_2,  # 0x06
+            CCAP_SERVER_DEFINE_CONV: 0x01,
+            CCAP_DEQUEUE_WITH_SELECTOR: 0x01,
+            CCAP_TTC1: 0x7F,
+            CCAP_OCI1: 0xFF,
+            CCAP_TDS_VERSION: 0x03,
+            CCAP_RPC_VERSION: 0x0A,
+            CCAP_RPC_SIG: 0x03,
+            CCAP_DBF_VERSION: 0x01,
+            CCAP_LOB: 0x7F,
+            CCAP_TTC2: 0xFF,
+            CCAP_UB2_DTY: 0x01,
+            CCAP_OCI2: 0x3F,
+            CCAP_CLIENT_FN: 0x06,
+            CCAP_TTC3: 0x03,
+            # Unnamed slots the 11.2 server sets; kept by index for byte-parity.
+            1: 0x01,
+            2: 0x01,
+            3: 0x01,
+            6: 0x01,
+            10: 0x01,
+            11: 0x01,
+            12: 0x01,
+            13: 0x01,
+            14: 0x01,
+            20: 0x03,
+            24: 0x01,
+            25: 0x7F,
+            28: 0x06,
+            29: 0x01,
+            30: 0x01,
+            32: 0x01,
+            33: 0x03,
+            36: 0x01,
+            38: 0x02,
+        },
+    )
 )
 
 
-_SERVER_RUNTIME_CAPS = bytes.fromhex('02010001180003')  # 7-byte server runtime caps
+_SERVER_RUNTIME_CAPS = _render_caps(
+    (
+        7,
+        {
+            RCAP_COMPAT: RCAP_COMPAT_81,  # 0x02
+            RCAP_TTC: RCAP_TTC_ZERO_COPY | 0x02,  # 0x03
+            # Unnamed slots the 11.2 server sets; kept by index for byte-parity.
+            1: 0x01,
+            3: 0x01,
+            4: 0x18,
+        },
+    )
+)
 
 
 # --- the thin DTY reply: the server's type-conversion table ---
