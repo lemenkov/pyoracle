@@ -882,13 +882,21 @@ def _encode_oer(
     message: bytes,
     cursor_id: int = 0,
     batch_errors: list[tuple[int, int, str]] | None = None,
+    *,
+    seq: int = 0,
+    error_pos: int = 0,
+    sql_type: int = 0,
+    call_number: int = 0,
 ) -> bytes:
     # An OER return-status token (§6.5, 11g) — the terminal of every response.
     # Rowid fields are zero; call status, the ORA error number, the affected-row
     # count, the cursor id (for a mid-fetch "more rows" status), and the message
     # text carry meaning. ``batch_errors`` is (offset, code, message) per row that
     # failed in an array-DML batcherrors execute — the three arrays line up by
-    # position (#18).
+    # position (#18). ``seq`` / ``error_pos`` / ``sql_type`` / ``call_number`` are
+    # the OER fields left zero by the ordinary error/status paths but non-zero in a
+    # captured terminator (see :data:`_END_OF_FETCH`); they carry the captured
+    # value there and default to zero everywhere else.
     batch_errors = batch_errors or []
     codes = [code for _offset, code, _msg in batch_errors]
     offsets = [offset for offset, _code, _msg in batch_errors]
@@ -896,21 +904,21 @@ def _encode_oer(
     return (
         bytes([TTI_OER])
         + encode_sb4(call_status)
-        + encode_sb4(0)  # end-to-end seq
+        + encode_sb4(seq)  # end-to-end seq
         + encode_sb4(rowcount)  # current row number == DML affected rows on 11g
         + encode_sb4(ora_code)  # the ORA error number (0 on success)
         + encode_sb4(0)  # array element error 1
         + encode_sb4(0)  # array element error 2
         + encode_sb4(cursor_id)  # current cursor id
-        + encode_sb4(0)  # error position
-        + bytes(6)  # sql_type, fatal, flags, user_cursor_opts, upi_param, warn
+        + encode_sb4(error_pos)  # error position
+        + bytes([sql_type, 0, 0, 0, 0, 0])  # sql_type, fatal, flags, opts, upi, warn
         + encode_sb4(0)  # rowid data object number
         + encode_sb4(0)  # rowid relative file number
         + bytes(1)  # rowid reserved
         + encode_sb4(0)  # rowid block number
         + encode_sb4(0)  # rowid slot number
         + encode_sb4(0)  # os error
-        + bytes(2)  # statement number, call number
+        + bytes([0, call_number])  # statement number, call number
         + encode_sb4(0)  # padding
         + encode_sb4(1)  # successful iterations
         + _bytes_with_length(b'')  # oerrdd (logical rowid)
@@ -4973,20 +4981,6 @@ _SERVER_DTY_ENTRIES = [
 _SERVER_DTY_TABLE = encode_dty_table(_SERVER_DTY_ENTRIES)  # 913-byte type table
 
 
-# --- Captured thin reply-template blobs (opaque, staged here) ---
-
-
-# The end-of-fetch OER (ORA-01403 "no data found"), captured verbatim from a real
-# 11g response. It terminates a fetch that has returned all of its rows; the
-# client reads the 1403 status as "cursor drained" rather than an error.
-_END_OF_FETCH = (
-    bytes.fromhex(
-        '0401010104010102057b00000101010e03000000000000000000000000070001010000000019'
-    )
-    + b'ORA-01403: no data found\n'
-)
-
-
 # --- OCI LOB read round-trip (CLOB / BLOB SELECT, #405) ---
 # STATUS: WORKING — sqlplus displays CLOB and BLOB values over the Mirror
 # (single-packet and multi-packet content, session stays clean afterward). The
@@ -8173,6 +8167,29 @@ def encode_sb4(Val: int) -> bytes:
     # Out of ub4 range (or negative); raise here rather than via `case _` so
     # every branch is a value-return for flow analysis.
     raise Exception("Can't encode value", Val)
+
+
+# The end-of-fetch OER (ORA-01403 "no data found"): the OER return-status token
+# terminating a fetch that returned all of its rows — the client reads the 1403
+# status as "cursor drained" rather than an error. Built by _encode_oer (defined
+# here, after encode_sb4, so the eager call resolves), not stored: dissecting the
+# live 11g capture shows every byte is an ordinary OER field. call_status 1,
+# rowcount 1 and cursor_id 1 carry meaning; seq 4, error_pos 14, sql_type 3 and
+# call_number 7 are the specific values that terminator carried in the capture
+# (their meaning for a no-data status is murky, so they are carried in their named
+# OER slots, not invented). Consumed only by _terminator (a function), so its
+# placement here is fine.
+_END_OF_FETCH = _encode_oer(
+    1,
+    1403,
+    1,
+    b'ORA-01403: no data found\n',
+    cursor_id=1,
+    seq=4,
+    error_pos=14,
+    sql_type=3,
+    call_number=7,
+)
 
 
 def _o7_lobop_mid(
