@@ -949,14 +949,18 @@ def encode_rows(
         + encode_sb4(0)  # bit-vector length (no column compression)
         + _bytes_with_length(b'')  # rxhrid
     )
-    body = b''
+    # A bytearray, not a `bytes` accumulator: `bytes += ` reallocates and copies
+    # the whole buffer each row (O(n^2) for a large single batch — a fetch-all, a
+    # scrollable open, or a pipelined prefetch); a bytearray extends in place
+    # (O(n)). The OCI row encoders already do this.
+    body = bytearray()
     for row in rows:
         if len(row) != len(columns):
             raise InterfaceError('row width does not match the column count')
         body += bytes([TTI_RXD]) + b''.join(
             encode_value(v, col.data_type) for v, col in zip(row, columns)
         )
-    return header + body
+    return header + bytes(body)
 
 
 def encode_error(ora_code: int, message: str) -> bytes:
