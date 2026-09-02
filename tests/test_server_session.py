@@ -413,3 +413,26 @@ def test_plsql_bind_vars_wraps_block_binds_with_type_and_size() -> None:
     wrapped_rc = _plsql_bind_vars(refc)
     assert len(wrapped_rc) == 1
     assert wrapped_rc[0].tns_type == TNS_TYPE_REFCURSOR
+
+
+def test_oci_sequence_advances_per_reply() -> None:
+    # The per-session OER end-to-end sequence counter yields a fresh, advancing
+    # value on each call, starting at 1 — the Mirror threads seq.next() into every
+    # OCI status reply so the field advances like a real server's instead of
+    # repeating the frozen capture constant (§36).
+    from seerdb.common.tns import encode_status_oci
+    from seerdb.server.session import _OciSequence
+
+    seq = _OciSequence()
+    assert [seq.next() for _ in range(4)] == [1, 2, 3, 4]
+
+    # Threading one counter through consecutive status replies advances the OER
+    # sequence byte (frame offset 40: the compact OER sits at offset 32 with three
+    # leading pad bytes, and the sequence is at the OER's own offset 5) reply over
+    # reply — and nothing else in the frame changes.
+    seq2 = _OciSequence()
+    first = encode_status_oci(seq2.next())
+    second = encode_status_oci(seq2.next())
+    assert first[40] == 1
+    assert second[40] == 2
+    assert [i for i in range(len(first)) if first[i] != second[i]] == [40]

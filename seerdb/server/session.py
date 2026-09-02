@@ -458,6 +458,9 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
     # slicing the current LOB per each read's offset/amount (#405).
     lobs: list[tuple[bytes, bool]] = []
     current_lob: tuple[bytes, bool] | None = None
+    # The live per-session OER end-to-end sequence counter (§36); every OER-bearing
+    # reply below draws its next value so the field advances like a real server's.
+    seq = _OciSequence()
     while True:
         received = stream.read_packet()
         if received is None:
@@ -478,9 +481,9 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
                     # once its streaming define is set up. LONG rows stream one per
                     # reply: deliver the first now, re-park the rest for the
                     # follow-up fetches (#407).
-                    parked = _serve_oci_long_row(stream, parked, reexecute=True)
+                    parked = _serve_oci_long_row(stream, parked, seq, reexecute=True)
                     continue
-                parked, lobs = _answer_query_oci(stream, backend, body)
+                parked, lobs = _answer_query_oci(stream, backend, body, seq)
                 current_lob = None
                 continue
             if body[1] == TTI_LOBOPS:
@@ -509,7 +512,7 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
                 if parked is not None and _is_long_result(parked[0]):
                     # A LONG result drains one row per fetch (each with "more"),
                     # the last fetch drawing the 1403 terminator below (#407).
-                    parked = _serve_oci_long_row(stream, parked, reexecute=False)
+                    parked = _serve_oci_long_row(stream, parked, seq, reexecute=False)
                 elif parked is not None and _is_lob_result(parked[0]):
                     # A LOB result streams ONE row per fetch (sqlplus reads that
                     # row's LOB locators over TTI_LOBOPS before fetching the next —
@@ -519,17 +522,25 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
                     # row-major LOB queue drains in the order the locators go out (#405).
                     columns, rows = parked
                     stream.write_packet(
-                        TNS_DATA, encode_lob_fetch_rows_oci(columns, rows[:1])
+                        TNS_DATA,
+                        encode_lob_fetch_rows_oci(
+                            columns, rows[:1], sequence=seq.next()
+                        ),
                     )
                     parked = (columns, rows[1:]) if len(rows) > 1 else None
                 elif parked is not None:
                     columns, rows = parked
-                    stream.write_packet(TNS_DATA, encode_fetch_batch_oci(columns, rows))
+                    stream.write_packet(
+                        TNS_DATA,
+                        encode_fetch_batch_oci(columns, rows, sequence=seq.next()),
+                    )
                     parked = None
                 else:
                     # Nothing parked — the execute already delivered every row;
                     # the fetch just wants the end-of-fetch terminator (ORA-01403).
-                    stream.write_packet(TNS_DATA, encode_fetch_terminator_oci())
+                    stream.write_packet(
+                        TNS_DATA, encode_fetch_terminator_oci(seq.next())
+                    )
                 continue
             if body[1] in (TTI_COMMIT, TTI_ROLLBACK):
                 stream.write_packet(TNS_DATA, encode_commit_status_oci())
@@ -559,6 +570,7 @@ def _is_lob_result(columns: list[ColumnMeta]) -> bool:
 def _serve_oci_long_row(
     stream: PacketStream,
     parked: tuple[list[ColumnMeta], list[tuple]],
+    seq: '_OciSequence',
     *,
     reexecute: bool,
 ) -> tuple[list[ColumnMeta], list[tuple]] | None:
@@ -568,14 +580,16 @@ def _serve_oci_long_row(
     # makes the next fetch return the 1403 terminator (#407).
     columns, rows = parked
     if reexecute:
-        reply = encode_reexec_row_oci(columns, rows[:1], more=len(rows) > 1)
+        reply = encode_reexec_row_oci(
+            columns, rows[:1], sequence=seq.next(), more=len(rows) > 1
+        )
     else:
-        reply = encode_long_fetch_row_oci(columns, rows[0])
+        reply = encode_long_fetch_row_oci(columns, rows[0], sequence=seq.next())
     stream.write_packet(TNS_DATA, reply)
     return (columns, rows[1:]) if len(rows) > 1 else None
 
 
-def _oci_no_row_status(sql: str, rowcount: int) -> bytes:
+def _oci_no_row_status(sql: str, rowcount: int, seq: '_OciSequence') -> bytes:
     # Pick the OCI success reply for a statement that returned no columns, so
     # sqlplus renders the right message (#348 / #349): DML carries the affected row
     # count ("N rows created/updated/deleted"); DDL / session verbs (CREATE / DROP
@@ -585,15 +599,15 @@ def _oci_no_row_status(sql: str, rowcount: int) -> bytes:
     # session bootstrap) gets the generic "PL/SQL procedure successfully completed".
     keyword = sql.lstrip().split(None, 1)[0].upper() if sql.strip() else ''
     if keyword in _OCI_DML_KEYWORDS:
-        return encode_dml_status_oci(keyword, rowcount)
+        return encode_dml_status_oci(keyword, rowcount, sequence=seq.next())
     command_type = ddl_command_type(sql)
     if command_type is not None:
-        return encode_ddl_status_oci(command_type)
-    return encode_status_oci()
+        return encode_ddl_status_oci(command_type, sequence=seq.next())
+    return encode_status_oci(seq.next())
 
 
 def _answer_query_oci(
-    stream: PacketStream, backend: Backend, body: bytes
+    stream: PacketStream, backend: Backend, body: bytes, seq: '_OciSequence'
 ) -> tuple[tuple[list[ColumnMeta], list[tuple]] | None, list[tuple[bytes, bool]]]:
     # Answer one sqlplus / thick-OCI execute. sqlplus fires a chain of setup
     # statements (PL/SQL blocks, PRODUCT_PRIVS selects) before the user's query;
@@ -605,7 +619,7 @@ def _answer_query_oci(
     except InterfaceError:
         # A shape not parsed yet (e.g. a bound PL/SQL setup call) — acknowledge
         # success so sqlplus proceeds; the backend never sees it.
-        stream.write_packet(TNS_DATA, encode_status_oci())
+        stream.write_packet(TNS_DATA, encode_status_oci(seq.next()))
         return None, []
     try:
         result = backend.execute(request.sql, request.binds)
@@ -616,17 +630,25 @@ def _answer_query_oci(
         # (PL/SQL / DDL it can't do) gets a success status so the session
         # continues.
         if request.sql.lstrip().upper().startswith('SELECT'):
-            stream.write_packet(TNS_DATA, encode_error_oci(err.ora_code, str(err)))
+            stream.write_packet(
+                TNS_DATA,
+                encode_error_oci(err.ora_code, str(err), sequence=seq.next()),
+            )
         else:
-            stream.write_packet(TNS_DATA, encode_status_oci())
+            stream.write_packet(TNS_DATA, encode_status_oci(seq.next()))
         return None, []
     if result.out_binds:
         # A PL/SQL block that assigned OUT binds (sqlplus VARIABLE / EXEC) — return
         # the values so the client reads them back into its bound buffers.
-        stream.write_packet(TNS_DATA, encode_out_bind_response_oci(result.out_binds))
+        stream.write_packet(
+            TNS_DATA,
+            encode_out_bind_response_oci(result.out_binds, sequence=seq.next()),
+        )
         return None, []
     if not result.columns:
-        stream.write_packet(TNS_DATA, _oci_no_row_status(request.sql, result.rowcount))
+        stream.write_packet(
+            TNS_DATA, _oci_no_row_status(request.sql, result.rowcount, seq)
+        )
         return None, []
     rows = list(result.rows)
     # Every LOB cell across the whole result queues its content now, row-major, so
@@ -644,7 +666,9 @@ def _answer_query_oci(
         # 33-byte tail + a LOB execute status, not the ordinary inline-row DCB
         # tail) — matching it is what makes sqlplus accept the locator row rather
         # than break (#405).
-        stream.write_packet(TNS_DATA, encode_lob_describe_oci(result.columns))
+        stream.write_packet(
+            TNS_DATA, encode_lob_describe_oci(result.columns, sequence=seq.next())
+        )
         return (result.columns, rows), lobs
     if has_long and rows:
         # sqlplus fetches a LONG / LONG RAW row separately from the describe — it
@@ -652,17 +676,26 @@ def _answer_query_oci(
         # — so deliver no row inline (an inline LONG row segfaults it): describe +
         # "more rows", then the row in the follow-up fetch (#407).
         stream.write_packet(
-            TNS_DATA, encode_query_response_oci(result.columns, [], more=True)
+            TNS_DATA,
+            encode_query_response_oci(
+                result.columns, [], sequence=seq.next(), more=True
+            ),
         )
         return (result.columns, rows), lobs
     if len(rows) <= 1:
         # 0 or 1 row fits in the execute reply; sqlplus won't fetch further.
-        stream.write_packet(TNS_DATA, encode_query_response_oci(result.columns, rows))
+        stream.write_packet(
+            TNS_DATA,
+            encode_query_response_oci(result.columns, rows, sequence=seq.next()),
+        )
         return None, lobs
     # Deliver the first row now and park the rest — sqlplus reads the "more rows"
     # status and issues a fetch for the remainder.
     stream.write_packet(
-        TNS_DATA, encode_query_response_oci(result.columns, rows[:1], more=True)
+        TNS_DATA,
+        encode_query_response_oci(
+            result.columns, rows[:1], sequence=seq.next(), more=True
+        ),
     )
     return (result.columns, rows[1:]), lobs
 
@@ -684,6 +717,25 @@ def _skip_piggybacks(body: bytes) -> bytes:
             _, rest = decode_ub4(rest)  # each closed cursor id (ignored)
         body = rest
     return body
+
+
+class _OciSequence:
+    # The per-session OER end-to-end sequence number for the sqlplus / thick-OCI
+    # reply path (§36). A real Oracle server advances this diagnostic counter on
+    # every reply; the Mirror does the same with a live counter instead of emitting
+    # the frozen value each captured status was reverse-engineered with, so a
+    # session's replies look like a live server's rather than repeating one number.
+    # The field is read-and-discarded by every client (both reference thin and
+    # thick clients read it into a dead field or skip it outright — never validate,
+    # echo, or transmit it), so the start value and +1-per-reply step are Mirror
+    # response-generation policy, not a decoded Oracle rule. Starts at 1.
+    def __init__(self) -> None:
+        self._n = 1
+
+    def next(self) -> int:
+        n = self._n
+        self._n += 1
+        return n
 
 
 class _Cursors:
