@@ -314,13 +314,18 @@ def _start_mirror() -> tuple[socket.socket, threading.Thread, dict]:
 
 
 def _connect(port: int):
+    # A generous socket read timeout (per recv). The backing PostgreSQL may be
+    # remote (MIRROR_PG points off-box), and the Mirror runs an array-DML as one
+    # round-trip per row against it, so a 500-row executemany can take several
+    # seconds over a LAN — well past the old 5 s. 20 s clears that with margin
+    # while still failing fast on a genuinely hung server.
     return seerdb.connect(
         host='127.0.0.1',
         port=port,
         user='PYO',
         password='pyo123',
         service_name='XE',
-        timeout=5000,
+        timeout=20000,
     )
 
 
