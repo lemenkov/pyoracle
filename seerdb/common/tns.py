@@ -6430,6 +6430,21 @@ def _o7_bind_oac(Value: object) -> bytes:
     return _oac(Type, MaxSize, Csfrm)
 
 
+# The two fixed option blocks that frame the inline SQL in a TTI_ALL7 parse call
+# (#100 SELECT/DML, #102 PL/SQL block) — the block between the SQL-length and the
+# bind count, and the tail after the SQL. Both parse encoders share them verbatim.
+# The individual bytes are opaque 9i framing, carried as captured ground truth
+# (verified byte-for-byte against the 9i parse captures).
+_O7_PARSE_MID = bytes([0, 0, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0, 0, 0])
+_O7_PARSE_TAIL = bytes([0x01, 0x01, 0x01, 0x01, 0, 0, 0, 0, 0])
+
+
+def _o7_bind_count(Binds: list) -> bytes:
+    # The bind-count field that precedes the inline SQL: `01 01 <count>` with
+    # binds, `00 00` without.
+    return bytes([0x01, 0x01, len(Binds)]) if Binds else bytes([0, 0])
+
+
 def encode_o7_parse(Seq: int, Sql: str, Binds: list | None = None) -> bytes:
     # Call 1: TTI_ALL7 parse. The SQL is carried inline, sb4-length-prefixed,
     # between two fixed option blocks. With input binds (#100) the option word
@@ -6438,14 +6453,13 @@ def encode_o7_parse(Seq: int, Sql: str, Binds: list | None = None) -> bytes:
     Binds = Binds or []
     SqlBytes = Sql.encode('utf-8')
     Opt = 0x29 if Binds else 0x21
-    BindCount = bytes([0x01, 0x01, len(Binds)]) if Binds else bytes([0, 0])
     Out = (
         bytes([TTI_FUN, TTI_ALL7, Seq, 0x02, 0x80, Opt, 0x01, 0x01, 0x01])
         + encode_sb4(len(SqlBytes))
-        + bytes([0, 0, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0, 0, 0])
-        + BindCount
+        + _O7_PARSE_MID
+        + _o7_bind_count(Binds)
         + SqlBytes
-        + bytes([0x01, 0x01, 0x01, 0x01, 0, 0, 0, 0, 0])
+        + _O7_PARSE_TAIL
     )
     if Binds:
         Out += b''.join(_o7_bind_oac(V) for V in Binds)
@@ -6466,16 +6480,15 @@ def encode_o7_block(Seq: int, Sql: str, Binds: list | None = None) -> bytes:
     Binds = Binds or []
     SqlBytes = Sql.encode('utf-8')
     OptBytes = bytes([0x02, 0x04, 0x29]) if Binds else bytes([0x01, 0x21])
-    BindCount = bytes([0x01, 0x01, len(Binds)]) if Binds else bytes([0, 0])
     Out = (
         bytes([TTI_FUN, TTI_ALL7, Seq])
         + OptBytes
         + bytes([0x01, 0x01, 0x01])
         + encode_sb4(len(SqlBytes))
-        + bytes([0, 0, 0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0, 0, 0])
-        + BindCount
+        + _O7_PARSE_MID
+        + _o7_bind_count(Binds)
         + SqlBytes
-        + bytes([0x01, 0x01, 0x01, 0x01, 0, 0, 0, 0, 0])
+        + _O7_PARSE_TAIL
     )
     if Binds:
         # Bind OACs only — the values follow in a separate RXD frame after the
