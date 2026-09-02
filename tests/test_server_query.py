@@ -830,6 +830,24 @@ def test_encode_lob_describe_oci_omits_the_dcb_tail() -> None:
     assert b'\x08\x06\x00' in reply  # LOB execute status present
 
 
+def test_oci_lob_describe_tail_is_built_from_fields() -> None:
+    # The 33-byte LOB describe tail (#405) is built field-by-field, not stored:
+    # the describe-time DALC head (ub4 char-length 7 + byte-length 7) + one carried
+    # ub4 at offset 17. It must stay byte-identical to the live 11g capture.
+    from seerdb.common.tns import (
+        _OCI_LOB_DESCRIBE_SIZE_OFF,
+        _OCI_LOB_DESCRIBE_TAIL,
+        _oci_lob_describe_tail,
+    )
+
+    assert _OCI_LOB_DESCRIBE_TAIL == bytes.fromhex(
+        '0007000000070000000000000000000000e81f0000000000000000000000000000'
+    )
+    assert _oci_lob_describe_tail() == _OCI_LOB_DESCRIBE_TAIL
+    off = _OCI_LOB_DESCRIBE_SIZE_OFF
+    assert int.from_bytes(_OCI_LOB_DESCRIBE_TAIL[off : off + 4], 'little') == 8168
+
+
 def test_encode_lob_read_response_slices_and_reports_totals() -> None:
     # The READ reply carries the requested slice as LOB_DATA and reports the whole
     # LOB's byte size in the echoed locator plus this read's amount (#405).

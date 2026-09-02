@@ -4376,17 +4376,6 @@ _OCI_FETCH_OER_HEADER = _oci_oer_short(
 _OCI_FETCH_CONST = bytes.fromhex('f6310a')
 
 
-# The execute reply for a LOB SELECT is a describe with NO row inline — sqlplus
-# sets up its LOB define from it and fetches the locator rows separately. It is
-# NOT the ordinary describe: instead of the 83-byte DCB tail that precedes inline
-# rows it carries a 33-byte describe tail (a describe-timestamp form, no DCB
-# marker), and its own execute status/OER. Both are reduced from a live 11g CLOB
-# describe with the instance-specific bytes (the timestamp, the SCN) zeroed (#405).
-_OCI_LOB_DESCRIBE_TAIL = bytes.fromhex(
-    '0007000000070000000000000000000000e81f0000000000000000000000000000'
-)
-
-
 # The describe-only reply's trailing execute status (§36.3): the shared status
 # preamble + a success OER. offset 20 carries a non-zero value under a success
 # status — carried from the live capture; its meaning in the describe context is
@@ -5343,6 +5332,32 @@ def _oci_dcb_tail(numcols: int) -> bytes:
     tail[off : off + len(_OCI_DCB_MARKER)] = _OCI_DCB_MARKER
     tail[_OCI_DCB_NUMCOLS_OFF] = numcols
     return bytes(tail)
+
+
+# The execute reply for a LOB SELECT is a describe with NO row inline — sqlplus
+# sets up its LOB define from it and fetches the locator rows separately. Instead
+# of the 83-byte inline-row DCB tail it carries a 33-byte describe-timestamp tail
+# (no DCB marker): the same describe-time DALC head as _oci_dcb_tail (a ub4 char
+# length of 7 + the byte-length 7, the timestamp value itself zeroed), all zero
+# except one ub4 the LOB describe carries at offset 17. That ub4 is NOT
+# instance-specific (a real reply zeroes the timestamp / SCN but not this), so it
+# is a stable structural value; its exact meaning is unpinned, carried from the
+# live 11g CLOB describe capture (#405).
+_OCI_LOB_DESCRIBE_TAIL_LEN = 33
+_OCI_LOB_DESCRIBE_SIZE_OFF = 17
+_OCI_LOB_DESCRIBE_SIZE = 8168  # 0x1fe8, ub4 LE — carried ground truth
+
+
+def _oci_lob_describe_tail() -> bytes:
+    tail = bytearray(_OCI_LOB_DESCRIBE_TAIL_LEN)
+    tail[1:5] = _oci_ub4(_OCI_DCB_DATE_LEN)  # describe-time DALC char length
+    tail[5] = _OCI_DCB_DATE_LEN  # DALC byte length; the value stays zero
+    off = _OCI_LOB_DESCRIBE_SIZE_OFF
+    tail[off : off + 4] = _oci_ub4(_OCI_LOB_DESCRIBE_SIZE)
+    return bytes(tail)
+
+
+_OCI_LOB_DESCRIBE_TAIL = _oci_lob_describe_tail()
 
 
 # When the execute delivers fewer rows than the result holds, this byte in the
