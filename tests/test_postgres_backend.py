@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'examples'))
 from postgres_backend import (  # noqa: E402
     _HELPER_FUNCTIONS_DDL,
     _IS_DDL,
+    _REF_SELECT,
     OraInterval,
     PostgresBackend,
     _backend_error,
@@ -84,6 +85,42 @@ def test_translate_ddl_maps_create_table_column_types() -> None:
     assert 'ts ora_tstz' in sent  # WITH TIME ZONE preserves the offset (#519)
     assert 'f real' in sent and 'g double precision' in sent
     assert 'NUMBER' not in sent and 'VARCHAR2' not in sent
+
+
+def test_translate_ddl_maps_object_type_to_composite() -> None:
+    # CREATE TYPE ... AS OBJECT (attrs) → a PostgreSQL composite type, the OBJECT
+    # keyword dropped and the attribute types mapped like a table's columns (#139).
+    sent = _translate_ddl(
+        'CREATE TYPE PYORACLE_REF_PERSON AS OBJECT (id NUMBER, name VARCHAR2(40))'
+    )
+    assert 'AS OBJECT' not in sent and 'OBJECT' not in sent
+    assert 'AS (id numeric, name varchar(40))' in sent
+    assert 'PYORACLE_REF_PERSON' in sent  # the type name is untouched
+
+
+def test_translate_ddl_maps_ref_column_to_bytea() -> None:
+    # A `REF <object type>` column has no PostgreSQL equal; since the REF bind that
+    # uses it is 12c+ and skips on the 11g Mirror, the column becomes a bytea
+    # placeholder so the CREATE succeeds (#139). A REF() call is left alone.
+    sent = _translate_ddl('CREATE TABLE t (id NUMBER, r REF PYORACLE_REF_PERSON)')
+    assert 'r bytea' in sent
+    assert 'REF' not in sent
+    # CREATE TABLE ... OF type (a typed table) passes through unchanged.
+    assert _translate_ddl('CREATE TABLE people OF PYORACLE_REF_PERSON') == (
+        'CREATE TABLE people OF PYORACLE_REF_PERSON'
+    )
+
+
+def test_ref_select_matches_the_object_ref_fetch() -> None:
+    # `SELECT REF(alias) FROM table alias [rest]` is recognised so the backend can
+    # stand in the ctid + report the object type; the alias inside REF() must match
+    # the table alias (#139).
+    m = _REF_SELECT.match('SELECT REF(p) FROM PYORACLE_REF_PEOPLE p WHERE p.id = 1')
+    assert m is not None
+    assert m.group(1) == 'p' and m.group(2) == 'PYORACLE_REF_PEOPLE'
+    assert m.group(3) == 'p' and m.group(4).strip() == 'WHERE p.id = 1'
+    # A DEREF select (the 12c+ path) is not a REF fetch.
+    assert _REF_SELECT.match('SELECT DEREF(r).name FROM t') is None
 
 
 def test_translate_ddl_maps_interval_year_to_month_to_domain() -> None:

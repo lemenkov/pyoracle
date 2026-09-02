@@ -49,9 +49,15 @@ edge of this adapter:
   unimplemented: ``ctid`` exposes only a block and a slot, not the data-object# and
   relative-file# that the package's accessors (``ROWID_OBJECT``,
   ``ROWID_RELATIVE_FNO``, …) decompose a physical rowid into.
-- **Object types (``AS OBJECT``) and ``REF`` / ``DEREF``** — a PostgreSQL composite
-  type is not an Oracle object type and has no REF; the object schema the REF tests
-  build cannot even be created.
+- **Real ``REF`` / ``DEREF``** — an Oracle object type maps to a PostgreSQL
+  composite type and a typed table (``CREATE TABLE t OF type``), and ``SELECT
+  REF(p)`` is emulated with the row's ctid as the locator plus the object type
+  recovered from ``pg_class.reloftype`` — enough for the client to decode a REF with
+  the right ``type_name`` (which is all the 11g REF tests check before they skip the
+  bind). But a PostgreSQL composite has no REF *pointer*: the actual REF **bind** and
+  ``DEREF`` round-trip is a 12c+ feature the suite already skips on the 11g Mirror,
+  and could not be served if it did not — the ctid locator is opaque and never
+  dereferenced.
 """
 
 from __future__ import annotations
@@ -67,6 +73,7 @@ from psycopg.adapt import Loader
 from psycopg.types.composite import CompositeInfo, register_composite
 
 from seerdb.common.datatypes import IntervalYM
+from seerdb.common.dbobject import DbRef
 from seerdb.common.tns_consts import (
     TNS_TYPE_BDOUBLE,
     TNS_TYPE_BFLOAT,
@@ -77,6 +84,7 @@ from seerdb.common.tns_consts import (
     TNS_TYPE_INTERVALYM,
     TNS_TYPE_NUMBER,
     TNS_TYPE_RAW,
+    TNS_TYPE_REF,
     TNS_TYPE_TIMESTAMP,
     TNS_TYPE_TIMESTAMPTZ,
     TNS_TYPE_VARCHAR,
@@ -360,6 +368,12 @@ def _translate_binds(sql: str, binds: Sequence) -> tuple[str, dict]:
 _DDL_TYPE_REWRITES = [
     # SYS_REFCURSOR (a REF CURSOR OUT param) → PostgreSQL's refcursor (#518).
     (re.compile(r'\bSYS_REFCURSOR\b', re.IGNORECASE), 'refcursor'),
+    # A `REF <object type>` column (#139). PostgreSQL has no REF, but the REF-bind
+    # column is only exercised by the 12c+ path the suite skips on the 11g Mirror —
+    # the CREATE just has to succeed — so the column becomes a bytea placeholder.
+    # Matched before the object type name is otherwise touched; `REF(` (a REF()
+    # call) has no space and is not matched.
+    (re.compile(r'\bREF\s+\w+', re.IGNORECASE), 'bytea'),
     (re.compile(r'\bLONG\s+RAW\b', re.IGNORECASE), 'bytea'),
     (re.compile(r'\bRAW\s*\(\s*\d+\s*\)', re.IGNORECASE), 'bytea'),
     (re.compile(r'\bRAW\b', re.IGNORECASE), 'bytea'),
@@ -422,10 +436,29 @@ _IS_DDL = re.compile(
 )
 
 
+# An Oracle object type — `CREATE [OR REPLACE] TYPE name AS OBJECT (attrs)` — maps
+# to a PostgreSQL composite type (`CREATE TYPE name AS (attrs)`), which a typed
+# table (`CREATE TABLE t OF name`) can then be built on. It is not a true Oracle
+# object type (no methods, no REF), but it carries the attribute structure and the
+# type identity a `SELECT REF(p)` describe reports — enough for the REF tests to
+# reach their 11g self-skip (#139).
+_CREATE_TYPE_OBJECT = re.compile(
+    r'(\s*CREATE\s+(?:OR\s+REPLACE\s+)?TYPE\b.*?\bAS)\s+OBJECT\b',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
 def _translate_ddl(sql: str) -> str:
-    """Rewrite an Oracle ``CREATE TABLE`` to PostgreSQL: map the column types and
-    drop the clauses PostgreSQL has no equal for (#500). Non-CREATE-TABLE SQL is
-    returned unchanged."""
+    """Rewrite an Oracle ``CREATE TABLE`` / object ``CREATE TYPE`` to PostgreSQL:
+    map the column/attribute types and drop the clauses PostgreSQL has no equal
+    for (#500). Other SQL is returned unchanged."""
+    if _CREATE_TYPE_OBJECT.match(sql):
+        # `... AS OBJECT (attrs)` → `... AS (attrs)`, then map the attribute types
+        # (NUMBER → numeric, VARCHAR2(n) → varchar(n), …) the same way as a table.
+        out = _CREATE_TYPE_OBJECT.sub(r'\1', sql, count=1)
+        for pattern, replacement in _DDL_TYPE_REWRITES:
+            out = pattern.sub(replacement, out)
+        return out
     if not _IS_CREATE_TABLE.match(sql):
         return sql
     out = _DDL_GLOBAL_TEMPORARY.sub('TEMPORARY', sql)
@@ -433,6 +466,17 @@ def _translate_ddl(sql: str) -> str:
     for pattern, replacement in _DDL_TYPE_REWRITES:
         out = pattern.sub(replacement, out)
     return out
+
+
+# `SELECT REF(<alias>) FROM <table> <alias> [rest]` — the object-REF fetch (#139).
+# PostgreSQL has no REF, so the row's identity (its ctid) stands in for the opaque
+# locator and the referenced object type is recovered from the typed table's
+# catalog entry (pg_class.reloftype). Only this single-REF-column shape is handled
+# (all the suite issues); anything else falls through to the ordinary path.
+_REF_SELECT = re.compile(
+    r'\s*SELECT\s+REF\s*\(\s*(\w+)\s*\)\s+FROM\s+([\w.]+)\s+(\w+)\b(.*)$',
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 # Oracle SQL functions / literal idioms → PostgreSQL (#502). Each is a function
@@ -963,6 +1007,14 @@ class PostgresBackend:
         # values (#503).
         if any(isinstance(b, BindVar) for b in binds):
             return self._execute_plsql(sql, binds)
+        # A `SELECT REF(alias)` object-REF fetch: PostgreSQL has no REF, so stand in
+        # the row's ctid as the locator and report the referenced object type from
+        # the typed table's catalog entry, so the client decodes a REF whose
+        # type_name matches (#139). The 12c+ REF *bind* the test does next is skipped
+        # by its own version guard on the 11g Mirror.
+        ref_select = _REF_SELECT.match(sql)
+        if ref_select and ref_select.group(1).lower() == ref_select.group(3).lower():
+            return self._execute_ref_select(ref_select)
         # Reject the column types that are Oracle-only for the version the Mirror
         # advertises (JSON/VECTOR/BOOLEAN), so the suite's version guards skip
         # rather than the backend mis-representing them (#504).
@@ -1042,6 +1094,68 @@ class PostgresBackend:
         if is_ddl:
             self._conn.commit()
         return result
+
+    def _object_type_name(self, table: str) -> str | None:
+        # The Oracle object-type name of a typed table (CREATE TABLE t OF type), or
+        # None if `table` is not one. pg_class.reloftype names the row type; Oracle
+        # folds identifiers to upper case, so the name is compared uppercased.
+        relname = table.split('.')[-1].strip('"').lower()
+        row = self._conn.execute(
+            'SELECT reloftype::regtype::text FROM pg_class '
+            'WHERE relname = %s AND reloftype <> 0',
+            (relname,),
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return row[0].split('.')[-1].strip('"').upper()
+
+    def _execute_ref_select(self, match: 're.Match[str]') -> Result:
+        # Serve `SELECT REF(alias) FROM table alias [rest]` (#139). The referenced
+        # object type comes from the typed table's catalog entry; the REF locator is
+        # stood in by the row's ctid (opaque, and never dereferenced — the DEREF /
+        # bind the test does next is 12c+ and skips on the 11g Mirror). The result is
+        # one REF column of DbRef values carrying the type identity the describe
+        # reports, so the client reads ref.type_name correctly.
+        ref_alias, table, table_alias, rest = match.groups()
+        type_name = self._object_type_name(table)
+        if type_name is None:
+            raise UnsupportedFeature(
+                f'REF({ref_alias}): {table} is not an object table'
+            )
+        query = f'SELECT {table_alias}.ctid::text FROM {table} {table_alias}{rest}'
+        cursor = self._conn.cursor()
+        cursor.execute('SAVEPOINT _mirror_stmt')
+        try:
+            cursor.execute(query)
+            ctids = [r[0] for r in cursor.fetchall()]
+        except psycopg.Error as exc:
+            self._conn.execute('ROLLBACK TO SAVEPOINT _mirror_stmt')
+            self._conn.execute('RELEASE SAVEPOINT _mirror_stmt')
+            raise _backend_error(exc) from exc
+        self._conn.execute('RELEASE SAVEPOINT _mirror_stmt')
+        schema = 'PUBLIC'
+        oid = b'\x00' * 16  # Oracle carries a 16-byte type OID; unused pre-12c bind
+        column = ColumnMeta(
+            name=f'REF({ref_alias})'.upper().encode('utf-8'),
+            data_type=TNS_TYPE_REF,
+            data_length=4000,
+            max_size=0,
+            type_name=type_name.encode('ascii'),
+            type_schema=schema.encode('ascii'),
+            type_oid=oid,
+        )
+        rows = [
+            (
+                DbRef(
+                    ctid.encode('utf-8'),
+                    type_name=type_name,
+                    type_schema=schema,
+                    type_oid=oid,
+                ),
+            )
+            for ctid in ctids
+        ]
+        return Result(columns=[column], rows=rows)
 
     def _domain_type(self, pgresult, index: int) -> int | None:
         # The Oracle wire type if result column `index` comes from one of the typed
