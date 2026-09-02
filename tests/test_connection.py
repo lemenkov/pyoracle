@@ -138,6 +138,106 @@ class TestAsyncCloseTeardown(unittest.TestCase):
         self.assertEqual(writer.writes, [])
 
 
+class TestSyncAsyncTeardownParity(unittest.TestCase):
+    # Guard against sync/async drift in the I/O-interleaved teardown / txn
+    # methods (close, commit, rollback). These interleave blocking recv vs
+    # await, so they can't share a body and are hand-duplicated between
+    # connection.py and aconnection.py — exactly the shape that produced the
+    # close() parity gaps in #645/#646. Rather than re-test each method's
+    # behavior on both sides, run the *real* sync and async bodies with their
+    # I/O substeps instrumented and assert both issue the same ordered sequence
+    # of logical steps. A step added to one side but not the other (or
+    # reordered) makes the traces diverge and fails here.
+    _STEP_METHODS = ('rollback', 'commit', 'send', '_handle_response', 'disconnect')
+
+    def _marker(self):
+        from seerdb.common.tns_consts import TNS_DATA, TNS_DATA_FLAGS_EOF
+
+        return struct.pack('>hhBBh', 10, 0, TNS_DATA, 0, TNS_DATA_FLAGS_EOF)
+
+    def _instrument(self, conn, method, trace, is_async):
+        # Replace every teardown substep except the method under test with a
+        # recorder, so the traced body's real control flow drives the sequence.
+        for name in self._STEP_METHODS:
+            if name == method:
+                continue
+            if is_async:
+                setattr(
+                    conn,
+                    name,
+                    mock.AsyncMock(
+                        side_effect=lambda *a, _n=name, **k: trace.append(_n)
+                    ),
+                )
+            else:
+                setattr(conn, name, lambda *a, _n=name, **k: trace.append(_n))
+
+    def _sync_trace(self, method, autocommit):
+        from seerdb.client.connection import OracleConnect
+        from seerdb.common.tns_consts import CONN_STATE_AUTHENTICATED
+
+        c = OracleConnect(
+            host='x', port=1, user='pyo', password='p', autocommit=autocommit
+        )
+        c.conn_state = CONN_STATE_AUTHENTICATED
+        trace: list[str] = []
+        marker = self._marker()
+
+        class _RecordingSock:
+            def send(self, data):
+                trace.append('eof_marker' if bytes(data) == marker else 'raw_write')
+                return len(data)
+
+        c.sock = _RecordingSock()
+        self._instrument(c, method, trace, is_async=False)
+        getattr(c, method)()
+        return trace
+
+    def _async_trace(self, method, autocommit):
+        from seerdb.client.aconnection import AsyncOracleConnect
+        from seerdb.common.tns_consts import CONN_STATE_AUTHENTICATED
+
+        a = AsyncOracleConnect(
+            host='x', port=1, user='pyo', password='p', autocommit=autocommit
+        )
+        a.conn_state = CONN_STATE_AUTHENTICATED
+        trace: list[str] = []
+        marker = self._marker()
+
+        class _RecordingWriter:
+            def write(self, data):
+                trace.append('eof_marker' if bytes(data) == marker else 'raw_write')
+
+            async def drain(self):
+                pass
+
+        a._writer = _RecordingWriter()
+        a._reader = object()
+        self._instrument(a, method, trace, is_async=True)
+        asyncio.run(getattr(a, method)())
+        return trace
+
+    def _assert_parity(self, method):
+        for autocommit in (False, True):
+            sync = self._sync_trace(method, autocommit)
+            asyncr = self._async_trace(method, autocommit)
+            self.assertEqual(
+                sync,
+                asyncr,
+                f'{method}() sync vs async step sequence differs '
+                f'(autocommit={autocommit}): {sync} != {asyncr}',
+            )
+
+    def test_close_step_parity(self):
+        self._assert_parity('close')
+
+    def test_commit_step_parity(self):
+        self._assert_parity('commit')
+
+    def test_rollback_step_parity(self):
+        self._assert_parity('rollback')
+
+
 class TestProxyUser(unittest.TestCase):
     # Proxy authentication (#126): user "proxy[schema]" -> authenticate as
     # proxy, operate in schema. The wire side (PROXY_CLIENT_NAME auth pair) is
