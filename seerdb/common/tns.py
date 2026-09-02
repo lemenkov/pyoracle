@@ -5414,6 +5414,163 @@ _OCI_DCB_NUMCOLS_OFF = 37
 # call status + the return marker sqlplus needs to accept the row set. Reproduced
 # as a unit — the row-count fields inside are constant for the single-row replies
 # handled so far; generalising it is a follow-up.
+# The classic sqlplus / thick-OCI `DESCRIBE <object>` reply (TTI func 0x77). It is
+# a dedicated describe message (NOT the query DCB) laid out as: a fixed preamble,
+# the schema and table names (DALCs), a fixed header carrying a column-count field,
+# one ~163-byte block per column, and a fixed trailer. Reverse-engineered by
+# differential capture against live 11g (single-column NUMBER / VARCHAR / DATE
+# describes differ in only 14 places; the multi-column layout adds one block per
+# column) — see docs/PROTOCOL.md. The meaningful per-column fields (type, size,
+# precision, scale, nullability, charset) are computed; the opaque fixed structure
+# is carried as the four segment constants below. Unlike the query describe,
+# sqlplus rejects (hangs on) a DESCRIBE reply whose describe timestamp / object id
+# are zeroed, so the header carries the non-zero, valid values from the capture —
+# the Mirror has no real object numbers and the fields are not rendered, so they
+# are carried verbatim rather than synthesised.
+_OCI_DESC_HDR_PRE = bytes.fromhex('0801000100000027010700000007787e09020c281b00000000')
+_OCI_DESC_HDR_POST = bytes.fromhex(
+    '44c50100000000000000000000010000007244c501000000000001000000be0100000027'
+    '0b0700000007787e09020c281b0000000000000000000000000000000000000000000100'
+    '00000b0102000000be0100000027000700000007787e09020c281b020000000000000000'
+    '000000000000000000000000000000000000000000000000000000000000000000000000'
+    '000000000000000000000000000000000000000000000000000000000000000000000000'
+    '000000000000000000000000000000000100000027090700000007787e09020c281b0200'
+    '000000000000000000000000000000000000000000000000000000000000000000000000'
+    '0000000000000000000000010000'
+)
+_OCI_DESC_BLK = bytes.fromhex(
+    '005c160002000100000001430a0201000000000000000000000000000000000000000000'
+    '000000000000000000002400000000000000000000000000000000000000000000000000'
+    '000000000000000000000000000000000000000000000000000000000000000000000000'
+    '000000000000000000000000000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000000000000'
+)
+_OCI_DESC_TRAILER = bytes.fromhex(
+    '0000010004000000ca140001000000000900000000000000000000000000000000000000'
+    '000000000000000000000000000000000000000000000000000000000000000000000000'
+    '000000000000000000000000000000000000000000000000000000000000000000000000'
+    '000000000000000000000000000405000000130001010000000000000000000000000000'
+    '000000000000000000000000000000000000000000000000000015000001000000360100'
+    '0000000000000000000000000020f6310a00000000000000000000000000000000000000'
+    '000000000000000000000000000000000000000000000000000000000000000000000000'
+    '0000000000'
+)
+# Meaningful-field offsets within the segments (differential-mapped).
+_OCI_DESC_COLCOUNT_OFF = 76  # HDR_POST: column count + 1
+_OCI_DESC_BLK_SIZE = 2  # BLK pre-name: data length (single byte)
+_OCI_DESC_BLK_TYPE = 4  # BLK pre-name: TNS data type
+_OCI_DESC_BLK_PRENAME = 6  # BLK: length before the column-name DALC
+_OCI_DESC_POST_PREC = 0  # BLK post-name: precision
+_OCI_DESC_POST_SCALE = 1  # BLK post-name: scale (NUMBER) / length (char)
+_OCI_DESC_POST_NULL = 2  # BLK post-name: 1 nullable, 0 NOT NULL
+_OCI_DESC_POST_CSLO = 15  # BLK post-name: charset ub2 LE (low byte)
+_OCI_DESC_POST_CSHI = 16
+_OCI_DESC_POST_CSFRM = 17
+_OCI_DESC_BLK_CONT = 3  # BLK: `1` at (len - 3) on a non-last column, else `0`
+_OCI_DESC_TR_COUNT = 2  # TRAILER: column count
+_OCI_DESC_TR_OPAQUE = 8  # TRAILER: a type-dependent opaque byte (carried)
+# Fixed-size types report a constant wire length in the describe (a NUMBER is
+# always 22, a DATE 7, …) rather than the backend's display size; variable types
+# (VARCHAR / CHAR / RAW) report their declared length.
+_OCI_DESC_WIRE_SIZE = {
+    TNS_TYPE_NUMBER: 22,
+    TNS_TYPE_DATE: 7,
+    TNS_TYPE_TIMESTAMP: 11,
+    TNS_TYPE_TIMESTAMPTZ: 13,
+}
+# The opaque trailer byte, carried per column TNS type for a single-column reply;
+# its derivation for a multi-column reply is unknown, so the observed value is
+# carried (sqlplus does not render it). Extend the map as more types are captured.
+_OCI_DESC_TR_OPAQUE_BY_TYPE = {
+    TNS_TYPE_NUMBER: 0xCA,
+    TNS_TYPE_VARCHAR: 0xDA,
+    TNS_TYPE_DATE: 0x6A,
+}
+_OCI_DESC_TR_OPAQUE_MULTI = 0x62
+# Character types carry a charset + csfrm; every other type reports charset 0.
+_OCI_DESC_CHAR_TYPES = frozenset({TNS_TYPE_VARCHAR, TNS_TYPE_CHAR})
+# Every column block but the LAST carries a describe-timestamp entry (a fixed frame
+# around a 7-byte date) in its post-name region — the last block leaves it zero.
+# sqlplus hangs on a multi-column reply whose non-last blocks omit it, so it is
+# patched in (a valid, carried date; the value is not rendered).
+_OCI_DESC_TS_ENTRY = bytes.fromhex('0100000027090700000007787e09020c281b02')
+_OCI_DESC_BLK_TS_OFF = 81  # offset of the entry within a block's post-name region
+
+
+def _oci_desc_dalc(name: bytes) -> bytes:
+    # The describe-reply name form: a ub4 LE char length, a ub1 byte length, then
+    # the bytes. (Schema, table and column names all use it.)
+    return struct.pack('<I', len(name)) + bytes([len(name)]) + name
+
+
+def _oci_desc_block(col: ColumnMeta, *, last: bool) -> bytes:
+    pre = bytearray(_OCI_DESC_BLK[:_OCI_DESC_BLK_PRENAME])
+    size = _OCI_DESC_WIRE_SIZE.get(col.data_type, col.max_size)
+    pre[_OCI_DESC_BLK_SIZE] = size & 0xFF
+    pre[_OCI_DESC_BLK_TYPE] = col.data_type
+    post = bytearray(_OCI_DESC_BLK[_OCI_DESC_BLK_PRENAME + 6 :])
+    post[_OCI_DESC_POST_PREC] = col.precision & 0xFF
+    post[_OCI_DESC_POST_SCALE] = col.scale & 0xFF
+    post[_OCI_DESC_POST_NULL] = 1 if col.null_ok else 0
+    if col.data_type in _OCI_DESC_CHAR_TYPES:
+        post[_OCI_DESC_POST_CSLO] = col.charset & 0xFF
+        post[_OCI_DESC_POST_CSHI] = (col.charset >> 8) & 0xFF
+        post[_OCI_DESC_POST_CSFRM] = col.csfrm
+    if not last:
+        # A non-last column carries a describe-timestamp entry in its post-name
+        # region (the last column leaves it zero).
+        off = _OCI_DESC_BLK_TS_OFF
+        post[off : off + len(_OCI_DESC_TS_ENTRY)] = _OCI_DESC_TS_ENTRY
+    block = bytes(pre) + _oci_desc_dalc(col.name) + bytes(post)
+    if not last:
+        # …and a `1` continuation flag 3 bytes before its end.
+        marked = bytearray(block)
+        marked[-_OCI_DESC_BLK_CONT] = 1
+        block = bytes(marked)
+    return block
+
+
+def encode_describe_reply_oci(
+    columns: list[ColumnMeta], *, schema: bytes, table: bytes
+) -> bytes:
+    """Build the sqlplus / thick-OCI ``DESCRIBE <object>`` reply (TTI 0x77).
+
+    One column block per :class:`ColumnMeta`, framed by the fixed header (schema +
+    table names, column count) and trailer. Meaningful fields are computed; the
+    opaque structure and instance fields are carried (the latter zeroed). The
+    trailer's OER sequence is a diagnostic counter the client discards (§36), so it
+    is left at its carried value rather than threaded."""
+    out = bytearray(_OCI_DESC_HDR_PRE)
+    out += _oci_desc_dalc(schema) + _oci_desc_dalc(table)
+    header_post = bytearray(_OCI_DESC_HDR_POST)
+    header_post[_OCI_DESC_COLCOUNT_OFF] = (len(columns) + 1) & 0xFF
+    out += header_post
+    for index, col in enumerate(columns):
+        out += _oci_desc_block(col, last=index == len(columns) - 1)
+    trailer = bytearray(_OCI_DESC_TRAILER)
+    trailer[_OCI_DESC_TR_COUNT] = len(columns) & 0xFF
+    trailer[_OCI_DESC_TR_OPAQUE] = (
+        _OCI_DESC_TR_OPAQUE_BY_TYPE.get(columns[0].data_type, _OCI_DESC_TR_OPAQUE_MULTI)
+        if len(columns) == 1
+        else _OCI_DESC_TR_OPAQUE_MULTI
+    )
+    out += trailer
+    return bytes(out)
+
+
+def parse_describe_oci(body: bytes) -> str:
+    """Extract the object name from a sqlplus / thick-OCI ``DESCRIBE`` request
+    (``03 77 … <ub4 flag> <ub1 namelen> <name>``). The name is the trailing
+    length-prefixed token."""
+    for i in range(len(body) - 2, 0, -1):
+        namelen = body[i]
+        if 0 < namelen < 128 and i + 1 + namelen == len(body):
+            name = body[i + 1 : i + 1 + namelen]
+            if all(c < 128 for c in name) and name.replace(b'_', b'').isalnum():
+                return name.decode('ascii')
+    raise InterfaceError('OCI DESCRIBE: could not find the object name')
+
+
 _OCI_EXEC_OER_OFF = 32
 
 

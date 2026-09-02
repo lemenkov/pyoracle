@@ -572,6 +572,78 @@ def test_parse_exec_oci_out_bind_decodes_none_and_carries_meta() -> None:
     assert req.bind_meta == [(2, 22)]  # NUMBER (type 2), 22-byte buffer
 
 
+# A live sqlplus 11.2 `DESCRIBE seer_n` reply body (the packet's TTC content, after
+# the 8-byte header + 2-byte data flags) — one NUMBER(10,2) column `C` in schema
+# PYO. Captured sqlplus 11.2 <-> XE 11.2; the generator reproduces it byte-for-byte.
+_OCI_DESCRIBE_SEER_N = bytes.fromhex(
+    '0801000100000027010700000007787e09020c281b00000000030000000350594f06000000'
+    '06534545525f4e44c50100000000000000000000010000007244c501000000000001000000'
+    'be01000000270b0700000007787e09020c281b000000000000000000000000000000000000'
+    '000000010000000b0102000000be0100000027000700000007787e09020c281b0200000000'
+    '00000000000000000000000000000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000000000000000'
+    '0000000000000000000000000000000000000100000027090700000007787e09020c281b02'
+    '00000000000000000000000000000000000000000000000000000000000000000000000000'
+    '0000000000000000000000010000005c160002000100000001430a02010000000000000000'
+    '00000000000000000000000000000000000000000000002400000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000010004000000'
+    'ca140001000000000900000000000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000000000000000'
+    '00000405000000130001010000000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000001500000100000036010000000000000000000000000000'
+    '20f6310a000000000000000000000000000000000000000000000000000000000000000000'
+    '000000000000000000000000000000000000000000000000000000'
+)
+
+
+def test_encode_describe_reply_oci_matches_live_11g() -> None:
+    # The sqlplus `DESCRIBE` reply is generated field-by-field — computed meaningful
+    # fields (type, size, precision, scale, nullability), carried opaque structure —
+    # and reproduces the live 11g reply byte-for-byte for a NUMBER(10,2) column.
+    from seerdb.common.tns import encode_describe_reply_oci
+
+    col = ColumnMeta(
+        name=b'C',
+        data_type=TNS_TYPE_NUMBER,
+        data_length=22,
+        max_size=22,
+        precision=10,
+        scale=2,
+        null_ok=1,
+    )
+    reply = encode_describe_reply_oci([col], schema=b'PYO', table=b'SEER_N')
+    assert reply == _OCI_DESCRIBE_SEER_N
+
+
+def test_encode_describe_reply_oci_multicolumn_frames_each_column() -> None:
+    # A multi-column reply carries the column count (header N+1, trailer N) and one
+    # block per column, with the meaningful fields per type.
+    from seerdb.common.tns import _OCI_DESC_COLCOUNT_OFF, encode_describe_reply_oci
+
+    cols = [
+        ColumnMeta(name=b'ID', data_type=TNS_TYPE_NUMBER, data_length=22, max_size=22),
+        ColumnMeta(name=b'V', data_type=TNS_TYPE_VARCHAR, data_length=30, max_size=30),
+    ]
+    reply = encode_describe_reply_oci(cols, schema=b'PYO', table=b'T')
+    # header column-count field is N+1 (it sits inside the header-post segment,
+    # after HDR_PRE 25 B + schema DALC 8 B + table DALC 6 B)
+    assert reply[25 + 8 + 6 + _OCI_DESC_COLCOUNT_OFF] == 3
+
+
+def test_parse_describe_oci_extracts_the_object_name() -> None:
+    from seerdb.common.tns import parse_describe_oci
+
+    # `03 77 <seq> <indicator/len fields> <ub4 flag> <ub1 namelen> <name>`
+    req = (
+        bytes.fromhex('037715feffffffffffffff1b0000000000000000000000000200000009')
+        + b'seer_desc'
+    )
+    assert parse_describe_oci(req) == 'seer_desc'
+
+
 def test_encode_describe_oci_roundtrips_the_meaningful_fields() -> None:
     # The thin client can't parse the OCI describe, so round-trip through the
     # codec's own reader: every meaningful field survives (#265).

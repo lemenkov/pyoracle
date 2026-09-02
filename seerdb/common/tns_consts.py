@@ -263,6 +263,7 @@ TTI_OCCA = 105
 TTI_80SES = 107
 TTI_AUTH = 115
 TTI_SESS = 118
+TTI_DESCRIBE = 119  # sqlplus `DESCRIBE <object>` (thick-OCI describe-object call)
 TTI_CANA = 120
 TTI_KPN = 125
 TTI_OTCM = 127
