@@ -4222,9 +4222,13 @@ command_type)` builds the token from the named fields over the shared
 `_OCI_OER_ENVELOPE`. Everything that ends in this OER is generated from it, not
 stored: the error / LONG-row / LOB-row **return-status trailers** (three direct
 calls, pinned by `tests/test_oci_oer_generation.py`) and the **describe / DDL /
-outbind execute-status frames**, each a short capture-specific preamble
-(`08 06 …`, plus a cursor id for DDL) followed by an OER from this builder. The
-describe and outbind frames set the murky `18`/`49` fields themselves.
+outbind / DML execute-status frames**, each a 35-byte preamble followed by an OER
+from this builder. That preamble is itself built — `_oci_status_frame_prefix` —
+not stored: it is the `08 06` header, a ub2-LE **cursor id** at offset 4 (present
+on the DDL/DML statuses, `0` on describe/outbind), and two statement-kind marker
+bytes carried from the capture (offset 11 = `0x02` on a value/row-producing
+status, offset 15 = `0x01` on the DML status). The describe and outbind frames
+set the murky OER `18`/`49` fields themselves.
 
 **Compact 24-byte form.** The simple replies — a SELECT execute status, the
 fetch terminator (`ORA-01403`), and the no-row (PL/SQL / DDL) status — carry a
