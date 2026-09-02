@@ -24,7 +24,12 @@ from seerdb.common.exceptions import ProgrammingError, from_ora_code
 class _CursorLogic:
     """Shared non-I/O logic for `Cursor` / `AsyncCursor` (#553)."""
 
-    arraysize: int = 1
+    # The default number of rows fetchmany() returns and a scrollable cursor
+    # refills per batch — 100, matching oracledb (oracledb.defaults.arraysize). A
+    # bare fetchmany() then returns up to 100 rows as it does under oracledb, not 1.
+    # (The wire prefetch for a normal cursor is the connection's `fetch`, separate
+    # from this.)
+    arraysize: int = 100
     # Rows the server prefetches on a scrollable open (oracledb's prefetchrows
     # default). Kept small so the open does not drain the cursor to EOF, which
     # would break the subsequent scroll re-execute (#181).
