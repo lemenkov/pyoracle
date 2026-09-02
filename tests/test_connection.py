@@ -76,27 +76,66 @@ class _FakeWriter:
         pass
 
 
-class TestAsyncCloseSessionRelease(unittest.TestCase):
-    # Sync/async parity: OracleConnect.close() sends a final empty TNS_DATA
-    # packet with the EOF data flag so the server fully releases the session
-    # (without it sessions linger and pile up over rapid reconnects). The async
-    # close() must emit the same marker.
-    def test_close_emits_eof_session_release_marker(self):
+class TestAsyncCloseTeardown(unittest.TestCase):
+    # Sync/async parity: OracleConnect.close() follows the §10 teardown — roll
+    # back if autocommit is off, send TTI_LOGOFF and read its response, then a
+    # final empty TNS_DATA packet with the EOF data flag so the server fully
+    # releases the session (without it sessions linger and pile up over rapid
+    # reconnects). The async close() must do the same.
+    def _authenticated_conn(self, autocommit):
         from seerdb.client.aconnection import AsyncOracleConnect
+        from seerdb.common.tns_consts import CONN_STATE_AUTHENTICATED
+
+        a = AsyncOracleConnect(
+            host='x', port=1, user='pyo', password='p', autocommit=autocommit
+        )
+        a.conn_state = CONN_STATE_AUTHENTICATED
+        a._writer = _FakeWriter()
+        a._reader = object()
+        # The logoff round-trip helpers do real socket I/O; stub them so the
+        # teardown sequence runs offline over the fake writer.
+        a.rollback = mock.AsyncMock()
+        a._handle_response = mock.AsyncMock()
+        return a
+
+    def test_close_rolls_back_then_emits_eof_marker(self):
         from seerdb.common.tns_consts import TNS_DATA, TNS_DATA_FLAGS_EOF
 
-        a = AsyncOracleConnect(host='x', port=1, user='pyo', password='p')
-        writer = _FakeWriter()
-        a._writer = writer
-        a._reader = object()
-
+        a = self._authenticated_conn(autocommit=False)
+        writer = a._writer  # disconnect() nulls the attribute during close()
         asyncio.run(a.close())
 
         marker = struct.pack('>hhBBh', 10, 0, TNS_DATA, 0, TNS_DATA_FLAGS_EOF)
-        self.assertIn(marker, writer.writes)
-        # the logoff dictionary is sent before the marker
+        a.rollback.assert_awaited_once()  # autocommit off -> roll back
+        a._handle_response.assert_awaited_once()  # logoff response is read
+        # logoff dictionary is sent before the marker, which is the last write
         self.assertGreaterEqual(len(writer.writes), 2)
         self.assertEqual(writer.writes[-1], marker)
+
+    def test_close_skips_rollback_when_autocommit(self):
+        a = self._authenticated_conn(autocommit=True)
+        asyncio.run(a.close())
+        a.rollback.assert_not_awaited()
+        a._handle_response.assert_awaited_once()
+
+    def test_close_noop_when_not_authenticated(self):
+        # A connection that never authenticated must not send logoff/rollback.
+        from seerdb.client.aconnection import AsyncOracleConnect
+        from seerdb.common.tns_consts import CONN_STATE_CONNECTED
+
+        a = AsyncOracleConnect(host='x', port=1, user='pyo', password='p')
+        a.conn_state = CONN_STATE_CONNECTED
+        a._writer = _FakeWriter()
+        a._reader = object()
+        a.rollback = mock.AsyncMock()
+        a._handle_response = mock.AsyncMock()
+        writer = a._writer  # disconnect() nulls the attribute during close()
+
+        asyncio.run(a.close())
+
+        a.rollback.assert_not_awaited()
+        a._handle_response.assert_not_awaited()
+        self.assertEqual(writer.writes, [])
 
 
 class TestProxyUser(unittest.TestCase):
