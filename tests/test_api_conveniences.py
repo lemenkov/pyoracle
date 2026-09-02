@@ -50,6 +50,24 @@ class TestStmtCacheSize(unittest.TestCase):
         self.assertEqual(conn.stmtcachesize, 0)
 
 
+class TestArraysizeDefault(unittest.TestCase):
+    def test_default_matches_oracledb(self):
+        # arraysize defaults to 100, matching oracledb.defaults.arraysize, so a
+        # bare fetchmany() returns up to 100 rows like oracledb (not 1). Shared by
+        # the sync and async cursors through _CursorLogic.
+        from seerdb.client.acursor import AsyncCursor
+
+        self.assertEqual(Cursor(types.SimpleNamespace(sock=object())).arraysize, 100)
+        self.assertEqual(
+            AsyncCursor(types.SimpleNamespace(sock=object())).arraysize, 100
+        )
+
+    def test_fetchmany_no_arg_uses_the_default(self):
+        # fetchmany() with no size returns arraysize rows from the buffer.
+        cur = _stub_cursor([[i] for i in range(150)])
+        self.assertEqual(len(cur.fetchmany()), 100)
+
+
 class TestRowFactory(unittest.TestCase):
     def test_default_is_tuple(self):
         cur = _stub_cursor([[1, 'a']])
