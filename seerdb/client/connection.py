@@ -637,7 +637,7 @@ class OracleConnect(_ConnectionLogic):
         socket_options: object = None,
         timeout: int = 15000,
         autocommit: bool = True,
-        fetch: int = 15,
+        fetch: int = 100,
         role: int = 0,
         prelim: int = 0,
         sdu: int = DEFAULT_SDU,
@@ -682,6 +682,11 @@ class OracleConnect(_ConnectionLogic):
         self.conn_state = CONN_STATE_DISCONNECTED
         self.timeout = timeout
         self.autocommit = autocommit
+        # Rows requested per fetch round-trip. 100 matches oracledb's effective
+        # batch (its arraysize default), so a large fetchall drains in ~n/100
+        # round-trips instead of n/15. Bounded well below the row decoder's
+        # per-row recursion ceiling (a single batch of a few hundred rows would
+        # overflow it), so it is not raised further here.
         self.fetch = fetch
         self.role = role
         self.sdu = sdu

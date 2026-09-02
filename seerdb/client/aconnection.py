@@ -149,7 +149,7 @@ class AsyncOracleConnect(_ConnectionLogic):
         socket_options: object = None,
         timeout: int = 15000,
         autocommit: bool = True,
-        fetch: int = 15,
+        fetch: int = 100,
         role: int = 0,
         prelim: int = 0,
         sdu: int = DEFAULT_SDU,
