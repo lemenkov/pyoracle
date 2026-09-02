@@ -1122,6 +1122,38 @@ def test_encode_ddl_status_oci_carries_the_command_type() -> None:
     assert ddl_command_type('begin null; end;') is None
 
 
+def test_oci_status_frame_prefixes_share_one_builder() -> None:
+    # The describe/outbind, DDL and DML exec-status frames all begin with the same
+    # 35-byte `08 06` preamble, built by _oci_status_frame_prefix from a cursor id
+    # and two statement-kind markers. Each must stay byte-identical to its capture.
+    from seerdb.common.tns import (
+        _OCI_DDL_FRAME_PREFIX,
+        _OCI_DML_FRAME_PREFIX,
+        _OCI_STATUS_FRAME_PREFIX,
+        _oci_status_frame_prefix,
+    )
+
+    assert (
+        _OCI_STATUS_FRAME_PREFIX.hex()
+        == '0806000000000000000000020000000000000000000000000000000000000000000000'
+    )
+    assert (
+        _OCI_DDL_FRAME_PREFIX.hex()
+        == '08060000eb5b0000000000000000000000000000000000000000000000000000000000'
+    )
+    assert (
+        _OCI_DML_FRAME_PREFIX.hex()
+        == '08060000e85b0000000000020000000100000000000000000000000000000000000000'
+    )
+    # Reproduced from the named fields.
+    assert _oci_status_frame_prefix(row_producing=True) == _OCI_STATUS_FRAME_PREFIX
+    assert _oci_status_frame_prefix(0x5BEB) == _OCI_DDL_FRAME_PREFIX
+    assert (
+        _oci_status_frame_prefix(0x5BE8, row_producing=True, dml=True)
+        == _OCI_DML_FRAME_PREFIX
+    )
+
+
 def test_read_chunked_sql_reassembles_the_chunks() -> None:
     # Long OCI SQL is chunked: 0xFE marker, then <ub1 len><chunk> runs. The reader
     # reassembles them up to the declared total (#265).

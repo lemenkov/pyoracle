@@ -4355,13 +4355,35 @@ def encode_oci_oer(
     return bytes(oer)
 
 
-# The 35-byte preamble shared by the describe / outbind OCI status frames: an
-# 08-06 status header with every per-statement session counter zeroed (the
-# Mirror has no live sequence). The DDL frame carries a cursor id, so it keeps
-# its own preamble (_OCI_DDL_FRAME_PREFIX).
-_OCI_STATUS_FRAME_PREFIX = bytes.fromhex(
-    '0806000000000000000000020000000000000000000000000000000000000000000000'
-)
+# The 35-byte `08 06` OCI exec-status frame preamble, shared by the describe /
+# outbind / DDL / DML statuses. It is all zero (the Mirror has no live
+# per-statement session counters) but for the header, a ub2-LE **cursor id** at
+# offset 4 (the DDL / DML statuses carry a live cursor id here; the describe /
+# outbind status carries none), and two small marker bytes whose values track the
+# statement kind but whose exact meaning is unpinned, carried from the capture:
+# offset 11 is `0x02` on a value/row-producing status (describe / outbind / DML)
+# and `0` on DDL; offset 15 is `0x01` on the DML status and `0` otherwise.
+_OCI_STATUS_FRAME_PREFIX_LEN = 35
+_OCI_STATUS_FRAME_HEADER = bytes([0x08, 0x06])
+_OCI_STATUS_FRAME_CURSOR_OFF = 4  # ub2 LE cursor id
+_OCI_STATUS_FRAME_ROWS_OFF = 11  # 0x02 on a value/row-producing status
+_OCI_STATUS_FRAME_DML_OFF = 15  # 0x01 on the DML status
+
+
+def _oci_status_frame_prefix(
+    cursor_id: int = 0, *, row_producing: bool = False, dml: bool = False
+) -> bytes:
+    pre = bytearray(_OCI_STATUS_FRAME_PREFIX_LEN)
+    pre[0:2] = _OCI_STATUS_FRAME_HEADER
+    struct.pack_into('<H', pre, _OCI_STATUS_FRAME_CURSOR_OFF, cursor_id)
+    if row_producing:
+        pre[_OCI_STATUS_FRAME_ROWS_OFF] = 0x02
+    if dml:
+        pre[_OCI_STATUS_FRAME_DML_OFF] = 0x01
+    return bytes(pre)
+
+
+_OCI_STATUS_FRAME_PREFIX = _oci_status_frame_prefix(row_producing=True)
 
 
 # The fetch-terminator OER: a compact OER carrying ORA-01403 (no data found).
@@ -4396,15 +4418,14 @@ _OCI_STATUS_OER = (
 )
 
 
-# The DML execute-status frame (§36.3): a 35-byte preamble (with a cursor id) +
+# The DML execute-status frame (§36.3): the 35-byte preamble (its cursor id
+# `0x5be8` carried from the capture, plus the row-producing and DML markers) +
 # the 136-byte OER + a 16-byte trailer. Unlike the describe/DDL/outbind statuses
 # its OER embeds the touched row's physical **rowid** (offsets 27..40 within the
 # OER, echoed byte-swapped in the trailer) — capture-specific, opaque to sqlplus
 # (which renders "N rows created" from only the rowcount and command type). The
 # rowcount (OER offset 8) and command type (OER offset 22) are patched per call.
-_OCI_DML_FRAME_PREFIX = bytes.fromhex(
-    '08060000e85b0000000000020000000100000000000000000000000000000000000000'
-)
+_OCI_DML_FRAME_PREFIX = _oci_status_frame_prefix(0x5BE8, row_producing=True, dml=True)
 
 
 # The captured touched-row rowid (OER offsets 27..40) and the 16-byte trailer
@@ -4426,12 +4447,12 @@ def _oci_dml_status_frame() -> bytes:
 _OCI_DML_STATUS_FRAME = _oci_dml_status_frame()
 
 
-# The DDL execute-status preamble (§36.3): like _OCI_STATUS_FRAME_PREFIX but
-# carrying a cursor id (the 5b eb at offsets 4..5). encode_ddl_status_oci
-# completes the frame with a success OER whose command type is the DDL verb's.
-_OCI_DDL_FRAME_PREFIX = bytes.fromhex(
-    '08060000eb5b0000000000000000000000000000000000000000000000000000000000'
-)
+# The DDL execute-status preamble (§36.3): the shared status prefix carrying a
+# cursor id (`0x5beb` at offsets 4..5, carried from the capture) and — being a
+# no-row statement — neither the row-producing nor the DML marker.
+# encode_ddl_status_oci completes the frame with a success OER whose command type
+# is the DDL verb's.
+_OCI_DDL_FRAME_PREFIX = _oci_status_frame_prefix(0x5BEB)
 
 
 # The sqlplus / thick-OCI reply to a PL/SQL block that assigned OUT binds — the
