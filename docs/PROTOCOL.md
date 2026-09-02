@@ -2465,8 +2465,8 @@ as `Decimal`.
 
 seerdb prefers a **native binary OSON** bind (#70, the inverse of the §17.1
 decoder in `seerdb/oson.py:encode_oson`). It is sent exactly like the native
-VECTOR bind (§18.1): the bind OAC is the JSON one (`JSON_BIND_OAC`, type 119
-with a 32 MiB max length, captured from python-oracledb on 21c) and the value
+VECTOR bind (§18.1): the bind OAC is the JSON one (`_JSON_BIND_OAC`, type 119
+with a 32 MiB max length, built by `_encode_native_lob_oac`) and the value
 carries the same 19-byte LOB-backed descriptor, the image length (ub2), 22 zero
 bytes, then the OSON image over the 12c length framing. The encoder writes the
 compact small-document form — the object/array node uses a ub1 count, ub1
@@ -2541,11 +2541,15 @@ raises `VectorError` rather than spinning to build an unbounded list (#228).
 seerdb binds a vector with the **native binary image** (matching
 python-oracledb). The full exec bind for a vector is `OAC | TTI_RXD | value`:
 
-- **OAC** (`encode_token_oac`): a fixed 25-byte block — type 127, the *cont-flag*
-  field `0x02000000`, and the *oaccolid* field set to the 1 MiB max length:
+- **OAC** (`encode_token_oac` → `_encode_native_lob_oac`): a fixed 25-byte block,
+  built field-by-field — type 127, the max data length (1 MiB), the *cont-flag*
+  `0x02000000`, and the *LOB-prefetch length* set to the same 1 MiB max, with the
+  trailing *oaccolid* zero:
   `7f 01 00 00 | 04 00100000 | 00 | 04 02000000 | 00 00 00 00 | 04 00100000 | 00`.
-  Without the `0x02000000` flag the server rejects the inline value (ORA-03120);
-  a too-short OAC desyncs (ORA-03106).
+  python-oracledb emits the two size fields as a **non-minimal** 4-byte ub4 (the
+  leading zero of `00 10 00 00` is kept), so they are encoded fixed-width to match
+  the capture. Without the `0x02000000` flag the server rejects the inline value
+  (ORA-03120); a too-short OAC desyncs (ORA-03106).
 - **Value** (`encode_token_rxd`, after the `TTI_RXD`=0x07 token): a fixed 19-byte
   **descriptor** (`01 28 28 00 26 00 04 61 08 00 00 00 01 00 00 00 00 00 00` —
   the same one python-oracledb uses for any LOB-backed inline bind, so #70 JSON

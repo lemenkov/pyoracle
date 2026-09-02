@@ -28,7 +28,6 @@ from seerdb.common.date import date
 from seerdb.common.exceptions import DataError, InterfaceError
 from seerdb.common.vector import (
     VECTOR_BIND_DESCRIPTOR,
-    VECTOR_BIND_OAC,
     encode_vector,
     is_vector_bind,
 )
@@ -8512,7 +8511,7 @@ def encode_token_rxd(Token: object) -> bytes:
         Token = _json_bind_text(Token)
     elif is_vector_bind(Token):
         # Native VECTOR bind on 23ai (#62): the OAC counterpart is
-        # VECTOR_BIND_OAC.
+        # _VECTOR_BIND_OAC.
         return _native_lob_bind_value(encode_vector(Token))
     if isinstance(Token, bool):
         # Native SQL BOOLEAN bind on 23ai (#54): the value is a 2-byte DALC
@@ -8577,6 +8576,42 @@ def encode_token_rxd(Token: object) -> bytes:
         )
         return bytes([len(Bytes)]) + Bytes
     raise Exception('Unknown RXD token', Token)
+
+
+# The cont-flag (a ub8 in the 12c OAC) that marks a large-value bind — set by the
+# persistent/temporary LOB, native JSON and native VECTOR OACs alike.
+_OAC_CONT_FLAG_LOB = 0x02000000
+
+
+def _encode_native_lob_oac(DataType: int, Size: int) -> bytes:
+    """The fixed 12c bind OAC that python-oracledb sends for a native large-value
+    type — JSON (#70) and VECTOR (#62), both binary (charset/csfrm 0). Every
+    field is known (§18.1): the datatype, the max size, the LOB cont-flag, and
+    the same size again as the LOB-prefetch length. python-oracledb emits the two
+    size fields as a **non-minimal** 4-byte ub4 (a leading zero is kept, e.g.
+    VECTOR's 1 MiB is ``04 00 10 00 00``), so they are encoded fixed-width here to
+    stay byte-identical to the capture rather than through the minimising
+    :func:`encode_sb4`."""
+    FixedSize = bytes([4]) + struct.pack('>I', Size)  # non-minimal 4-byte ub4
+    return (
+        bytes([DataType, 1, 0, 0])
+        + FixedSize  # max data length
+        + encode_sb4(0)  # max number of array elements
+        + encode_sb4(_OAC_CONT_FLAG_LOB)  # cont flag (ub8)
+        + encode_sb4(0)  # OID
+        + encode_sb4(0)  # version
+        + encode_sb4(0)  # charset id (ub2) — binary
+        + bytes([0])  # character set form
+        + FixedSize  # LOB prefetch length (= max size)
+        + encode_sb4(0)  # oaccolid (12.2+)
+    )
+
+
+# Native JSON bind OAC (#70): type 119, 32 MiB max. Native VECTOR bind OAC (#62):
+# type 127, 1 MiB max. Both were captured verbatim from python-oracledb (21c /
+# 23ai); the capture is now reproduced field-by-field.
+_JSON_BIND_OAC = _encode_native_lob_oac(TNS_TYPE_JSON, 0x02000000)  # 32 MiB
+_VECTOR_BIND_OAC = _encode_native_lob_oac(TNS_TYPE_VECTOR, 0x00100000)  # 1 MiB
 
 
 def encode_token_oac(Token: object) -> bytes:
@@ -8664,15 +8699,12 @@ def encode_token_oac(Token: object) -> bytes:
         # else the VARCHAR OAC for the text cast (#50). Must match the choice in
         # encode_token_rxd.
         if _json_oson_image(Token) is not None:
-            from seerdb.common.oson import JSON_BIND_OAC
-
-            return JSON_BIND_OAC
+            return _JSON_BIND_OAC
         Token = _json_bind_text(Token)
     elif is_vector_bind(Token):
-        # Native VECTOR bind on 23ai (#62): type 127, cont-flag 0x02000000,
-        # 1 MiB max — the fixed OAC python-oracledb sends. The image rides in
-        # encode_token_rxd.
-        return VECTOR_BIND_OAC
+        # Native VECTOR bind on 23ai (#62): the fixed OAC python-oracledb sends
+        # (built above). The image rides in encode_token_rxd.
+        return _VECTOR_BIND_OAC
     if isinstance(Token, BinaryFloat):
         return encode_token_raw(TNS_TYPE_BFLOAT, 4, 0, 0, 0)
     if isinstance(Token, BinaryDouble):

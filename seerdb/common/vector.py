@@ -175,13 +175,12 @@ def is_vector_bind(value: object) -> bool:
     )
 
 
-# Native binary VECTOR bind (#62). Captured from python-oracledb on 23ai
-# (docs/PROTOCOL.md §18.1): the bind OAC is type 127 with the cont-flag field
-# 0x02000000 and a 1 MiB max length; the value carries a fixed descriptor (the
-# same one python-oracledb uses for any LOB-backed inline bind), then the image
-# length (ub2), 22 zero bytes, then the image via the normal 12c length framing.
-# Both constants are stable across element types and vector sizes.
-VECTOR_BIND_OAC = bytes.fromhex('7f010000040010000000040200000000000000040010000000')
+# Native binary VECTOR bind (#62), captured from python-oracledb on 23ai
+# (docs/PROTOCOL.md §18.1). The value carries this fixed descriptor (the same one
+# python-oracledb uses for any LOB-backed inline bind), then the image length
+# (ub2), 22 zero bytes, then the image via the normal 12c length framing. It is
+# stable across element types and vector sizes. The bind OAC counterpart is built
+# in tns._encode_native_lob_oac (type 127, 1 MiB max).
 VECTOR_BIND_DESCRIPTOR = bytes.fromhex('01282800260004610800000001000000000000')
 
 # Per-element-type (version, flags) for the bind image. FLOAT32/64/INT8 use
