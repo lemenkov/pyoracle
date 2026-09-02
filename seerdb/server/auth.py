@@ -377,6 +377,23 @@ def parse_auth_response(payload: bytes) -> tuple[bytes, bytes, bytes | None]:
     return user, unhexlify(sesskey), auth_password
 
 
+def parse_changepassword_oci(payload: bytes) -> tuple[bytes, bytes, bytes]:
+    """Return ``(username, AUTH_PASSWORD, AUTH_NEWPASSWORD)`` from an OCI
+    changepassword — sqlplus's ``PASSWORD`` command (OCIPasswordChange).
+
+    The OCI counterpart of :func:`parse_changepassword`. sqlplus wraps it in a
+    TTI_80SES piggyback (stripped before this) and marshals it in the OCI dialect,
+    but the payload is the same two fields as the thin form: ``AUTH_PASSWORD`` (the
+    current password) and ``AUTH_NEWPASSWORD`` (the new one), each the AES-CBC
+    ciphertext the client encrypted under the login ConnKey — the session decrypts
+    them with :func:`~seerdb.common.crypto.decrypt_password`. Unlike the OCI login
+    AUTH there is no proof to verify; the live session is the authorisation."""
+    user = _parse_oci_fun_username(payload, TTI_AUTH, 'AUTH')
+    old_cipher = _oci_auth_value(payload, b'AUTH_PASSWORD')
+    new_cipher = _oci_auth_value(payload, b'AUTH_NEWPASSWORD')
+    return user, old_cipher, new_cipher
+
+
 def parse_changepassword(payload: bytes) -> tuple[bytes, bytes, bytes]:
     """Return ``(username, AUTH_PASSWORD, AUTH_NEWPASSWORD)`` from a changepassword
     TTI_AUTH (#21/#486). Both password fields are the AES-CBC ciphertext (already

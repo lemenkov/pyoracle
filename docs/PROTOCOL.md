@@ -509,6 +509,36 @@ rather than replaying templates) can replace them later. Auth is only the login
 phase; the OCI **query** marshalling (post-login `ttc` calls) is the next
 frontier — a thin client's query response is not what sqlplus expects.
 
+#### 4.1.3 sqlplus `PASSWORD` — the OCI changepassword (#21)
+
+sqlplus's `PASSWORD` command (`OCIPasswordChange`) changes the password on the
+live, already-authenticated session. Its wire form is the OCI analogue of the
+thin changepassword (§ password change): a `TTI_FUN`/`TTI_AUTH` carrying
+**`AUTH_PASSWORD` (current)** and **`AUTH_NEWPASSWORD` (new)**, each the
+`AES-CBC(ConnKey)` ciphertext hex-encoded (the *same* login `ConnKey` — no fresh
+`AUTH_SESSKEY`), marshalled in the OCI dialect (§4.1.2: 8-byte indicators, fixed
+ub4 lengths, username at offset 51). There is no old-password proof to verify —
+the live session is the authorisation.
+
+Two framing details make it easy to misroute:
+
+- It arrives wrapped in a **TTI_80SES (`0x11 0x6b`) piggyback**, not the OCCA
+  (`0x11 0x69`) close-cursors piggyback that wraps ordinary executes. Both have a
+  fixed 15-byte prefix; the real `TTI_FUN` call begins at offset 15
+  (`strip_oci_piggyback`).
+- The post-login **version call** (`OCI_VERSION_CALL`) uses the *same* `0x11 0x6b`
+  TTI_80SES wrapper and 15-byte prefix — they differ only in the wrapped inner
+  function (`0x03 0x3b` version vs. `0x03 0x73` `TTI_AUTH`). So the recogniser
+  keys on the **inner** function (`is_version_call_oci`), else a changepassword is
+  answered with the version banner and sqlplus hangs.
+
+The Mirror decrypts both fields with the login `ConnKey`, drives
+`backend.change_password(user, old, new)`, and replies with a compact OER
+"command complete" status (`encode_changepassword_status_oci`) that sqlplus
+renders as **"Password changed"**. Verified live: sqlplus `PASSWORD` against the
+Mirror (passthrough backend) changes the password on the real 11g and reconnects
+with the new one.
+
 ### 4.2 Data Type Negotiation (TTI_DTY)
 
 TTI_DTY (message type `2`, `TNS_MSG_TYPE_DATA_TYPES`) advertises the client's
