@@ -397,6 +397,24 @@ class TestTnsCommandDecoders(unittest.TestCase):
             (True, [1, {'foo': 'bar'}]),
         )
 
+    def test_decode_packet_handles_a_large_row_batch(self):
+        # A single fetch batch of thousands of RXD rows must decode iteratively:
+        # the old per-row recursion raised RecursionError past a few hundred rows.
+        from seerdb.common.tns import encode_value
+        from seerdb.common.tns_consts import TNS_TYPE_NUMBER, TTI_RXD, TTI_STA
+
+        row_format = [{'data_type': TNS_TYPE_NUMBER, 'column_name': b'N'}]
+        count = 5000  # well past the old ~450-row recursion ceiling
+        body = b''.join(
+            bytes([TTI_RXD]) + encode_value(i, TNS_TYPE_NUMBER) for i in range(count)
+        )
+        (done, acc) = decode_packet(body + bytes([TTI_STA]), (None, row_format, []))
+        self.assertTrue(done)
+        rows = acc[2]
+        self.assertEqual(len(rows), count)
+        self.assertEqual(rows[0], [0])
+        self.assertEqual(rows[-1], [count - 1])
+
     def test_decode_select_response_21c(self):
         # Full 'SELECT 1 FROM dual' response captured from Oracle 21c (DCB +
         # RXH + RXD + RPA + OER), decoded with the 21.1 field version. Exercises
