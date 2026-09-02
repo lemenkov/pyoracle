@@ -4277,12 +4277,10 @@ LID in §14.6). **Verified live** against sqlplus over the
 Mirror: `insert/update/delete` print the right verb and count, `create/drop`
 print `Table created.` / `Table dropped.` (and, via the resolved command type, `Index created.`, `Table altered.`, `View dropped.`, `Table truncated.`, and the rest).
 
-One OCI reply keeps a frozen sequence: the `TTI_LOBOPS` READ reply's tail
-(`_oci_lob_read_tail`, §14.6) embeds its OER inside a larger captured RPA+OER
-blob rather than building it from `encode_oci_oer`, so its sequence stays at the
-captured `17`. Threading the live counter through it means patching the value
-inside that blob; since the field is consumer-ignored it is harmless and left for
-a follow-up.
+Every OCI reply that carries an OER draws the live counter, including the
+`TTI_LOBOPS` READ reply's tail (`_oci_lob_read_tail`, §14.6): its OER sits at the
+end of a TTI_RPA + OER tail and is built from `encode_oci_oer` with the session
+sequence, so a multi-read LOB fetch advances the field on every slice returned.
 
 ## 37. Sharding keys are not on the thin wire (#164)
 
