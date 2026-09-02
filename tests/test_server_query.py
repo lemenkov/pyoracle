@@ -1096,6 +1096,23 @@ def test_encode_dml_status_oci_carries_the_verb_and_rowcount() -> None:
     )
 
 
+def test_oci_dml_frame_trailer_is_derived_from_the_rowid() -> None:
+    # The 16-byte DML status trailer is not stored independently: it splices two of
+    # the rowid's 2-byte words back in byte-swapped, inside a fixed frame. It must
+    # stay byte-identical to the capture and track the rowid.
+    from seerdb.common.tns import (
+        _OCI_DML_FRAME_TRAILER,
+        _OCI_DML_ROWID,
+        _oci_dml_frame_trailer,
+    )
+
+    assert _OCI_DML_FRAME_TRAILER.hex() == '0d000d010001b57f00010000b4b10000'
+    assert _oci_dml_frame_trailer(_OCI_DML_ROWID) == _OCI_DML_FRAME_TRAILER
+    # The two byte-swapped rowid words really do come from the rowid.
+    assert _OCI_DML_FRAME_TRAILER[6:8] == _OCI_DML_ROWID[1:3][::-1]
+    assert _OCI_DML_FRAME_TRAILER[12:14] == _OCI_DML_ROWID[9:11][::-1]
+
+
 def test_encode_ddl_status_oci_carries_the_command_type() -> None:
     # One frame carries the V$SQL command code at offset 57; sqlplus renders it as
     # "Table created." (1) / "Table dropped." (12) / "Index created." (9) etc. DDL

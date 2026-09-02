@@ -4245,8 +4245,11 @@ so it is carried, not fully pinned.
 The DML execute-status reply wraps the OER in a larger status frame: a 35-byte
 preamble (with a cursor id) + the OER + a 16-byte trailer. Its OER **is** built
 on the envelope by `encode_oci_oer` (call status `2`, sequence `19`), with the
-touched row's physical **rowid** patched into offsets `27..40` (echoed
-byte-swapped in the trailer) — capture-specific and opaque to sqlplus, which
+touched row's physical **rowid** patched into offsets `27..40`. The 16-byte
+trailer is **derived** from that same rowid (`_oci_dml_frame_trailer`): a fixed
+frame with two of the rowid's 2-byte words spliced back in byte-swapped
+(rowid `1..3` → trailer offset `6`, rowid `9..11` → trailer offset `12`). The
+rowid is capture-specific and opaque to sqlplus, which
 renders the completion message from just **two** fields: the V$SQL **command
 type** at frame offset `57` (= the OER's offset `22`) and the affected-row
 **count** (ub4 LE) at offset `43`, both patched per call by

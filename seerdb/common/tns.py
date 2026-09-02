@@ -4428,11 +4428,29 @@ _OCI_STATUS_OER = (
 _OCI_DML_FRAME_PREFIX = _oci_status_frame_prefix(0x5BE8, row_producing=True, dml=True)
 
 
-# The captured touched-row rowid (OER offsets 27..40) and the 16-byte trailer
-# echoing it. FIXME: real physical row identity from the capture; carried, like
-# the LOB LID (§14.6) — a synthetic value would need live 11g validation.
+# The captured touched-row rowid (OER offsets 27..40). FIXME: real physical row
+# identity from the capture; carried, like the LOB LID (§14.6) — a synthetic
+# value would need live 11g validation.
 _OCI_DML_ROWID = bytes.fromhex('007fb5010001000000b1b4000000')
-_OCI_DML_FRAME_TRAILER = bytes.fromhex('0d000d010001b57f00010000b4b10000')
+
+
+def _oci_dml_frame_trailer(rowid: bytes) -> bytes:
+    # The 16-byte DML status trailer is NOT independent of the rowid: it splices
+    # two of the rowid's 2-byte words back in byte-swapped — rowid[1:3] lands at
+    # offset 6 (7f b5 → b5 7f) and rowid[9:11] at offset 12 (b1 b4 → b4 b1) —
+    # inside an otherwise fixed frame. Both come from the same captured row, so
+    # derive the trailer rather than store a second blob; the physical fields'
+    # meaning stays unpinned.
+    return (
+        bytes([0x0D, 0x00, 0x0D, 0x01, 0x00, 0x01])
+        + rowid[1:3][::-1]
+        + bytes([0x00, 0x01, 0x00, 0x00])
+        + rowid[9:11][::-1]
+        + bytes([0x00, 0x00])
+    )
+
+
+_OCI_DML_FRAME_TRAILER = _oci_dml_frame_trailer(_OCI_DML_ROWID)
 
 
 def _oci_dml_status_frame() -> bytes:
