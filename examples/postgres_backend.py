@@ -1095,6 +1095,33 @@ class PostgresBackend:
             self._conn.commit()
         return result
 
+    def execute_many(self, sql: str, rows: Sequence[Sequence]) -> int:
+        # Array DML (executemany) in one round-trip: translate the statement once
+        # and send every bind row through psycopg's executemany (which pipelines),
+        # instead of a round-trip per row — the difference is ~7 s vs a few ms for
+        # 500 rows against a remote database. Returns the total affected-row count.
+        # The Mirror calls this only for the non-batcherrors path, where a per-row
+        # failure aborts the whole batch — exactly Oracle's non-batcherrors DML.
+        rows = list(rows)
+        if not rows:
+            return 0
+        translated = _translate_idioms(
+            _translate_plsql_block(_translate_routine_ddl(_translate_ddl(sql)))
+        )
+        bound_sql, _ = _translate_binds(translated, rows[0])
+        params = [_translate_binds(translated, row)[1] for row in rows]
+        cursor = self._conn.cursor()
+        cursor.execute('SAVEPOINT _mirror_stmt')
+        try:
+            cursor.executemany(bound_sql, params)
+            affected = cursor.rowcount
+        except psycopg.Error as exc:
+            self._conn.execute('ROLLBACK TO SAVEPOINT _mirror_stmt')
+            self._conn.execute('RELEASE SAVEPOINT _mirror_stmt')
+            raise _backend_error(exc) from exc
+        self._conn.execute('RELEASE SAVEPOINT _mirror_stmt')
+        return max(affected, 0)
+
     def _object_type_name(self, table: str) -> str | None:
         # The Oracle object-type name of a typed table (CREATE TABLE t OF type), or
         # None if `table` is not one. pg_class.reloftype names the row type; Oracle

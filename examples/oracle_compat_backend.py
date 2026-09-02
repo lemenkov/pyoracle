@@ -118,6 +118,17 @@ class OracleCompatBackend:
         # being dialect-specific, translates Oracle SQL to its own dialect there).
         return self._inner.execute(sql, binds)
 
+    def execute_many(self, sql: str, rows: Sequence[Sequence]) -> int:
+        # Array DML (executemany): hand the whole batch to the inner backend's own
+        # array path when it has one (one round-trip instead of per row), else fall
+        # back to a per-row loop through this wrapper's execute. Array DML is plain
+        # INSERT / UPDATE / DELETE, so the sqlplus idioms execute() handles do not
+        # apply — a raw delegate is correct.
+        inner_many = getattr(self._inner, 'execute_many', None)
+        if inner_many is not None:
+            return inner_many(sql, rows)
+        return sum(self.execute(sql, row).rowcount for row in rows)
+
     def change_password(
         self, username: str, old_password: str, new_password: str
     ) -> None:
