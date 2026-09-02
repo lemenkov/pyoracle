@@ -1241,6 +1241,19 @@ assignments; a non-Oracle backend cannot run general PL/SQL, but this one idiom
 covers the bind-a-value-then-use-it flow, so a following `SELECT … WHERE k = :v`
 receives the value as an ordinary IN bind (§5.4).
 
+**OUT-bind request marker (`fd 01`).** The `EXEC :v := 42` request is an ordinary
+`OALL8` execute carrying the `BEGIN … END;` block and one OAC per bind — but the
+wire **does not carry a bind's direction** (Oracle infers IN vs OUT from the
+block). An OUT bind therefore has no input value: in the `TTI_RXD` bind row its
+value slot holds the 2-byte placeholder **`fd 01`** instead of a DALC. Verified
+against live 11g across NUMBER and VARCHAR OUT binds, single and multiple —
+`BEGIN :a := 1; :b := 'x'; END;` sends `07 fd 01 fd 01`. The Mirror decodes each
+`fd 01` to `None` (`parse_exec_oci` / `_parse_oci_binds`) so the OUT bind is not
+fed a garbage input, and hands every bind to the backend OUT-capable (the same
+directionless-bind handling the thin exec uses, §5.4); an ordinary IN bind in the
+same slot is a normal DALC (`:x = 7` → `07 02 c1 08`). The OAC is identical for IN
+and OUT — the `fd 01` value marker is the only direction signal on the wire.
+
 **DML completion reply (the Mirror, OCI dialect).** A DML that returns no columns
 (`INSERT` / `UPDATE` / `DELETE`) still needs sqlplus to print `N rows created.` /
 `N rows updated.` / `N rows deleted.` rather than the generic PL/SQL message.

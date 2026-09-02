@@ -5189,8 +5189,11 @@ def parse_exec_oci(payload: bytes) -> ExecRequest:
         payload[_OCI_BIND_COUNT_OFF : _OCI_BIND_COUNT_OFF + 4], 'little'
     )
     binds: list = []
+    bind_meta: list[tuple[int, int]] = []
     if bind_count and marker != 0xFE:
-        binds = _parse_oci_binds(payload, _OCI_ALL8_SQL_OFF + marker, bind_count)
+        binds, bind_meta = _parse_oci_binds(
+            payload, _OCI_ALL8_SQL_OFF + marker, bind_count
+        )
     return ExecRequest(
         sql=sql,
         cursor=cursor,
@@ -5198,6 +5201,7 @@ def parse_exec_oci(payload: bytes) -> ExecRequest:
         fetch=0,
         binds=binds,
         bind_rows=[binds] if binds else [],
+        bind_meta=bind_meta,
     )
 
 
@@ -5209,6 +5213,14 @@ _OCI_BIND_COUNT_OFF = 83
 
 
 _OCI_OAC_MARKER = re.compile(rb'\x01(.)\x03\x00\x00')
+
+
+# The value-slot marker sqlplus sends for an OUT bind (`VARIABLE` / `EXEC :v := …`)
+# — the wire carries no bind direction, so an OUT bind rides with this 2-byte
+# `fd 01` placeholder instead of a value DALC. The Mirror decodes it as None (no
+# input); the assigned value comes back from the PL/SQL block. Verified across
+# NUMBER / VARCHAR OUT binds, single and multiple, against live 11g.
+_OCI_OUT_BIND_MARKER = 0xFD
 
 
 _OCI_BIND_TYPES = frozenset(
@@ -5226,19 +5238,27 @@ _OCI_BIND_TYPES = frozenset(
 )
 
 
-def _parse_oci_binds(payload: bytes, sql_end: int, bind_count: int) -> list:
-    # Read the bind values from the OCI bind section: collect each bind's TNS
-    # type from its OAC marker, then decode the RXD row's DALC values by type.
+def _parse_oci_binds(
+    payload: bytes, sql_end: int, bind_count: int
+) -> tuple[list, list[tuple[int, int]]]:
+    # Read the bind values AND their (tns_type, max_size) metadata from the OCI
+    # bind section. Each bind's OAC marker (``01 <type> 03 00 00``) carries the TNS
+    # type; the ub4 LE right after it is the bind's max buffer size (NUMBER 22,
+    # VARCHAR2(20) 60, …), which a PL/SQL OUT bind needs so its return buffer is
+    # sized correctly (#483). Returns ``(values, bind_meta)`` — bind_meta is the
+    # per-bind (type, max_size) list the OUT-bind path wraps as BindVars.
     tail = payload[sql_end:]
-    types = []
+    meta: list[tuple[int, int]] = []
     for match in _OCI_OAC_MARKER.finditer(tail):
         data_type = match.group(1)[0]
         if data_type in _OCI_BIND_TYPES:
-            types.append(data_type)
-        if len(types) == bind_count:
+            max_size = int.from_bytes(tail[match.end() : match.end() + 4], 'little')
+            meta.append((data_type, max_size))
+        if len(meta) == bind_count:
             break
-    if len(types) != bind_count:
-        return []
+    if len(meta) != bind_count:
+        return [], []
+    types = [t for t, _ in meta]
     # The RXD row is the 0x07 token whose following DALCs decode cleanly into one
     # value per bind — a position robust to 0x07 bytes appearing in the OAC area.
     for i, byte in enumerate(tail):
@@ -5248,6 +5268,15 @@ def _parse_oci_binds(payload: bytes, sql_end: int, bind_count: int) -> list:
         values: list = []
         try:
             for data_type in types:
+                # An OUT bind (sqlplus `VARIABLE` / `EXEC :v := …`) has no input
+                # value: direction is not on the wire, so sqlplus sends the 2-byte
+                # placeholder `fd 01` in the value's slot. Decode it as None so the
+                # OUT bind is not fed a garbage input (its real value comes back from
+                # the block); an ordinary IN value is a normal DALC.
+                if len(rest) >= 2 and rest[0] == _OCI_OUT_BIND_MARKER:
+                    values.append(None)
+                    rest = rest[2:]
+                    continue
                 raw, rest = decode_dalc(rest)
                 # The OCI (sqlplus) bind path doesn't carry a national char form;
                 # decode ordinary char (csfrm 1) — no test client binds NCHAR here.
@@ -5255,8 +5284,8 @@ def _parse_oci_binds(payload: bytes, sql_end: int, bind_count: int) -> list:
         except (IndexError, DataError):
             continue
         if len(values) == bind_count:
-            return values
-    return []
+            return values, meta
+    return [], []
 
 
 def _oci_ub4(n: int) -> bytes:

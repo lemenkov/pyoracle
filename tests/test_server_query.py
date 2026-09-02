@@ -544,6 +544,34 @@ def test_parse_exec_oci_rejects_a_non_oci_message() -> None:
         parse_exec_oci(b'\x03\x5e\x06not the oci shape' + b'\x00' * 200)
 
 
+# A live sqlplus 11.2 `EXEC :n := 42` — a PL/SQL block with one NUMBER OUT bind.
+# The wire carries no bind direction: the OUT bind rides with the 2-byte `fd 01`
+# placeholder in its value slot (the tail `... 07 fd 01`), and its OAC gives the
+# type (0x02 NUMBER) + max size (0x16 = 22). Captured sqlplus 11.2 <-> XE 11.2.
+_OCI_EXEC_OUT_BIND = bytes.fromhex(
+    '035e152904040000000000feffffffffffffff4200000000000000feffffffffffffff'
+    '0d00000000000000fefffffffffffffffeffffffffffffff0000000001000000000000'
+    '0000000000feffffffffffffff01000000000000000000000000000000feffffffffff'
+    'ffff0000000000000000fefffffffffffffffeffffffffffffff4871cd2b0000000000'
+    '00000000000000fefffffffffffffffeffffffffffffff000000000000000000000000'
+    '000000000000000000000000000000000000000016424547494e203a6e203a3d203432'
+    '3b20454e443b0a00010000000100000000000000000000000000000000000000000000'
+    '0008000000000000000000000000000000000000000000000001020300001600000000'
+    '0000000000000000000000000000000000000000000000000000000000000007fd01'
+)
+
+
+def test_parse_exec_oci_out_bind_decodes_none_and_carries_meta() -> None:
+    # A PL/SQL block's OUT bind (sqlplus VARIABLE / EXEC) has no input value — the
+    # `fd 01` placeholder decodes to None so the backend is not fed a garbage value,
+    # while bind_meta carries the (type, max_size) the OUT path needs (#265).
+    req = parse_exec_oci(_OCI_EXEC_OUT_BIND)
+    assert req.sql == 'BEGIN :n := 42; END;\n'
+    assert req.bind_count == 1
+    assert req.binds == [None]  # not the garbage the raw value used to decode to
+    assert req.bind_meta == [(2, 22)]  # NUMBER (type 2), 22-byte buffer
+
+
 def test_encode_describe_oci_roundtrips_the_meaningful_fields() -> None:
     # The thin client can't parse the OCI describe, so round-trip through the
     # codec's own reader: every meaningful field survives (#265).
