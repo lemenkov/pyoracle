@@ -92,6 +92,23 @@ class OraclePassthroughBackend:
             return Result(columns=columns, rows=rows)
         return Result(rowcount=cursor.rowcount or 0)
 
+    def execute_many(self, sql: str, rows: Sequence[Sequence]) -> int:
+        # Array DML (executemany): send the whole batch upstream in one round-trip
+        # through seerdb's own cursor.executemany — one parse, len(rows) iterations
+        # — instead of the Mirror's per-row fallback (one upstream round-trip per
+        # bind row, which paid the network latency once per row). Returns the total
+        # affected-row count. The Mirror calls this only for the non-batcherrors
+        # path, where an upstream failure aborts the whole batch — exactly Oracle's
+        # own non-batcherrors semantics.
+        assert self._conn is not None  # authenticate() ran before any execute
+        cursor = self._conn.cursor()
+        try:
+            cursor.executemany(sql, [list(row) for row in rows])
+        except seerdb.DatabaseError as exc:
+            code = getattr(exc, 'code', None) or 900
+            raise BackendError(str(exc), ora_code=code) from exc
+        return cursor.rowcount or 0
+
     def _execute_plsql(self, cursor, sql: str, binds: Sequence) -> Result:
         variables = []
         for bind in binds:
