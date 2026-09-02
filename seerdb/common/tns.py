@@ -8484,11 +8484,11 @@ def encode_token_rxd(Token: object) -> bytes:
             return encode_chr(Token._value.encode('utf-16-be'))
         return encode_token_rxd(Token._value)
     if isinstance(Token, TempLob):
-        # Temp-LOB locator bind (#91): the LOB-descriptor prefix `01 28 28`
-        # (shared with the native VECTOR / JSON binds), a ub2 locator length,
-        # then the locator bytes. Verified against python-oracledb on 21c.
+        # Temp-LOB locator bind (#91): the LOB-descriptor prefix (shared with the
+        # native VECTOR / JSON binds), a ub2 locator length, then the locator
+        # bytes. Verified against python-oracledb on 21c.
         return (
-            bytes.fromhex('012828')
+            _TEMP_LOB_BIND_PREFIX
             + struct.pack('>H', len(Token.locator))
             + Token.locator
         )
