@@ -98,6 +98,7 @@ from seerdb.common.tns_consts import (
     TNS_GSO_CAN_RECV_ATTENTION,
     TNS_MARKER,
     TNS_MARKER_TYPE_INTERRUPT,
+    TNS_MARKER_TYPE_RESET,
     TNS_PIPELINE_MODE_CONTINUE_ON_ERROR,
     TNS_REDIRECT,
     TNS_REFUSE,
@@ -491,7 +492,7 @@ class AsyncOracleConnect(_ConnectionLogic):
                 self._in_break = False
                 return (Type, Packet)
             if not self._in_break:
-                await self.send(TNS_MARKER, b'\x01\x00\x02')
+                await self.send(TNS_MARKER, bytes([1, 0, TNS_MARKER_TYPE_RESET]))
                 self._in_break = True
 
     # ----- login state machine -----
@@ -637,7 +638,9 @@ class AsyncOracleConnect(_ConnectionLogic):
                 case t if t == TNS_MARKER:
                     # Single reset per break episode, then drain (#45).
                     if not self._in_break:
-                        await self.send(TNS_MARKER, b'\x01\x00\x02')
+                        await self.send(
+                            TNS_MARKER, bytes([1, 0, TNS_MARKER_TYPE_RESET])
+                        )
                         self._in_break = True
                     continue
                 case t if t == TNS_REDIRECT:
