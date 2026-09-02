@@ -254,6 +254,25 @@ def test_more_rows_terminator_carries_cursor_id() -> None:
     assert result[2] == 9  # CursorId
 
 
+def test_end_of_fetch_is_built_from_oer_fields() -> None:
+    # _END_OF_FETCH is the ORA-01403 terminator, built by _encode_oer rather than
+    # stored. It must stay byte-identical to the live 11g capture and decode as the
+    # 1403 "no data found" status the client keys on to stop fetching.
+    from seerdb.common.tns import _END_OF_FETCH, decode_token_oer
+
+    assert (
+        _END_OF_FETCH
+        == bytes.fromhex(
+            '0401010104010102057b00000101010e03000000000000000000000000070001010000000019'
+        )
+        + b'ORA-01403: no data found\n'
+    )
+    _DECODE_FIELD_VERSION.set(FIELD_VERSION_11_2)
+    result = decode_token_oer(_END_OF_FETCH, (0, [], []))
+    assert result[0] == 1  # CallStatus
+    assert result[1] == 1403  # ErrCode — cursor drained
+
+
 def test_parse_fetch_extracts_cursor_and_count() -> None:
     from seerdb.common.tns import encode_dictionary_fetch, parse_fetch
 
