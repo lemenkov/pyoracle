@@ -44,6 +44,7 @@ TNS_FUNC_PIPELINE_END = 200  # end-of-pipeline message
 TNS_DATA_FLAGS_BEGIN_PIPELINE = 0x1000  # first pipelined packet
 TNS_DATA_FLAGS_END_OF_REQUEST = 0x0800  # a pipelined call expecting a result
 TNS_DATA_FLAGS_MORE = 0x0020  # non-final DATA fragment: more of the message follows
+TNS_DATA_FLAGS_EOF = 0x0040  # EOF: final empty DATA packet, releases the session
 TNS_PIPELINE_MODE_CONTINUE_ON_ERROR = 1
 TNS_PIPELINE_MODE_ABORT_ON_ERROR = 2
 

@@ -74,6 +74,7 @@ from seerdb.common.tns_consts import (
     TNS_DATA,
     TNS_DATA_FLAGS_BEGIN_PIPELINE,
     TNS_DATA_FLAGS_END_OF_REQUEST,
+    TNS_DATA_FLAGS_EOF,
     TNS_DATA_FLAGS_MORE,
     TNS_FETCH_ORIENTATION_CURRENT,
     TNS_GSO_CAN_RECV_ATTENTION,
@@ -2218,9 +2219,11 @@ class OracleConnect(_ConnectionLogic):
                 # the server to fully release the session. Without this the
                 # session lingers server-side and accumulates over rapid
                 # reconnect cycles. Format: 10-byte header (PacketSize,
-                # PacketFlags, Type, Flags, DataFlags=0x0040 EOF).
+                # PacketFlags, Type, Flags, DataFlags).
                 if self.sock is not None:
-                    self._sock.send(struct.pack('>hhBBh', 10, 0, TNS_DATA, 0, 0x0040))
+                    self._sock.send(
+                        struct.pack('>hhBBh', 10, 0, TNS_DATA, 0, TNS_DATA_FLAGS_EOF)
+                    )
         except (OSError, Exception):
             # If the server already hung up or our state is out of sync, we
             # still want to release the local socket.
