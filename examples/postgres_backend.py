@@ -927,7 +927,22 @@ class PostgresBackend:
         self, conninfo: str = '', *, credentials: Credentials | None = None
     ) -> None:
         self._conn = psycopg.connect(conninfo)
+        # Disable psycopg's automatic server-side prepared statements. Every
+        # statement runs inside a SAVEPOINT, and a ROLLBACK TO SAVEPOINT deallocates
+        # any prepared statement created after that savepoint — which desyncs
+        # psycopg's prepared-statement cache from the server ("prepared statement
+        # _pgN_M does not exist"). A proxy backend running varied SQL gains little
+        # from the cache anyway; the pipeline below is the real round-trip win.
+        self._conn.prepare_threshold = None
         self._credentials = credentials or {}
+        # Pipeline mode ships a statement's SAVEPOINT / statement / RELEASE in one
+        # network round-trip instead of three (a 3x per-statement latency cut
+        # against a remote database). It needs libpq >= 14; older builds fall back
+        # to the sequential path.
+        try:
+            self._use_pipeline = psycopg.pq.version() >= 140000
+        except Exception:
+            self._use_pipeline = False
         # Lean on the `orafce` extension for Oracle-compatible SQL functions —
         # nvl, decode, to_char / to_date, add_months, instr, and much more —
         # rather than hand-rolling each rewrite. It installs those into the
@@ -1032,48 +1047,67 @@ class PostgresBackend:
         params: dict | None = None
         if binds:
             sql, params = _translate_binds(sql, binds)
+        # Each statement runs inside a SAVEPOINT so a failure rolls back just it
+        # (clearing PostgreSQL's aborted-transaction state) and leaves the rest of
+        # the transaction intact — Oracle's statement-level error model. The
+        # pipelined path ships the SAVEPOINT, the statement and the RELEASE in one
+        # network round-trip instead of three; the sequential path is the fallback
+        # when libpq is too old for pipeline mode. DDL stays sequential: pipeline
+        # mode forces the extended query protocol, which rejects the multi-command
+        # `DROP …; CREATE …` a routine DDL rewrites to (#526) — the simple protocol
+        # the sequential path uses accepts it. DDL is infrequent and auto-commits,
+        # so the hot SELECT/DML path (single-command) is where the round-trips count.
+        if self._use_pipeline and not is_ddl:
+            result = self._execute_pipelined(sql, params)
+        else:
+            result = self._execute_sequential(sql, params)
+        # DDL auto-commits (Oracle semantics): persist it — and any pending DML —
+        # so a later rollback discards only DML, not the table (#532).
+        if is_ddl:
+            self._conn.commit()
+        return result
+
+    def _build_result(self, cursor) -> Result:
+        # Turn an executed statement's cursor into a Result: a row count for a
+        # no-row statement, else the fetched rows plus a ColumnMeta per column.
+        if cursor.description is None:
+            return Result(rowcount=max(cursor.rowcount, 0))
+        rows = [list(r) for r in cursor.fetchall()]
+        # Re-tag any ora_tstz composite cells to aware datetimes carrying the
+        # entered offset before they reach the wire encoder (#519).
+        for i, desc in enumerate(cursor.description):
+            if self._tstz_oid is not None and desc.type_code == self._tstz_oid:
+                for row in rows:
+                    row[i] = _reconstruct_tstz(row[i])
+        columns = []
+        for i, desc in enumerate(cursor.description):
+            # A column tracing back to a typed domain is that Oracle type — an
+            # ora_clob / ora_blob LOB (so an empty value stays '' / b'' rather than
+            # collapsing to NULL, #534), or an ora_intervalym INTERVAL YEAR TO MONTH
+            # (so its months survive, #504). Only a text / bytea / interval column
+            # can be one, so cheaper types skip the catalog lookup.
+            domain = (
+                self._domain_type(cursor.pgresult, i)
+                if desc.type_code in _DOMAIN_BASE_OIDS
+                else None
+            )
+            if domain in (TNS_TYPE_CLOB, TNS_TYPE_BLOB):
+                columns.append(_lob_column_meta(desc.name, domain))
+            elif domain == TNS_TYPE_INTERVALYM:
+                for row in rows:
+                    row[i] = _to_interval_ym(row[i])
+                columns.append(_intervalym_column_meta(desc.name))
+            else:
+                columns.append(_column_meta(desc, [r[i] for r in rows], self._tstz_oid))
+        return Result(columns=columns, rows=[tuple(r) for r in rows])
+
+    def _execute_sequential(self, sql: str, params: dict | None) -> Result:
+        # SAVEPOINT + statement + RELEASE as three round-trips; the fallback path.
         cursor = self._conn.cursor()
-        # SAVEPOINT isolates this statement: on any error we roll back to here
-        # (which also clears PostgreSQL's aborted-transaction state) and leave the
-        # rest of the transaction intact; on success we release it. Either way
-        # the savepoint is resolved, so they never accumulate across statements.
         cursor.execute('SAVEPOINT _mirror_stmt')
         try:
             cursor.execute(sql, params)
-            if cursor.description is None:
-                result = Result(rowcount=max(cursor.rowcount, 0))
-            else:
-                rows = [list(r) for r in cursor.fetchall()]
-                # Re-tag any ora_tstz composite cells to aware datetimes carrying
-                # the entered offset before they reach the wire encoder (#519).
-                for i, desc in enumerate(cursor.description):
-                    if self._tstz_oid is not None and desc.type_code == self._tstz_oid:
-                        for row in rows:
-                            row[i] = _reconstruct_tstz(row[i])
-                columns = []
-                for i, desc in enumerate(cursor.description):
-                    # A column tracing back to a typed domain is that Oracle type —
-                    # an ora_clob / ora_blob LOB (so an empty value stays '' / b''
-                    # rather than collapsing to NULL, #534), or an ora_intervalym
-                    # INTERVAL YEAR TO MONTH (so its months survive, #504). Only a
-                    # text / bytea / interval column can be one, so cheaper types
-                    # skip the catalog lookup.
-                    domain = (
-                        self._domain_type(cursor.pgresult, i)
-                        if desc.type_code in _DOMAIN_BASE_OIDS
-                        else None
-                    )
-                    if domain in (TNS_TYPE_CLOB, TNS_TYPE_BLOB):
-                        columns.append(_lob_column_meta(desc.name, domain))
-                    elif domain == TNS_TYPE_INTERVALYM:
-                        for row in rows:
-                            row[i] = _to_interval_ym(row[i])
-                        columns.append(_intervalym_column_meta(desc.name))
-                    else:
-                        columns.append(
-                            _column_meta(desc, [r[i] for r in rows], self._tstz_oid)
-                        )
-                result = Result(columns=columns, rows=[tuple(r) for r in rows])
+            result = self._build_result(cursor)
         except psycopg.Error as exc:
             self._conn.execute('ROLLBACK TO SAVEPOINT _mirror_stmt')
             self._conn.execute('RELEASE SAVEPOINT _mirror_stmt')
@@ -1089,11 +1123,34 @@ class PostgresBackend:
             self._conn.execute('RELEASE SAVEPOINT _mirror_stmt')
             raise
         self._conn.execute('RELEASE SAVEPOINT _mirror_stmt')
-        # DDL auto-commits (Oracle semantics): persist it — and any pending DML —
-        # so a later rollback discards only DML, not the table (#532).
-        if is_ddl:
-            self._conn.commit()
         return result
+
+    def _execute_pipelined(self, sql: str, params: dict | None) -> Result:
+        # SAVEPOINT + statement + RELEASE shipped in ONE round-trip via a psycopg
+        # pipeline. Each command uses its own cursor so the statement's cursor keeps
+        # its own result (rowcount / description / rows / pgresult) after the sync —
+        # a shared cursor would only retain the last command's (RELEASE) result.
+        savepoint = self._conn.cursor()
+        statement = self._conn.cursor()
+        release = self._conn.cursor()
+        try:
+            with self._conn.pipeline():
+                savepoint.execute('SAVEPOINT _mirror_stmt')
+                statement.execute(sql, params)
+                release.execute('RELEASE SAVEPOINT _mirror_stmt')
+        except psycopg.Error as exc:
+            # The statement failed inside the pipeline; the RELEASE that followed it
+            # was discarded, so the savepoint still stands — roll the statement back
+            # to it (preserving the rest of the transaction) and surface a clean ORA
+            # error, never a desync.
+            self._conn.execute('ROLLBACK TO SAVEPOINT _mirror_stmt')
+            self._conn.execute('RELEASE SAVEPOINT _mirror_stmt')
+            raise _backend_error(exc) from exc
+        # The pipeline succeeded, so the savepoint is already released and the
+        # statement had its effect. Building the result can only raise on an
+        # unencodable SELECT column — no side effect to undo — so let it propagate
+        # for the session to map to an ORA error; the connection stays usable.
+        return self._build_result(statement)
 
     def execute_many(self, sql: str, rows: Sequence[Sequence]) -> int:
         # Array DML (executemany) in one round-trip: translate the statement once
