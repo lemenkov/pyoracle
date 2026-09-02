@@ -643,7 +643,7 @@ def test_encode_query_response_oci_structure() -> None:
     col = ColumnMeta(
         name=b'1', data_type=TNS_TYPE_NUMBER, data_length=2, max_size=0, scale=-127
     )
-    resp = encode_query_response_oci([col], [(1,)])
+    resp = encode_query_response_oci([col], [(1,)], sequence=19)
     assert _decode_describe_oci(resp)[0]['name'] == b'1'  # describe decodes back
     assert b'\x07\x02\xc1\x02' in resp  # the RXD row: NUMBER 1 = c1 02
 
@@ -654,7 +654,7 @@ def test_oci_trailers_are_computed_mostly_zero() -> None:
     from seerdb.common.tns import _oci_dcb_tail, _oci_row_status
 
     tail = _oci_dcb_tail(1)
-    status = _oci_row_status()
+    status = _oci_row_status(19)
     assert len(tail) == 83 and tail.count(0) > 70
     assert len(status) == 171 and status.count(0) > 120
 
@@ -665,7 +665,7 @@ def test_encode_fetch_terminator_oci_signals_end_of_fetch() -> None:
     # renders live when the execute already returned the rows (#265).
     from seerdb.common.tns import encode_fetch_terminator_oci
 
-    term = encode_fetch_terminator_oci()
+    term = encode_fetch_terminator_oci(20)
     assert len(term) == 162
     assert term[0] == 0x04  # OER token
     assert term.endswith(b'ORA-01403: no data found\n')
@@ -691,7 +691,7 @@ def test_encode_status_oci_and_commit_shapes() -> None:
     # TTI_STA acknowledgement (#265).
     from seerdb.common.tns import encode_commit_status_oci, encode_status_oci
 
-    status = encode_status_oci()
+    status = encode_status_oci(7)
     assert status[:3] == b'\x08\x06\x00' and len(status) == 171
     assert encode_commit_status_oci()[0] == 0x09  # TTI_STA
 
@@ -765,10 +765,10 @@ def test_long_row_replies_carry_the_right_status() -> None:
     from seerdb.common.tns_consts import TNS_TYPE_LONG
 
     col = ColumnMeta(name=b'V', data_type=TNS_TYPE_LONG, data_length=0, max_size=0)
-    reexec = encode_reexec_row_oci([col], [('hi',)], more=True)
+    reexec = encode_reexec_row_oci([col], [('hi',)], sequence=19, more=True)
     assert reexec[0] == 0x06  # TTI_RXH
     assert b'\x08\x06\x00' in reexec  # execute row-status
-    fetch = encode_long_fetch_row_oci([col], ('hi',))
+    fetch = encode_long_fetch_row_oci([col], ('hi',), sequence=0x11)
     assert fetch[0] == 0x06  # TTI_RXH
     assert fetch[-136:][:2] == b'\x04\x01'  # OER "more rows" status, no 1403 body
 
@@ -843,7 +843,7 @@ def test_encode_lob_describe_oci_omits_the_dcb_tail() -> None:
     from seerdb.common.tns_consts import TNS_TYPE_CLOB
 
     col = ColumnMeta(name=b'C', data_type=TNS_TYPE_CLOB, data_length=4000, max_size=0)
-    reply = encode_lob_describe_oci([col])
+    reply = encode_lob_describe_oci([col], sequence=15)
     assert reply[0] == TTI_DCB
     assert bytes.fromhex('060122') not in reply  # no DCB-tail marker
     assert b'\x08\x06\x00' in reply  # LOB execute status present
@@ -1097,21 +1097,29 @@ def test_encode_dml_status_oci_carries_the_verb_and_rowcount() -> None:
 
     off = _OCI_DML_ROWCOUNT_OFF
     for keyword in ('INSERT', 'UPDATE', 'DELETE'):
-        status = encode_dml_status_oci(keyword, 7)
+        status = encode_dml_status_oci(keyword, 7, sequence=19)
         assert status[:3] == b'\x08\x06\x00'
         assert len(status) == 187
         assert int.from_bytes(status[off : off + 4], 'little') == 7
 
     # The verb templates are distinct — the command-code byte differs per verb.
-    codes = {kw: encode_dml_status_oci(kw, 1) for kw in ('INSERT', 'UPDATE', 'DELETE')}
+    codes = {
+        kw: encode_dml_status_oci(kw, 1, sequence=19)
+        for kw in ('INSERT', 'UPDATE', 'DELETE')
+    }
     assert codes['INSERT'] != codes['UPDATE'] != codes['DELETE']
 
     # An unknown verb (e.g. MERGE) falls back to the INSERT template.
-    assert encode_dml_status_oci('MERGE', 3) == encode_dml_status_oci('INSERT', 3)
+    assert encode_dml_status_oci('MERGE', 3, sequence=19) == encode_dml_status_oci(
+        'INSERT', 3, sequence=19
+    )
 
     # Zero rows is representable (DML matching no rows).
     assert (
-        int.from_bytes(encode_dml_status_oci('DELETE', 0)[off : off + 4], 'little') == 0
+        int.from_bytes(
+            encode_dml_status_oci('DELETE', 0, sequence=19)[off : off + 4], 'little'
+        )
+        == 0
     )
 
 
@@ -1138,8 +1146,8 @@ def test_encode_ddl_status_oci_carries_the_command_type() -> None:
     # affects no rows — nothing but that field varies.
     from seerdb.common.tns import ddl_command_type, encode_ddl_status_oci
 
-    create = encode_ddl_status_oci(1)
-    drop = encode_ddl_status_oci(12)
+    create = encode_ddl_status_oci(1, sequence=17)
+    drop = encode_ddl_status_oci(12, sequence=17)
     for body in (create, drop):
         assert body[:3] == b'\x08\x06\x00'
         assert len(body) == 171
@@ -1212,7 +1220,9 @@ def test_encode_error_oci_matches_the_captured_ora_error() -> None:
         '0000000000000000284f52412d30303934323a207461626c65206f7220766965'
         '7720646f6573206e6f742065786973740a'
     )
-    assert encode_error_oci(942, 'table or view does not exist') == captured
+    assert (
+        encode_error_oci(942, 'table or view does not exist', sequence=0x13) == captured
+    )
 
 
 def test_oci_dcb_tail_is_column_aware() -> None:
@@ -1241,8 +1251,8 @@ def test_encode_query_response_oci_signals_more_rows() -> None:
     col = ColumnMeta(
         name=b'N', data_type=TNS_TYPE_NUMBER, data_length=2, max_size=0, scale=-127
     )
-    done = encode_query_response_oci([col], [(1,)], more=False)
-    more = encode_query_response_oci([col], [(1,)], more=True)
+    done = encode_query_response_oci([col], [(1,)], sequence=19, more=False)
+    more = encode_query_response_oci([col], [(1,)], sequence=19, more=True)
     i = len(done) - _OCI_ROW_STATUS_LEN + _OCI_MORE_ROWS_OFF
     assert more[i] == 0x1E and done[i] == 0x00
 
@@ -1254,7 +1264,7 @@ def test_encode_fetch_batch_oci_carries_rows_and_terminator() -> None:
     col = ColumnMeta(
         name=b'N', data_type=TNS_TYPE_NUMBER, data_length=2, max_size=0, scale=-127
     )
-    batch = encode_fetch_batch_oci([col], [(1,), (2,)])
+    batch = encode_fetch_batch_oci([col], [(1,), (2,)], sequence=20)
     assert batch[0] == 0x06  # TTI_RXH token
     assert batch.count(b'\x07\x02\xc1') == 2  # two RXD rows (07 + NUMBER DALC)
     assert batch.endswith(b'ORA-01403: no data found\n')
@@ -1300,7 +1310,7 @@ def test_encode_out_bind_response_oci_matches_captured_11g_reply() -> None:
         '00000000000000000000000000000000000000000000000000000000000000000000000000'
         '000000000000'
     )
-    assert encode_out_bind_response_oci([7]) == captured_n7
+    assert encode_out_bind_response_oci([7], sequence=0) == captured_n7
 
 
 def test_encode_out_bind_response_oci_marshals_each_bind() -> None:
@@ -1310,7 +1320,7 @@ def test_encode_out_bind_response_oci_marshals_each_bind() -> None:
     from seerdb.common.tns import encode_out_bind_response_oci
     from seerdb.common.tns_consts import TTI_RXD
 
-    two = encode_out_bind_response_oci([7, 9])
+    two = encode_out_bind_response_oci([7, 9], sequence=0)
     assert two[4] == 2  # bind count
     assert two[50:52] == b'\x10\x10'  # one define marker per bind
     rxd = two[52:]
@@ -1318,7 +1328,7 @@ def test_encode_out_bind_response_oci_marshals_each_bind() -> None:
     # 07 | 02 c1 08 (NUMBER 7) 00 00 | 02 c1 0a (NUMBER 9) 00 00
     assert rxd[:11] == bytes.fromhex('0702c108000002c10a0000')
 
-    text = encode_out_bind_response_oci(['hi'])
+    text = encode_out_bind_response_oci(['hi'], sequence=0)
     assert text[4] == 1
     assert text[51:].startswith(bytes.fromhex('0702686900'))  # 07 + 'hi' DALC
 

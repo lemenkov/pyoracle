@@ -71,7 +71,9 @@ class TestOciOerGeneration(unittest.TestCase):
         # offset 12 (ub4 LE), then appends the ORA-… message DALC.
         expected = bytearray(ERROR_OER)
         expected[12:16] = (942).to_bytes(4, 'little')
-        got = encode_error_oci(942, 'table or view does not exist')
+        # sequence=0x13 is the value the golden capture carried; passing it
+        # reproduces the live 11g error reply byte-for-byte.
+        got = encode_error_oci(942, 'table or view does not exist', sequence=0x13)
         self.assertEqual(got[:136], bytes(expected))
 
     def test_error_oer_status_and_code(self):
@@ -83,7 +85,7 @@ class TestOciOerGeneration(unittest.TestCase):
         self.assertEqual(len(oer), 136)
 
     def test_error_message_appended(self):
-        got = encode_error_oci(942, 'table or view does not exist')
+        got = encode_error_oci(942, 'table or view does not exist', sequence=0x13)
         self.assertEqual(
             got[136:], bytes([40]) + b'ORA-00942: table or view does not exist\n'
         )
@@ -102,7 +104,9 @@ class TestExecuteStatusGeneration(unittest.TestCase):
 
     def test_dml_verbs_share_frame_and_carry_command_type(self):
         codes = {'INSERT': 2, 'UPDATE': 6, 'DELETE': 7}
-        bodies = {kw: encode_dml_status_oci(kw, 5) for kw in codes}
+        # sequence=19 is the captured DML value; a fixed sequence keeps the three
+        # verbs' frames identical bar the command type.
+        bodies = {kw: encode_dml_status_oci(kw, 5, sequence=19) for kw in codes}
         for kw, code in codes.items():
             self.assertEqual(bodies[kw][_OCI_CMD_TYPE_OFF], code)
             self.assertEqual(
@@ -119,7 +123,7 @@ class TestExecuteStatusGeneration(unittest.TestCase):
             self.assertEqual(diffs, [_OCI_CMD_TYPE_OFF])
 
     def test_dml_rowcount(self):
-        body = encode_dml_status_oci('UPDATE', 42)
+        body = encode_dml_status_oci('UPDATE', 42, sequence=19)
         self.assertEqual(
             int.from_bytes(
                 body[_OCI_DML_ROWCOUNT_OFF : _OCI_DML_ROWCOUNT_OFF + 4], 'little'
@@ -129,16 +133,29 @@ class TestExecuteStatusGeneration(unittest.TestCase):
 
     def test_dml_unknown_verb_falls_back_to_insert(self):
         self.assertEqual(
-            encode_dml_status_oci('MERGE', 3), encode_dml_status_oci('INSERT', 3)
+            encode_dml_status_oci('MERGE', 3, sequence=19),
+            encode_dml_status_oci('INSERT', 3, sequence=19),
         )
 
     def test_ddl_verbs_share_frame_and_carry_command_type(self):
-        create = encode_ddl_status_oci(1)  # CREATE TABLE
-        drop = encode_ddl_status_oci(12)  # DROP TABLE
+        create = encode_ddl_status_oci(1, sequence=17)  # CREATE TABLE
+        drop = encode_ddl_status_oci(12, sequence=17)  # DROP TABLE
         self.assertEqual(create[_OCI_CMD_TYPE_OFF], 1)
         self.assertEqual(drop[_OCI_CMD_TYPE_OFF], 12)
         diffs = [i for i in range(len(create)) if create[i] != drop[i]]
         self.assertEqual(diffs, [_OCI_CMD_TYPE_OFF])
+
+    def test_status_replies_carry_the_live_sequence(self):
+        # The OER sequence is now a per-session counter threaded in, not a frozen
+        # capture constant: a different sequence changes offset 5 (and its +2 echo
+        # at offset 49) of the OER while the rest of the frame is unchanged. Tested
+        # on the bare-OER error reply, whose OER starts at offset 0.
+        a = encode_error_oci(942, 'x', sequence=0x13)[:136]
+        b = encode_error_oci(942, 'x', sequence=0x14)[:136]
+        self.assertEqual(a[5], 0x13)
+        self.assertEqual(b[5], 0x14)
+        diffs = [i for i in range(len(a)) if a[i] != b[i]]
+        self.assertEqual(diffs, [5, 49])
 
 
 if __name__ == '__main__':

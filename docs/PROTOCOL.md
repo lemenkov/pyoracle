@@ -4183,7 +4183,7 @@ to real 11g, varying one thing at a time. Offsets are from the `0x04` token:
 |---|---|---|---|
 | `0` | 1 | token tag `0x04` (TTI_OER) | constant |
 | `1` | 1 | **status** — `0x01` success, `0x05` error | error vs success replies |
-| `5..7` | ub2 LE | sequence (per-context internal field) | carried from capture; high byte `0` in every capture; **likely a monotonic per-session counter** (see below) |
+| `5..7` | ub2 LE | **end-to-end sequence number** — a per-session diagnostic counter | high byte `0` in every capture; a live monotonic counter, read-and-discarded by every client (see below) |
 | `7` | 1 | constant `0x01` | constant across captures |
 | `8` | 1 | **row kind** — `0` none, `1` LOB row, `2` LONG row | LOB vs LONG fetch status |
 | `8..12` | ub4 LE | **rowcount** (affected rows) | ins1→1, ins3→3, upd/del→4 |
@@ -4208,12 +4208,27 @@ handshake negotiates); the Mirror emits the captured value rather than its own,
 which sqlplus accepts — whether the field must track the live negotiation is
 not confirmed.
 
-The `sequence` at offset `5` is most likely a **monotonically-increasing
-per-session counter**: each reply pins it to the value seen in its capture,
-which only works because the Mirror starts every session from the beginning and
-sqlplus does not appear to validate it. This is untested against a session that
-has already advanced the counter (a mid-session capture, or replaying many
-statements) — a `FIXME` to confirm someday.
+The `sequence` at offset `5` is the OER's **end-to-end sequence number** — a
+diagnostic/tracing counter (same family as the end-to-end application-tracing
+attributes, §17), **not** a protocol-correctness field. It is
+read-and-discarded by every client: the thin client skips it on decode, and both
+reference implementations (thin and thick) do the same — one reads it into a
+struct field that is never read again, the other skips it outright in the error
+token. No client validates, echoes, or transmits it, and there is no
+"wrong sequence" Oracle error (`ORA-03137`/`ORA-03106` are framing/parse
+failures, not sequence-value mismatches).
+
+Because the field is consumer-ignored, the Mirror is free to emit **any**
+monotonic value — but a real server *advances* it per reply, so the Mirror does
+too: `seerdb/server/session.py:_OciSequence` is a per-session counter (`+1` per
+OER-bearing reply, starting at `1`) threaded into every OCI status builder,
+replacing the frozen per-capture constant each status was reverse-engineered
+with. The captured adjacency of the SELECT execute status (`19`) and the
+following fetch terminator (`20`) is the evidence that the real field advances
+`+1` per reply. The start value and step are therefore Mirror
+response-generation policy, not a decoded Oracle rule. (Offline tests reproduce
+each live capture byte-for-byte by passing that capture's original sequence
+value; §36.2.)
 
 ### 36.2 Generation
 
@@ -4244,8 +4259,9 @@ so it is carried, not fully pinned.
 
 The DML execute-status reply wraps the OER in a larger status frame: a 35-byte
 preamble (with a cursor id) + the OER + a 16-byte trailer. Its OER **is** built
-on the envelope by `encode_oci_oer` (call status `2`, sequence `19`), with the
-touched row's physical **rowid** patched into offsets `27..40`. The 16-byte
+on the envelope by `encode_oci_oer` (call status `2`, the live per-session
+sequence of §36.1), with the touched row's physical **rowid** patched into
+offsets `27..40`. The 16-byte
 trailer is **derived** from that same rowid (`_oci_dml_frame_trailer`): a fixed
 frame with two of the rowid's 2-byte words spliced back in byte-swapped
 (rowid `1..3` → trailer offset `6`, rowid `9..11` → trailer offset `12`). The
@@ -4260,6 +4276,13 @@ rest) comes from the same command-type field on an envelope-built OER via
 LID in §14.6). **Verified live** against sqlplus over the
 Mirror: `insert/update/delete` print the right verb and count, `create/drop`
 print `Table created.` / `Table dropped.` (and, via the resolved command type, `Index created.`, `Table altered.`, `View dropped.`, `Table truncated.`, and the rest).
+
+One OCI reply keeps a frozen sequence: the `TTI_LOBOPS` READ reply's tail
+(`_oci_lob_read_tail`, §14.6) embeds its OER inside a larger captured RPA+OER
+blob rather than building it from `encode_oci_oer`, so its sequence stays at the
+captured `17`. Threading the live counter through it means patching the value
+inside that blob; since the field is consumer-ignored it is harmless and left for
+a follow-up.
 
 ## 37. Sharding keys are not on the thin wire (#164)
 
