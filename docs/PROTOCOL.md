@@ -1281,8 +1281,12 @@ The full server side, reduced from live 11g out-of-line CLOB captures:
 
 1. **Execute → LOB describe.** The reply is *not* an ordinary describe. The LOB
    column reports **`data_length` 4000** and the describe carries a distinct
-   **33-byte tail** (a describe-timestamp form, *without* the `06 01 22` DCB
-   marker) followed by a LOB execute status — `encode_lob_describe_oci`, not the
+   **33-byte tail** (`_oci_lob_describe_tail`): the same describe-time DALC head
+   as the ordinary DCB tail (a ub4 char-length of 7 + the byte-length 7, the
+   timestamp zeroed), *without* the `06 01 22` DCB marker, and all zero except one
+   `ub4` at **offset 17** (`0x1fe8` = 8168 from the capture — not instance-specific,
+   so carried as a stable structural value of unpinned meaning). It is followed by
+   a LOB execute status — `encode_lob_describe_oci`, not the
    inline-row `encode_query_response_oci`. This is load-bearing: with the ordinary
    describe sqlplus sets up its LOB define wrong and **breaks on the locator row**
    even when that row is byte-identical to Oracle's.
