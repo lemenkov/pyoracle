@@ -935,18 +935,29 @@ def _answer_query(
     try:
         if len(request.bind_rows) > 1:
             # Array DML (executemany): apply each bind row and report the total
-            # affected-row count — one execute message, one aggregated reply. With
-            # batcherrors the good rows still apply and a per-row failure is
-            # collected (offset, code, message) rather than aborting the batch.
-            affected = 0
-            for offset, row in enumerate(request.bind_rows):
-                try:
-                    affected += backend.execute(sql, row).rowcount
-                except BackendError as err:
-                    if not request.batcherrors:
-                        raise
-                    batch_errors.append((offset, err.ora_code, err.ora_message))
-            result = Result(rowcount=affected)
+            # affected-row count — one execute message, one aggregated reply.
+            execute_many = getattr(backend, 'execute_many', None)
+            if execute_many is not None and not request.batcherrors:
+                # Fast path: hand the whole array to the backend so it can send it
+                # in one round-trip (a per-row loop against a remote backend paid
+                # its network latency once per row). A per-row failure aborts the
+                # batch — exactly Oracle's non-batcherrors behaviour. batcherrors
+                # keeps the per-row path below so each failure can be attributed.
+                result = Result(rowcount=execute_many(sql, request.bind_rows))
+            else:
+                # Per row: needed for batcherrors (the good rows still apply and a
+                # per-row failure is collected as (offset, code, message) rather
+                # than aborting the batch), and the fallback for a backend that
+                # offers no array path.
+                affected = 0
+                for offset, row in enumerate(request.bind_rows):
+                    try:
+                        affected += backend.execute(sql, row).rowcount
+                    except BackendError as err:
+                        if not request.batcherrors:
+                            raise
+                        batch_errors.append((offset, err.ora_code, err.ora_message))
+                result = Result(rowcount=affected)
         else:
             result = backend.execute(sql, _plsql_bind_vars(request))
         # Autocommit mode: the client set the commit-on-success option, so

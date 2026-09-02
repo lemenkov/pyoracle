@@ -615,6 +615,37 @@ def test_executemany_array_dml_postgres() -> None:
     assert rows == [(1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')]
 
 
+def test_executemany_failure_aborts_batch_and_keeps_session_postgres() -> None:
+    # A plain (non-batcherrors) array DML now runs through the backend's own
+    # executemany. A row that fails mid-batch must abort the whole batch (Oracle's
+    # non-batcherrors semantics) — the savepoint rolls back every row of it — and
+    # leave the session usable for the next statement, never desyncing.
+    listen, server, result = _start_mirror()
+    conn = _connect(listen.getsockname()[1])
+    try:
+        cur = conn.cursor()
+        cur.execute('drop table if exists t_manyfail')
+        cur.execute('create table t_manyfail (id integer primary key)')
+        with pytest.raises(seerdb.DatabaseError):
+            # The third row duplicates the first key — the batch aborts.
+            cur.executemany('insert into t_manyfail values (:1)', [(1,), (2,), (1,)])
+        # The session survived; the aborted batch applied nothing (the two good
+        # rows were rolled back with it).
+        cur.execute('select count(*) from t_manyfail')
+        remaining = cur.fetchone()[0]
+        cur.execute('drop table t_manyfail')
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert remaining == 0
+
+
 def test_fractional_number_bind_postgres() -> None:
     # psycopg maps a Decimal bind straight to numeric; the exact value survives
     # (the SQLite backend takes a lossy REAL path — this is the exact one).
