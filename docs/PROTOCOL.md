@@ -939,7 +939,9 @@ For fetching additional rows from an open cursor:
 TTI_FUN | TTI_FETCH | SeqNum | Cursor(SB4) | RowsToFetch(SB4)
 ```
 
-The default fetch size is 15 rows (configurable via the `fetch` parameter).
+The default fetch size is 100 rows (configurable via the `fetch` parameter),
+matching oracledb's effective batch so a large `fetchall` drains in ~n/100
+round-trips rather than ~n/15.
 
 **When a follow-up FETCH is required.** The execute response carries
 the OER `call_status` field (`§6.7`). When that value is non-zero it
