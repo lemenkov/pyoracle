@@ -4265,7 +4265,10 @@ def _oci_version_trailer(
 _OCI_VERSION_TRAILER = _oci_version_trailer(11, 2, 0, 2)  # XE 11.2.0.2.0
 
 
-_OCI_DCB_MARKER = bytes.fromhex('060122')  # a required 3-byte descriptor marker
+# A 3-byte marker in the describe-column trailer. Load-bearing by position — the
+# client draws ORA-03113 if it is zeroed (§36) — but its byte values' meaning is
+# unpinned: carried verbatim as capture ground truth, not decoded (§39.2).
+_OCI_DCB_MARKER = bytes.fromhex('060122')
 
 
 # The compact 24-byte OCI OER token — the short form of _OCI_OER_ENVELOPE (§36)
@@ -4368,6 +4371,9 @@ _OCI_FETCH_OER_HEADER = _oci_oer_short(
 )
 
 
+# The one instance constant inside the end-of-fetch OER (§36) — the same
+# `f6 31 0a` marker that recurs as `20 f6 31 0a` in _OCI_OER_ENVELOPE. Carried
+# verbatim as capture ground truth; its meaning is unpinned, not decoded (§39.2).
 _OCI_FETCH_CONST = bytes.fromhex('f6310a')
 
 
