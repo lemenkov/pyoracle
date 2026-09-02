@@ -457,11 +457,22 @@ def decode_packet(Data: bytes, Acc: tuple, FieldVersion: int | None = None) -> t
     # via the ContextVar set here.
     if FieldVersion is not None:
         _DECODE_FIELD_VERSION.set(FieldVersion)
-    Token = Data[0]
+    # RXD (row data) and BVC (its bit vector) are the only tokens that repeat
+    # proportional to the row count. Loop over them here instead of recursing per
+    # row, so a large fetch batch cannot overflow Python's recursion limit (a
+    # batch of a few hundred rows used to raise RecursionError). Every other token
+    # appears O(1) times per response and dispatches (and may recurse) below with
+    # bounded depth.
+    while True:
+        Token = Data[0]
+        if Token == TTI_RXD:
+            (Data, Acc) = _decode_rxd_step(Data, Acc)
+        elif Token == TTI_BVC:
+            (Data, Acc) = _decode_bvc_step(Data, Acc)
+        else:
+            break
     logger.debug('Token %s', Token)
     match Token:
-        case t if t == TTI_BVC:
-            return decode_token_bvc(Data, Acc)
         case t if t == TTI_DCB:
             return decode_token_dcb(Data, Acc)
         case t if t == TTI_FOB:  # return
@@ -476,8 +487,6 @@ def decode_packet(Data: bytes, Acc: tuple, FieldVersion: int | None = None) -> t
             return decode_token_oac(Data, Acc)
         case t if t == TTI_OER:
             return decode_token_oer(Data, Acc)
-        case t if t == TTI_RXD:
-            return decode_token_rxd(Data, Acc)
         case t if t == TTI_RXH:
             return decode_token_rxh(Data, Acc)
         case t if t == TTI_RPA:
@@ -514,12 +523,13 @@ def decode_packet(Data: bytes, Acc: tuple, FieldVersion: int | None = None) -> t
     raise Exception("Can't decode unknown type", Token, Data, Acc)
 
 
-def decode_token_bvc(Data: bytes, Acc: tuple) -> tuple:
+def _decode_bvc_step(Data: bytes, Acc: tuple) -> tuple:
     # Bit vector identifying columns whose value is REPEATED from the previous
     # row (so the following RXD only carries the columns whose bits are set).
     # NumColumnsSent is variable ub2; bit vector size is derived from the
     # cursor's total column count. Stash the bytes onto Acc so the next RXD
-    # can consult them.
+    # can consult them. Returns the ``(Rest, NewAcc)`` continuation decode_packet
+    # loops on (BVC precedes an RXD, so it is a per-row token too).
     (Cursor, RowFormat, Rows, *_) = Acc
     Rest = Data[1:]
     (_, Rest) = decode_ub4(Rest)
@@ -527,7 +537,14 @@ def decode_token_bvc(Data: bytes, Acc: tuple) -> tuple:
     VecLen = (NumCols + 7) // 8
     BitVec = bytes(Rest[:VecLen])
     Rest = Rest[VecLen:]
-    return decode_packet(Rest, (Cursor, RowFormat, Rows, BitVec))
+    return (Rest, (Cursor, RowFormat, Rows, BitVec))
+
+
+def decode_token_bvc(Data: bytes, Acc: tuple) -> tuple:
+    # Consume a BVC and continue decoding — the full decode a direct caller
+    # expects. decode_packet itself loops over the per-row step.
+    (Rest, NewAcc) = _decode_bvc_step(Data, Acc)
+    return decode_packet(Rest, NewAcc)
 
 
 def _skip_chunked_bytes(Data: bytes) -> bytes:
@@ -2332,7 +2349,12 @@ _UROWID_DATA_TYPES = frozenset((TNS_TYPE_UROWID,))
 _LONG_DATA_TYPES = frozenset((TNS_TYPE_LONG, TNS_TYPE_LONGRAW))
 
 
-def decode_token_rxd(Data: bytes, Acc: tuple) -> tuple:
+def _decode_rxd_step(Data: bytes, Acc: tuple) -> tuple:
+    # One row of RXD data. Returns ``(Rest, NewAcc)`` — the continuation
+    # decode_packet loops on — rather than recursing, so a large fetch batch (one
+    # RXD per row) cannot overflow the stack. The new row is appended to the Rows
+    # list in place (not ``Rows + [Row]``), which is also O(n) over the batch
+    # instead of O(n^2). :func:`decode_token_rxd` wraps this for direct callers.
     Val: Any  # reused per column, heterogeneous
     # Row data (section 6.2). Each column value is normally a DALC blob whose
     # raw bytes we hand to seerdb.common.types.decode_value, which dispatches on the
@@ -2373,7 +2395,8 @@ def decode_token_rxd(Data: bytes, Acc: tuple) -> tuple:
             'return_positions': list(ReturnPositions),
             'return_values': ReturnValues,
         }
-        return decode_packet(Rest, (Cursor, RowFormat, Rows + [Record]))
+        Rows.append(Record)
+        return (Rest, (Cursor, RowFormat, Rows))
     Row = []
     if RowFormat:
         # Reused (bit-unset) columns copy the previous row. Within a response
@@ -2408,7 +2431,16 @@ def decode_token_rxd(Data: bytes, Acc: tuple) -> tuple:
                 continue
             (Val, Rest) = decode_dalc(Rest)
             Row.append(decode_value(Col, Val))
-    return decode_packet(Rest, (Cursor, RowFormat, Rows + [Row]))
+    Rows.append(Row)
+    return (Rest, (Cursor, RowFormat, Rows))
+
+
+def decode_token_rxd(Data: bytes, Acc: tuple) -> tuple:
+    # Decode one RXD row and continue decoding the rest of the response — the full
+    # decode a direct caller expects. decode_packet itself loops over the per-row
+    # step instead of going through this wrapper.
+    (Rest, NewAcc) = _decode_rxd_step(Data, Acc)
+    return decode_packet(Rest, NewAcc)
 
 
 def _read_lob_column(Rest: bytes) -> tuple[bytes | None, bytes]:
