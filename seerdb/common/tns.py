@@ -112,6 +112,7 @@ from seerdb.common.tns_consts import (
     TNS_END_TO_END_CLIENT_INFO,
     TNS_END_TO_END_DBOP,
     TNS_END_TO_END_MODULE,
+    TNS_ESCAPE_CHAR,
     TNS_EXEC_FLAGS_NO_CANCEL_ON_EOF,
     TNS_EXEC_FLAGS_SCROLLABLE,
     TNS_EXEC_OPTION_BATCH_ERRORS,
@@ -5215,14 +5216,6 @@ _OCI_BIND_COUNT_OFF = 83
 _OCI_OAC_MARKER = re.compile(rb'\x01(.)\x03\x00\x00')
 
 
-# The value-slot marker sqlplus sends for an OUT bind (`VARIABLE` / `EXEC :v := …`)
-# — the wire carries no bind direction, so an OUT bind rides with this 2-byte
-# `fd 01` placeholder instead of a value DALC. The Mirror decodes it as None (no
-# input); the assigned value comes back from the PL/SQL block. Verified across
-# NUMBER / VARCHAR OUT binds, single and multiple, against live 11g.
-_OCI_OUT_BIND_MARKER = 0xFD
-
-
 _OCI_BIND_TYPES = frozenset(
     {
         TNS_TYPE_VARCHAR,
@@ -5270,10 +5263,11 @@ def _parse_oci_binds(
             for data_type in types:
                 # An OUT bind (sqlplus `VARIABLE` / `EXEC :v := …`) has no input
                 # value: direction is not on the wire, so sqlplus sends the 2-byte
-                # placeholder `fd 01` in the value's slot. Decode it as None so the
-                # OUT bind is not fed a garbage input (its real value comes back from
-                # the block); an ordinary IN value is a normal DALC.
-                if len(rest) >= 2 and rest[0] == _OCI_OUT_BIND_MARKER:
+                # placeholder `<escape> 01` in the value's slot (the escape char is
+                # the wire's absent-value sentinel). Decode it as None so the OUT
+                # bind is not fed a garbage input (its real value comes back from the
+                # block); an ordinary IN value is a normal DALC.
+                if len(rest) >= 2 and rest[0] == TNS_ESCAPE_CHAR:
                     values.append(None)
                     rest = rest[2:]
                     continue

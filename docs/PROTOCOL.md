@@ -1245,7 +1245,9 @@ receives the value as an ordinary IN bind (§5.4).
 `OALL8` execute carrying the `BEGIN … END;` block and one OAC per bind — but the
 wire **does not carry a bind's direction** (Oracle infers IN vs OUT from the
 block). An OUT bind therefore has no input value: in the `TTI_RXD` bind row its
-value slot holds the 2-byte placeholder **`fd 01`** instead of a DALC. Verified
+value slot holds the 2-byte placeholder **`fd 01`** instead of a DALC — `fd` is
+the wire's escape / absent-value sentinel (`TNS_ESCAPE_CHAR`, `0xFD`), shared with
+the thin dialect, and `01` the following field. Verified
 against live 11g across NUMBER and VARCHAR OUT binds, single and multiple —
 `BEGIN :a := 1; :b := 'x'; END;` sends `07 fd 01 fd 01`. The Mirror decodes each
 `fd 01` to `None` (`parse_exec_oci` / `_parse_oci_binds`) so the OUT bind is not

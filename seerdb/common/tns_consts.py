@@ -42,11 +42,17 @@ TTI_TOKEN = 33  # response correlation marker
 TNS_FUNC_PIPELINE_BEGIN = 199  # begin-pipeline piggyback
 TNS_FUNC_PIPELINE_END = 200  # end-of-pipeline message
 TNS_DATA_FLAGS_BEGIN_PIPELINE = 0x1000  # first pipelined packet
+TNS_DATA_FLAGS_END_OF_RESPONSE = 0x2000  # the flag that terminates a response body
 TNS_DATA_FLAGS_END_OF_REQUEST = 0x0800  # a pipelined call expecting a result
 TNS_DATA_FLAGS_MORE = 0x0020  # non-final DATA fragment: more of the message follows
 TNS_DATA_FLAGS_EOF = 0x0040  # EOF: final empty DATA packet, releases the session
 TNS_PIPELINE_MODE_CONTINUE_ON_ERROR = 1
 TNS_PIPELINE_MODE_ABORT_ON_ERROR = 2
+
+# The wire's escape / null-value sentinel (0xFD). As a value-slot marker it flags
+# an absent value — e.g. sqlplus / thick-OCI sends `fd 01` in an OUT bind's value
+# slot (§ OUT-bind request marker), the wire carrying no bind direction.
+TNS_ESCAPE_CHAR = 0xFD
 
 # Server-side scrollable cursors (#181). The execute al8i4 array carries the
 # scroll request: al8i4[9] gains the SCROLLABLE + NO_CANCEL_ON_EOF exec flags
@@ -271,6 +277,19 @@ TTI_SCID = 135
 TTI_SPFP = 138
 TTI_KPFC = 139
 TTI_PING = 147
+
+# Further Oracle TTC function / message-type codes seerdb does not dispatch yet —
+# cataloged so the dispatch table and downstream RE have names, not bare numbers.
+TNS_FUNC_REEXECUTE_AND_FETCH = 78  # combined re-execute + fetch round-trip
+TNS_FUNC_DIRECT_PATH_PREPARE = 128
+TNS_FUNC_DIRECT_PATH_LOAD_STREAM = 129
+TNS_FUNC_DIRECT_PATH_OP = 130  # direct-path load (SQL*Loader path)
+TNS_FUNC_SET_SCHEMA = 152  # ALTER SESSION SET CURRENT_SCHEMA fast-path
+TNS_FUNC_SESSION_GET = 162  # DRCP pooled-session acquire (#130)
+TNS_FUNC_SESSION_RELEASE = 163  # DRCP pooled-session release (#130)
+TNS_FUNC_NOTIFY = 187  # CQN / AQ notification delivery (#129)
+TNS_MSG_TYPE_ONEWAY_FN = 26  # fire-and-forget call, no response expected
+TNS_MSG_TYPE_RENEGOTIATE = 28  # server asks the client to renegotiate (TLS / caps)
 
 # TNS_CCAP_FIELD_VERSION_* values (the byte written at CCAP_FIELD_VERSION). The
 # negotiated TTC field version gates the auth verifier and the version-specific
