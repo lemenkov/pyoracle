@@ -35,6 +35,7 @@ from seerdb.common.tns import (
     decode_ub4,
     encode_batch_errors_status,
     encode_challenge,
+    encode_changepassword_status_oci,
     encode_commit_status_oci,
     encode_create_temp_response,
     encode_ddl_status_oci,
@@ -107,6 +108,7 @@ from seerdb.server.auth import (
     parse_auth_response,
     parse_auth_response_oci,
     parse_changepassword,
+    parse_changepassword_oci,
     parse_osesskey,
     parse_osesskey_oci,
     parse_token_auth,
@@ -379,7 +381,7 @@ def serve_session(
         stream, backend, encryption=encryption, token_public_key=token_public_key
     )
     if sqlplus:
-        return _serve_oci_session(stream, backend, user)
+        return _serve_oci_session(stream, backend, user, conn_key)
     cursors = _Cursors()
     # LOB contents (wire bytes + is_clob) the current statement's rows carry, in
     # the order their locators went out; the thin client drains them with
@@ -446,7 +448,9 @@ _OCI_BANNER = (
 )
 
 
-def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str:
+def _serve_oci_session(
+    stream: PacketStream, backend: Backend, user: str, conn_key: bytes | None = None
+) -> str:
     # The sqlplus / thick-OCI query loop (#265), built up one message shape at a
     # time. So far: the post-login version call (-> banner), the OCI execute
     # (-> describe + rows + status), and the follow-up fetch (-> end-of-fetch
@@ -552,6 +556,13 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
                 continue
             if body[1] in (TTI_COMMIT, TTI_ROLLBACK):
                 stream.write_packet(TNS_DATA, encode_commit_status_oci())
+                continue
+            if body[1] == TTI_AUTH:
+                # A post-login TTI_AUTH is a password change: sqlplus's PASSWORD
+                # command (OCIPasswordChange), unwrapped from its TTI_80SES
+                # piggyback above. It carries AUTH_PASSWORD (current) and
+                # AUTH_NEWPASSWORD (new), the same pair as the thin changepassword.
+                _answer_changepassword_oci(stream, backend, body, conn_key, user, seq)
                 continue
             if body[1] == TTI_LOGOFF:
                 stream.write_packet(TNS_DATA, encode_logoff_status_oci())
@@ -1191,6 +1202,65 @@ def _answer_changepassword(
         return
     logger.info('password changed: %s', user)
     stream.write_packet(TNS_DATA, encode_status(0))
+
+
+def _answer_changepassword_oci(
+    stream: PacketStream,
+    backend: Backend,
+    body: bytes,
+    conn_key: bytes | None,
+    user: str,
+    seq: '_OciSequence',
+) -> None:
+    # sqlplus PASSWORD (OCIPasswordChange): a TTI_AUTH (unwrapped from its
+    # TTI_80SES piggyback by strip_oci_piggyback) carrying AUTH_PASSWORD (current)
+    # and AUTH_NEWPASSWORD (new), each AES-encrypted under the login session key —
+    # the same two fields as the thin changepassword, in the OCI marshalling.
+    # Decrypt both, drive the backend change, and reply with a success status.
+    change = getattr(backend, 'change_password', None)
+    if conn_key is None or change is None:
+        stream.write_packet(
+            TNS_DATA,
+            encode_error_oci(
+                _CHANGE_PASSWORD_UNSUPPORTED,
+                'ORA-01031: password change not supported',
+                sequence=seq.next(),
+            ),
+        )
+        return
+    try:
+        _user, old_cipher, new_cipher = parse_changepassword_oci(body)
+        old_password = decrypt_password(conn_key, old_cipher).decode('utf-8')
+        new_password = decrypt_password(conn_key, new_cipher).decode('utf-8')
+    except Exception as exc:
+        logger.info('OCI changepassword parse failed: %s', exc)
+        stream.write_packet(
+            TNS_DATA,
+            encode_error_oci(
+                1017, 'ORA-01017: invalid credential', sequence=seq.next()
+            ),
+        )
+        return
+    try:
+        change(user, old_password, new_password)
+    except BackendError as err:
+        stream.write_packet(
+            TNS_DATA,
+            encode_error_oci(err.ora_code, err.ora_message, sequence=seq.next()),
+        )
+        return
+    except Exception as exc:
+        logger.warning('backend raised a non-ORA error: %s', exc)
+        stream.write_packet(
+            TNS_DATA,
+            encode_error_oci(
+                _INTERNAL_ERROR, f'ORA-00600: backend error: {exc}', sequence=seq.next()
+            ),
+        )
+        return
+    logger.info('OCI password changed: %s', user)
+    seq.next()  # advance the OER counter for parity even though the reply is fixed
+    stream.write_packet(TNS_DATA, encode_changepassword_status_oci())
 
 
 def _answer_txn(stream: PacketStream, backend: Backend, *, commit: bool) -> None:

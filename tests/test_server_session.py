@@ -436,3 +436,121 @@ def test_oci_sequence_advances_per_reply() -> None:
     assert first[40] == 1
     assert second[40] == 2
     assert [i for i in range(len(first)) if first[i] != second[i]] == [40]
+
+
+# --- sqlplus PASSWORD / OCI changepassword (#21) ------------------------------
+
+
+def _oci_changepassword_frame(
+    conn_key: bytes, user: bytes, old: str, new: str
+) -> bytes:
+    """Build a synthetic OCI (deadbeef) changepassword TTI_AUTH, as sqlplus's
+    PASSWORD sends inside its TTI_80SES piggyback (unwrapped): AUTH_PASSWORD
+    (current) + AUTH_NEWPASSWORD (new), each hex(AES-cipher under conn_key)."""
+    from seerdb.common import oci
+    from seerdb.common.crypto import encrypt_password
+    from seerdb.server.auth import encode_kv_oci
+
+    ind = oci.OCI_INDICATOR
+    # header: TTI_FUN + AUTH subtype, indicators at offsets 3/19/35/43, then the
+    # ub1-length username at offset 51 (see auth._parse_oci_fun_username).
+    header = (
+        b'\x03\x73\x00'
+        + ind
+        + b'\x00' * 8
+        + ind
+        + b'\x00' * 8
+        + ind
+        + ind
+        + bytes([len(user)])
+        + user
+    )
+    old_hex = encrypt_password(conn_key, old.encode()).hex().upper().encode()
+    new_hex = encrypt_password(conn_key, new.encode()).hex().upper().encode()
+    return (
+        header
+        + encode_kv_oci(b'AUTH_PASSWORD', old_hex)
+        + encode_kv_oci(b'AUTH_NEWPASSWORD', new_hex)
+    )
+
+
+def test_is_version_call_oci_distinguishes_changepassword() -> None:
+    # The version call and the changepassword both arrive as a TTI_80SES
+    # (0x11 0x6b) piggyback with the same 15-byte prefix; only the wrapped TTI
+    # function differs (0x3b version vs. TTI_AUTH). is_version_call_oci must key
+    # on the inner function, else a changepassword is answered with the banner.
+    from seerdb.common.tns import is_version_call_oci, strip_oci_piggyback
+
+    prefix = bytes.fromhex('116b043b000000e507000001000000')
+    version = prefix + bytes.fromhex('033b') + b'\x00' * 4
+    change = prefix + bytes.fromhex('0373') + b'\x00' * 4
+    assert is_version_call_oci(version)
+    assert not is_version_call_oci(change)
+    # strip_oci_piggyback unwraps the TTI_80SES wrapper to the inner TTI_FUN call.
+    assert strip_oci_piggyback(change)[:2] == bytes.fromhex('0373')
+    assert strip_oci_piggyback(version)[:2] == bytes.fromhex('033b')
+
+
+def test_oci_changepassword_decrypts_and_applies() -> None:
+    from seerdb.common.tns import encode_changepassword_status_oci
+    from seerdb.server.auth import parse_changepassword_oci
+    from seerdb.server.session import _answer_changepassword_oci
+
+    conn_key = bytes(range(24))
+    frame = _oci_changepassword_frame(conn_key, b'PWTEST', 'oldpw', 'newpw')
+
+    # The parser recovers the two ciphertexts (un-hexed).
+    from seerdb.common.crypto import encrypt_password
+
+    user, old_c, new_c = parse_changepassword_oci(frame)
+    assert user == b'PWTEST'
+    assert old_c == encrypt_password(conn_key, b'oldpw')
+    assert new_c == encrypt_password(conn_key, b'newpw')
+
+    calls: list = []
+
+    class _Backend:
+        def change_password(self, u: str, old: str, new: str) -> None:
+            calls.append((u, old, new))
+
+    class _Stream:
+        def __init__(self) -> None:
+            self.sent: list[bytes] = []
+
+        def write_packet(self, ptype: int, body: bytes) -> None:
+            self.sent.append(body)
+
+    class _Seq:
+        def next(self) -> int:
+            return 1
+
+    stream = _Stream()
+    _answer_changepassword_oci(stream, _Backend(), frame, conn_key, 'PWTEST', _Seq())
+    # decrypted the pair and drove the backend change, then acked with the
+    # OCIPasswordChange success frame sqlplus renders as "Password changed".
+    assert calls == [('PWTEST', 'oldpw', 'newpw')]
+    assert stream.sent[-1] == encode_changepassword_status_oci()
+
+
+def test_oci_changepassword_unsupported_backend_replies_ora_error() -> None:
+    from seerdb.server.session import _answer_changepassword_oci
+
+    conn_key = bytes(range(24))
+    frame = _oci_changepassword_frame(conn_key, b'PWTEST', 'oldpw', 'newpw')
+
+    class _Stream:
+        def __init__(self) -> None:
+            self.sent: list[bytes] = []
+
+        def write_packet(self, ptype: int, body: bytes) -> None:
+            self.sent.append(body)
+
+    class _Seq:
+        def next(self) -> int:
+            return 1
+
+    stream = _Stream()
+    # A backend with no change_password: reply with an ORA error, never desync.
+    _answer_changepassword_oci(stream, object(), frame, conn_key, 'PWTEST', _Seq())
+    assert stream.sent, 'must answer even when unsupported'
+    assert b'ORA-01031' in stream.sent[-1]

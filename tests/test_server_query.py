@@ -729,8 +729,13 @@ def test_encode_version_banner_oci_matches_the_captured_reply() -> None:
         '346269742050726f64756374696f6e0002200b09010000000300'
     )
     assert encode_version_banner_oci(banner) == captured
-    # and the request recogniser keys on the 0x11 0x6b lead
-    assert is_version_call_oci(b'\x11\x6b\x04\x3b\x00') is True
+    # The recogniser keys on the TTI_80SES (0x11 0x6b) lead AND the wrapped inner
+    # function (0x03 0x3b), so a piggybacked changepassword (inner TTI_AUTH, which
+    # shares the 0x11 0x6b prefix) is not mistaken for the version request.
+    version = bytes.fromhex('116b043b000000e507000001000000') + b'\x03\x3b'
+    change = bytes.fromhex('116b043b000000e507000001000000') + b'\x03\x73'
+    assert is_version_call_oci(version) is True
+    assert is_version_call_oci(change) is False
     assert is_version_call_oci(b'\x03\x5e\x06') is False
 
 

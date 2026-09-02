@@ -1605,8 +1605,17 @@ def is_reexecute_oci(payload: bytes) -> bool:
 
 
 def is_version_call_oci(payload: bytes) -> bool:
-    """True if this is the sqlplus / thick-OCI post-login version request."""
-    return payload[:2] == oci.OCI_VERSION_CALL
+    """True if this is the sqlplus / thick-OCI post-login version request.
+
+    The version call and the sqlplus ``PASSWORD`` changepassword both arrive as a
+    TTI_80SES (``0x11 0x6b``) piggyback and share the same 15-byte prefix; they
+    differ only in the wrapped TTI function (``0x3b`` version vs. ``TTI_AUTH``).
+    Match the inner function too, so a piggybacked changepassword is not mistaken
+    for the version request (and answered with the banner)."""
+    return (
+        payload[:2] == oci.OCI_VERSION_CALL
+        and payload[_OCI_80SES_FIXED : _OCI_80SES_FIXED + 2] == b'\x03\x3b'
+    )
 
 
 def encode_version_banner_oci(banner: bytes) -> bytes:
@@ -1636,12 +1645,28 @@ _OCI_PIGGYBACK = b'\x11\x69'
 _OCI_PIGGYBACK_FIXED = 3 + 8 + 4  # 0x11 0x69 seq | indicator | ub4 count
 
 
+# The version call and sqlplus PASSWORD changepassword instead arrive wrapped in
+# a TTI_80SES (0x11 0x6b) piggyback: a fixed 15-byte prefix (0x11 0x6b, a seq
+# byte, and a 12-byte session-switch preamble) then the real TTI_FUN call. The
+# preamble length is constant across captures (only the seq/count bytes vary), so
+# the inner call always starts at offset 15.
+_OCI_PIGGYBACK_80SES = b'\x11\x6b'
+_OCI_80SES_FIXED = 15
+
+
 def strip_oci_piggyback(body: bytes) -> bytes:
-    """Return the OALL8 execute inside an OCCA piggyback, or ``body`` unchanged."""
-    if body[:2] != _OCI_PIGGYBACK:
-        return body
-    count = int.from_bytes(body[11:15], 'little')
-    return body[_OCI_PIGGYBACK_FIXED + count * 8 :]
+    """Return the real TTI_FUN call inside an OCI piggyback, or ``body`` unchanged.
+
+    Handles both wrappers the thick-OCI client uses: the OCCA close-cursors
+    piggyback (``0x11 0x69``) around every execute past the first, and the
+    TTI_80SES (``0x11 0x6b``) piggyback around the version call and the
+    changepassword (:func:`is_version_call_oci` splits those two apart)."""
+    if body[:2] == _OCI_PIGGYBACK:
+        count = int.from_bytes(body[11:15], 'little')
+        return body[_OCI_PIGGYBACK_FIXED + count * 8 :]
+    if body[:2] == _OCI_PIGGYBACK_80SES:
+        return body[_OCI_80SES_FIXED:]
+    return body
 
 
 _OCI_END_OF_FETCH_MSG = b'ORA-01403: no data found\n'
@@ -5766,6 +5791,27 @@ def encode_status_oci(sequence: int) -> bytes:
     off = _OCI_EXEC_OER_OFF
     status[off : off + len(status_oer)] = status_oer
     return bytes(status)
+
+
+# sqlplus PASSWORD success reply (OCIPasswordChange complete, #21). Its own
+# compact OER "command complete" frame (same 0x20f6310a marker and OER shape the
+# DML/describe statuses carry), captured verbatim from an 11g password change:
+# sqlplus renders "Password changed" from it. Carried as one frame — the leading
+# 0x0405 word is NOT a discardable session counter (zeroing it makes sqlplus
+# reject the reply and hang), and the rest is fixed. FIXME: reduce to the OER
+# primitives (like encode_status_oci) once the field layout is bisected; a live
+# password change against 11g is the ground truth.
+_OCI_CHANGEPASSWORD_STATUS = bytes.fromhex(
+    '08000004050000001300010100000000000000000000000000000000000000000000'
+    '000000000000000000000000000000000000160000010000003601000000000000000000'
+    '000000000020f6310a0000000000000000000000000000000000000000000000000000'
+    '00000000000000000000000000000000000000000000000000000000000000000000'
+)
+
+
+def encode_changepassword_status_oci() -> bytes:
+    """The sqlplus / thick-OCI reply that completes an OCIPasswordChange (#21)."""
+    return _OCI_CHANGEPASSWORD_STATUS
 
 
 # OCI DML execute-status reply (#348/#349). sqlplus renders the completion
