@@ -622,7 +622,12 @@ def _answer_query_oci(
         stream.write_packet(TNS_DATA, encode_status_oci(seq.next()))
         return None, []
     try:
-        result = backend.execute(request.sql, request.binds)
+        # A PL/SQL block (sqlplus VARIABLE / EXEC :v := …) hands its binds over as
+        # BindVar so the backend registers them OUT-capable and returns the assigned
+        # values — the wire carries no direction, so every bind goes over
+        # OUT-capable (the same path the thin exec uses). A plain statement's binds
+        # pass through unchanged.
+        result = backend.execute(request.sql, _plsql_bind_vars(request))
     except BackendError as err:
         # A statement the backend can't run. A failed SELECT (e.g. sqlplus's
         # PRODUCT_PRIVS lookup) must come back as an ORA error — sqlplus expects
