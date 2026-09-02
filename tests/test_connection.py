@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: 2019 Peter Lemenkov <lemenkov@gmail.com>
 # SPDX-License-Identifier: MIT
 
+import asyncio
 import socket
+import struct
 import threading
 import time
 import unittest
@@ -48,6 +50,53 @@ class TestCqnRejected(unittest.TestCase):
             a.subscribe(callback=lambda m: None)
         with self.assertRaises(NotSupportedError):
             a.unsubscribe()
+
+
+class _FakeWriter:
+    """Records writes and no-ops the asyncio.StreamWriter teardown calls that
+    AsyncOracleConnect.close/disconnect drive, so an offline close() can run
+    without a real socket."""
+
+    def __init__(self):
+        self.writes = []
+
+    def write(self, data):
+        self.writes.append(bytes(data))
+
+    async def drain(self):
+        pass
+
+    def can_write_eof(self):
+        return False
+
+    def close(self):
+        pass
+
+    async def wait_closed(self):
+        pass
+
+
+class TestAsyncCloseSessionRelease(unittest.TestCase):
+    # Sync/async parity: OracleConnect.close() sends a final empty TNS_DATA
+    # packet with the EOF data flag so the server fully releases the session
+    # (without it sessions linger and pile up over rapid reconnects). The async
+    # close() must emit the same marker.
+    def test_close_emits_eof_session_release_marker(self):
+        from seerdb.client.aconnection import AsyncOracleConnect
+        from seerdb.common.tns_consts import TNS_DATA, TNS_DATA_FLAGS_EOF
+
+        a = AsyncOracleConnect(host='x', port=1, user='pyo', password='p')
+        writer = _FakeWriter()
+        a._writer = writer
+        a._reader = object()
+
+        asyncio.run(a.close())
+
+        marker = struct.pack('>hhBBh', 10, 0, TNS_DATA, 0, TNS_DATA_FLAGS_EOF)
+        self.assertIn(marker, writer.writes)
+        # the logoff dictionary is sent before the marker
+        self.assertGreaterEqual(len(writer.writes), 2)
+        self.assertEqual(writer.writes[-1], marker)
 
 
 class TestProxyUser(unittest.TestCase):

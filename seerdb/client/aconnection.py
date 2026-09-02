@@ -93,6 +93,7 @@ from seerdb.common.tns_consts import (
     TNS_DATA,
     TNS_DATA_FLAGS_BEGIN_PIPELINE,
     TNS_DATA_FLAGS_END_OF_REQUEST,
+    TNS_DATA_FLAGS_EOF,
     TNS_DATA_FLAGS_MORE,
     TNS_FETCH_ORIENTATION_CURRENT,
     TNS_GSO_CAN_RECV_ATTENTION,
@@ -2096,12 +2097,21 @@ class AsyncOracleConnect(_ConnectionLogic):
         )
 
     async def close(self) -> None:
-        """Send TNS logoff, then close the underlying writer."""
+        """Send TNS logoff and the session-release marker, then close the writer."""
         if self._writer is None:
             return
         try:
             Data = encode_dictionary(self._make_dict(DictionaryType.close))
             await self.send(TNS_DATA, Data)
+            # Final empty TNS_DATA packet with the EOF data flag, telling the
+            # server to fully release the session (mirrors OracleConnect.close,
+            # #626). Without it the session lingers server-side and accumulates
+            # over rapid reconnect cycles. Format: 10-byte header (PacketSize,
+            # PacketFlags, Type, Flags, DataFlags).
+            self._wr.write(
+                struct.pack('>hhBBh', 10, 0, TNS_DATA, 0, TNS_DATA_FLAGS_EOF)
+            )
+            await self._wr.drain()
         except Exception:
             # Best-effort logoff: if the server already hung up we still
             # want to tear down the local socket below.
