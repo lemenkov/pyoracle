@@ -750,6 +750,36 @@ def test_statement_error_keeps_the_transaction() -> None:
     assert rows == [(10,), (20,)]  # the pre-error row was not rolled back
 
 
+def test_execute_pipelined_and_sequential_agree() -> None:
+    # The pipelined path (SAVEPOINT + statement + RELEASE in one round-trip) and
+    # the sequential fallback (three round-trips, for libpq < 14) must produce the
+    # same results and the same statement-level error isolation. Drive the backend
+    # directly, forcing each path, so the fallback is exercised even where libpq is
+    # new enough that the Mirror always pipelines.
+    from postgres_backend import PostgresBackend
+
+    from seerdb.server import BackendError
+
+    for use_pipeline in (True, False):
+        backend = PostgresBackend(_CONNINFO, credentials=dict(_CREDS))
+        backend._use_pipeline = use_pipeline
+        try:
+            backend.execute('drop table if exists t_paths')
+            backend.execute('create table t_paths (n integer)')
+            assert backend.execute('insert into t_paths values (1)').rowcount == 1
+            backend.execute('insert into t_paths values (2)')  # prior, uncommitted
+            # A failing statement rolls back only itself, prior work survives.
+            with pytest.raises(BackendError):
+                backend.execute('insert into t_paths values (no_such_column)')
+            backend.execute('insert into t_paths values (3)')  # still usable
+            result = backend.execute('select n from t_paths order by n')
+            assert [r[0] for r in result.rows] == [1, 2, 3], use_pipeline
+            backend.execute('drop table t_paths')
+            backend.commit()
+        finally:
+            backend.close()
+
+
 def test_bind_variables_postgres() -> None:
     listen, server, result = _start_mirror()
     conn = _connect(listen.getsockname()[1])
