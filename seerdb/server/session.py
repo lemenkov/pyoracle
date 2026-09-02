@@ -504,7 +504,7 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
                 stream.write_packet(
                     TNS_DATA,
                     encode_lob_read_response_oci(
-                        chunk, count, len(content), is_clob=is_clob
+                        chunk, count, len(content), is_clob=is_clob, sequence=seq.next()
                     ),
                 )
                 continue

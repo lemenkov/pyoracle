@@ -5067,16 +5067,17 @@ _OCI_LOB_ROW_VALUE = {
 }
 
 
-def _oci_lob_read_tail(is_clob: bool) -> bytes:
+def _oci_lob_read_tail(is_clob: bool, sequence: int) -> bytes:
     # The TTI_LOBOPS READ reply tail after the LOB_DATA content: a TTI_RPA (0x08
     # 0x00, the echoed locator, then the ub4 LE amount read — characters for a
     # CLOB, bytes for a BLOB) then the LOB-row OER call status. The echoed
     # locator's byte size (offset 93) and the amount (offset 107) are patched to
-    # stay consistent with the content delivered.
+    # stay consistent with the content delivered. ``sequence`` is the live
+    # per-session OER counter (§36) for the trailing status OER.
     oer = bytearray(
         encode_oci_oer(
             oci.OCI_OER_STATUS_SUCCESS,
-            sequence=17,
+            sequence=sequence,
             row_kind=oci.OCI_OER_ROW_KIND_LOB,
             command_type=0,
         )
@@ -5090,9 +5091,6 @@ def _oci_lob_read_tail(is_clob: bool) -> bytes:
         + b'\x00' * 4
         + bytes(oer)
     )
-
-
-_OCI_LOB_READ_TAIL = {is_clob: _oci_lob_read_tail(is_clob) for is_clob in (True, False)}
 
 
 # --- Mirror deadbeef/OCI codec (parse/describe/rows/status/LOB, #265) ---
@@ -5797,17 +5795,23 @@ def encode_lob_locator_oci(value: object, is_clob: bool) -> bytes:
 
 
 def encode_lob_read_response_oci(
-    content: bytes, amount: int, total_bytes: int | None = None, *, is_clob: bool = True
+    content: bytes,
+    amount: int,
+    total_bytes: int | None = None,
+    *,
+    is_clob: bool = True,
+    sequence: int,
 ) -> bytes:
     """The TTI_LOBOPS READ reply (#405): the LOB content slice (LOB_DATA) then the
-    captured TTI_RPA + OER tail. ``content`` is the UTF-16BE (CLOB) / raw (BLOB)
-    bytes read this call; ``amount`` is that read's count (characters for a CLOB,
-    bytes for a BLOB); ``total_bytes`` is the whole LOB's byte size the echoed
-    locator reports (defaults to this slice, for a single read-it-all call).
-    ``is_clob`` selects the echoed-locator template (character vs binary, #406)."""
+    TTI_RPA + OER tail. ``content`` is the UTF-16BE (CLOB) / raw (BLOB) bytes read
+    this call; ``amount`` is that read's count (characters for a CLOB, bytes for a
+    BLOB); ``total_bytes`` is the whole LOB's byte size the echoed locator reports
+    (defaults to this slice, for a single read-it-all call). ``is_clob`` selects
+    the echoed-locator template (character vs binary, #406). ``sequence`` is the
+    live per-session OER counter for the trailing status."""
     if total_bytes is None:
         total_bytes = len(content)
-    tail = bytearray(_OCI_LOB_READ_TAIL[is_clob])
+    tail = bytearray(_oci_lob_read_tail(is_clob, sequence))
     tail[_OCI_LOB_TAIL_SIZE_OFF : _OCI_LOB_TAIL_SIZE_OFF + 4] = total_bytes.to_bytes(
         4, 'big'
     )

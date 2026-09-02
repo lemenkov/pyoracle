@@ -800,8 +800,10 @@ def test_lob_read_response_selects_clob_or_blob_locator() -> None:
     # matching the row locator so sqlplus renders the content correctly (#406).
     from seerdb.common.tns import encode_lob_read_response_oci
 
-    clob_reply = encode_lob_read_response_oci(b'\x00A', 1, 2, is_clob=True)
-    blob_reply = encode_lob_read_response_oci(b'\xca\xfe', 2, 2, is_clob=False)
+    clob_reply = encode_lob_read_response_oci(b'\x00A', 1, 2, is_clob=True, sequence=17)
+    blob_reply = encode_lob_read_response_oci(
+        b'\xca\xfe', 2, 2, is_clob=False, sequence=17
+    )
     # The echoed locator carries the same type/charset split as the row locator.
     assert bytes.fromhex('0001020c88') in clob_reply  # CLOB locator signature
     assert bytes.fromhex('0001010c08') in blob_reply  # BLOB locator signature
@@ -877,7 +879,9 @@ def test_encode_lob_read_response_slices_and_reports_totals() -> None:
     )
 
     content = 'Hello'.encode('utf-16-be')  # a 5-char slice, 10 bytes
-    reply = encode_lob_read_response_oci(content, amount=5, total_bytes=4000)
+    reply = encode_lob_read_response_oci(
+        content, amount=5, total_bytes=4000, sequence=17
+    )
     assert reply[0] == TTI_LOB
     tail = reply[-251:]
     assert (
