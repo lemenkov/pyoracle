@@ -2929,6 +2929,33 @@ class TestTnsCommandEncodersDict(unittest.TestCase):
             '01010000011400000000020369010000',
         )
 
+    def test_native_lob_oac(self):
+        # The native JSON (#70) and VECTOR (#62) bind OACs are built field-by-field
+        # by _encode_native_lob_oac; both must stay byte-identical to the
+        # python-oracledb capture (§18.1). The two size fields are a non-minimal
+        # 4-byte ub4 — VECTOR's 1 MiB keeps its leading zero (04 00100000).
+        from seerdb.common.tns import (
+            _JSON_BIND_OAC,
+            _VECTOR_BIND_OAC,
+            _encode_native_lob_oac,
+        )
+        from seerdb.common.tns_consts import TNS_TYPE_JSON, TNS_TYPE_VECTOR
+
+        self.assertEqual(
+            _JSON_BIND_OAC.hex(),
+            '77010000040200000000040200000000000000040200000000',
+        )
+        self.assertEqual(
+            _VECTOR_BIND_OAC.hex(),
+            '7f010000040010000000040200000000000000040010000000',
+        )
+        self.assertEqual(
+            _encode_native_lob_oac(TNS_TYPE_JSON, 0x02000000), _JSON_BIND_OAC
+        )
+        self.assertEqual(
+            _encode_native_lob_oac(TNS_TYPE_VECTOR, 0x00100000), _VECTOR_BIND_OAC
+        )
+
     def test_dty_table_12c(self):
         # The 12c+ datatype table must stay byte-identical to python-oracledb
         # 4.0.1's DATA_TYPES table captured against 21c (sha256 of the rendered

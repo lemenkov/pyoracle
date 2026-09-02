@@ -170,11 +170,6 @@ def _oson_emit(value, buf: bytearray, fid) -> int:
     return start
 
 
-# Native JSON bind OAC (#70): like the VECTOR one (§18.1) but type 119 with a
-# 32 MiB max length. Captured from python-oracledb on 21c.
-JSON_BIND_OAC = bytes.fromhex('77010000040200000000040200000000000000040200000000')
-
-
 def encode_oson(value) -> bytes:
     """Encode a Python value to an OSON image (the inverse of decode_oson) for a
     native JSON bind (#70). Covers the common small-document shape — scalars,
