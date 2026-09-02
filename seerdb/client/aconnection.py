@@ -2097,24 +2097,31 @@ class AsyncOracleConnect(_ConnectionLogic):
         )
 
     async def close(self) -> None:
-        """Send TNS logoff and the session-release marker, then close the writer."""
-        if self._writer is None:
+        """Roll back, log off and release the session (§10), then close the writer."""
+        # Best-effort orderly shutdown, then always disconnect so the socket
+        # gets reclaimed even if the server-side handshake has gone sideways.
+        if self.conn_state == CONN_STATE_DISCONNECTED or self._writer is None:
             return
         try:
-            Data = encode_dictionary(self._make_dict(DictionaryType.close))
-            await self.send(TNS_DATA, Data)
-            # Final empty TNS_DATA packet with the EOF data flag, telling the
-            # server to fully release the session (mirrors OracleConnect.close,
-            # #626). Without it the session lingers server-side and accumulates
-            # over rapid reconnect cycles. Format: 10-byte header (PacketSize,
-            # PacketFlags, Type, Flags, DataFlags).
-            self._wr.write(
-                struct.pack('>hhBBh', 10, 0, TNS_DATA, 0, TNS_DATA_FLAGS_EOF)
-            )
-            await self._wr.drain()
+            if self.conn_state == CONN_STATE_AUTHENTICATED:
+                if not self.autocommit:
+                    await self.rollback()
+                # Logoff (the TTI_LOGOFF function call + its response).
+                Data = encode_dictionary(self._make_dict(DictionaryType.close))
+                await self.send(TNS_DATA, Data)
+                await self._handle_response()
+                # Final empty TNS_DATA packet with the EOF data flag, telling the
+                # server to fully release the session (mirrors OracleConnect.close,
+                # §10). Without it the session lingers server-side and accumulates
+                # over rapid reconnect cycles. Format: 10-byte header (PacketSize,
+                # PacketFlags, Type, Flags, DataFlags).
+                self._wr.write(
+                    struct.pack('>hhBBh', 10, 0, TNS_DATA, 0, TNS_DATA_FLAGS_EOF)
+                )
+                await self._wr.drain()
         except Exception:
-            # Best-effort logoff: if the server already hung up we still
-            # want to tear down the local socket below.
+            # Best-effort teardown: if the server already hung up or our state
+            # is out of sync, we still want to release the local socket below.
             pass
         await self.disconnect()
 
