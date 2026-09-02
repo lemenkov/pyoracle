@@ -180,7 +180,7 @@ def encode_oson(value) -> bytes:
     zero (the server accepts that — verified by round-trip on 21c)."""
     if not isinstance(value, (dict, list)):
         node = _oson_scalar_node(value)
-        return b'\xff\x4a\x5a\x01' + b'\x00\x16\x00' + bytes([len(node)]) + node
+        return OSON_MAGIC + b'\x01' + b'\x00\x16\x00' + bytes([len(node)]) + node
     fnames: list[str] = []
     ids = {}
 
@@ -218,7 +218,8 @@ def encode_oson(value) -> bytes:
     if len(fnames_seg) > 0xFFFF or len(tree) > 0xFFFF:
         raise OsonError('document too large for the native OSON encoder')
     header = (
-        b'\xff\x4a\x5a\x01'
+        OSON_MAGIC
+        + b'\x01'
         + b'\x21\x06'
         + bytes([len(fnames)])
         + len(fnames_seg).to_bytes(2, 'big')
