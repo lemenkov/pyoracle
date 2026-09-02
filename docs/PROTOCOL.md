@@ -1254,6 +1254,37 @@ directionless-bind handling the thin exec uses, §5.4); an ordinary IN bind in t
 same slot is a normal DALC (`:x = 7` → `07 02 c1 08`). The OAC is identical for IN
 and OUT — the `fd 01` value marker is the only direction signal on the wire.
 
+**`DESCRIBE <object>` (the Mirror, OCI dialect).** sqlplus `DESC table` sends a
+dedicated describe call — `TTI_FUN 0x77` carrying the object name as the trailing
+length-prefixed token (`… 02 00 00 00 <ub1 namelen> <name>`) — and expects a
+dedicated describe reply, **not** the query DCB. The reply
+(`encode_describe_reply_oci`) is a fixed preamble + the schema and table names
+(DALCs: a ub4 char length, a ub1 byte length, then the bytes) + a header carrying a
+**column count** (`N + 1`) + one ~163-byte **block per column** + a fixed trailer
+(carrying the column count `N`). Reverse-engineered by differential capture against
+live 11g: single-column NUMBER / VARCHAR / DATE describes are 732-byte replies that
+differ in only 14 places, so the meaningful per-column fields are computed and the
+rest carried:
+
+- **size** (data length — 22 for NUMBER, 7 for DATE, the declared length for a
+  char type), **TNS type**, **precision**, **scale** (NUMBER) / length (char),
+  **nullability** (`1` nullable / `0` NOT NULL), and **charset + csfrm** (char types
+  only) — computed from the column;
+- each non-last column carries a `1` **continuation flag** three bytes before its
+  end and a **describe-timestamp entry** in its post-name region (the last column
+  leaves both zero);
+- the describe **timestamp** and **object id** are instance-specific — but sqlplus
+  *rejects a describe reply whose timestamp / object id are zero* (it silently
+  waits for more, unlike the query describe which tolerates a zeroed timestamp), so
+  the Mirror carries the non-zero captured values verbatim rather than zeroing them.
+
+Two framing points matter: the reply body follows the 8-byte TNS header and the
+**2-byte data flags** (`00 00`) — a describe reply that folds the data flags into
+its body desyncs sqlplus's parse by two bytes (it hangs). And the whole exchange is
+**two round-trips**: the `0x77` describe, then a small follow-up status call.
+Verified live: `DESC` of single- and multi-column tables renders the right
+`Name / Null? / Type` for NUMBER(p,s), VARCHAR2(n), and DATE (incl. NOT NULL).
+
 **DML completion reply (the Mirror, OCI dialect).** A DML that returns no columns
 (`INSERT` / `UPDATE` / `DELETE`) still needs sqlplus to print `N rows created.` /
 `N rows updated.` / `N rows deleted.` rather than the generic PL/SQL message.

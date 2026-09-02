@@ -38,6 +38,7 @@ from seerdb.common.tns import (
     encode_commit_status_oci,
     encode_create_temp_response,
     encode_ddl_status_oci,
+    encode_describe_reply_oci,
     encode_dml_status_oci,
     encode_error,
     encode_error_oci,
@@ -67,6 +68,7 @@ from seerdb.common.tns import (
     is_version_call_oci,
     mint_temp_lob_locator,
     oci_lob_contents,
+    parse_describe_oci,
     parse_exec,
     parse_exec_oci,
     parse_fetch,
@@ -86,6 +88,7 @@ from seerdb.common.tns_consts import (
     TTI_ALL8,
     TTI_AUTH,
     TTI_COMMIT,
+    TTI_DESCRIBE,
     TTI_FETCH,
     TTI_FUN,
     TTI_LOBOPS,
@@ -486,6 +489,11 @@ def _serve_oci_session(stream: PacketStream, backend: Backend, user: str) -> str
                 parked, lobs = _answer_query_oci(stream, backend, body, seq)
                 current_lob = None
                 continue
+            if body[1] == TTI_DESCRIBE:
+                # sqlplus `DESCRIBE <object>` — reply with the object's column
+                # metadata (a dedicated describe message, not a query describe).
+                _answer_describe_oci(stream, backend, body, seq, user)
+                continue
             if body[1] == TTI_LOBOPS:
                 # sqlplus reads a LOB column's content, looping over the LOB in
                 # SET LONGCHUNKSIZE-sized slices. A read that starts at offset 1 is
@@ -703,6 +711,30 @@ def _answer_query_oci(
         ),
     )
     return (result.columns, rows[1:]), lobs
+
+
+def _answer_describe_oci(
+    stream: PacketStream, backend: Backend, body: bytes, seq: '_OciSequence', user: str
+) -> None:
+    # Serve a sqlplus `DESCRIBE <object>`: decode the object name, get its columns
+    # from the backend with an empty-result SELECT (the describe carries only the
+    # column metadata, no rows), and reply with the OCI describe message. A bad
+    # name / missing object comes back as an ORA error so the session continues.
+    try:
+        name = parse_describe_oci(body)
+        result = backend.execute(f'SELECT * FROM {name} WHERE 1 = 0')
+    except (InterfaceError, BackendError) as err:
+        code = getattr(err, 'ora_code', None) or 942
+        stream.write_packet(
+            TNS_DATA, encode_error_oci(code, str(err), sequence=seq.next())
+        )
+        return
+    reply = encode_describe_reply_oci(
+        result.columns,
+        schema=user.upper().encode('utf-8'),
+        table=name.upper().encode('utf-8'),
+    )
+    stream.write_packet(TNS_DATA, reply)
 
 
 def _skip_piggybacks(body: bytes) -> bytes:
