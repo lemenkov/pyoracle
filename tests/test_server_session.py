@@ -554,3 +554,79 @@ def test_oci_changepassword_unsupported_backend_replies_ora_error() -> None:
     _answer_changepassword_oci(stream, object(), frame, conn_key, 'PWTEST', _Seq())
     assert stream.sent, 'must answer even when unsupported'
     assert b'ORA-01031' in stream.sent[-1]
+
+
+class _LeakyBackend(_DualBackend):
+    # A backend that embeds a seerdb client talking to a NEWER Oracle (the
+    # passthrough in front of a 23ai) leaves the codec's field-version context
+    # variables at the upstream's version after every call — decode_packet /
+    # encode_dictionary_exec set them per message in the calling thread. This
+    # stand-in does exactly that on each execute and records the binds it got.
+    def __init__(self) -> None:
+        self.binds: list = []
+
+    def execute(self, sql: str, binds=()) -> Result:
+        from seerdb.common.tns import _DECODE_FIELD_VERSION, _ENCODE_FIELD_VERSION
+        from seerdb.common.tns_consts import FIELD_VERSION_23_1
+
+        self.binds.append(list(binds))
+        _DECODE_FIELD_VERSION.set(FIELD_VERSION_23_1)
+        _ENCODE_FIELD_VERSION.set(FIELD_VERSION_23_1)
+        if sql.lstrip().upper().startswith('INSERT'):
+            return Result(rowcount=1)
+        return super().execute(sql, binds)
+
+
+def test_backend_codec_context_does_not_leak_into_the_session() -> None:
+    # A 32K+ string bind goes out in the 11g chunked LONG layout. If the backend's
+    # own codec state (field version 23ai) leaked into the session thread, the
+    # Mirror would decode the client's 11g chunks with the 12.2+ framing and hand
+    # the backend a garbled value (observed live: 51951 chars for 51200, first
+    # character dropped). The backend must see the client's exact value.
+    listen = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listen.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listen.bind(('127.0.0.1', 0))
+    listen.listen(1)
+    port = listen.getsockname()[1]
+
+    backend = _LeakyBackend()
+    result: dict = {}
+
+    def run() -> None:
+        conn, _ = listen.accept()
+        try:
+            result['user'] = serve_session(PacketStream(conn), backend)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the test thread
+            result['error'] = exc
+        finally:
+            conn.close()
+
+    server = threading.Thread(target=run, daemon=True)
+    server.start()
+
+    text = '0123456789abcdef' * (50 * 1024 // 16)  # 51200 chars, chunked on the wire
+    conn = seerdb.connect(
+        host='127.0.0.1',
+        port=port,
+        user='PYO',
+        password='pyo123',
+        service_name='XE',
+        timeout=5000,
+    )
+    try:
+        cursor = conn.cursor()
+        cursor.execute('select * from dual')  # the backend pollutes the context
+        cursor.execute('INSERT INTO t (c) VALUES (:c)', {'c': text})
+        cursor.execute('select * from dual')  # and the response path still works
+        row = cursor.fetchone()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert row == ('X',)
+    assert backend.binds[1] == [text]
