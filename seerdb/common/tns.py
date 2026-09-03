@@ -5515,6 +5515,14 @@ _OCI_DESC_TR_OPAQUE_BY_TYPE = {
 _OCI_DESC_TR_OPAQUE_MULTI = 0x62
 # Character types carry a charset + csfrm; every other type reports charset 0.
 _OCI_DESC_CHAR_TYPES = frozenset({TNS_TYPE_VARCHAR, TNS_TYPE_CHAR})
+# A TIMESTAMP's fractional-seconds precision is the N in TIMESTAMP(N). The
+# client carries it in the column's scale (its precision is 0), but a real
+# 11g DESCRIBE reply reports it in the PRECISION field too (e.g. TIMESTAMP(6)
+# -> precision 6, scale 6), and sqlplus renders TIMESTAMP(N) from precision.
+# So the describe block mirrors the scale into precision for these types.
+_OCI_DESC_TIMESTAMP_TYPES = frozenset(
+    {TNS_TYPE_TIMESTAMP, TNS_TYPE_TIMESTAMPTZ, TNS_TYPE_TIMESTAMPLTZ}
+)
 # Every column block but the LAST carries a describe-timestamp entry (a fixed frame
 # around a 7-byte date) in its post-name region — the last block leaves it zero.
 # sqlplus hangs on a multi-column reply whose non-last blocks omit it, so it is
@@ -5535,7 +5543,10 @@ def _oci_desc_block(col: ColumnMeta, *, last: bool) -> bytes:
     pre[_OCI_DESC_BLK_SIZE] = size & 0xFF
     pre[_OCI_DESC_BLK_TYPE] = col.data_type
     post = bytearray(_OCI_DESC_BLK[_OCI_DESC_BLK_PRENAME + 6 :])
-    post[_OCI_DESC_POST_PREC] = col.precision & 0xFF
+    precision = (
+        col.scale if col.data_type in _OCI_DESC_TIMESTAMP_TYPES else col.precision
+    )
+    post[_OCI_DESC_POST_PREC] = precision & 0xFF
     post[_OCI_DESC_POST_SCALE] = col.scale & 0xFF
     post[_OCI_DESC_POST_NULL] = 1 if col.null_ok else 0
     if col.data_type in _OCI_DESC_CHAR_TYPES:
