@@ -793,11 +793,36 @@ def _ora_code_for(exc) -> int:
     return _SQLSTATE_TO_ORA.get(getattr(exc, 'sqlstate', None), _ORA_INVALID_SQL)
 
 
-def _backend_error(exc) -> BackendError:
+def _backend_error(
+    exc, *, original: str | None = None, translated: str | None = None
+) -> BackendError:
     # A PostgreSQL failure as a clean ORA error: the mapped code, and the Oracle
     # canonical text for it when there is one, else PostgreSQL's own message (#529).
     code = _ora_code_for(exc)
-    return BackendError(_ORA_MESSAGE.get(code, str(exc).strip()), ora_code=code)
+    return BackendError(
+        _ORA_MESSAGE.get(code, str(exc).strip()),
+        ora_code=code,
+        error_offset=_error_offset(exc, original, translated),
+    )
+
+
+def _error_offset(exc, original: str | None, translated: str | None) -> int | None:
+    # PostgreSQL reports where a parse error sits as a 1-based character position
+    # into the statement it received — the dialect-rewritten one. Oracle's offset
+    # (DatabaseError.offset, the sqlplus caret) is 0-based into the statement the
+    # client sent. The two agree only where the rewrite left everything before the
+    # error untouched, so relay the position when the two texts share that prefix
+    # and report nothing (None) otherwise, rather than a misplaced caret.
+    position = getattr(getattr(exc, 'diag', None), 'statement_position', None)
+    if position is None or original is None or translated is None:
+        return None
+    try:
+        offset = int(position) - 1
+    except (TypeError, ValueError):
+        return None
+    if offset < 0 or offset > len(translated):
+        return None
+    return offset if translated[:offset] == original[:offset] else None
 
 
 # PostgreSQL's built-in `refcursor` type OID (stable across versions) — a CALL's
@@ -1037,6 +1062,7 @@ class PostgresBackend:
         # Oracle auto-commits DDL — decide from the original statement, before the
         # dialect rewrite reshapes it (#532).
         is_ddl = _IS_DDL.match(sql) is not None
+        original = sql
         # Translate Oracle SQL to PostgreSQL's dialect (#500/#502/#503) — DDL
         # column types, CREATE PROCEDURE/FUNCTION → PL/pgSQL, then the function /
         # literal idioms. This is where dialect knowledge belongs, not in the
@@ -1058,9 +1084,9 @@ class PostgresBackend:
         # the sequential path uses accepts it. DDL is infrequent and auto-commits,
         # so the hot SELECT/DML path (single-command) is where the round-trips count.
         if self._use_pipeline and not is_ddl:
-            result = self._execute_pipelined(sql, params)
+            result = self._execute_pipelined(sql, params, original)
         else:
-            result = self._execute_sequential(sql, params)
+            result = self._execute_sequential(sql, params, original)
         # DDL auto-commits (Oracle semantics): persist it — and any pending DML —
         # so a later rollback discards only DML, not the table (#532).
         if is_ddl:
@@ -1101,7 +1127,9 @@ class PostgresBackend:
                 columns.append(_column_meta(desc, [r[i] for r in rows], self._tstz_oid))
         return Result(columns=columns, rows=[tuple(r) for r in rows])
 
-    def _execute_sequential(self, sql: str, params: dict | None) -> Result:
+    def _execute_sequential(
+        self, sql: str, params: dict | None, original: str | None = None
+    ) -> Result:
         # SAVEPOINT + statement + RELEASE as three round-trips; the fallback path.
         cursor = self._conn.cursor()
         cursor.execute('SAVEPOINT _mirror_stmt')
@@ -1114,7 +1142,7 @@ class PostgresBackend:
             # A PostgreSQL failure surfaces as a clean ORA error — never a desync.
             # Map the SQLSTATE to the matching Oracle code so error-conditional
             # client flows (e.g. a best-effort DROP that swallows ORA-00942) work.
-            raise _backend_error(exc) from exc
+            raise _backend_error(exc, original=original, translated=sql) from exc
         except Exception:
             # An our-side rejection (e.g. UnsupportedFeature on an unmapped column
             # type) after the statement ran — undo it and re-raise for the session
@@ -1125,7 +1153,9 @@ class PostgresBackend:
         self._conn.execute('RELEASE SAVEPOINT _mirror_stmt')
         return result
 
-    def _execute_pipelined(self, sql: str, params: dict | None) -> Result:
+    def _execute_pipelined(
+        self, sql: str, params: dict | None, original: str | None = None
+    ) -> Result:
         # SAVEPOINT + statement + RELEASE shipped in ONE round-trip via a psycopg
         # pipeline. Each command uses its own cursor so the statement's cursor keeps
         # its own result (rowcount / description / rows / pgresult) after the sync —
@@ -1145,7 +1175,7 @@ class PostgresBackend:
             # error, never a desync.
             self._conn.execute('ROLLBACK TO SAVEPOINT _mirror_stmt')
             self._conn.execute('RELEASE SAVEPOINT _mirror_stmt')
-            raise _backend_error(exc) from exc
+            raise _backend_error(exc, original=original, translated=sql) from exc
         # The pipeline succeeded, so the savepoint is already released and the
         # statement had its effect. Building the result can only raise on an
         # unencodable SELECT column — no side effect to undo — so let it propagate

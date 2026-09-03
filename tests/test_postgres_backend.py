@@ -70,6 +70,40 @@ def test_backend_error_uses_oracle_canonical_text_for_mapped_code() -> None:
 # --- DDL type translation (#500) — a pure function, no live PostgreSQL needed ---
 
 
+def test_backend_error_relays_the_parse_position_as_the_offset() -> None:
+    # PostgreSQL's 1-based statement_position becomes Oracle's 0-based offset, but
+    # only where the dialect rewrite left the prefix before the error untouched.
+    class _Diag:
+        def __init__(self, position: str | None) -> None:
+            self.statement_position = position
+
+    class _PgError(_FakePgError):
+        def __init__(self, position: str | None) -> None:
+            super().__init__('42703', 'column "nonexistent_col" does not exist')
+            self.diag = _Diag(position)
+
+    original = 'SELECT nonexistent_col'
+    # Same prefix: relay (position 8 -> offset 7, the column's start).
+    err = _backend_error(_PgError('8'), original=original, translated=original)
+    assert err.ora_code == 904
+    assert err.error_offset == 7
+    # A rewrite that changed the text before the error (an inserted space, so
+    # PostgreSQL now sees the column at position 9): no offset rather than a
+    # misplaced one.
+    err = _backend_error(
+        _PgError('9'), original=original, translated='SELECT  nonexistent_col'
+    )
+    assert err.error_offset is None
+    # No position reported, or none of the texts: no offset.
+    assert (
+        _backend_error(
+            _PgError(None), original=original, translated=original
+        ).error_offset
+        is None
+    )
+    assert _backend_error(_PgError('8')).error_offset is None
+
+
 def test_translate_ddl_maps_create_table_column_types() -> None:
     sent = _translate_ddl(
         'CREATE TABLE t (id NUMBER(10,2), v VARCHAR2(20), d DATE, '
