@@ -8899,6 +8899,12 @@ def encode_value(Value: object, DataType: int) -> bytes:
         # A thin CLOB / BLOB value is delivered as an opaque locator, not inline;
         # the content follows over TTI_LOBOPS (#413).
         return encode_lob_locator_thin()
+    if DataType == TNS_TYPE_BOOLEAN:
+        # Native SQL BOOLEAN (23ai): a one-byte value, 0x01 for TRUE and 0x00 for
+        # FALSE, which the client reads by its last byte (Data[-1] != 0). This must
+        # come before the bool branch below — a bool encoded as a NUMBER would make
+        # FALSE (NUMBER 0 -> 0x80) read back as TRUE.
+        return _bytes_with_length(bytes([1 if Value else 0]))
     if isinstance(Value, bool):
         # No 11g BOOLEAN type; a bool is a NUMBER 0/1 (bool is an int subclass, so
         # match it before the int branch would silently swallow it).

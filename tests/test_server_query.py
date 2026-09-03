@@ -2019,6 +2019,23 @@ def test_scroll_response_bodies_frame_rows_and_describe() -> None:
 # --- INTERVAL DAY TO SECOND / YEAR TO MONTH (#484) -----------------------------
 
 
+def test_encode_value_native_boolean_is_one_byte_and_decodes_back() -> None:
+    # A native SQL BOOLEAN column value (23ai) is a one-byte DALC — 0x01 for TRUE,
+    # 0x00 for FALSE — which the client's decode_value reads by its last byte. A
+    # bool must take this path, not the NUMBER-0/1 fallback: NUMBER 0 encodes to
+    # 0x80, whose last byte is non-zero, so FALSE would read back as TRUE.
+    from seerdb.common.tns import encode_value
+    from seerdb.common.tns_consts import TNS_TYPE_BOOLEAN
+    from seerdb.common.types import decode_value
+
+    col = {'data_type': TNS_TYPE_BOOLEAN}
+    assert encode_value(True, TNS_TYPE_BOOLEAN) == bytes([1, 1])
+    assert encode_value(False, TNS_TYPE_BOOLEAN) == bytes([1, 0])
+    # The DALC content (past the length byte) round-trips through the decoder.
+    assert decode_value(col, encode_value(True, TNS_TYPE_BOOLEAN)[1:]) is True
+    assert decode_value(col, encode_value(False, TNS_TYPE_BOOLEAN)[1:]) is False
+
+
 def test_encode_value_dispatches_interval_columns() -> None:
     import datetime
 
