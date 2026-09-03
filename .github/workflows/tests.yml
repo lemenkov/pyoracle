@@ -149,3 +149,69 @@ jobs:
           SEERDB_TEST_THROTTLE_RETRIES: "4"
           SEERDB_TEST_THROTTLE_DELAY: "1.0"
         run: python -m unittest -v tests.test_integration
+
+  # The same 11.2 integration suite, driven through the Mirror over a PostgreSQL
+  # backend (examples/mirror_over_postgres.py): a real seerdb client talks to the
+  # Mirror, which serves every statement from PostgreSQL via the dialect
+  # translator. Regressions in the backend or the Mirror's thin path used to go
+  # unnoticed because nothing ran the suite this way. PostgreSQL comes from the
+  # repo's own image (orafce built from source), started as a container in the
+  # job; the Mirror runs in the background of the test step so it is torn down
+  # with it. The backend's own unit module runs here too — it needs psycopg and
+  # a reachable PostgreSQL, so it is skipped everywhere else.
+  mirror-postgres:
+    name: Integration tests (Mirror over PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install . pytest "psycopg[binary]"
+      - name: Build and start PostgreSQL with orafce
+        run: |
+          docker build -f examples/mirror-pg.Dockerfile -t mirror-pg .
+          docker run -d --name mirror-pg -p 5433:5432 \
+            -e POSTGRES_USER=pyo -e POSTGRES_PASSWORD=pyo123 -e POSTGRES_DB=mirror \
+            mirror-pg
+          # The image's first boot runs a temporary socket-only server for its init
+          # scripts and shuts it down before the real one starts, so probe over
+          # TCP, which only the real server answers. orafce is a hard requirement
+          # of the backend, not a nice-to-have: prove the extension loads and its
+          # functions resolve as part of the readiness check, or fail here.
+          for i in $(seq 1 60); do
+            if docker exec mirror-pg psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U pyo -d mirror \
+                 -c "CREATE EXTENSION IF NOT EXISTS orafce" \
+                 -c "SELECT oracle.nvl(NULL::text, 'orafce ok'), oracle.add_months(DATE '2026-01-31', 1)"; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "PostgreSQL with orafce never became ready"; docker logs mirror-pg; exit 1
+      - name: Run the backend unit module and the integration suite through the Mirror
+        env:
+          MIRROR_PG: "host=localhost port=5433 user=pyo password=pyo123 dbname=mirror"
+          SEERDB_TEST_USER: pyo
+          SEERDB_TEST_PASSWORD: pyo123
+          SEERDB_TEST_HOST: 127.0.0.1
+          SEERDB_TEST_PORT: "1521"
+          SEERDB_TEST_SERVICE: XE
+        run: |
+          python -m pytest -q tests/test_postgres_backend.py
+          # Run the Mirror from the checkout (the launcher lives in examples/, so
+          # without this it would import whatever `pip install .` shipped).
+          PYTHONPATH="$PWD" python examples/mirror_over_postgres.py "$MIRROR_PG" 1521 > mirror.log 2>&1 &
+          MIRROR_PID=$!
+          for i in $(seq 1 30); do
+            python -c "import socket; socket.create_connection(('127.0.0.1', 1521), timeout=1).close()" 2>/dev/null && break
+            sleep 1
+          done
+          if ! kill -0 "$MIRROR_PID" 2>/dev/null; then
+            echo "the Mirror exited during startup"; cat mirror.log; exit 1
+          fi
+          status=0
+          python -m unittest -v tests.test_integration || status=$?
+          kill "$MIRROR_PID" 2>/dev/null || true
+          if [ "$status" -ne 0 ]; then echo "--- mirror log ---"; tail -n 200 mirror.log; fi
+          exit "$status"
