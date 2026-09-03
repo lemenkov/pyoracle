@@ -29,6 +29,9 @@ def main() -> None:
     hostport, service = upstream.rsplit('/', 1)
     host, port = hostport.rsplit(':', 1)
 
+    # The field version the Mirror advertises (default 11.2); a 12c+/23ai value
+    # makes a thin client negotiate to it and exercises those wire formats.
+    field_version = int(os.environ.get('MIRROR_FIELD_VERSION', '6'))
     user = os.environ.get('SEERDB_TEST_USER', 'PYO')
     password = os.environ.get('SEERDB_TEST_PASSWORD', 'pyo123')
 
@@ -42,6 +45,7 @@ def main() -> None:
     seerdb.serve(
         '127.0.0.1',
         listen_port,
+        field_version=field_version,
         backend_factory=lambda: OraclePassthroughBackend(
             host=host,
             port=int(port),

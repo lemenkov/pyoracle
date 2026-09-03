@@ -90,6 +90,127 @@ def test_non_exec_raises() -> None:
         parse_exec(b'\x06\x00not an exec')
 
 
+def _at_field_version(version: int):
+    # Pin both codec contextvars to `version` for one round-trip (the Mirror's
+    # session loop does the same per request), restoring 11g afterwards.
+    from contextlib import contextmanager
+
+    from seerdb.common.tns import _ENCODE_FIELD_VERSION
+
+    @contextmanager
+    def pinned():
+        d_tok, e_tok = (
+            _DECODE_FIELD_VERSION.set(version),
+            _ENCODE_FIELD_VERSION.set(version),
+        )
+        try:
+            yield
+        finally:
+            _DECODE_FIELD_VERSION.reset(d_tok)
+            _ENCODE_FIELD_VERSION.reset(e_tok)
+
+    return pinned()
+
+
+def _client_exec_request(version: int, sql: str, binds: list) -> bytes:
+    # The real client's OALL8 encoder, at the given field version.
+    from seerdb.common.tns import encode_dictionary_exec
+
+    return encode_dictionary_exec(
+        {
+            'field_version': version,
+            'seq': 3,
+            'query': {
+                'type': 'select',
+                'auto': 0,
+                'fetch': 15,
+                'server_version': 0,
+                'cursor': 0,
+                'query': sql,
+                'bind': binds,
+                'batch': [],
+                'def': [],
+                'batcherrors': None,
+                'arraydmlrowcounts': None,
+                'return_binds': None,
+                'scrollable': False,
+                'scroll': None,
+            },
+        }
+    )
+
+
+@pytest.mark.parametrize('version', [8, 12, 16, 17])  # 12.2, 19c, 21c, 23ai
+def test_parse_exec_reads_the_12c_request_layout(version: int) -> None:
+    # From 12.2 the client's OALL8 replaces the marker + server-version slot with
+    # a registration / array-DML / SQL-signature block, length-prefixes the SQL,
+    # and appends an oaccolid to each bind OAC; the parser follows the session's
+    # field version. The 11g layout stays byte-identical (the default suites).
+    with _at_field_version(version):
+        request = parse_exec(
+            _client_exec_request(version, 'select :b, :n from dual', ['abc', 42])
+        )
+    assert request.sql == 'select :b, :n from dual'
+    assert request.binds == ['abc', 42]
+    with _at_field_version(version):
+        plain = parse_exec(_client_exec_request(version, 'select 1 from dual', []))
+    assert plain.sql == 'select 1 from dual'
+    assert plain.binds == []
+
+
+@pytest.mark.parametrize('version', [8, 17])
+def test_describe_decodes_back_at_a_12c_field_version(version: int) -> None:
+    # The describe column gains a one-byte scale and an oaccolid at 12.2, and the
+    # SQL-domain schema + name at 23ai; the client's own decoder at that version
+    # must read the Mirror's block cleanly.
+    cols = [
+        ColumnMeta(
+            name=b'ID',
+            data_type=TNS_TYPE_NUMBER,
+            data_length=22,
+            max_size=22,
+            precision=5,
+            scale=-2,
+            null_ok=0,
+        ),
+        ColumnMeta(
+            name=b'NAME', data_type=TNS_TYPE_VARCHAR, data_length=30, max_size=30
+        ),
+    ]
+    with _at_field_version(version):
+        payload = encode_describe(cols)
+        assert payload[0] == TTI_DCB
+        decoded, rest = _decode_describe_body(_skip_chunked_bytes(payload[1:]))
+    assert rest == b''
+    assert [c['column_name'] for c in decoded] == [b'ID', b'NAME']
+    assert decoded[0]['data_scale'] == -2  # the 12c single signed scale byte
+    assert decoded[0]['null_ok'] == 0
+    assert decoded[1]['max_size'] == 30
+
+
+@pytest.mark.parametrize('version', [8, 14, 17])  # 12.2, 20.1, 23ai
+def test_oer_decodes_back_at_a_12c_field_version(version: int) -> None:
+    # A 12.1+ client reads an extended error number + rowcount ahead of the
+    # message, and a 20.1+ client a SQL type + checksum too; the status, error
+    # and end-of-fetch OERs all carry them under that version.
+    from seerdb.common.tns import (
+        _terminator,
+        decode_token_oer,
+        encode_error,
+        encode_status,
+    )
+
+    with _at_field_version(version):
+        status = decode_token_oer(encode_status(7, cursor_id=3), (0, [], []))
+        error = decode_token_oer(
+            encode_error(942, 'ORA-00942: table or view does not exist'), (0, [], [])
+        )
+        eof = decode_token_oer(_terminator(0, more=False), (0, [], []))
+    assert status[1] == 0 and status[2] == 3 and status[3][0] == 7
+    assert error[1] == 942 and 'ORA-00942' in error[5]
+    assert eof[1] == 1403
+
+
 def test_describe_roundtrips_to_the_dual_column() -> None:
     # The DUMMY VARCHAR2(1) column of DUAL, encoded then decoded by the client.
     payload = encode_describe(

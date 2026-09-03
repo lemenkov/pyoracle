@@ -818,12 +818,17 @@ def _encode_signed_sb4(value: int) -> bytes:
 
 
 def _encode_dcb_column(col: ColumnMeta, position: int) -> bytes:
-    # Inverse of _decode_dcb_column (11g / fv < 12.2). Fields the client skips
-    # are written as well-formed zeros; only type/precision/scale/length/
-    # charset/csfrm/max_size/null_ok/name carry meaning.
+    # Inverse of _decode_dcb_column, in the layout the negotiated field version's
+    # client reads: 12.2+ carries the scale as one signed byte and appends an
+    # oaccolid after max_size; 23ai (17) adds the SQL-domain schema + name (empty
+    # for a plain column). Fields the client skips are written as well-formed
+    # zeros; only type/precision/scale/length/charset/csfrm/max_size/null_ok/name
+    # carry meaning.
+    field_version = _ENCODE_FIELD_VERSION.get()
+    is_12c = field_version >= FIELD_VERSION_12_2
     return (
         bytes([col.data_type, 0, col.precision & 0xFF])
-        + _encode_signed_sb4(col.scale)
+        + (bytes([col.scale & 0xFF]) if is_12c else _encode_signed_sb4(col.scale))
         + encode_sb4(col.data_length)  # buffer size
         + encode_sb4(0)  # max array elements
         + encode_sb4(0)  # cont flags
@@ -833,12 +838,18 @@ def _encode_dcb_column(col: ColumnMeta, position: int) -> bytes:
         + encode_sb4(col.charset)
         + bytes([col.csfrm])
         + encode_sb4(col.max_size)
+        + (encode_sb4(0) if is_12c else b'')  # oaccolid (12.2+)
         + bytes([col.null_ok, 0])  # null_ok + (skipped) v7 name length
         + _str_with_length(col.name)
         + _str_with_length(col.type_schema)  # type schema (ADT owner)
         + _str_with_length(col.type_name)  # type name
         + encode_sb4(position)  # column position
         + encode_sb4(0)  # uds flags (11g addition)
+        + (
+            _str_with_length(b'') + _str_with_length(b'')  # domain schema + name
+            if field_version >= FIELD_VERSION_23_1
+            else b''
+        )
     )
 
 
@@ -944,8 +955,22 @@ def _encode_oer(
         + _encode_batch_ub4_array(codes)  # batch error codes
         + _encode_batch_ub4_array(offsets)  # batch error row offsets
         + _encode_batch_messages(messages)  # batch error messages
+        + _oer_version_tail(ora_code, rowcount)
         + _bytes_with_length(message)  # the message DALC (read only when ora_code≠0)
     )
+
+
+def _oer_version_tail(ora_code: int, rowcount: int) -> bytes:
+    # The fields a 12.1+ client reads between the batch-error arrays and the
+    # message (its decode_token_oer): the extended error number and the ub8
+    # rowcount, then from 20.1 a SQL type and a server checksum. 11g has none.
+    field_version = _ENCODE_FIELD_VERSION.get()
+    if field_version < FIELD_VERSION_12_1:
+        return b''
+    tail = encode_sb4(ora_code) + encode_sb4(rowcount)
+    if field_version >= FIELD_VERSION_20_1:
+        tail += encode_sb4(0) + encode_sb4(0)  # sql type, server checksum
+    return tail
 
 
 def _national_wire_value(value: object, col: ColumnMeta) -> object:
@@ -1038,7 +1063,7 @@ def encode_more_rows(cursor_id: int) -> bytes:
 
 
 def _terminator(cursor_id: int, more: bool) -> bytes:
-    return encode_more_rows(cursor_id) if more else _END_OF_FETCH
+    return encode_more_rows(cursor_id) if more else _end_of_fetch()
 
 
 def encode_query_response(
@@ -1192,6 +1217,25 @@ def peek_exec_cursor(payload: bytes) -> tuple[int, bool]:
     return (cursor, bool(query_flag))
 
 
+def _skip_exec_middle_12c(rest: bytes, field_version: int) -> bytes:
+    # The 12.2+ OALL8 block between the fixed head and the SQL (the client's
+    # encode_dictionary_exec `Middle`): the 0,0,1 marker, the registration
+    # fields, the array-DML row-count block (a 1 + sb4 iteration count + 1 when
+    # arraydmlrowcounts was requested, else three zeros), the SQL-signature /
+    # SQL-id slot, and from 12.2_EXT1 up two chunk-id bytes.
+    rest = rest[3:]  # 0, 0, 1
+    rest = rest[5:]  # reg_lsb .. reg_msb
+    if rest[:1] == b'\x01':
+        _, rest = decode_ub4(rest[1:])  # iteration count
+        rest = rest[1:]
+    else:
+        rest = rest[3:]
+    rest = rest[5:]  # al8sqlsig / SQL id
+    if field_version >= FIELD_VERSION_12_2_EXT1:
+        rest = rest[2:]  # chunk ids
+    return rest
+
+
 def parse_exec(payload: bytes, bind_types: list | None = None) -> ExecRequest:
     """Parse an OALL8 execute payload (the TTC message from ``read_packet``).
 
@@ -1227,15 +1271,26 @@ def parse_exec(payload: bytes, bind_types: list | None = None) -> ExecRequest:
     _def_flag, rest = rest[0], rest[1:]
     _def_len, rest = decode_ub4(rest)
 
-    rest = rest[_MARKER_LEN + _SERVER_VERSION_SLOT :]
-    sql = rest[:query_len].decode('utf-8') if query_flag else ''
+    field_version = _DECODE_FIELD_VERSION.get()
+    if field_version >= FIELD_VERSION_12_2:
+        # 12.2+ replaces the marker + server-version slot with the registration /
+        # array-DML row-count / SQL-signature block, and length-prefixes the SQL.
+        rest = _skip_exec_middle_12c(rest, field_version)
+        if query_flag:
+            raw, after = decode_dalc(rest)
+            sql = bytes(raw).decode('utf-8')
+        else:
+            sql, after = '', rest
+    else:
+        rest = rest[_MARKER_LEN + _SERVER_VERSION_SLOT :]
+        sql = rest[:query_len].decode('utf-8') if query_flag else ''
+        after = rest[query_len:]
 
     # The al8i4 option array follows the SQL text; decode all `all8_len` sb4
     # elements so `after` lands on the OAC/RXD tokens and the scroll request
     # (al8i4[9] exec flags, [10] orientation, [11] position) is available. A
     # scroll re-execute carries no binds, so this must run unconditionally, not
     # only in the bind path (#181/#485).
-    after = rest[query_len:]
     al8: list[int] = []
     for _ in range(all8_len):
         al8_elem, after = decode_ub4(after)
@@ -1266,7 +1321,12 @@ def parse_exec(payload: bytes, bind_types: list | None = None) -> ExecRequest:
                     csfrm,
                     after,
                 ) = decode_oac_fields(after)
-                if data_type in (TNS_TYPE_CLOB, TNS_TYPE_BLOB):
+                if field_version >= FIELD_VERSION_12_2:
+                    # The 12.2+ bind OAC appends an oaccolid the shared decoder
+                    # stops short of (the same trailer a 12.2+ describe column
+                    # carries) — consume it so the next OAC aligns.
+                    _, after = decode_ub4(after)
+                elif data_type in (TNS_TYPE_CLOB, TNS_TYPE_BLOB):
                     # A thin CLOB / BLOB bind is the temp-LOB locator form (#412),
                     # whose OAC appends a trailing oaccolid field the shared
                     # decoder stops short of — swallow it so the next OAC aligns.
@@ -8573,6 +8633,24 @@ _END_OF_FETCH = _encode_oer(
     sql_type=3,
     call_number=7,
 )
+
+
+def _end_of_fetch() -> bytes:
+    # The 11g terminator is the pinned constant; a 12.1+ client reads extra OER
+    # fields, so re-encode it under the session's field version.
+    if _ENCODE_FIELD_VERSION.get() < FIELD_VERSION_12_1:
+        return _END_OF_FETCH
+    return _encode_oer(
+        1,
+        1403,
+        1,
+        b'ORA-01403: no data found\n',
+        cursor_id=1,
+        seq=4,
+        error_pos=14,
+        sql_type=3,
+        call_number=7,
+    )
 
 
 def _o7_lobop_mid(
