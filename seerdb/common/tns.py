@@ -8768,11 +8768,16 @@ def encode_long_value_thin(Value: object) -> bytes:
         Content = bytes(Value)
     else:
         Content = str(Value).encode('utf-8')
+    # 11g frames each inline LONG chunk with a single length byte; a 12.2+ client
+    # reads a ub4 length per chunk (its _read_long_column), so chunk in the
+    # session's negotiated version — the same split as the LOB read reply.
+    wide = _ENCODE_FIELD_VERSION.get() >= FIELD_VERSION_12_2
+    encode_len = encode_sb4 if wide else (lambda n: bytes([n]))
     Out = bytearray([0xFE])
     for Start in range(0, len(Content), _THIN_LONG_CHUNK):
         Chunk = Content[Start : Start + _THIN_LONG_CHUNK]
-        Out += bytes([len(Chunk)]) + Chunk
-    Out += bytes([0])  # zero-length chunk terminates the run
+        Out += encode_len(len(Chunk)) + Chunk
+    Out += encode_len(0)  # zero-length chunk terminates the run
     return bytes(Out) + _THIN_LONG_TRAILER
 
 

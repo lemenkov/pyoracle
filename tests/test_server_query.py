@@ -1961,30 +1961,40 @@ def test_encode_value_dispatches_interval_columns() -> None:
 # --- LONG / LONG RAW inline column values (#484) -------------------------------
 
 
-def test_encode_long_value_thin_roundtrips_via_client_reader() -> None:
+@pytest.mark.parametrize('version', [6, 17])  # 11g single-byte / 12.2+ ub4 chunks
+def test_encode_long_value_thin_roundtrips_via_client_reader(version: int) -> None:
+    # The inline LONG value chunks in the session's negotiated framing (a single
+    # length byte per chunk at 11g, a ub4 from 12.2 up); the client's reader at
+    # that same version must recover the content and stop exactly at its end.
     from seerdb.common.tns import (
         _DECODE_FIELD_VERSION,
+        _ENCODE_FIELD_VERSION,
         _read_long_column,
         encode_long_value_thin,
     )
 
-    _DECODE_FIELD_VERSION.set(FIELD_VERSION_11_2)  # 11g single-byte chunk form
-    for content in (
-        b'hello',
-        b'x' * 700,  # multi-chunk
-        b'',
-        ('café — 日本').encode('utf-8'),
-    ):
-        # A trailing sentinel proves the two ub4 indicators are consumed and the
-        # reader stops exactly at the value's end (no desync into the next token).
-        val, rest = _read_long_column(encode_long_value_thin(content) + b'\xaa\xbb')
-        assert val == content
-        assert rest == b'\xaa\xbb'
+    e_tok = _ENCODE_FIELD_VERSION.set(version)
+    d_tok = _DECODE_FIELD_VERSION.set(version)
+    try:
+        for content in (
+            b'hello',
+            b'x' * 700,  # multi-chunk
+            b'',
+            ('café — 日本').encode('utf-8'),
+        ):
+            # A trailing sentinel proves the two ub4 indicators are consumed and
+            # the reader stops exactly at the value's end (no desync).
+            val, rest = _read_long_column(encode_long_value_thin(content) + b'\xaa\xbb')
+            assert val == content
+            assert rest == b'\xaa\xbb'
 
-    # A NULL LONG still carries the trailing indicators, so the reader realigns.
-    val, rest = _read_long_column(encode_long_value_thin(None) + b'\xaa\xbb')
-    assert val is None
-    assert rest == b'\xaa\xbb'
+        # A NULL LONG still carries the trailing indicators, so the reader realigns.
+        val, rest = _read_long_column(encode_long_value_thin(None) + b'\xaa\xbb')
+        assert val is None
+        assert rest == b'\xaa\xbb'
+    finally:
+        _ENCODE_FIELD_VERSION.reset(e_tok)
+        _DECODE_FIELD_VERSION.reset(d_tok)
 
 
 def test_encode_value_routes_long_columns_and_null_carries_trailers() -> None:
