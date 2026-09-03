@@ -410,7 +410,7 @@ parameters are exported in the environment:
 ```
 export SEERDB_TEST_USER=pyo
 export SEERDB_TEST_PASSWORD=pyo123
-export SEERDB_TEST_HOST=localhost          # optional, default localhost
+export SEERDB_TEST_HOST=127.0.0.1          # optional, default 127.0.0.1
 export SEERDB_TEST_PORT=1521               # optional, default 1521
 export SEERDB_TEST_SERVICE=XE              # optional, default XE
 python3 -m unittest discover -v tests/

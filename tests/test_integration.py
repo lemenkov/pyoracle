@@ -6,7 +6,7 @@
 #
 #   SEERDB_TEST_USER       (required — gate; if unset, all tests skip)
 #   SEERDB_TEST_PASSWORD   (required)
-#   SEERDB_TEST_HOST       (default 'localhost')
+#   SEERDB_TEST_HOST       (default '127.0.0.1')
 #   SEERDB_TEST_PORT       (default 1521)
 #   SEERDB_TEST_SERVICE    (default 'XE')
 #
@@ -164,7 +164,7 @@ from _tls_proxy import CERT_PATH, TLSProxy  # noqa: E402
 
 _USER = os.environ.get('SEERDB_TEST_USER')
 _PASSWORD = os.environ.get('SEERDB_TEST_PASSWORD', '')
-_HOST = os.environ.get('SEERDB_TEST_HOST', 'localhost')
+_HOST = os.environ.get('SEERDB_TEST_HOST', '127.0.0.1')
 _PORT = int(os.environ.get('SEERDB_TEST_PORT', '1521'))
 _SERVICE = os.environ.get('SEERDB_TEST_SERVICE', 'XE')
 # Advertise a 12c+ TTC field version (e.g. 16 = 21.1) to run the suite against
@@ -3832,11 +3832,11 @@ class BFILEIntegration(unittest.TestCase):
 
     def setUp(self):
         self.conn = seerdb.connect(
-            host=os.environ.get('SEERDB_TEST_HOST', 'localhost'),
-            port=int(os.environ.get('SEERDB_TEST_PORT', '1521')),
-            user=os.environ['SEERDB_TEST_USER'],
-            password=os.environ['SEERDB_TEST_PASSWORD'],
-            service_name=os.environ.get('SEERDB_TEST_SERVICE', 'XE'),
+            host=_HOST,
+            port=_PORT,
+            user=_USER,
+            password=_PASSWORD,
+            service_name=_SERVICE,
             autocommit=True,
             **_FV_KW,
         )

@@ -14,7 +14,7 @@ Defaults match the self-hosted runbook (the committed fixture wallet, the
 piece via environment variables:
 
     SEERDB_WALLET_LIVE=1            enable this test (required)
-    SEERDB_LIVE_HOST=127.0.0.1     TCPS listener host
+    SEERDB_LIVE_HOST=127.0.0.1     TCPS listener host (falls back to SEERDB_TEST_HOST)
     SEERDB_LIVE_TCPS_PORT=2484     TCPS listener port
     SEERDB_LIVE_SERVICE=FREEPDB1   service name
     SEERDB_LIVE_USER=PYO           database user
@@ -34,7 +34,9 @@ _FIXTURE_WALLET = os.path.join(os.path.dirname(__file__), 'fixtures', 'wallet')
 
 def _cfg():
     return {
-        'host': os.environ.get('SEERDB_LIVE_HOST', '127.0.0.1'),
+        'host': os.environ.get(
+            'SEERDB_LIVE_HOST', os.environ.get('SEERDB_TEST_HOST', '127.0.0.1')
+        ),
         'port': int(os.environ.get('SEERDB_LIVE_TCPS_PORT', '2484')),
         'service_name': os.environ.get('SEERDB_LIVE_SERVICE', 'FREEPDB1'),
         'user': os.environ.get('SEERDB_LIVE_USER', 'PYO'),
