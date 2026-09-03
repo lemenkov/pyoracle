@@ -70,6 +70,7 @@ from seerdb.common.tns import (
     encode_scroll_response,
     encode_status,
     encode_status_oci,
+    encode_status_with_rowcounts,
     encode_token_result,
     encode_version_banner_oci,
     is_reexecute_oci,
@@ -1149,6 +1150,22 @@ def _answer_query(
             # Array DML (executemany): apply each bind row and report the total
             # affected-row count — one execute message, one aggregated reply.
             execute_many = getattr(backend, 'execute_many', None)
+            rowcounts = getattr(backend, 'execute_many_rowcounts', None)
+            if (
+                request.arraydmlrowcounts
+                and rowcounts is not None
+                and not request.batcherrors
+            ):
+                # The client asked for the per-iteration affected-row counts
+                # (arraydmlrowcounts): get them from the backend and return them
+                # in front of the status (#18). Same one-round-trip array DML.
+                total, per_iter = rowcounts(sql, request.bind_rows)
+                stream.write_packet(
+                    TNS_DATA, encode_status_with_rowcounts(total, per_iter)
+                )
+                if request.autocommit:
+                    backend.commit()
+                return lobs
             if execute_many is not None and not request.batcherrors:
                 # Fast path: hand the whole array to the backend so it can send it
                 # in one round-trip (a per-row loop against a remote backend paid

@@ -140,6 +140,37 @@ def _client_exec_request(version: int, sql: str, binds: list) -> bytes:
     )
 
 
+def test_encode_status_with_rowcounts_frames_the_counts_before_the_status() -> None:
+    # The arraydmlrowcounts status leads with a server-side RPA piggyback (TTI_RPA,
+    # zero fields) carrying `count | count x ub4`, then the ordinary status OER —
+    # exactly where the client's decode_token_rpa_piggyback reads the counts when
+    # its own execute armed arraydmlrowcounts. (The live round-trip is covered by
+    # test_integration's arraydmlrowcounts cases through the Mirror.)
+    from seerdb.common.tns import (
+        TTI_RPA,
+        decode_ub4,
+        encode_status,
+        encode_status_with_rowcounts,
+    )
+
+    counts = [1, 1, 2, 1]
+    reply = encode_status_with_rowcounts(5, counts, cursor_id=9)
+    assert reply[0] == TTI_RPA
+    fields, rest = decode_ub4(reply[1:])
+    assert fields == 0  # the piggyback carries no fields, just the count block
+    count, rest = decode_ub4(rest)
+    assert count == len(counts)
+    got = []
+    for _ in range(count):
+        value, rest = decode_ub4(rest)
+        got.append(value)
+    assert got == counts
+    # The status OER (the ordinary DML status) follows the count block.
+    assert rest == encode_status(5, cursor_id=9)
+    # A bare status (no request) is unchanged — it does not lead with the RPA.
+    assert encode_status(5, cursor_id=9)[0] != TTI_RPA
+
+
 @pytest.mark.parametrize('version', [8, 12, 16, 17])  # 12.2, 19c, 21c, 23ai
 def test_parse_exec_reads_the_12c_request_layout(version: int) -> None:
     # From 12.2 the client's OALL8 replaces the marker + server-version slot with
