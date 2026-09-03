@@ -38,6 +38,7 @@ from seerdb.common.tns import (
     ScalarOutBind,
     TempLobRef,
     ddl_command_type,
+    decode_dalc,
     decode_ub4,
     encode_batch_errors_status,
     encode_challenge,
@@ -87,8 +88,11 @@ from seerdb.common.tns import (
 )
 from seerdb.common.tns_consts import (
     FIELD_VERSION_11_2,
+    FIELD_VERSION_23_1,
     TNS_CONNECT,
     TNS_DATA,
+    TNS_FUNC_SESSION_STATE,
+    TNS_FUNC_SET_END_TO_END_ATTR,
     TNS_TYPE_BLOB,
     TNS_TYPE_CLOB,
     TNS_TYPE_LONG,
@@ -854,22 +858,66 @@ def _answer_describe_oci(
 
 
 def _skip_piggybacks(body: bytes) -> bytes:
-    # A call can be preceded by piggybacks — most commonly CLOSE_CURSORS, which
-    # a client sends to free the cursors it drained on the previous fetch. The
-    # Mirror keeps no cursor/session state, so it skips them and processes the
-    # trailing function. Only the shapes clients actually send are handled; an
-    # unknown piggyback is left in place (the caller then ignores the message
-    # rather than mis-parsing it).
+    # A call can be preceded by piggybacks — CLOSE_CURSORS (105), which a client
+    # sends to free the cursors it drained on the previous fetch, and, from 12.1
+    # up, the end-to-end tracing attributes (135) and the request-boundary
+    # session state (176). The Mirror keeps no cursor / tracing / request state,
+    # so it walks past them (each by its own layout — a piggyback carries no
+    # length) and processes the trailing function. An unknown piggyback is left
+    # in place, so the caller ignores the message rather than mis-parsing it.
     while len(body) >= 3 and body[0] == TTI_MSG_TYPE_PIGGYBACK:
-        if body[1] != TTI_OCCA:  # CLOSE_CURSORS (105)
-            break
+        func = body[1]
         rest = body[3:]  # skip the piggyback token, function code, sequence
-        rest = rest[1:]  # pointer byte
-        count, rest = decode_ub4(rest)
-        for _ in range(count):
-            _, rest = decode_ub4(rest)  # each closed cursor id (ignored)
+        if _DECODE_FIELD_VERSION.get() > FIELD_VERSION_23_1:
+            _, rest = decode_ub4(rest)  # the fv24 ub8 token
+        if func == TTI_OCCA:  # CLOSE_CURSORS
+            rest = rest[1:]  # pointer byte
+            count, rest = decode_ub4(rest)
+            for _ in range(count):
+                _, rest = decode_ub4(rest)  # each closed cursor id (ignored)
+        elif func == TNS_FUNC_SET_END_TO_END_ATTR:
+            rest = _skip_end_to_end_piggyback(rest)
+        elif func == TNS_FUNC_SESSION_STATE:
+            _, rest = decode_ub4(rest)  # the requested state (ignored)
+        else:
+            break
         body = rest
     return body
+
+
+def _skip_end_to_end_piggyback(rest: bytes) -> bytes:
+    # The SET_END_TO_END_ATTR body (the inverse of the client's
+    # encode_end_to_end_piggyback): two pointer bytes and the flags word, then
+    # one (modified, length) header per attribute — client_identifier, module,
+    # action, client_info, dbop — with the unsupported fixed slots between them,
+    # then a length-prefixed value for every attribute that was set (a cleared
+    # one has the modified flag and no value).
+    rest = rest[2:]  # cidnam / cidser pointers
+    _, rest = decode_ub4(rest)  # flags
+    values = 0
+    for slot in (
+        'client_identifier',
+        'module',
+        'action',
+        'cideci',
+        'cidcct',
+        'client_info',
+        'cidkstk',
+        'cidktgt',
+        'dbop',
+    ):
+        modified, rest = rest[0], rest[1:]
+        length, rest = decode_ub4(rest)
+        if modified and length and slot in _END_TO_END_ATTRS:
+            values += 1
+    for _ in range(values):
+        _, rest = decode_dalc(rest)
+    return rest
+
+
+_END_TO_END_ATTRS = frozenset(
+    {'client_identifier', 'module', 'action', 'client_info', 'dbop'}
+)
 
 
 class _OciSequence:

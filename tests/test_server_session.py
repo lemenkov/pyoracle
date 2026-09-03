@@ -192,6 +192,118 @@ def test_live_seerdb_login_at_a_higher_field_version(version: int) -> None:
     assert result.get('user') == 'PYO'
 
 
+def _exec_body() -> bytes:
+    from seerdb.common.tns import encode_dictionary_exec
+
+    return encode_dictionary_exec(
+        {
+            'field_version': 17,
+            'seq': 5,
+            'query': {
+                'type': 'select',
+                'auto': 0,
+                'fetch': 15,
+                'server_version': 0,
+                'cursor': 0,
+                'query': 'select * from dual',
+                'bind': [],
+                'batch': [],
+                'def': [],
+                'batcherrors': None,
+                'arraydmlrowcounts': None,
+                'return_binds': None,
+                'scrollable': False,
+                'scroll': None,
+            },
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    'attrs',
+    [
+        {'module': 'm'},
+        {
+            'client_identifier': 'c',
+            'module': 'mod',
+            'action': 'a',
+            'client_info': 'i',
+            'dbop': 'd',
+        },
+        {'module': None, 'action': 'act'},  # a cleared attribute carries no value
+        {'client_info': 'x' * 300},  # a long value rides the chunked DALC form
+    ],
+)
+def test_skip_piggybacks_walks_the_12c_tracing_and_session_state(attrs: dict) -> None:
+    # The 12.1+ client puts the end-to-end tracing (135) and request-boundary
+    # session-state (176) piggybacks in front of a call; the Mirror keeps no such
+    # state and must land exactly on the call that follows.
+    from seerdb.common.tns import (
+        _DECODE_FIELD_VERSION,
+        encode_close_cursors_piggyback,
+        encode_end_to_end_piggyback,
+        encode_session_state_piggyback,
+    )
+    from seerdb.server.session import _skip_piggybacks
+
+    body = _exec_body()
+    token = _DECODE_FIELD_VERSION.set(17)
+    try:
+        e2e = encode_end_to_end_piggyback(4, 17, attrs)
+        state = encode_session_state_piggyback(4, 17, 0x44)
+        close = encode_close_cursors_piggyback(4, 17, [3, 9])
+        assert _skip_piggybacks(e2e + body) == body
+        assert _skip_piggybacks(state + body) == body
+        assert _skip_piggybacks(close + e2e + state + body) == body
+        # an unknown piggyback is left in place, as before
+        assert (
+            _skip_piggybacks(bytes([0x11, 0xCD, 4]) + body)
+            == bytes([0x11, 0xCD, 4]) + body
+        )
+    finally:
+        _DECODE_FIELD_VERSION.reset(token)
+
+
+def test_live_seerdb_tracing_attributes_at_a_higher_field_version() -> None:
+    # A real 23ai-negotiated client sets tracing attributes; the next execute
+    # carries the SET_END_TO_END_ATTR piggyback, and the query still answers.
+    listen = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listen.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listen.bind(('127.0.0.1', 0))
+    listen.listen(1)
+    port = listen.getsockname()[1]
+    result: dict = {}
+    server = threading.Thread(
+        target=_run_mirror_login_at, args=(listen, result, 17), daemon=True
+    )
+    server.start()
+    conn = seerdb.connect(
+        host='127.0.0.1',
+        port=port,
+        user='PYO',
+        password='pyo123',
+        service_name='XE',
+        timeout=5000,
+    )
+    try:
+        conn.module = 'seerdb-test'
+        conn.client_identifier = 'tracer'
+        cursor = conn.cursor()
+        cursor.execute('select * from dual')
+        assert cursor.fetchone() == ('X',)
+        conn.module = None  # a clear rides the next call too
+        cursor.execute('select * from dual')
+        assert cursor.fetchone() == ('X',)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+    assert result.get('error') is None, result.get('error')
+
+
 def test_live_seerdb_dual_query() -> None:
     # The 2.1.0 capstone: a real client runs SELECT * FROM DUAL against the
     # Mirror (no Oracle, no Postgres) and gets the DUMMY 'X' row back.
