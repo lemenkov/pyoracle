@@ -1317,6 +1317,58 @@ def test_encode_lob_read_response_thin_carries_content_then_a_success_oer() -> N
     assert encode_lob_read_response_thin(b'').startswith(_oci_lob_data(b''))
 
 
+def test_lob_read_reply_chunks_in_the_negotiated_versions_framing() -> None:
+    # A LOB read reply longer than one chunk uses the negotiated version's chunk
+    # framing: 11g a single length byte per chunk, a 12.2+ client the variable-
+    # width big-endian (ub4) length its own long-value reader consumes. A read at
+    # 11g stays byte-identical to _oci_lob_data. Both must decode back to the
+    # content through the client's chunk logic.
+    from seerdb.common.tns import (
+        _ENCODE_FIELD_VERSION,
+        _oci_lob_data,
+        decode_ub4,
+        encode_lob_read_response_thin,
+    )
+    from seerdb.common.tns_consts import FIELD_VERSION_11_2, FIELD_VERSION_23_1, TTI_OER
+
+    content = bytes(range(256)) * 3  # 768 bytes → several chunks
+
+    def read_back(reply: bytes, is_12c: bool) -> bytes:
+        assert reply[0] == TTI_LOB
+        pos = 1
+        assert reply[pos] == 0xFE  # chunked marker
+        pos += 1
+        out = bytearray()
+        while True:
+            if is_12c:
+                length, rest = decode_ub4(reply[pos:])
+                pos = len(reply) - len(rest)
+            else:
+                length, pos = reply[pos], pos + 1
+            if length == 0:
+                break
+            out += reply[pos : pos + length]
+            pos += length
+        assert reply[pos] == TTI_OER  # the success OER stop signal follows
+        return bytes(out)
+
+    tok = _ENCODE_FIELD_VERSION.set(FIELD_VERSION_11_2)
+    try:
+        eleven = encode_lob_read_response_thin(content)
+        assert eleven.startswith(_oci_lob_data(content))  # unchanged at 11g
+        assert read_back(eleven, is_12c=False) == content
+    finally:
+        _ENCODE_FIELD_VERSION.reset(tok)
+
+    tok = _ENCODE_FIELD_VERSION.set(FIELD_VERSION_23_1)
+    try:
+        newer = encode_lob_read_response_thin(content)
+        assert newer != eleven
+        assert read_back(newer, is_12c=True) == content
+    finally:
+        _ENCODE_FIELD_VERSION.reset(tok)
+
+
 def test_parse_lobops_request_classifies_create_temp() -> None:
     # CREATE_TEMP drives the temp-LOB write flow (#412): the Mirror recognises the
     # client's fixed block and the CLOB / BLOB type byte in it.

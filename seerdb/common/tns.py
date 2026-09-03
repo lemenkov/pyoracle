@@ -1404,7 +1404,25 @@ def encode_lob_read_response_thin(content: bytes) -> bytes:
     """The thin TTI_LOBOPS READ reply (#413): the whole LOB content as LOB_DATA
     then a success OER (the client reads the content, skips to the OER, and stops).
     ``content`` is UTF-16BE for a CLOB, raw for a BLOB."""
-    return _oci_lob_data(content) + _encode_oer(1, 0, 0, b'')
+    return _lob_data_thin(content) + _encode_oer(1, 0, 0, b'')
+
+
+def _lob_data_thin(content: bytes) -> bytes:
+    # LOB_DATA in the negotiated version's chunk framing. A short value is one
+    # length byte + data at every version. A longer one is the 0xFE-marked run of
+    # chunks: 11g prefixes each chunk with a single length byte, a 12.2+ client
+    # reads a variable-width big-endian length (the ub4 form) per chunk — the
+    # same framing its own writer uses for a long bind — and a zero terminator.
+    if _ENCODE_FIELD_VERSION.get() < FIELD_VERSION_12_2:
+        return _oci_lob_data(content)
+    if len(content) < 0xFE:
+        return bytes([TTI_LOB, len(content)]) + content
+    out = bytearray([TTI_LOB, 0xFE])
+    for start in range(0, len(content), _OCI_LOB_CHUNK):
+        chunk = content[start : start + _OCI_LOB_CHUNK]
+        out += encode_sb4(len(chunk)) + chunk
+    out += encode_sb4(0)
+    return bytes(out)
 
 
 def mint_temp_lob_locator(index: int, is_blob: bool) -> bytes:
