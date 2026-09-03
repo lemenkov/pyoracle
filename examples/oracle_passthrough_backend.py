@@ -22,7 +22,7 @@ from dataclasses import replace
 
 import seerdb
 from seerdb.common.datatypes import dbtype_for_oracle_type
-from seerdb.common.tns import ColumnMeta
+from seerdb.common.tns import AL16UTF16_CHARSET, ColumnMeta
 from seerdb.common.tns_consts import TNS_TYPE_REF, TNS_TYPE_REFCURSOR
 from seerdb.server.backend import BackendError, BindVar, CursorResult, Result
 
@@ -224,13 +224,24 @@ def _to_column_meta(desc: tuple) -> ColumnMeta:
     # wire tns_type; the sizes give the declared/buffer length.
     name, type_code, display_size, internal_size, precision, scale, null_ok = desc
     tns_type = getattr(type_code, 'tns_type', type_code)
-    size = internal_size or display_size or 0
+    csfrm = getattr(type_code, 'csfrm', 1)
+    byte_size = internal_size or display_size or 0
+    if csfrm == 2:
+        # National char (NCHAR / NVARCHAR2): UTF-16BE in AL16UTF16. data_length is
+        # the byte buffer (internal_size), max_size the declared character length.
+        data_length, max_size = byte_size, (display_size or byte_size)
+        charset = AL16UTF16_CHARSET
+    else:
+        data_length = max_size = byte_size
+        charset = ColumnMeta.charset
     return ColumnMeta(
         name=name.encode('utf-8'),
         data_type=int(tns_type),
-        data_length=size,
-        max_size=size,
+        data_length=data_length,
+        max_size=max_size,
         precision=precision or 0,
         scale=scale or 0,
+        charset=charset,
+        csfrm=csfrm,
         null_ok=int(bool(null_ok)),
     )
