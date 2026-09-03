@@ -4277,7 +4277,7 @@ to real 11g, varying one thing at a time. Offsets are from the `0x04` token:
 | `8..12` | ub4 LE | **rowcount** (affected rows) | ins1→1, ins3→3, upd/del→4 |
 | `12..16` | ub4 LE | **error code** | ORA-00942 → `ae 03`, ORA-01403 → `7b 05` |
 | `18` | 1 | statement category — `2` query / PL-SQL, `1` DDL | DDL vs describe/outbind frames |
-| `20` | 1 | error position | ORA-00942 → `0x0e` |
+| `20` | 1 | error position (parse offset; the column sqlplus draws its caret under) | ORA-00942 → `0x0e`; the Mirror emits the backend-supplied offset (`encode_error_oci(error_pos=...)`), clamped to one byte, or `0x0e` when unknown |
 | `22` | 1 | **V$SQL command type** | INSERT=2, UPDATE=6, DELETE=7, SELECT=3, CREATE TABLE=1, DROP TABLE=12, PL/SQL=47 |
 | `27..40` | | rowid of the touched row (DML only) | capture-specific; the Mirror reuses a fixed frame |
 | `49..51` | ub2 LE | echo of the sequence field | `sequence + 2` for row/return statuses; `0` in the outbind reply |

@@ -729,7 +729,12 @@ def _answer_query_oci(
         if request.sql.lstrip().upper().startswith('SELECT'):
             stream.write_packet(
                 TNS_DATA,
-                encode_error_oci(err.ora_code, str(err), sequence=seq.next()),
+                encode_error_oci(
+                    err.ora_code,
+                    str(err),
+                    sequence=seq.next(),
+                    error_pos=err.error_offset,
+                ),
             )
         else:
             stream.write_packet(TNS_DATA, encode_status_oci(seq.next()))
@@ -810,7 +815,13 @@ def _answer_describe_oci(
     except (InterfaceError, BackendError) as err:
         code = getattr(err, 'ora_code', None) or 942
         stream.write_packet(
-            TNS_DATA, encode_error_oci(code, str(err), sequence=seq.next())
+            TNS_DATA,
+            encode_error_oci(
+                code,
+                str(err),
+                sequence=seq.next(),
+                error_pos=getattr(err, 'error_offset', None),
+            ),
         )
         return
     reply = encode_describe_reply_oci(
@@ -1136,7 +1147,7 @@ def _answer_query(
             response = encode_status(result.rowcount, cursor_id=cursor_id)
     except BackendError as err:
         logger.info('query refused: %s', err.ora_message)
-        response = encode_error(err.ora_code, err.ora_message)
+        response = encode_error(err.ora_code, err.ora_message, err.error_offset)
     except Exception as exc:
         logger.warning('backend raised a non-ORA error: %s', exc)
         response = encode_error(_INTERNAL_ERROR, f'ORA-00600: backend error: {exc}')
@@ -1185,7 +1196,9 @@ def _answer_scroll(
             backend.commit()
     except BackendError as err:
         logger.info('scrollable query refused: %s', err.ora_message)
-        stream.write_packet(TNS_DATA, encode_error(err.ora_code, err.ora_message))
+        stream.write_packet(
+            TNS_DATA, encode_error(err.ora_code, err.ora_message, err.error_offset)
+        )
         return []
     except Exception as exc:
         logger.warning('backend raised a non-ORA error: %s', exc)

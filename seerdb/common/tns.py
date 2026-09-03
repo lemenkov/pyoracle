@@ -981,10 +981,13 @@ def encode_rows(
     return header + bytes(body)
 
 
-def encode_error(ora_code: int, message: str) -> bytes:
+def encode_error(ora_code: int, message: str, error_pos: int | None = None) -> bytes:
     """OER reporting an error: the client raises ``ORA-<code>: <message>`` and
-    the connection stays usable."""
-    return _encode_oer(1, ora_code, 0, message.encode('utf-8'))
+    the connection stays usable. ``error_pos`` is the parse offset of the error
+    (``None`` -> 0, no specific position)."""
+    return _encode_oer(
+        1, ora_code, 0, message.encode('utf-8'), error_pos=error_pos or 0
+    )
 
 
 def encode_status(rowcount: int = 0, cursor_id: int = 0) -> bytes:
@@ -4419,7 +4422,10 @@ def encode_oci_oer(
     oer[1] = status
     struct.pack_into('<H', oer, 5, sequence)
     oer[8] = row_kind
-    oer[20] = error_pos
+    # The OCI frame's error-position field is a single byte; clamp a larger
+    # parse offset rather than overflow the assignment (the caret then lands at
+    # the last column it can express).
+    oer[20] = min(max(error_pos, 0), 0xFF)
     oer[22] = command_type
     # FIXME: the offset-49 echo is only reliably `sequence + 2` for the row /
     # return statuses; the outbind reply carries 0 there instead, so this is not
@@ -5732,16 +5738,28 @@ def encode_long_fetch_row_oci(
     return bytes(out) + status
 
 
-def encode_error_oci(ora_code: int, message: str, *, sequence: int) -> bytes:
+def encode_error_oci(
+    ora_code: int, message: str, *, sequence: int, error_pos: int | None = None
+) -> bytes:
     """OCI error reply — an OER carrying ORA-<code>: <message>, connection intact.
 
     The deadbeef-dialect counterpart of :func:`encode_error`: a failing statement
     surfaces in sqlplus as the ORA error and the session stays usable. The error
     status (0x05) and frame differ from the end-of-fetch OER — a real error, not
     "cursor drained" — so the two must not be conflated (#265, #350).
+
+    ``error_pos`` is the 0-based parse offset of the error in the statement —
+    the column sqlplus draws its caret under. ``None`` keeps the captured
+    default (``0x0E``); a backend that knows the real offset passes it so the
+    caret lands correctly.
     """
+    if error_pos is None:
+        error_pos = 0x0E
     oer = encode_oci_oer(
-        oci.OCI_OER_STATUS_ERROR, sequence=sequence, error_pos=0x0E, error_code=ora_code
+        oci.OCI_OER_STATUS_ERROR,
+        sequence=sequence,
+        error_pos=error_pos,
+        error_code=ora_code,
     )
     text = f'ORA-{ora_code:05d}: {message}\n'.encode('utf-8')
     return oer + bytes([len(text)]) + text
