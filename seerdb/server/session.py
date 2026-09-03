@@ -17,10 +17,13 @@ usernames match case-insensitively); a backend-mapped auth API comes later.
 
 from __future__ import annotations
 
+import contextvars
+import functools
 import logging
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from secrets import token_bytes
-from typing import NoReturn
+from typing import NoReturn, TypeVar
 
 from seerdb.common.crypto import decrypt_password
 from seerdb.common.exceptions import InterfaceError
@@ -118,6 +121,7 @@ from seerdb.server.backend import (
     Backend,
     BackendError,
     BindVar,
+    Capability,
     CursorResult,
     Result,
 )
@@ -132,6 +136,8 @@ from seerdb.server.handshake import (
     parse_connect,
     pro_is_sqlplus,
 )
+
+_T = TypeVar('_T')
 
 logger = logging.getLogger('seerdb.server')
 
@@ -358,6 +364,59 @@ def _deny_login(stream: PacketStream, reason: str) -> NoReturn:
     raise InterfaceError(f'authentication rejected — {reason}')
 
 
+class _IsolatedBackend:
+    """Runs every backend call in a copy of the session's contextvars context.
+
+    The codec keeps per-message state in context variables (the field version
+    being decoded / encoded, the arraydmlrowcounts arming, ...), set by whichever
+    side is currently coding a message in the thread. A backend that itself
+    embeds a seerdb client — the passthrough relaying to a real Oracle — sets
+    them to *its upstream's* field version on every call it makes, and left as
+    is, that state would still be in the thread when the Mirror next decodes a
+    client request or encodes a reply: in front of a 23ai upstream the Mirror
+    decoded an 11g client's chunked LONG bind with the 12.2+ chunk framing and
+    handed the backend a garbled value. Copying the context per call confines
+    the backend's codec state to the call; the Mirror's own codec keeps running
+    at the version it negotiated with the client.
+
+    The five :class:`Backend` methods are delegated explicitly; the optional
+    extensions the session probes with ``getattr`` (``execute_many``,
+    ``change_password``, ...) resolve through ``__getattr__`` and are wrapped
+    the same way, so a missing one still raises ``AttributeError`` as before.
+    """
+
+    def __init__(self, backend: Backend) -> None:
+        self._backend = backend
+        self.capabilities: frozenset[Capability] = getattr(
+            backend, 'capabilities', frozenset()
+        )
+
+    def authenticate(self, username: str) -> str | None:
+        return _isolated(self._backend.authenticate, username)
+
+    def execute(self, sql: str, binds: Sequence = ()) -> Result:
+        return _isolated(self._backend.execute, sql, binds)
+
+    def commit(self) -> None:
+        _isolated(self._backend.commit)
+
+    def rollback(self) -> None:
+        _isolated(self._backend.rollback)
+
+    def close(self) -> None:
+        _isolated(self._backend.close)
+
+    def __getattr__(self, name: str) -> object:
+        attr = getattr(self._backend, name)
+        if callable(attr):
+            return functools.partial(_isolated, attr)
+        return attr
+
+
+def _isolated(call: Callable[..., _T], *args: object, **kwargs: object) -> _T:
+    return contextvars.copy_context().run(call, *args, **kwargs)
+
+
 def serve_session(
     stream: PacketStream,
     backend: Backend,
@@ -377,6 +436,7 @@ def serve_session(
     the authenticated username. ``encryption`` is the Mirror's ANO stance,
     forwarded to :func:`handle_login` (§33 / #448).
     """
+    backend = _IsolatedBackend(backend)
     user, sqlplus, conn_key = handle_login(
         stream, backend, encryption=encryption, token_public_key=token_public_key
     )
