@@ -51,3 +51,19 @@ def test_code_argument_wins_over_the_prefix_digits():
     err = _relay_error(exc)
     assert err.ora_code == 942
     assert err.ora_message == 'ORA-00942: table or view does not exist'
+
+
+def test_relays_the_error_offset():
+    # oracledb's DatabaseError.offset (the parse offset) is carried into the
+    # BackendError so the Mirror draws its caret under the right column.
+    exc = seerdb.DatabaseError('ORA-00904: "X": invalid identifier', 904)
+    exc.offset = 7
+    err = _relay_error(exc)
+    assert err.error_offset == 7
+
+
+def test_missing_offset_is_none():
+    exc = seerdb.DatabaseError('ORA-00942: table or view does not exist', 942)
+    # .offset defaults to None on a DatabaseError with no parse position.
+    err = _relay_error(exc)
+    assert err.error_offset is None

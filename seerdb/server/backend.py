@@ -106,10 +106,16 @@ class BackendError(Exception):
     than a dropped connection. Defaults to ``ORA-00900`` (invalid SQL statement).
     """
 
-    def __init__(self, message: str, *, ora_code: int = 900) -> None:
+    def __init__(
+        self, message: str, *, ora_code: int = 900, error_offset: int | None = None
+    ) -> None:
         super().__init__(message)
         self.ora_code = ora_code
         self.ora_message = f'ORA-{ora_code:05d}: {message}'
+        # The 0-based parse offset of the error in the statement text (the column
+        # sqlplus draws its caret under), when the backend knows it; None means
+        # unknown and the Mirror uses its default.
+        self.error_offset = error_offset
 
 
 class UnsupportedFeature(BackendError):

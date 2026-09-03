@@ -184,5 +184,24 @@ class ChangePasswordStatusGolden(unittest.TestCase):
         self.assertEqual(diffs, [1, 5, 8, 18, 22, 49])
 
 
+class ErrorPositionOverride(unittest.TestCase):
+    # The OCI error reply carries the parse offset at OER offset 20 (the column
+    # sqlplus draws its caret under). None keeps the captured 0x0E default; a
+    # backend that knows the real offset overrides it.
+    def test_default_keeps_the_captured_position(self):
+        reply = encode_error_oci(904, 'x', sequence=0x13)
+        self.assertEqual(reply[20], 0x0E)
+
+    def test_override_places_the_real_offset(self):
+        reply = encode_error_oci(904, 'x', sequence=0x13, error_pos=7)
+        self.assertEqual(reply[20], 7)
+
+    def test_large_offset_is_clamped_to_one_byte(self):
+        # The frame's position field is a single byte; a longer statement's offset
+        # clamps rather than overflowing.
+        reply = encode_error_oci(904, 'x', sequence=0x13, error_pos=1000)
+        self.assertEqual(reply[20], 0xFF)
+
+
 if __name__ == '__main__':
     unittest.main()

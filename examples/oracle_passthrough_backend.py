@@ -180,7 +180,11 @@ def _relay_error(exc: 'seerdb.DatabaseError') -> BackendError:
         code = int(match.group(1))
     if match is not None:
         text = text[match.end() :]
-    return BackendError(text, ora_code=code or 900)
+    # Relay the parse offset (oracledb's DatabaseError.offset) so the Mirror draws
+    # the error caret under the same column the real server flagged.
+    return BackendError(
+        text, ora_code=code or 900, error_offset=getattr(exc, 'offset', None)
+    )
 
 
 def _enrich_ref_columns(columns: list, rows: list) -> list:
