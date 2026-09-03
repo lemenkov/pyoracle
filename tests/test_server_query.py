@@ -633,6 +633,51 @@ def test_encode_describe_reply_oci_multicolumn_frames_each_column() -> None:
     assert reply[25 + 8 + 6 + _OCI_DESC_COLCOUNT_OFF] == 3
 
 
+def test_describe_reply_lays_out_interval_precisions() -> None:
+    # sqlplus renders INTERVAL precisions from the describe block's precision/scale
+    # bytes, which are laid out per family (verified against live 11g):
+    #   YEAR TO MONTH -> the year precision in BOTH bytes (YEAR(3) -> 03 03);
+    #   DAY TO SECOND -> swapped: precision = SECOND fractional (col.scale),
+    #                    scale = DAY leading (col.precision) (DAY(2) SEC(6) -> 06 02).
+    from seerdb.common.tns import (
+        _OCI_DESC_POST_PREC,
+        _OCI_DESC_POST_SCALE,
+        _oci_desc_block,
+    )
+    from seerdb.common.tns_consts import TNS_TYPE_INTERVALDS, TNS_TYPE_INTERVALYM
+
+    def post(col: ColumnMeta) -> bytes:
+        block = _oci_desc_block(col, last=True)
+        return block[6 + 4 + 1 + len(col.name) :]
+
+    # INTERVAL YEAR(3) TO MONTH: client carries the year precision in `precision`.
+    ym = ColumnMeta(
+        name=b'E',
+        data_type=TNS_TYPE_INTERVALYM,
+        data_length=5,
+        max_size=5,
+        precision=3,
+        scale=0,
+    )
+    ym_post = post(ym)
+    assert ym_post[_OCI_DESC_POST_PREC] == 3
+    assert ym_post[_OCI_DESC_POST_SCALE] == 3
+
+    # INTERVAL DAY(2) TO SECOND(6): client carries day in `precision`, second in
+    # `scale`; the describe swaps them.
+    ds = ColumnMeta(
+        name=b'F',
+        data_type=TNS_TYPE_INTERVALDS,
+        data_length=11,
+        max_size=11,
+        precision=2,
+        scale=6,
+    )
+    ds_post = post(ds)
+    assert ds_post[_OCI_DESC_POST_PREC] == 6  # SECOND fractional
+    assert ds_post[_OCI_DESC_POST_SCALE] == 2  # DAY leading
+
+
 def test_describe_reply_puts_timestamp_precision_in_the_precision_field() -> None:
     # A real 11g DESCRIBE reports a TIMESTAMP's fractional-seconds precision in the
     # precision field (TIMESTAMP(6) -> 06 06), and sqlplus renders TIMESTAMP(N)
