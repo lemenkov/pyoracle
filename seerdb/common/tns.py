@@ -3450,6 +3450,34 @@ def encode_tpc_switch(
     return Out
 
 
+def parse_tpc_switch(body: bytes, field_version: int) -> tuple[int, int, int, bytes]:
+    """Decode a client TPC switch call (TTI_FUN 103) — the inverse of
+    :func:`encode_tpc_switch` for the shape a sessionless begin / resume / suspend
+    sends. Returns ``(operation, flags, timeout, transaction_id)``: operation is
+    START (0x01) or DETACH (0x02), flags carry NEW vs RESUME, and the id is the
+    xid's gtrid (empty for a suspend, which sends no xid)."""
+    rest = body[3:]  # TTI_FUN, func, seq
+    if field_version > FIELD_VERSION_23_1:
+        _, rest = decode_ub4(rest)  # the fv24 token number
+    operation, rest = decode_ub4(rest)
+    rest = rest[1:]  # context pointer flag
+    _ctx_len, rest = decode_ub4(rest)
+    _format_id, rest = decode_ub4(rest)
+    gtrid_len, rest = decode_ub4(rest)
+    _bqual_len, rest = decode_ub4(rest)
+    has_xid, rest = rest[0], rest[1:]
+    xidbytes_len, rest = decode_ub4(rest)
+    flags, rest = decode_ub4(rest)
+    timeout, rest = decode_ub4(rest)
+    rest = rest[3:]  # app-value / return-context / length pointers
+    rest = rest[1:]
+    _iname_len, rest = decode_ub4(rest)  # internal name
+    rest = rest[1:]
+    _ename_len, rest = decode_ub4(rest)  # external name
+    xid = rest[:xidbytes_len] if has_xid else b''
+    return operation, flags, timeout, xid[:gtrid_len]
+
+
 def encode_tpc_change_state(
     Seq: int,
     FieldVersion: int,

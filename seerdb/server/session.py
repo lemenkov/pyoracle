@@ -83,6 +83,7 @@ from seerdb.common.tns import (
     parse_fetch,
     parse_lobops_read,
     parse_lobops_request,
+    parse_tpc_switch,
     peek_exec_cursor,
     scroll_start_row,
     strip_oci_piggyback,
@@ -94,6 +95,7 @@ from seerdb.common.tns_consts import (
     TNS_DATA,
     TNS_FUNC_SESSION_STATE,
     TNS_FUNC_SET_END_TO_END_ATTR,
+    TNS_FUNC_TPC_TXN_SWITCH,
     TNS_TYPE_BLOB,
     TNS_TYPE_CLOB,
     TNS_TYPE_LONG,
@@ -513,6 +515,8 @@ def serve_session(
             _answer_txn(stream, backend, commit=True)
         elif body[1] == TTI_ROLLBACK:
             _answer_txn(stream, backend, commit=False)
+        elif body[1] == TNS_FUNC_TPC_TXN_SWITCH:
+            _answer_sessionless_switch(stream, backend, body, field_version)
         elif body[1] == TTI_PING:
             # A keepalive / pool health check (conn.ping()): no state to touch,
             # just acknowledge with a success status so the client round-trip
@@ -1465,3 +1469,34 @@ def _answer_txn(stream: PacketStream, backend: Backend, *, commit: bool) -> None
     else:
         response = encode_status(0)
     stream.write_packet(TNS_DATA, response)
+
+
+def _answer_sessionless_switch(
+    stream: PacketStream, backend: Backend, body: bytes, field_version: int
+) -> None:
+    # A sessionless transaction begin / resume / suspend (TTI_FUN 103, a TPC
+    # switch). Its commit and rollback take the ordinary TTI_COMMIT / TTI_ROLLBACK
+    # path. Drive the backend's optional sessionless API and answer with a plain
+    # status — the client discards the switch reply (it only checks the operation
+    # did not error). A backend without the API still succeeds so the session
+    # stays usable; the transaction just is not isolated on it.
+    from seerdb.common.tns_consts import TNS_TPC_TXN_START, TPC_BEGIN_RESUME
+
+    operation, flags, timeout, txn_id = parse_tpc_switch(body, field_version)
+    try:
+        if operation == TNS_TPC_TXN_START and flags & TPC_BEGIN_RESUME:
+            resume = getattr(backend, 'sessionless_resume', None)
+            if resume is not None:
+                resume(txn_id, timeout)
+        elif operation == TNS_TPC_TXN_START:
+            begin = getattr(backend, 'sessionless_begin', None)
+            if begin is not None:
+                begin(txn_id, timeout)
+        else:  # TNS_TPC_TXN_DETACH
+            suspend = getattr(backend, 'sessionless_suspend', None)
+            if suspend is not None:
+                suspend()
+    except BackendError as err:
+        stream.write_packet(TNS_DATA, encode_error(err.ora_code, err.ora_message))
+        return
+    stream.write_packet(TNS_DATA, encode_status(0))
