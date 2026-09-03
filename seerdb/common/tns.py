@@ -5793,20 +5793,36 @@ def encode_status_oci(sequence: int) -> bytes:
     return bytes(status)
 
 
-# sqlplus PASSWORD success reply (OCIPasswordChange complete, #21). Its own
-# compact OER "command complete" frame (same 0x20f6310a marker and OER shape the
-# DML/describe statuses carry), captured verbatim from an 11g password change:
-# sqlplus renders "Password changed" from it. Carried as one frame — the leading
-# 0x0405 word is NOT a discardable session counter (zeroing it makes sqlplus
-# reject the reply and hang), and the rest is fixed. FIXME: reduce to the OER
-# primitives (like encode_status_oci) once the field layout is bisected; a live
-# password change against 11g is the ground truth.
-_OCI_CHANGEPASSWORD_STATUS = bytes.fromhex(
-    '08000004050000001300010100000000000000000000000000000000000000000000'
-    '000000000000000000000000000000000000160000010000003601000000000000000000'
-    '000000000020f6310a0000000000000000000000000000000000000000000000000000'
-    '00000000000000000000000000000000000000000000000000000000000000000000'
-)
+# The sqlplus PASSWORD success reply (OCIPasswordChange complete, #21): an empty
+# RPA return-parameter envelope followed by an OER return-status token, from
+# which sqlplus renders "Password changed". Its body is the shared
+# :data:`_OCI_OER_ENVELOPE` — the same OER frame every OCI status carries,
+# including the fixed 0x20f6310a instance marker — so it is built on that rather
+# than stored as a second copy of the frame. Six bytes differ from the envelope;
+# all are fixed values carried from the capture, so they are set by raw offset
+# rather than through :func:`encode_oci_oer`'s named fields, whose meanings do
+# not hold for this reply (the status byte reads the ERROR marker even though the
+# change succeeded; offset 8 is not a LOB row-kind here).
+#
+# Verified byte-identical across FOUR independent live 11g password changes in
+# separate sessions: the whole reply is a constant. There is no per-session
+# counter — the offset-5 value and its offset-49 echo, live sequence fields in
+# the query-path OERs, are fixed here — so the Mirror emits it verbatim (§36.1).
+_OCI_RPA_EMPTY = bytes([TTI_RPA, 0, 0])  # RPA return with zero parameters
+
+
+def _build_changepassword_status_oci() -> bytes:
+    oer = bytearray(_OCI_OER_ENVELOPE)
+    oer[1] = 0x05  # status byte (the ERROR marker, though the change succeeded)
+    oer[5] = 0x13  # offset-5 field — a fixed value here, not a live sequence
+    oer[8] = 0x01  # marker whose meaning is unpinned (§36.1)
+    oer[18] = 0x00  # this reply zeroes the envelope's offset-18 marker (§36.1)
+    oer[22] = 0x00  # command-type field: none
+    oer[49] = 0x16  # offset-49 echo — a fixed value here, not sequence + 2
+    return _OCI_RPA_EMPTY + bytes(oer)
+
+
+_OCI_CHANGEPASSWORD_STATUS = _build_changepassword_status_oci()
 
 
 def encode_changepassword_status_oci() -> bytes:

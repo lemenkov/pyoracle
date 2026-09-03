@@ -533,11 +533,21 @@ Two framing details make it easy to misroute:
   answered with the version banner and sqlplus hangs.
 
 The Mirror decrypts both fields with the login `ConnKey`, drives
-`backend.change_password(user, old, new)`, and replies with a compact OER
-"command complete" status (`encode_changepassword_status_oci`) that sqlplus
-renders as **"Password changed"**. Verified live: sqlplus `PASSWORD` against the
-Mirror (passthrough backend) changes the password on the real 11g and reconnects
-with the new one.
+`backend.change_password(user, old, new)`, and replies with the auth-complete
+status (`encode_changepassword_status_oci`) that sqlplus renders as **"Password
+changed"**. Verified live: sqlplus `PASSWORD` against the Mirror (passthrough
+backend) changes the password on the real 11g and reconnects with the new one.
+
+The 139-byte reply is an **empty RPA return-parameter envelope** (`08 00 00` —
+`TTI_RPA` + a zero `ub2` count) followed by an **OER return-status token** whose
+body is the shared §36 OER envelope (`_OCI_OER_ENVELOPE`, including the fixed
+`20 f6 31 0a` instance marker). Six bytes differ from that envelope and are all
+fixed here — the status byte, offsets 5 / 8 / 18 / 22, and the offset-49 echo —
+so the reply is built on the shared envelope rather than stored as a second copy
+of it. Captured byte-for-byte across **four** independent live 11g password
+changes in separate sessions, the whole reply is invariant: unlike the
+query-path OERs, offset 5 and its offset-49 echo are not a live sequence here but
+constants, so the Mirror emits it verbatim.
 
 ### 4.2 Data Type Negotiation (TTI_DTY)
 
