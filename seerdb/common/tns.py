@@ -222,6 +222,7 @@ logger = logging.getLogger(__name__)
 # AL32UTF8 (AL32UTF8_CHARSET) — what seerdb advertises and what an 11g DUAL
 # column reports. _CSFRM_DB is the database charset form (not the national one).
 _CSFRM_DB = 1
+_CSFRM_NCHAR = 2  # national charset form (NCHAR / NVARCHAR2 -> AL16UTF16 / UTF-16BE)
 
 
 @dataclass(frozen=True)
@@ -947,6 +948,16 @@ def _encode_oer(
     )
 
 
+def _national_wire_value(value: object, col: ColumnMeta) -> object:
+    # National char data (NCHAR / NVARCHAR2, csfrm 2) travels the wire as UTF-16BE
+    # in the AL16UTF16 charset — the form both the thin client's decoder and
+    # sqlplus expect when the describe says csfrm 2. A str value is pre-encoded to
+    # those bytes; everything else (NULL, non-national columns) passes through.
+    if col.csfrm == _CSFRM_NCHAR and isinstance(value, str):
+        return value.encode('utf-16-be')
+    return value
+
+
 def encode_rows(
     rows: list[tuple], columns: list[ColumnMeta], *, fetch: int = 15
 ) -> bytes:
@@ -976,7 +987,8 @@ def encode_rows(
         if len(row) != len(columns):
             raise InterfaceError('row width does not match the column count')
         body += bytes([TTI_RXD]) + b''.join(
-            encode_value(v, col.data_type) for v, col in zip(row, columns)
+            encode_value(_national_wire_value(v, col), col.data_type)
+            for v, col in zip(row, columns)
         )
     return header + bytes(body)
 
@@ -5360,6 +5372,14 @@ _OCI_UNSIZED_TYPES = _OCI_LONG_TYPES | _OCI_LOB_TYPES
 
 
 _OCI_DCB_CHAR_FLAG = 0x80
+# Character-length-semantics flag (pre offset 15): set on a column whose declared
+# length is a character count rather than a byte count. NCHAR / NVARCHAR2 are
+# always character-semantic, and the flag tells sqlplus to size the column by the
+# character max_size (e.g. NCHAR(5) -> width 5) instead of the wider UTF-16 byte
+# buffer (data_length 10). Verified against a live 11g NCHAR describe (the one
+# byte that differed).
+_OCI_DCB_CHAR_SEMANTICS_OFF = 15
+_OCI_DCB_CHAR_SEMANTICS_FLAG = 0x10
 
 
 def _encode_dcb_column_oci(col: ColumnMeta, position: int, first: bool) -> bytes:
@@ -5372,6 +5392,8 @@ def _encode_dcb_column_oci(col: ColumnMeta, position: int, first: bool) -> bytes
     pre[4] = col.precision & 0xFF
     pre[5] = col.scale & 0xFF  # signed byte (e.g. -127 for a NUMBER literal)
     pre[6:10] = _oci_ub4(col.data_length)
+    if is_char and col.csfrm == _CSFRM_NCHAR:
+        pre[_OCI_DCB_CHAR_SEMANTICS_OFF] = _OCI_DCB_CHAR_SEMANTICS_FLAG
     if is_char:
         pre[30:32] = int(col.charset).to_bytes(2, 'little')
         pre[32] = col.csfrm
@@ -5562,7 +5584,13 @@ def _oci_desc_precision_scale(col: ColumnMeta) -> tuple[int, int]:
 
 def _oci_desc_block(col: ColumnMeta, *, last: bool) -> bytes:
     pre = bytearray(_OCI_DESC_BLK[:_OCI_DESC_BLK_PRENAME])
+    is_char = col.data_type in _OCI_DESC_CHAR_TYPES
+    national = is_char and col.csfrm == _CSFRM_NCHAR
     size = _OCI_DESC_WIRE_SIZE.get(col.data_type, col.max_size)
+    if national:
+        # NCHAR / NVARCHAR2: the size field is the UTF-16 byte length, which
+        # sqlplus halves (via the 0x80 flag below) to the character count.
+        size = col.data_length
     pre[_OCI_DESC_BLK_SIZE] = size & 0xFF
     pre[_OCI_DESC_BLK_TYPE] = col.data_type
     post = bytearray(_OCI_DESC_BLK[_OCI_DESC_BLK_PRENAME + 6 :])
@@ -5570,10 +5598,15 @@ def _oci_desc_block(col: ColumnMeta, *, last: bool) -> bytes:
     post[_OCI_DESC_POST_PREC] = precision & 0xFF
     post[_OCI_DESC_POST_SCALE] = scale & 0xFF
     post[_OCI_DESC_POST_NULL] = 1 if col.null_ok else 0
-    if col.data_type in _OCI_DESC_CHAR_TYPES:
+    if is_char:
         post[_OCI_DESC_POST_CSLO] = col.charset & 0xFF
         post[_OCI_DESC_POST_CSHI] = (col.charset >> 8) & 0xFF
         post[_OCI_DESC_POST_CSFRM] = col.csfrm
+        if national:
+            # The national flag makes sqlplus halve the byte size to the declared
+            # character count; the character length itself goes in the scale byte.
+            post[_OCI_DESC_POST_PREC] = 0x80
+            post[_OCI_DESC_POST_SCALE] = col.max_size & 0xFF
     if not last:
         # A non-last column carries a describe-timestamp entry in its post-name
         # region (the last column leaves it zero).
@@ -6180,7 +6213,7 @@ def _encode_oci_value(value: object, col: ColumnMeta) -> bytes:
         return encode_lob_locator_oci(value, col.data_type == TNS_TYPE_CLOB)
     if col.data_type in _OCI_LONG_TYPES:
         return encode_long_value_oci(value)
-    return encode_value(value, col.data_type)
+    return encode_value(_national_wire_value(value, col), col.data_type)
 
 
 # The OER status that trails a LOB locator row on the fetch — NOT the 1403

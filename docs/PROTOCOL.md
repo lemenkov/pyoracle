@@ -1323,7 +1323,16 @@ rest carried:
   while `INTERVAL DAY TO SECOND` **swaps** them — the precision byte carries the
   `SECOND` fractional precision (the column's scale) and the scale byte the `DAY`
   leading precision (the column's precision), so `DAY(2) TO SECOND(6)` -> `06 02`.
-  `_oci_desc_precision_scale` picks the per-family layout;
+  `_oci_desc_precision_scale` picks the per-family layout. A **national** char
+  type (`NCHAR` / `NVARCHAR2`, csfrm 2) carries its data as **UTF-16BE** in the
+  `AL16UTF16` charset: the value goes on the wire pre-encoded to UTF-16BE (both
+  the thin row encoder and the OCI one route national values through
+  `_national_wire_value`), the SELECT DCB sets a **character-length-semantics
+  flag** (`0x10` at column pre-offset 15) so sqlplus sizes the column by the
+  character `max_size` rather than the wider byte buffer, and the `DESCRIBE`
+  reply reports the **byte** length in its size field with a `0x80` national flag
+  and the character length in the scale byte, so sqlplus halves the byte size to
+  render `NCHAR(N)`;
 - each non-last column carries a `1` **continuation flag** three bytes before its
   end and a **describe-timestamp entry** in its post-name region (the last column
   leaves both zero);

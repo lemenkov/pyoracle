@@ -633,6 +633,64 @@ def test_encode_describe_reply_oci_multicolumn_frames_each_column() -> None:
     assert reply[25 + 8 + 6 + _OCI_DESC_COLCOUNT_OFF] == 3
 
 
+def test_national_char_values_and_describe_ride_as_utf16be() -> None:
+    # NCHAR / NVARCHAR2 (csfrm 2) go on the wire as UTF-16BE (AL16UTF16), and the
+    # describe metadata is sized so sqlplus renders NCHAR(3) and the client decodes
+    # the value as UTF-16 — verified against live 11g.
+    from seerdb.common.tns import (
+        _OCI_DCB_CHAR_SEMANTICS_FLAG,
+        _OCI_DCB_CHAR_SEMANTICS_OFF,
+        _OCI_DESC_POST_PREC,
+        _OCI_DESC_POST_SCALE,
+        AL16UTF16_CHARSET,
+        _encode_dcb_column_oci,
+        _national_wire_value,
+        _oci_desc_block,
+    )
+    from seerdb.common.tns_consts import TNS_TYPE_CHAR
+
+    # NCHAR(5): 10-byte UTF-16 buffer, 5-char declared length.
+    nchar = ColumnMeta(
+        name=b'A',
+        data_type=TNS_TYPE_CHAR,
+        data_length=10,
+        max_size=5,
+        charset=AL16UTF16_CHARSET,
+        csfrm=2,
+    )
+    plain = ColumnMeta(
+        name=b'B',
+        data_type=TNS_TYPE_CHAR,
+        data_length=4,
+        max_size=4,
+        csfrm=1,
+    )
+
+    # 1) values: national -> UTF-16BE bytes; ordinary passes through.
+    assert _national_wire_value('abc', nchar) == 'abc'.encode('utf-16-be')
+    assert _national_wire_value('abc', plain) == 'abc'
+    assert _national_wire_value(None, nchar) is None
+
+    # 2) the SELECT DCB flags character-length semantics for national only.
+    dcb_n = _encode_dcb_column_oci(nchar, 0, first=True)
+    dcb_p = _encode_dcb_column_oci(plain, 0, first=True)
+    assert dcb_n[_OCI_DCB_CHAR_SEMANTICS_OFF] == _OCI_DCB_CHAR_SEMANTICS_FLAG
+    assert dcb_p[_OCI_DCB_CHAR_SEMANTICS_OFF] == 0
+
+    # 3) the DESCRIBE reply carries the byte length + national flag + char length.
+    def post(col: ColumnMeta) -> tuple[int, bytes]:
+        block = _oci_desc_block(col, last=True)
+        return block[2], block[6 + 4 + 1 + len(col.name) :]
+
+    n_size, n_post = post(nchar)
+    p_size, p_post = post(plain)
+    assert n_size == 10  # byte length; sqlplus halves it via the flag
+    assert n_post[_OCI_DESC_POST_PREC] == 0x80  # national flag
+    assert n_post[_OCI_DESC_POST_SCALE] == 5  # character length
+    assert p_size == 4  # ordinary char keeps its byte size unchanged
+    assert p_post[_OCI_DESC_POST_PREC] == 0
+
+
 def test_describe_reply_lays_out_interval_precisions() -> None:
     # sqlplus renders INTERVAL precisions from the describe block's precision/scale
     # bytes, which are laid out per family (verified against live 11g):
