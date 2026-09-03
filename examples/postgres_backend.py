@@ -45,8 +45,10 @@ edge of this adapter:
   FULL`` — so it is a faithful locator only within an unmodified snapshot, not a
   durable cross-transaction handle (a real migration substitutes a surrogate identity
   key). The UROWID (``*``-prefixed logical rowid) of an ``ORGANIZATION INDEX`` table
-  has no ``ctid`` analogue and cannot be produced. ``DBMS_ROWID`` is likewise
-  unimplemented: ``ctid`` exposes only a block and a slot, not the data-object# and
+  is emulated from the table's primary key (see ``_urowid_expression``): a stable,
+  ``*``-prefixed handle that round-trips as a ``WHERE ROWID = :bind``, but not
+  Oracle's actual key encoding. ``DBMS_ROWID`` is unimplemented: ``ctid`` exposes
+  only a block and a slot, not the data-object# and
   relative-file# that the package's accessors (``ROWID_OBJECT``,
   ``ROWID_RELATIVE_FNO``, …) decompose a physical rowid into.
 - **Real ``REF`` / ``DEREF``** — an Oracle object type maps to a PostgreSQL
@@ -424,6 +426,53 @@ _DDL_TYPE_REWRITES = [
 # TEMPORARY table (ON COMMIT ... ROWS is already valid PostgreSQL).
 _DDL_ORG_INDEX = re.compile(r'\s+ORGANIZATION\s+INDEX\b', re.IGNORECASE)
 _DDL_GLOBAL_TEMPORARY = re.compile(r'\bGLOBAL\s+TEMPORARY\b', re.IGNORECASE)
+# Index-organized tables: Oracle gives their rows a logical UROWID — a
+# '*'-prefixed base64 of the primary key — where a heap table has a physical
+# ROWID. PostgreSQL has neither, so the backend remembers which tables a session
+# created ORGANIZATION INDEX and their primary-key columns, and renders ROWID on
+# those as '*' || base64(primary key): a stable, '*'-prefixed handle that
+# round-trips through a `WHERE ROWID = :bind` because the same expression stands
+# on both sides. It is not Oracle's key encoding, just its shape. The primary key
+# is read from an inline `col type PRIMARY KEY` or a `PRIMARY KEY (cols)`
+# constraint; a column whose type carries parentheses (NUMBER(10,2)) is not
+# matched inline, and a table with no recognised key keeps the heap ctid form.
+_CREATE_TABLE_NAME = re.compile(
+    r'\s*CREATE\s+(?:GLOBAL\s+TEMPORARY\s+)?TABLE\s+([\w.]+)', re.IGNORECASE
+)
+_PK_CONSTRAINT = re.compile(r'\bPRIMARY\s+KEY\s*\(([^)]+)\)', re.IGNORECASE)
+_PK_INLINE = re.compile(r'[(,]\s*(\w+)\s+[^,()]*?\bPRIMARY\s+KEY\b', re.IGNORECASE)
+_DROP_TABLE_NAME = re.compile(r'\s*DROP\s+TABLE\s+([\w.]+)', re.IGNORECASE)
+_STATEMENT_TABLE = re.compile(r'\b(?:FROM|UPDATE|INTO)\s+([\w.]+)', re.IGNORECASE)
+_ROWID_WORD = re.compile(r'\bROWID\b', re.IGNORECASE)
+
+
+def _bare_table(name: str) -> str:
+    return name.split('.')[-1].upper()
+
+
+def _iot_primary_key(sql: str) -> tuple[str, list[str]] | None:
+    """The (table, primary-key columns) of a ``CREATE TABLE … ORGANIZATION INDEX``,
+    or None for any other statement or an IOT whose key isn't recognised."""
+    if not _IS_CREATE_TABLE.match(sql) or not _DDL_ORG_INDEX.search(sql):
+        return None
+    name = _CREATE_TABLE_NAME.match(sql)
+    if name is None:
+        return None
+    constraint = _PK_CONSTRAINT.search(sql)
+    if constraint is not None:
+        cols = [c.strip() for c in constraint.group(1).split(',') if c.strip()]
+    else:
+        inline = _PK_INLINE.search(sql)
+        cols = [inline.group(1)] if inline is not None else []
+    return (_bare_table(name.group(1)), cols) if cols else None
+
+
+def _urowid_expression(pk_columns: list[str]) -> str:
+    """The SQL rendering an IOT row's logical rowid from its primary key."""
+    key = ', '.join(pk_columns)
+    return f"('*' || encode(convert_to(ROW({key})::text, 'UTF8'), 'base64'))"
+
+
 _IS_CREATE_TABLE = re.compile(
     r'\s*CREATE\s+(?:GLOBAL\s+TEMPORARY\s+)?TABLE\b', re.IGNORECASE
 )
@@ -521,9 +570,10 @@ _IDIOM_REWRITES = [
     # physical, *mutable* address — it changes on UPDATE / VACUUM FULL — so it is a
     # faithful row locator only within an unmodified snapshot, which is all the
     # read-then-bind suite needs; it is not a durable cross-transaction handle like
-    # Oracle's ROWID (a real migration uses a surrogate identity key instead). The
-    # UROWID / index-organized logical rowid has no ctid analogue and stays a
-    # ceiling (#548).
+    # Oracle's ROWID (a real migration uses a surrogate identity key instead). An
+    # index-organized table's ROWID is rewritten earlier, per session, from its
+    # primary key (PostgresBackend._rewrite_iot_rowid), so this only sees heap
+    # tables.
     (re.compile(r'\bROWID\b', re.IGNORECASE), 'ctid::text'),
     # A BINARY_DOUBLE / BINARY_FLOAT numeric literal suffix (1234.5678d, 1.5f) —
     # PostgreSQL has no such suffix, so drop it. A decimal point is required so
@@ -960,6 +1010,9 @@ class PostgresBackend:
         # from the cache anyway; the pipeline below is the real round-trip win.
         self._conn.prepare_threshold = None
         self._credentials = credentials or {}
+        # Index-organized tables this session created, with their primary-key
+        # columns, for the logical-rowid rendering.
+        self._iot_pk: dict[str, list[str]] = {}
         # Pipeline mode ships a statement's SAVEPOINT / statement / RELEASE in one
         # network round-trip instead of three (a 3x per-statement latency cut
         # against a remote database). It needs libpq >= 14; older builds fall back
@@ -1059,6 +1112,15 @@ class PostgresBackend:
         # advertises (JSON/VECTOR/BOOLEAN), so the suite's version guards skip
         # rather than the backend mis-representing them (#504).
         _reject_unsupported_ddl_types(sql)
+        # Register / forget an index-organized table, and render ROWID on one from
+        # its primary key before the generic rewrite turns ROWID into ctid.
+        iot = _iot_primary_key(sql)
+        if iot is not None:
+            self._iot_pk[iot[0]] = iot[1]
+        dropped = _DROP_TABLE_NAME.match(sql)
+        if dropped is not None:
+            self._iot_pk.pop(_bare_table(dropped.group(1)), None)
+        sql = self._rewrite_iot_rowid(sql)
         # Oracle auto-commits DDL — decide from the original statement, before the
         # dialect rewrite reshapes it (#532).
         is_ddl = _IS_DDL.match(sql) is not None
@@ -1092,6 +1154,20 @@ class PostgresBackend:
         if is_ddl:
             self._conn.commit()
         return result
+
+    def _rewrite_iot_rowid(self, sql: str) -> str:
+        # ROWID on a registered index-organized table → its logical-rowid
+        # expression. The statement's table is its first FROM / UPDATE / INTO
+        # target; anything else is left for the generic ctid rewrite.
+        if not self._iot_pk or _ROWID_WORD.search(sql) is None:
+            return sql
+        table = _STATEMENT_TABLE.search(sql)
+        if table is None:
+            return sql
+        pk = self._iot_pk.get(_bare_table(table.group(1)))
+        if pk is None:
+            return sql
+        return _ROWID_WORD.sub(_urowid_expression(pk), sql)
 
     def _build_result(self, cursor) -> Result:
         # Turn an executed statement's cursor into a Result: a row count for a

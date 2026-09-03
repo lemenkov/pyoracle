@@ -33,6 +33,7 @@ from postgres_backend import (  # noqa: E402
     PostgresBackend,
     _backend_error,
     _distinct_bind_refs,
+    _iot_primary_key,
     _parse_out_assignments,
     _reject_unsupported_ddl_types,
     _to_interval_ym,
@@ -41,6 +42,7 @@ from postgres_backend import (  # noqa: E402
     _translate_idioms,
     _translate_plsql_block,
     _translate_routine_ddl,
+    _urowid_expression,
 )
 
 
@@ -102,6 +104,40 @@ def test_backend_error_relays_the_parse_position_as_the_offset() -> None:
         is None
     )
     assert _backend_error(_PgError('8')).error_offset is None
+
+
+def test_iot_primary_key_is_read_from_organization_index_ddl() -> None:
+    # Inline and constraint forms; a heap table or an IOT without a recognised
+    # key registers nothing.
+    assert _iot_primary_key(
+        'CREATE TABLE t (id NUMBER PRIMARY KEY, v VARCHAR2(20)) ORGANIZATION INDEX'
+    ) == ('T', ['id'])
+    assert _iot_primary_key(
+        'create table s.t2 (a number, b number, primary key (a, b)) organization index'
+    ) == ('T2', ['a', 'b'])
+    assert _iot_primary_key('CREATE TABLE t (id NUMBER PRIMARY KEY)') is None
+    assert _iot_primary_key('CREATE TABLE t (id NUMBER) ORGANIZATION INDEX') is None
+
+
+def test_iot_rowid_renders_a_star_prefixed_logical_rowid() -> None:
+    # The registered IOT's ROWID becomes '*' || base64(primary key), the same
+    # expression on a SELECT and on a WHERE ROWID = :bind; a heap table's ROWID
+    # is left alone for the generic ctid rewrite.
+    backend = PostgresBackend.__new__(PostgresBackend)
+    backend._iot_pk = {'T': ['id']}
+    expr = _urowid_expression(['id'])
+    assert expr.startswith("('*' || encode(")
+    assert (
+        backend._rewrite_iot_rowid('SELECT ROWID, id FROM t')
+        == f'SELECT {expr}, id FROM t'
+    )
+    assert (
+        backend._rewrite_iot_rowid('SELECT id FROM t WHERE ROWID = :r')
+        == f'SELECT id FROM t WHERE {expr} = :r'
+    )
+    assert (
+        backend._rewrite_iot_rowid('SELECT ROWID FROM heap') == 'SELECT ROWID FROM heap'
+    )
 
 
 def test_translate_ddl_maps_create_table_column_types() -> None:
