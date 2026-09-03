@@ -1668,7 +1668,7 @@ TTI_OER |
   ora_error_code (ub2)        -- 0 on success |
   array_elem_error (ub2, skipped) | array_elem_error (ub2, skipped) |
   cursor_id (ub2) |
-  error_position (sb2) |
+  error_position (sb2)         -- the parse offset; surfaced as DatabaseError.offset (oracledb parity) |
   sql_type, fatal, flags, user_cursor_options, upi_param,
     warn_flags (6 x ub1) |
   rowid (ub4 data_object + ub2 rel_file + ub1 + ub4 block + ub2 slot) |

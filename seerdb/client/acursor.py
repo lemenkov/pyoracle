@@ -141,6 +141,7 @@ class AsyncCursor(_CursorLogic):
             Rows = Result[4]
             Message = Result[5] if len(Result) > 5 else None
             LastRowid = Result[6] if len(Result) > 6 else None
+            ErrorOffset = Result[9] if len(Result) > 9 else None
         except (TypeError, IndexError, ValueError) as exc:
             raise DatabaseError(f'unexpected wire response: {Result!r}') from exc
 
@@ -157,7 +158,11 @@ class AsyncCursor(_CursorLogic):
         NonFatal = (0, 1403, 24381) if BatchErrors else (0, 1403)
         if OraCode not in NonFatal:
             Detail = Message or f'ORA-{OraCode:05d}'
-            raise from_ora_code(OraCode)(Detail, code=OraCode)
+            Exc = from_ora_code(OraCode)(Detail, code=OraCode)
+            # oracledb parity: the 0-based character offset of the error in the
+            # statement text, for a parse/bind error (0 when the server reports none).
+            Exc.offset = ErrorOffset
+            raise Exc
 
         # PL/SQL OUT / IN OUT binds: scalars are assigned here; REF CURSOR OUT
         # binds are fetched (async) and wrapped in a nested AsyncCursor.

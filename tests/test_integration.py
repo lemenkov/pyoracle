@@ -1421,6 +1421,16 @@ class ErrorAndRowcountIntegration(_IntegrationBase):
         self.assertIn('table or view', str(ctx.exception))
         self.assertIn('does not exist', str(ctx.exception))
 
+    def test_error_offset_points_at_the_bad_token(self):
+        # oracledb parity: DatabaseError.offset is the 0-based character offset of
+        # the error in the statement text (the position sqlplus draws its caret
+        # under). "nonexistent_col" starts at offset 7; the value is stable across
+        # 11g/21c/23ai.
+        with self.assertRaises(seerdb.DatabaseError) as ctx:
+            self.cur.execute('SELECT nonexistent_col FROM dual')
+        self.assertEqual(ctx.exception.code, 904)
+        self.assertEqual(ctx.exception.offset, 7)
+
     def test_error_message_for_invalid_number(self):
         self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER)')
         with self.assertRaises(seerdb.DatabaseError) as ctx:
@@ -3591,6 +3601,16 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(await Cur.fetchone(), (8,))
                 finally:
                     await Cur.execute('DROP TABLE PYORACLE_ASYNC_EM')
+
+    async def test_async_error_offset_points_at_the_bad_token(self):
+        # Async mirror of test_error_offset_points_at_the_bad_token: the parse
+        # offset reaches DatabaseError.offset over the async path too.
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                with self.assertRaises(seerdb.DatabaseError) as ctx:
+                    await Cur.execute('SELECT nonexistent_col FROM dual')
+                self.assertEqual(ctx.exception.code, 904)
+                self.assertEqual(ctx.exception.offset, 7)
 
     async def test_async_executemany_batcherrors(self):
         # Async mirror of test_executemany_batcherrors (#18): per-row constraint
