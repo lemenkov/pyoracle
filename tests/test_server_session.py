@@ -50,6 +50,10 @@ class _DualBackend:
     def close(self) -> None:
         pass
 
+    def set_end_to_end(self, attrs: dict) -> None:
+        # Record what the Mirror hands over from a tracing piggyback.
+        self.tracing = {**getattr(self, 'tracing', {}), **attrs}
+
 
 def _run_mirror(listen: socket.socket, result: dict) -> None:
     conn, _ = listen.accept()
@@ -252,7 +256,10 @@ def test_skip_piggybacks_walks_the_12c_tracing_and_session_state(attrs: dict) ->
         e2e = encode_end_to_end_piggyback(4, 17, attrs)
         state = encode_session_state_piggyback(4, 17, 0x44)
         close = encode_close_cursors_piggyback(4, 17, [3, 9])
-        assert _skip_piggybacks(e2e + body) == body
+        backend = _DualBackend()
+        assert _skip_piggybacks(e2e + body, backend) == body
+        # …and the attributes (a cleared one as None) reach the backend.
+        assert backend.tracing == dict(attrs)
         assert _skip_piggybacks(state + body) == body
         assert _skip_piggybacks(close + e2e + state + body) == body
         # an unknown piggyback is left in place, as before
@@ -273,9 +280,20 @@ def test_live_seerdb_tracing_attributes_at_a_higher_field_version() -> None:
     listen.listen(1)
     port = listen.getsockname()[1]
     result: dict = {}
-    server = threading.Thread(
-        target=_run_mirror_login_at, args=(listen, result, 17), daemon=True
-    )
+    backend = _DualBackend()
+
+    def run() -> None:
+        conn, _ = listen.accept()
+        try:
+            result['user'] = serve_session(
+                PacketStream(conn), backend, field_version=17
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced to the test thread
+            result['error'] = exc
+        finally:
+            conn.close()
+
+    server = threading.Thread(target=run, daemon=True)
     server.start()
     conn = seerdb.connect(
         host='127.0.0.1',
@@ -291,9 +309,15 @@ def test_live_seerdb_tracing_attributes_at_a_higher_field_version() -> None:
         cursor = conn.cursor()
         cursor.execute('select * from dual')
         assert cursor.fetchone() == ('X',)
+        assert backend.tracing == {
+            'module': 'seerdb-test',
+            'action': None,
+            'client_identifier': 'tracer',
+        }
         conn.module = None  # a clear rides the next call too
         cursor.execute('select * from dual')
         assert cursor.fetchone() == ('X',)
+        assert backend.tracing['module'] is None
     finally:
         try:
             conn.close()

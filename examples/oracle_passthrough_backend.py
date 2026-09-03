@@ -148,6 +148,24 @@ class OraclePassthroughBackend:
             raise _relay_error(exc) from exc
         self._credentials[username.upper()] = new_password
 
+    # The client's attribute names for the end-to-end tracing slots the Mirror
+    # hands over; client_info is spelled clientinfo on the connection.
+    _END_TO_END_ATTR = {'client_info': 'clientinfo'}
+
+    def set_end_to_end(self, attrs: dict[str, str | None]) -> None:
+        # Apply the session's end-to-end tracing attributes (module, action,
+        # client_identifier, client_info, dbop) to the upstream connection, so
+        # SYS_CONTEXT('USERENV', …) on the real Oracle reflects what the client
+        # set through the Mirror. An upstream below 12.1 has no way to carry them
+        # (the client raises NotSupportedError); that is a limit of the upstream,
+        # not a Mirror failure, so it is ignored.
+        assert self._conn is not None  # authenticate() ran before any call
+        for name, value in attrs.items():
+            try:
+                setattr(self._conn, self._END_TO_END_ATTR.get(name, name), value)
+            except seerdb.NotSupportedError:
+                return
+
     def commit(self) -> None:
         if self._conn is not None:
             self._conn.commit()
