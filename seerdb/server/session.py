@@ -27,6 +27,7 @@ from typing import NoReturn, TypeVar
 
 from seerdb.common.crypto import decrypt_password
 from seerdb.common.exceptions import InterfaceError
+from seerdb.common.oci import OCI_CMD_COMMIT, OCI_CMD_ROLLBACK
 from seerdb.common.tns import (
     ColumnMeta,
     ExecRequest,
@@ -633,6 +634,14 @@ def _serve_oci_session(
 
 _OCI_DML_KEYWORDS = ('INSERT', 'UPDATE', 'DELETE', 'MERGE')
 
+# Transaction-control verbs typed as SQL statements (sqlplus sends a bare
+# COMMIT / ROLLBACK through OCIStmtExecute, not OCITransCommit / -Rollback), so
+# they reach the execute path rather than the TTI_COMMIT / TTI_ROLLBACK
+# piggyback. Their V$SQL command types (captured live from 11g) make sqlplus
+# render "Commit complete." / "Rollback complete." from the same no-row
+# command-complete frame the DDL statuses use.
+_OCI_TXN_COMMAND_TYPE = {'COMMIT': OCI_CMD_COMMIT, 'ROLLBACK': OCI_CMD_ROLLBACK}
+
 
 def _is_long_result(columns: list[ColumnMeta]) -> bool:
     # A result that carries a LONG / LONG RAW column, which sqlplus streams one
@@ -679,6 +688,10 @@ def _oci_no_row_status(sql: str, rowcount: int, seq: '_OciSequence') -> bytes:
     keyword = sql.lstrip().split(None, 1)[0].upper() if sql.strip() else ''
     if keyword in _OCI_DML_KEYWORDS:
         return encode_dml_status_oci(keyword, rowcount, sequence=seq.next())
+    if keyword in _OCI_TXN_COMMAND_TYPE:
+        return encode_ddl_status_oci(
+            _OCI_TXN_COMMAND_TYPE[keyword], sequence=seq.next()
+        )
     command_type = ddl_command_type(sql)
     if command_type is not None:
         return encode_ddl_status_oci(command_type, sequence=seq.next())

@@ -73,5 +73,7 @@ OCI_CMD_DROP_SYNONYM = 20
 OCI_CMD_CREATE_VIEW = 21
 OCI_CMD_DROP_VIEW = 22
 OCI_CMD_LOCK_TABLE = 26
+OCI_CMD_COMMIT = 44  # bare COMMIT typed as a statement (not OCITransCommit)
+OCI_CMD_ROLLBACK = 45  # bare ROLLBACK typed as a statement
 OCI_CMD_PLSQL = 47  # anonymous PL/SQL block (EXEC / OUT-bind reply)
 OCI_CMD_TRUNCATE_TABLE = 85
