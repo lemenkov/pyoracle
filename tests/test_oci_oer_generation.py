@@ -22,6 +22,7 @@ from seerdb.common.oci import (
 from seerdb.common.tns import (
     _OCI_CMD_TYPE_OFF,
     _OCI_DML_ROWCOUNT_OFF,
+    encode_changepassword_status_oci,
     encode_ddl_status_oci,
     encode_dml_status_oci,
     encode_error_oci,
@@ -156,6 +157,31 @@ class TestExecuteStatusGeneration(unittest.TestCase):
         self.assertEqual(b[5], 0x14)
         diffs = [i for i in range(len(a)) if a[i] != b[i]]
         self.assertEqual(diffs, [5, 49])
+
+
+class ChangePasswordStatusGolden(unittest.TestCase):
+    # The OCIPasswordChange ("Password changed") reply, captured live from 11g
+    # via sqlplus through a logging proxy — byte-identical across four separate
+    # password changes in independent sessions, so the whole reply is a fixed
+    # constant with no per-session counter (docs/PROTOCOL.md § 4.1.3 / §36.1).
+    _CAPTURE = bytes.fromhex(
+        '08000004050000001300010100000000000000000000000000000000000000000000000000000000000000000000000000000000160000010000003601000000000000000000000000000020f6310a000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000'
+    )
+
+    def test_matches_the_live_capture(self):
+        self.assertEqual(encode_changepassword_status_oci(), self._CAPTURE)
+
+    def test_is_the_shared_oer_envelope_plus_an_empty_rpa(self):
+        # The reply is an empty RPA return envelope (08 00 00) + the shared OER
+        # envelope: only six fixed bytes of the 136-byte OER body differ from it.
+        from seerdb.common.tns import _OCI_OER_ENVELOPE
+
+        reply = encode_changepassword_status_oci()
+        self.assertEqual(reply[:3], bytes([8, 0, 0]))
+        body = reply[3:]
+        self.assertEqual(len(body), len(_OCI_OER_ENVELOPE))
+        diffs = [i for i in range(len(body)) if body[i] != _OCI_OER_ENVELOPE[i]]
+        self.assertEqual(diffs, [1, 5, 8, 18, 22, 49])
 
 
 if __name__ == '__main__':
