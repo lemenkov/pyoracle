@@ -144,6 +144,29 @@ class OraclePassthroughBackend:
             raise _relay_error(exc) from exc
         return Result(out_binds=[_out_value(var.getvalue()) for var in variables])
 
+    def sessionless_begin(self, transaction_id: bytes, timeout: int) -> None:
+        # Start a sessionless transaction on the upstream connection so the
+        # client's work is isolated there and resumable from another session.
+        assert self._conn is not None
+        try:
+            self._conn.begin_sessionless_transaction(transaction_id, timeout=timeout)
+        except seerdb.DatabaseError as exc:
+            raise _relay_error(exc) from exc
+
+    def sessionless_resume(self, transaction_id: bytes, timeout: int) -> None:
+        assert self._conn is not None
+        try:
+            self._conn.resume_sessionless_transaction(transaction_id, timeout=timeout)
+        except seerdb.DatabaseError as exc:
+            raise _relay_error(exc) from exc
+
+    def sessionless_suspend(self) -> None:
+        assert self._conn is not None
+        try:
+            self._conn.suspend_sessionless_transaction()
+        except seerdb.DatabaseError as exc:
+            raise _relay_error(exc) from exc
+
     def change_password(
         self, username: str, old_password: str, new_password: str
     ) -> None:

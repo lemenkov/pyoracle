@@ -171,6 +171,62 @@ def test_encode_status_with_rowcounts_frames_the_counts_before_the_status() -> N
     assert encode_status(5, cursor_id=9)[0] != TTI_RPA
 
 
+@pytest.mark.parametrize('version', [17, 24])  # 23ai (legacy handshake / fast-auth)
+def test_parse_tpc_switch_reads_sessionless_begin_resume_suspend(version: int) -> None:
+    # A sessionless begin / resume / suspend rides as a TPC switch (TTI_FUN 103);
+    # the parser is the inverse of the client's encoder at the negotiated version
+    # (which adds a token slot above 23ai), recovering the operation, the flags
+    # that separate a new begin from a resume, the timeout and the transaction id.
+    from seerdb.common.tns import encode_tpc_switch, parse_tpc_switch
+    from seerdb.common.tns_consts import (
+        TNS_TPC_SESSIONLESS_FORMAT_ID,
+        TNS_TPC_TXN_DETACH,
+        TNS_TPC_TXN_START,
+        TPC_BEGIN_NEW,
+        TPC_BEGIN_RESUME,
+        TPC_TXN_FLAGS_SESSIONLESS,
+    )
+
+    xid = (TNS_TPC_SESSIONLESS_FORMAT_ID, b'sl-1', b'')
+    begin = encode_tpc_switch(
+        7,
+        version,
+        TNS_TPC_TXN_START,
+        xid,
+        TPC_BEGIN_NEW | TPC_TXN_FLAGS_SESSIONLESS,
+        60,
+        None,
+    )
+    op, flags, timeout, txn = parse_tpc_switch(begin, version)
+    assert op == TNS_TPC_TXN_START and not (flags & TPC_BEGIN_RESUME)
+    assert timeout == 60 and txn == b'sl-1'
+
+    resume = encode_tpc_switch(
+        7,
+        version,
+        TNS_TPC_TXN_START,
+        xid,
+        TPC_BEGIN_RESUME | TPC_TXN_FLAGS_SESSIONLESS,
+        30,
+        None,
+    )
+    op, flags, timeout, txn = parse_tpc_switch(resume, version)
+    assert op == TNS_TPC_TXN_START and flags & TPC_BEGIN_RESUME
+    assert timeout == 30 and txn == b'sl-1'
+
+    suspend = encode_tpc_switch(
+        7,
+        version,
+        TNS_TPC_TXN_DETACH,
+        None,
+        TPC_TXN_FLAGS_SESSIONLESS,
+        0,
+        None,
+    )
+    op, _flags, _timeout, txn = parse_tpc_switch(suspend, version)
+    assert op == TNS_TPC_TXN_DETACH and txn == b''
+
+
 @pytest.mark.parametrize('version', [8, 12, 16, 17])  # 12.2, 19c, 21c, 23ai
 def test_parse_exec_reads_the_12c_request_layout(version: int) -> None:
     # From 12.2 the client's OALL8 replaces the marker + server-version slot with

@@ -54,6 +54,15 @@ class _DualBackend:
         # Record what the Mirror hands over from a tracing piggyback.
         self.tracing = {**getattr(self, 'tracing', {}), **attrs}
 
+    def sessionless_begin(self, transaction_id: bytes, timeout: int) -> None:
+        self.sessionless = ('begin', transaction_id, timeout)
+
+    def sessionless_resume(self, transaction_id: bytes, timeout: int) -> None:
+        self.sessionless = ('resume', transaction_id, timeout)
+
+    def sessionless_suspend(self) -> None:
+        self.sessionless = ('suspend', None, 0)
+
 
 def _run_mirror(listen: socket.socket, result: dict) -> None:
     conn, _ = listen.accept()
@@ -318,6 +327,56 @@ def test_live_seerdb_tracing_attributes_at_a_higher_field_version() -> None:
         cursor.execute('select * from dual')
         assert cursor.fetchone() == ('X',)
         assert backend.tracing['module'] is None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+    assert result.get('error') is None, result.get('error')
+
+
+def test_live_seerdb_sessionless_transaction_at_23ai() -> None:
+    # A real 23ai-negotiated client begins a sessionless transaction, runs a
+    # statement, suspends it, and each TPC switch reaches the backend.
+    listen = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listen.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listen.bind(('127.0.0.1', 0))
+    listen.listen(1)
+    port = listen.getsockname()[1]
+    result: dict = {}
+    backend = _DualBackend()
+
+    def run() -> None:
+        conn, _ = listen.accept()
+        try:
+            result['user'] = serve_session(
+                PacketStream(conn), backend, field_version=17
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced to the test thread
+            result['error'] = exc
+        finally:
+            conn.close()
+
+    server = threading.Thread(target=run, daemon=True)
+    server.start()
+    conn = seerdb.connect(
+        host='127.0.0.1',
+        port=port,
+        user='PYO',
+        password='pyo123',
+        service_name='XE',
+        timeout=5000,
+    )
+    try:
+        txnid = conn.begin_sessionless_transaction('sl-live', timeout=45)
+        assert backend.sessionless == ('begin', txnid, 45)
+        cursor = conn.cursor()
+        cursor.execute('select * from dual')
+        assert cursor.fetchone() == ('X',)
+        conn.suspend_sessionless_transaction()
+        assert backend.sessionless[0] == 'suspend'
     finally:
         try:
             conn.close()
