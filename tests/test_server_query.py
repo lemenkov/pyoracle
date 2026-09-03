@@ -633,6 +633,49 @@ def test_encode_describe_reply_oci_multicolumn_frames_each_column() -> None:
     assert reply[25 + 8 + 6 + _OCI_DESC_COLCOUNT_OFF] == 3
 
 
+def test_describe_reply_puts_timestamp_precision_in_the_precision_field() -> None:
+    # A real 11g DESCRIBE reports a TIMESTAMP's fractional-seconds precision in the
+    # precision field (TIMESTAMP(6) -> 06 06), and sqlplus renders TIMESTAMP(N)
+    # from it. The client carries that precision in `scale` (precision 0), so the
+    # describe block mirrors scale into precision for TIMESTAMP types — while a
+    # NUMBER keeps its own precision and scale distinct.
+    from seerdb.common.tns import (
+        _OCI_DESC_POST_PREC,
+        _OCI_DESC_POST_SCALE,
+        _oci_desc_block,
+    )
+    from seerdb.common.tns_consts import TNS_TYPE_TIMESTAMP
+
+    ts = ColumnMeta(
+        name=b'TS',
+        data_type=TNS_TYPE_TIMESTAMP,
+        data_length=11,
+        max_size=11,
+        precision=0,
+        scale=6,
+    )
+    num = ColumnMeta(
+        name=b'N',
+        data_type=TNS_TYPE_NUMBER,
+        data_length=22,
+        max_size=22,
+        precision=8,
+        scale=2,
+    )
+
+    def post(col: ColumnMeta) -> bytes:
+        block = _oci_desc_block(col, last=True)
+        # The post-name region starts after the 6-byte pre + the name DALC
+        # (a ub4 char length + a ub1 byte length + the name bytes).
+        return block[6 + 4 + 1 + len(col.name) :]
+
+    ts_post, num_post = post(ts), post(num)
+    assert ts_post[_OCI_DESC_POST_PREC] == 6  # mirrored from scale for TIMESTAMP
+    assert ts_post[_OCI_DESC_POST_SCALE] == 6
+    assert num_post[_OCI_DESC_POST_PREC] == 8  # NUMBER keeps its own precision
+    assert num_post[_OCI_DESC_POST_SCALE] == 2
+
+
 def test_parse_describe_oci_extracts_the_object_name() -> None:
     from seerdb.common.tns import parse_describe_oci
 

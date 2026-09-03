@@ -1311,7 +1311,13 @@ rest carried:
 - **size** (data length — 22 for NUMBER, 7 for DATE, the declared length for a
   char type), **TNS type**, **precision**, **scale** (NUMBER) / length (char),
   **nullability** (`1` nullable / `0` NOT NULL), and **charset + csfrm** (char types
-  only) — computed from the column;
+  only) — computed from the column. A **TIMESTAMP**'s fractional-seconds precision
+  (the `N` in `TIMESTAMP(N)`) is reported in the **precision** field, not just the
+  scale — a live 11g `DESCRIBE` of `TIMESTAMP(6)` carries `06 06` (precision 6,
+  scale 6) and sqlplus renders `TIMESTAMP(N)` from the precision. The client keeps
+  that value in the column's scale (its precision is 0), so the describe block
+  mirrors scale into precision for the TIMESTAMP family (`TNS_TYPE_TIMESTAMP` /
+  `TIMESTAMPTZ` / `TIMESTAMPLTZ`);
 - each non-last column carries a `1` **continuation flag** three bytes before its
   end and a **describe-timestamp entry** in its post-name region (the last column
   leaves both zero);
