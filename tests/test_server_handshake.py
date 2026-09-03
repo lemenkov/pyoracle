@@ -101,6 +101,21 @@ def test_pro_reply_pins_field_version_11g() -> None:
     assert caps[CCAP_FIELD_VERSION] == FIELD_VERSION_11_2
 
 
+def test_pro_reply_field_version_is_negotiable() -> None:
+    # The advertised field version is the one byte a client negotiates on; the
+    # rest of the pinned 11.2 identity is unchanged around it.
+    from seerdb.common.tns_consts import FIELD_VERSION_12_1, FIELD_VERSION_23_1
+
+    for version in (FIELD_VERSION_12_1, FIELD_VERSION_23_1):
+        reply = encode_pro_reply(field_version=version)
+        caps = decode_token_pro(reply[10:])['compile_caps']
+        assert caps[CCAP_FIELD_VERSION] == version
+        default = encode_pro_reply()
+        assert len(reply) == len(default)
+        diffs = [i for i in range(len(reply)) if reply[i] != default[i]]
+        assert len(diffs) == 1
+
+
 # --- sqlplus 'deadbeef' PRO dialect (#265) ---
 
 

@@ -17,6 +17,7 @@ import socket
 import threading
 from collections.abc import Callable
 
+from seerdb.common.tns_consts import FIELD_VERSION_11_2
 from seerdb.server.backend import Backend
 from seerdb.server.framing import PacketStream
 from seerdb.server.session import serve_session
@@ -42,8 +43,14 @@ class Server:
         port: int = 1521,
         *,
         backend_factory: BackendFactory,
+        field_version: int = FIELD_VERSION_11_2,
     ) -> None:
         self._backend_factory = backend_factory
+        # The field version the Mirror advertises to thin clients (default the
+        # pinned 11.2). Higher values unlock the 12c+ / 23ai wire formats a client
+        # gates on that version; the login path handles them, the query path is
+        # being brought up format by format.
+        self._field_version = field_version
         self._running = True
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -72,7 +79,9 @@ class Server:
         backend = None
         try:
             backend = self._backend_factory()
-            user = serve_session(PacketStream(client), backend)
+            user = serve_session(
+                PacketStream(client), backend, field_version=self._field_version
+            )
             logger.info('%s:%d session ended (%s)', addr[0], addr[1], user)
         except Exception:
             logger.exception('session error from %s:%d', *addr)
@@ -95,9 +104,12 @@ def serve(
     port: int = 1521,
     *,
     backend_factory: BackendFactory,
+    field_version: int = FIELD_VERSION_11_2,
 ) -> None:
     """Run a Mirror server until interrupted — the one-call convenience."""
-    server = Server(host, port, backend_factory=backend_factory)
+    server = Server(
+        host, port, backend_factory=backend_factory, field_version=field_version
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:
