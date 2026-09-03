@@ -16,6 +16,7 @@ client, and the same credentials open the upstream connection.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import replace
 
@@ -83,8 +84,7 @@ class OraclePassthroughBackend:
         try:
             cursor.execute(sql, list(binds))
         except seerdb.DatabaseError as exc:
-            code = getattr(exc, 'code', None) or 900
-            raise BackendError(str(exc), ora_code=code) from exc
+            raise _relay_error(exc) from exc
         if cursor.description:
             columns = [_to_column_meta(desc) for desc in cursor.description]
             rows = cursor.fetchall()
@@ -105,8 +105,7 @@ class OraclePassthroughBackend:
         try:
             cursor.executemany(sql, [list(row) for row in rows])
         except seerdb.DatabaseError as exc:
-            code = getattr(exc, 'code', None) or 900
-            raise BackendError(str(exc), ora_code=code) from exc
+            raise _relay_error(exc) from exc
         return cursor.rowcount or 0
 
     def _execute_plsql(self, cursor, sql: str, binds: Sequence) -> Result:
@@ -128,8 +127,7 @@ class OraclePassthroughBackend:
         try:
             cursor.execute(sql, variables)
         except seerdb.DatabaseError as exc:
-            code = getattr(exc, 'code', None) or 900
-            raise BackendError(str(exc), ora_code=code) from exc
+            raise _relay_error(exc) from exc
         return Result(out_binds=[_out_value(var.getvalue()) for var in variables])
 
     def change_password(
@@ -147,8 +145,7 @@ class OraclePassthroughBackend:
                 f'ALTER USER {username} IDENTIFIED BY "{quoted}" REPLACE "{old_quoted}"'
             )
         except seerdb.DatabaseError as exc:
-            code = getattr(exc, 'code', None) or 900
-            raise BackendError(str(exc), ora_code=code) from exc
+            raise _relay_error(exc) from exc
         self._credentials[username.upper()] = new_password
 
     def commit(self) -> None:
@@ -165,6 +162,25 @@ class OraclePassthroughBackend:
                 self._conn.close()
             finally:
                 self._conn = None
+
+
+# Oracle's own error text already begins with "ORA-NNNNN: "; the Mirror
+# (BackendError) re-adds that prefix from the code, so relaying str(exc) verbatim
+# doubles it ("ORA-00904: ORA-00904: ..."). Strip the leading prefix and take the
+# code from it (falling back to exc.code, then ORA-00900) so the Mirror emits
+# exactly one, matching a real server.
+_ORA_PREFIX = re.compile(r'^ORA-(\d{5}):\s*')
+
+
+def _relay_error(exc: 'seerdb.DatabaseError') -> BackendError:
+    text = str(exc)
+    match = _ORA_PREFIX.match(text)
+    code = getattr(exc, 'code', None)
+    if code is None and match is not None:
+        code = int(match.group(1))
+    if match is not None:
+        text = text[match.end() :]
+    return BackendError(text, ora_code=code or 900)
 
 
 def _enrich_ref_columns(columns: list, rows: list) -> list:
