@@ -1178,6 +1178,10 @@ def _oci_lob_data(content: bytes) -> bytes:
 # The LOB-descriptor prefix a temp-LOB locator bind carries (shared with the
 # native VECTOR / JSON binds): 01 28 28 then a ub2 locator length + locator.
 _TEMP_LOB_BIND_PREFIX = b'\x01\x28\x28'
+# The fixed head of a native JSON bind value (_native_lob_bind_value): the
+# 19-byte descriptor + a ub2 image length + 22 zero bytes; the OSON image
+# (bytes_with_length) follows.
+_JSON_BIND_HEAD_LEN = len(VECTOR_BIND_DESCRIPTOR) + 2 + 22
 
 
 def _read_bind_value(data_type: int, csfrm: int, after: bytes) -> tuple[object, bytes]:
@@ -1195,6 +1199,25 @@ def _read_bind_value(data_type: int, csfrm: int, after: bytes) -> tuple[object, 
         # Kept as a reference; the session swaps in the bytes streamed over
         # TTI_LOBOPS WRITE (the backend never sees a locator, only the value).
         return TempLobRef(locator, data_type == TNS_TYPE_BLOB), after[5 + loclen :]
+    if data_type == TNS_TYPE_JSON and after[:3] == _TEMP_LOB_BIND_PREFIX:
+        # A native JSON bind (#50/#70): the client sends the value inline as its
+        # OSON image, not a plain DALC — the _native_lob_bind_value framing of a
+        # fixed descriptor, a ub2 image length, 22 zero bytes, then the image in
+        # bytes_with_length form. Skip the fixed head, read the image, and decode
+        # it back to a Python value the backend re-binds (a too-large / too-wide
+        # value the client couldn't OSON-encode arrives as a VARCHAR text cast
+        # instead, on the ordinary DALC path below). #70.
+        from seerdb.common.oson import decode_oson
+
+        rest = after[_JSON_BIND_HEAD_LEN:]
+        image, rest = decode_dalc(rest)
+        if isinstance(image, list):
+            return None, rest
+        # Re-wrap as a JSON marker so the backend re-binds it into a JSON column
+        # rather than as its bare Python type: a bare list / scalar would
+        # otherwise bind as a collection / VARCHAR (only a dict is auto-detected
+        # as JSON). #50/#70.
+        return JSON(decode_oson(bytes(image))), rest
     raw, after = decode_dalc(after)
     return _decode_bind_value(data_type, csfrm, raw), after
 
@@ -6318,16 +6341,25 @@ def oci_lob_contents(
     is UTF-16BE (``is_clob`` True — offsets/amounts count characters, 2 bytes
     each); BLOB content is raw bytes (counts bytes). The session slices this per
     the offset/amount each read requests."""
+    from seerdb.common.oson import encode_oson
+
     out: list[tuple[bytes, bool]] = []
     for row in rows:
         for value, col in zip(row, columns):
-            if col.data_type not in _OCI_LOB_TYPES or value is None:
+            if col.data_type not in _LOB_CONTENT_TYPES or value is None:
                 continue
             if col.data_type == TNS_TYPE_CLOB:
                 out.append((str(value).encode('utf-16-be'), True))
+            elif col.data_type == TNS_TYPE_JSON:
+                # A native JSON column reads back as a LOB whose content is the
+                # value's OSON image; the client decodes it as JSON (#30/#50).
+                out.append((encode_oson(value), False))
             else:
                 out.append((bytes(value), False))
     return out
+
+
+_LOB_CONTENT_TYPES = _OCI_LOB_TYPES | {TNS_TYPE_JSON}
 
 
 def _encode_oci_value(value: object, col: ColumnMeta) -> bytes:
@@ -8895,9 +8927,10 @@ def encode_value(Value: object, DataType: int) -> bytes:
         return _bytes_with_length(encode_token_interval_ds(Value))
     if DataType == TNS_TYPE_INTERVALYM and isinstance(Value, IntervalYM):
         return _bytes_with_length(encode_token_interval_ym(Value))
-    if DataType in (TNS_TYPE_CLOB, TNS_TYPE_BLOB):
-        # A thin CLOB / BLOB value is delivered as an opaque locator, not inline;
-        # the content follows over TTI_LOBOPS (#413).
+    if DataType in (TNS_TYPE_CLOB, TNS_TYPE_BLOB, TNS_TYPE_JSON):
+        # A thin CLOB / BLOB / JSON value is delivered as an opaque locator, not
+        # inline; the content follows over TTI_LOBOPS (#413). For a JSON column
+        # the content is the value's OSON image (see oci_lob_contents).
         return encode_lob_locator_thin()
     if DataType == TNS_TYPE_BOOLEAN:
         # Native SQL BOOLEAN (23ai): a one-byte value, 0x01 for TRUE and 0x00 for

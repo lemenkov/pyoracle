@@ -1369,6 +1369,81 @@ def test_oci_lob_contents_reports_type_and_wire_bytes() -> None:
     assert got == [('hi'.encode('utf-16-be'), True), (b'\xca\xfe', False)]
 
 
+def test_oci_lob_contents_encodes_a_json_cell_as_its_oson_image() -> None:
+    # A native JSON column reads back over the LOB path like a CLOB / BLOB, but
+    # its content is the value's OSON image (is_clob False — the client decodes
+    # OSON, not text). NULL is skipped like any other LOB (#30/#50/#70).
+    from seerdb.common.oson import decode_oson, encode_oson
+    from seerdb.common.tns import ColumnMeta, oci_lob_contents
+    from seerdb.common.tns_consts import TNS_TYPE_JSON
+
+    cols = [
+        ColumnMeta(name=b'D', data_type=TNS_TYPE_JSON, data_length=4000, max_size=0)
+    ]
+    doc = {'hello': 'world', 'n': 42, 'arr': [1, 2, 3]}
+    got = oci_lob_contents(cols, [(doc,), (None,)])
+    assert len(got) == 1
+    image, is_clob = got[0]
+    assert is_clob is False
+    assert image == encode_oson(doc)
+    assert decode_oson(image) == doc
+
+
+def test_encode_value_emits_a_thin_lob_locator_for_a_json_column() -> None:
+    # A JSON value rides as a LOB locator inline (its OSON image follows over
+    # TTI_LOBOPS), exactly like a CLOB / BLOB; NULL is a bare 0x00 (#30/#50).
+    from seerdb.common.tns import encode_lob_locator_thin, encode_value
+    from seerdb.common.tns_consts import TNS_TYPE_JSON
+
+    assert encode_value({'a': 1}, TNS_TYPE_JSON) == encode_lob_locator_thin()
+    assert encode_value(None, TNS_TYPE_JSON) == b'\x00'
+
+
+def test_parse_exec_decodes_a_native_json_bind_as_a_json_value() -> None:
+    # A JSON bind the client can OSON-encode rides inline as its OSON image (the
+    # _native_lob_bind_value framing), not a plain DALC. parse_exec reads it back
+    # and hands the backend a JSON-wrapped Python value so a bare list / scalar
+    # re-binds into a JSON column rather than as a collection / VARCHAR (#50/#70).
+    from seerdb.common.datatypes import JSON
+    from seerdb.common.tns import (
+        _ENCODE_FIELD_VERSION,
+        encode_dictionary_exec,
+        parse_exec,
+    )
+    from seerdb.common.tns_consts import FIELD_VERSION_23_1
+
+    doc = {'hello': 'world', 'n': 42, 'arr': [1, 2, 3]}
+    # The native framing (bytes_with_length) and the 12.2+ OALL8 middle block are
+    # post-11g forms: encode AND decode at 23ai (the session pins both context
+    # vars to the negotiated version per message).
+    enc = _ENCODE_FIELD_VERSION.set(FIELD_VERSION_23_1)
+    dec = _DECODE_FIELD_VERSION.set(FIELD_VERSION_23_1)
+    try:
+        payload = encode_dictionary_exec(
+            {
+                'seq': 4,
+                'field_version': FIELD_VERSION_23_1,
+                'query': {
+                    'type': 'select',
+                    'auto': 0,
+                    'fetch': 0,
+                    'server_version': 186647040,
+                    'cursor': 0,
+                    'query': 'insert into t values (:1)',
+                    'bind': [doc],
+                    'batch': [],
+                    'def': [],
+                },
+            }
+        )
+        request = parse_exec(payload)
+    finally:
+        _ENCODE_FIELD_VERSION.reset(enc)
+        _DECODE_FIELD_VERSION.reset(dec)
+    assert isinstance(request.binds[0], JSON)
+    assert request.binds[0].value == doc
+
+
 def test_encode_value_emits_a_thin_lob_locator_for_lob_columns() -> None:
     # A thin (oracledb/seerdb) client's LOB column carries a minted opaque locator
     # inline; the content follows over TTI_LOBOPS. NULL is a bare 0x00 (#413).
