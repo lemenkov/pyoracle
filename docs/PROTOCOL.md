@@ -4365,6 +4365,8 @@ LID in §14.6). **Verified live** against sqlplus over the
 Mirror: `insert/update/delete` print the right verb and count, `create/drop`
 print `Table created.` / `Table dropped.` (and, via the resolved command type, `Index created.`, `Table altered.`, `View dropped.`, `Table truncated.`, and the rest).
 
+A bare `COMMIT` / `ROLLBACK` typed in sqlplus is executed as a SQL statement (`OCIStmtExecute`), not `OCITransCommit` / `OCITransRollback`, so it reaches the OCI **execute** path rather than the `TTI_COMMIT` / `TTI_ROLLBACK` piggyback. Its reply is the same no-row command-complete OER, tagged with the transaction-control command type — **`COMMIT` = 44**, **`ROLLBACK` = 45** (captured live from 11g) — from which sqlplus renders `Commit complete.` / `Rollback complete.` The live-server frame also carries a session cursor id and SCN region, but sqlplus renders the message from the command type alone, so the Mirror reuses `encode_ddl_status_oci` and does not fabricate those.
+
 Every OCI reply that carries an OER draws the live counter, including the
 `TTI_LOBOPS` READ reply's tail (`_oci_lob_read_tail`, §14.6): its OER sits at the
 end of a TTI_RPA + OER tail and is built from `encode_oci_oer` with the session

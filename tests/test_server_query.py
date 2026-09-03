@@ -1275,6 +1275,27 @@ def test_encode_ddl_status_oci_carries_the_command_type() -> None:
     assert ddl_command_type('begin null; end;') is None
 
 
+def test_oci_no_row_status_tags_commit_and_rollback() -> None:
+    # A bare COMMIT / ROLLBACK typed in sqlplus is executed as a SQL statement
+    # (not OCITransCommit), so it reaches the OCI execute path. The Mirror must
+    # tag it with its V$SQL command type (44 / 45, captured live from 11g) so
+    # sqlplus renders "Commit complete." / "Rollback complete." rather than the
+    # generic "PL/SQL procedure successfully completed."
+    from seerdb.common.tns import encode_status_oci
+    from seerdb.server.session import _oci_no_row_status, _OciSequence
+
+    commit = _oci_no_row_status('COMMIT', 0, _OciSequence())
+    rollback = _oci_no_row_status('rollback', 0, _OciSequence())
+    plain = _oci_no_row_status('BEGIN NULL; END;', 0, _OciSequence())
+
+    assert commit[:3] == b'\x08\x06\x00'
+    assert len(commit) == 171
+    assert commit[57] == 44  # OCI_CMD_COMMIT
+    assert rollback[57] == 45  # OCI_CMD_ROLLBACK
+    # a non-transaction, non-DML/DDL statement still gets the generic status
+    assert plain == encode_status_oci(1)  # first _OciSequence.next() is 1
+
+
 def test_oci_status_frame_prefixes_share_one_builder() -> None:
     # The describe/outbind, DDL and DML exec-status frames all begin with the same
     # 35-byte `08 06` preamble, built by _oci_status_frame_prefix from a cursor id
