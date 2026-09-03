@@ -135,19 +135,17 @@ def _run_bad_out_bind_session(listen: socket.socket, result: dict) -> None:
 
 def _run_mirror_login_at(listen: socket.socket, result: dict, version: int) -> None:
     conn, _ = listen.accept()
-    stream = PacketStream(conn)
     try:
-        result['user'], _sqlplus, _conn_key = handle_login(
-            stream, _DualBackend(), field_version=version
+        result['user'] = serve_session(
+            PacketStream(conn), _DualBackend(), field_version=version
         )
-        stream.read_packet()
     except Exception as exc:  # noqa: BLE001 - surfaced to the test thread
         result['error'] = exc
     finally:
         conn.close()
 
 
-@pytest.mark.parametrize('version', [7, 16, 17])  # 12.1, 21c, 23ai (legacy handshake)
+@pytest.mark.parametrize('version', [7, 8, 16, 17])  # 12.1, 12.2, 21c, 23ai
 def test_live_seerdb_login_at_a_higher_field_version(version: int) -> None:
     # A Mirror advertising a 12c+ field version: the real client negotiates to it
     # and logs in — a 12.1+ client length-prefixes the username in OSESSKEY /
@@ -175,6 +173,13 @@ def test_live_seerdb_login_at_a_higher_field_version(version: int) -> None:
     )
     try:
         assert conn.field_version == version
+        # …and the query round-trip in that version's request / describe / OER
+        # layouts, with and without a bind (12.2+ reshapes all three).
+        cursor = conn.cursor()
+        cursor.execute('select * from dual')
+        assert cursor.fetchone() == ('X',)
+        cursor.execute('select :b from dual', ['abc'])
+        assert cursor.fetchone() == ('X',)
     finally:
         try:
             conn.close()

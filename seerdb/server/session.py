@@ -29,6 +29,8 @@ from seerdb.common.crypto import decrypt_password
 from seerdb.common.exceptions import InterfaceError
 from seerdb.common.oci import OCI_CMD_COMMIT, OCI_CMD_ROLLBACK
 from seerdb.common.tns import (
+    _DECODE_FIELD_VERSION,
+    _ENCODE_FIELD_VERSION,
     ColumnMeta,
     ExecRequest,
     FetchRequest,
@@ -466,6 +468,12 @@ def serve_session(
     # following execute (#412).
     temp_lobs: dict[bytes, bytearray] = {}
     while True:
+        # The codec's per-message state defaults to 11g (and token auth leaves it
+        # at 12.2); pin it to the field version this session negotiated so each
+        # request is parsed and its reply built in that version's layouts. The
+        # backend runs in a copied context, so its own client cannot disturb it.
+        _DECODE_FIELD_VERSION.set(field_version)
+        _ENCODE_FIELD_VERSION.set(field_version)
         received = stream.read_packet()
         if received is None:
             return user
