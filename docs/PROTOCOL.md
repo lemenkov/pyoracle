@@ -1317,7 +1317,13 @@ rest carried:
   scale 6) and sqlplus renders `TIMESTAMP(N)` from the precision. The client keeps
   that value in the column's scale (its precision is 0), so the describe block
   mirrors scale into precision for the TIMESTAMP family (`TNS_TYPE_TIMESTAMP` /
-  `TIMESTAMPTZ` / `TIMESTAMPLTZ`);
+  `TIMESTAMPTZ` / `TIMESTAMPLTZ`). **INTERVAL** precisions lay out differently
+  again: `INTERVAL YEAR TO MONTH` reports the leading (`YEAR`) precision in both
+  fields (`YEAR(3)` -> `03 03`, sqlplus reading `YEAR(N)` from the scale byte),
+  while `INTERVAL DAY TO SECOND` **swaps** them — the precision byte carries the
+  `SECOND` fractional precision (the column's scale) and the scale byte the `DAY`
+  leading precision (the column's precision), so `DAY(2) TO SECOND(6)` -> `06 02`.
+  `_oci_desc_precision_scale` picks the per-family layout;
 - each non-last column carries a `1` **continuation flag** three bytes before its
   end and a **describe-timestamp entry** in its post-name region (the last column
   leaves both zero);

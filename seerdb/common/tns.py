@@ -5537,17 +5537,38 @@ def _oci_desc_dalc(name: bytes) -> bytes:
     return struct.pack('<I', len(name)) + bytes([len(name)]) + name
 
 
+def _oci_desc_precision_scale(col: ColumnMeta) -> tuple[int, int]:
+    # The (precision, scale) bytes a DESCRIBE block reports, which don't always
+    # match the column's own precision/scale — sqlplus renders the type's
+    # parenthesised precisions from these two positions, and each temporal family
+    # lays them out differently (verified against live 11g DESCRIBE captures):
+    #   - NUMBER etc.: precision, scale as-is.
+    #   - TIMESTAMP family: the fractional-seconds precision (carried in the
+    #     column's scale) in BOTH fields — TIMESTAMP(6) -> 06 06.
+    #   - INTERVAL YEAR TO MONTH: the leading-field (YEAR) precision, carried in
+    #     the column's precision, in BOTH fields — YEAR(3) -> 03 03; sqlplus reads
+    #     YEAR(N) from the scale byte.
+    #   - INTERVAL DAY TO SECOND: swapped — precision byte = SECOND fractional
+    #     precision (the column's scale), scale byte = DAY leading precision (the
+    #     column's precision) — DAY(2) TO SECOND(6) -> 06 02.
+    if col.data_type in _OCI_DESC_TIMESTAMP_TYPES:
+        return col.scale, col.scale
+    if col.data_type == TNS_TYPE_INTERVALYM:
+        return col.precision, col.precision
+    if col.data_type == TNS_TYPE_INTERVALDS:
+        return col.scale, col.precision
+    return col.precision, col.scale
+
+
 def _oci_desc_block(col: ColumnMeta, *, last: bool) -> bytes:
     pre = bytearray(_OCI_DESC_BLK[:_OCI_DESC_BLK_PRENAME])
     size = _OCI_DESC_WIRE_SIZE.get(col.data_type, col.max_size)
     pre[_OCI_DESC_BLK_SIZE] = size & 0xFF
     pre[_OCI_DESC_BLK_TYPE] = col.data_type
     post = bytearray(_OCI_DESC_BLK[_OCI_DESC_BLK_PRENAME + 6 :])
-    precision = (
-        col.scale if col.data_type in _OCI_DESC_TIMESTAMP_TYPES else col.precision
-    )
+    precision, scale = _oci_desc_precision_scale(col)
     post[_OCI_DESC_POST_PREC] = precision & 0xFF
-    post[_OCI_DESC_POST_SCALE] = col.scale & 0xFF
+    post[_OCI_DESC_POST_SCALE] = scale & 0xFF
     post[_OCI_DESC_POST_NULL] = 1 if col.null_ok else 0
     if col.data_type in _OCI_DESC_CHAR_TYPES:
         post[_OCI_DESC_POST_CSLO] = col.charset & 0xFF
