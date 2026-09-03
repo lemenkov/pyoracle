@@ -33,6 +33,7 @@ from seerdb.common.tns import (
     _SERVER_COMPILE_CAPS,
     _SERVER_DTY_TABLE,
     _SERVER_RUNTIME_CAPS,
+    CCAP_FIELD_VERSION,
 )
 from seerdb.common.tns_consts import (
     AL32UTF8_CHARSET,
@@ -61,11 +62,18 @@ _DB_TZ_HMS = (0, 0, 0)  # DB session time zone = UTC (+00:00:00)
 _TZFILE_VERSION = 14  # the 11.2 default timezone-file (DST rules) version
 
 
-def build_caps_block_reply() -> bytes:
+def build_caps_block_reply(field_version: int = FIELD_VERSION_11_2) -> bytes:
     """The TTI_PRO capability block as a TTC payload (no packet header): version
     banner, charset, the charset-element array, the fixed descriptor, and the
     server 11g capability vectors. Serves both the thin PRO reply and the
-    sqlplus/deadbeef DTY reply (they are byte-identical)."""
+    sqlplus/deadbeef DTY reply (they are byte-identical).
+
+    ``field_version`` is the field version the Mirror advertises — the byte at
+    ``CCAP_FIELD_VERSION`` in the compile capabilities, which is what a thin
+    client negotiates down to and gates its 12c+ / 23ai wire formats on. The
+    rest of the block is the pinned 11.2 identity whatever the version."""
+    compile_caps = bytearray(_SERVER_COMPILE_CAPS)
+    compile_caps[CCAP_FIELD_VERSION] = field_version
     return (
         # TTI_PRO, the negotiated field version (6 = 11g), a zero, then the
         # NUL-terminated version banner.
@@ -78,8 +86,8 @@ def build_caps_block_reply() -> bytes:
         + _PRO_CHARSET_ELEMENTS
         + struct.pack('>H', len(_PRO_FDO))
         + _PRO_FDO
-        + bytes([len(_SERVER_COMPILE_CAPS)])
-        + _SERVER_COMPILE_CAPS
+        + bytes([len(compile_caps)])
+        + bytes(compile_caps)
         + bytes([len(_SERVER_RUNTIME_CAPS)])
         + _SERVER_RUNTIME_CAPS
     )

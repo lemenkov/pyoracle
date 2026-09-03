@@ -62,6 +62,8 @@ from seerdb.common.tns import (
     decode_ub4,
 )
 from seerdb.common.tns_consts import (
+    FIELD_VERSION_11_2,
+    FIELD_VERSION_12_1,
     FIELD_VERSION_12_2,
     TTI_AUTH,
     TTI_FUN,
@@ -262,10 +264,16 @@ def encode_result_oci(session_key: bytes, *, nonce: bytes | None = None) -> byte
     return _oci_auth_packet(pairs, _RESULT_TRAILER)
 
 
-def _parse_fun_auth(payload: bytes) -> tuple[int, bytes, dict[bytes, bytes | None]]:
-    # Parse a client TTI_FUN auth message (OSESSKEY or AUTH), 11g/fv<12.1 shape:
+def _parse_fun_auth(
+    payload: bytes, field_version: int = FIELD_VERSION_11_2
+) -> tuple[int, bytes, dict[bytes, bytes | None]]:
+    # Parse a client TTI_FUN auth message (OSESSKEY or AUTH):
     #   TTI_FUN, subtype, seq, 0x01, sb4(userlen), sb4(mode), 0x01,
-    #   sb4(numpairs), 0x01, 0x01, user[userlen], <numpairs key-value pairs>
+    #   sb4(numpairs), 0x01, 0x01, user, <numpairs key-value pairs>
+    # ``user`` is the raw bytes (read via userlen) on 11g / fv < 12.1; a 12.1+
+    # client writes it length-prefixed (write_bytes_with_length), so the session's
+    # negotiated field version decides whether a length byte precedes it — reading
+    # the 12c form as 11g yields b'\x03PYO'-style garbage and a rejected login.
     if len(payload) < 4 or payload[0] != TTI_FUN:
         raise InterfaceError('not a TTI_FUN message')
     subtype = payload[1]
@@ -275,14 +283,16 @@ def _parse_fun_auth(payload: bytes) -> tuple[int, bytes, dict[bytes, bytes | Non
     rest = rest[1:]  # skip the 0x01 has-more byte
     numpairs, rest = decode_ub4(rest)
     rest = rest[2:]  # skip the 0x01 0x01 pointer pair
+    if field_version >= FIELD_VERSION_12_1:
+        rest = rest[1:]  # the 12.1+ length byte in front of the username
     user = rest[:userlen]
     kvs, _ = decode_kv(rest[userlen:], numpairs, [])
     return subtype, user, dict(kvs)
 
 
-def parse_osesskey(payload: bytes) -> bytes:
+def parse_osesskey(payload: bytes, field_version: int = FIELD_VERSION_11_2) -> bytes:
     """Return the username from the client's OSESSKEY (phase-one) request."""
-    subtype, user, _ = _parse_fun_auth(payload)
+    subtype, user, _ = _parse_fun_auth(payload, field_version)
     if subtype != TTI_SESS:
         raise InterfaceError(f'expected OSESSKEY, got subtype {subtype}')
     return user
@@ -359,14 +369,16 @@ def parse_auth_response_oci(payload: bytes) -> tuple[bytes, bytes, bytes]:
     return user, sesskey, password
 
 
-def parse_auth_response(payload: bytes) -> tuple[bytes, bytes, bytes | None]:
+def parse_auth_response(
+    payload: bytes, field_version: int = FIELD_VERSION_11_2
+) -> tuple[bytes, bytes, bytes | None]:
     """Return ``(username, client AUTH_SESSKEY, AUTH_PASSWORD)`` from the AUTH.
 
     The client's session key derives the shared ConnKey; ``AUTH_PASSWORD`` (the
     client's password proof, ``None`` if absent) lets the server verify the
     password with :func:`verify_password`.
     """
-    subtype, user, kvs = _parse_fun_auth(payload)
+    subtype, user, kvs = _parse_fun_auth(payload, field_version)
     if subtype != TTI_AUTH:
         raise InterfaceError(f'expected AUTH, got subtype {subtype}')
     sesskey = kvs.get(b'AUTH_SESSKEY')
@@ -394,13 +406,15 @@ def parse_changepassword_oci(payload: bytes) -> tuple[bytes, bytes, bytes]:
     return user, old_cipher, new_cipher
 
 
-def parse_changepassword(payload: bytes) -> tuple[bytes, bytes, bytes]:
+def parse_changepassword(
+    payload: bytes, field_version: int = FIELD_VERSION_11_2
+) -> tuple[bytes, bytes, bytes]:
     """Return ``(username, AUTH_PASSWORD, AUTH_NEWPASSWORD)`` from a changepassword
     TTI_AUTH (#21/#486). Both password fields are the AES-CBC ciphertext (already
     un-hexed) the client encrypted under the login ConnKey — the session decrypts
     them with :func:`~seerdb.common.crypto.decrypt_password`. Unlike login this
     carries no ``AUTH_SESSKEY`` (the session already exists)."""
-    subtype, user, kvs = _parse_fun_auth(payload)
+    subtype, user, kvs = _parse_fun_auth(payload, field_version)
     if subtype != TTI_AUTH:
         raise InterfaceError(f'expected AUTH, got subtype {subtype}')
     old_cipher = kvs.get(b'AUTH_PASSWORD')

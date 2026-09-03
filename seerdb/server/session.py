@@ -84,6 +84,7 @@ from seerdb.common.tns import (
     strip_oci_piggyback,
 )
 from seerdb.common.tns_consts import (
+    FIELD_VERSION_11_2,
     TNS_CONNECT,
     TNS_DATA,
     TNS_TYPE_BLOB,
@@ -254,6 +255,7 @@ def handle_login(
     *,
     encryption: str = 'accepted',
     token_public_key: bytes | None = None,
+    field_version: int = FIELD_VERSION_11_2,
 ) -> tuple[str, bool, bytes | None]:
     """Run the server side of the handshake + O5LOGON.
 
@@ -266,6 +268,9 @@ def handle_login(
     ``encryption`` is the Mirror's ANO stance (§33): ``'accepted'`` (default)
     stays plaintext unless the client forces it; ``'required'`` selects AES + a
     SHA-2 checksum and encrypts every DATA packet from PRO onward (#448).
+    ``field_version`` is what the PRO reply advertises (default 11.2); a 12.1+
+    thin client length-prefixes the username in its auth messages, so the same
+    value drives the auth parsers.
 
     The O5LOGON secret comes from ``backend.authenticate(user)`` — auth lives
     with the backend, not the Mirror. Raises :class:`InterfaceError` on a
@@ -292,9 +297,9 @@ def handle_login(
     # reply dialect (#265). Decide on the PRO request and hold it for the DTY
     # reply so both halves speak one dialect.
     sqlplus = pro_is_sqlplus(first)
-    stream.send_raw(encode_pro_reply(sqlplus=sqlplus))
+    stream.send_raw(encode_pro_reply(sqlplus=sqlplus, field_version=field_version))
     _expect(stream, TNS_DATA, 'DTY')
-    stream.send_raw(encode_dty_reply(sqlplus=sqlplus))
+    stream.send_raw(encode_dty_reply(sqlplus=sqlplus, field_version=field_version))
     if sqlplus:
         # sqlplus / thick OCI runs a third data-type negotiation round after DTY
         # (a `ttc=02` request) before it sends OSESSKEY; a thin client skips it
@@ -314,8 +319,11 @@ def handle_login(
     # session — there is no O5LOGON challenge, proof, or ConnKey.
     if token_public_key is not None and is_token_auth(osesskey):
         return _handle_token_login(stream, osesskey, token_public_key), sqlplus, None
-    parse_osesskey_fn = parse_osesskey_oci if sqlplus else parse_osesskey
-    user = parse_osesskey_fn(osesskey).decode('utf-8')
+    user = (
+        parse_osesskey_oci(osesskey)
+        if sqlplus
+        else parse_osesskey(osesskey, field_version)
+    ).decode('utf-8')
     secret = backend.authenticate(user)
     if secret is None:
         _deny_login(stream, f'unknown user: {user!r}')
@@ -334,7 +342,7 @@ def handle_login(
         challenge = make_challenge(secret.encode('utf-8'))
         stream.write_packet(TNS_DATA, encode_challenge(challenge))
         _, client_sesskey, auth_password = parse_auth_response(
-            _expect(stream, TNS_DATA, 'AUTH')
+            _expect(stream, TNS_DATA, 'AUTH'), field_version
         )
 
     conn_key = derive_conn_key(challenge, client_sesskey)
@@ -424,6 +432,7 @@ def serve_session(
     *,
     encryption: str = 'accepted',
     token_public_key: bytes | None = None,
+    field_version: int = FIELD_VERSION_11_2,
 ) -> str:
     """Log a client in, then answer its queries until it disconnects.
 
@@ -439,7 +448,11 @@ def serve_session(
     """
     backend = _IsolatedBackend(backend)
     user, sqlplus, conn_key = handle_login(
-        stream, backend, encryption=encryption, token_public_key=token_public_key
+        stream,
+        backend,
+        encryption=encryption,
+        token_public_key=token_public_key,
+        field_version=field_version,
     )
     if sqlplus:
         return _serve_oci_session(stream, backend, user, conn_key)
@@ -496,7 +509,7 @@ def serve_session(
             # A post-login TTI_AUTH is a password change (#21/#486): it reuses the
             # login session key, so decrypt the old / new passwords with conn_key
             # and drive the backend's password change.
-            _answer_changepassword(stream, backend, body, conn_key, user)
+            _answer_changepassword(stream, backend, body, conn_key, user, field_version)
         elif body[1] == TTI_LOGOFF:
             return user
 
@@ -1250,6 +1263,7 @@ def _answer_changepassword(
     body: bytes,
     conn_key: bytes | None,
     user: str,
+    field_version: int = FIELD_VERSION_11_2,
 ) -> None:
     # Handle a password change on the live session (#21/#486): the client sends a
     # TTI_AUTH reusing the login session key, with the current + new passwords
@@ -1266,7 +1280,7 @@ def _answer_changepassword(
         )
         return
     try:
-        _user, old_cipher, new_cipher = parse_changepassword(body)
+        _user, old_cipher, new_cipher = parse_changepassword(body, field_version)
         old_password = decrypt_password(conn_key, old_cipher).decode('utf-8')
         new_password = decrypt_password(conn_key, new_cipher).decode('utf-8')
     except Exception as exc:

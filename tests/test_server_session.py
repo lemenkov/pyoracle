@@ -133,6 +133,60 @@ def _run_bad_out_bind_session(listen: socket.socket, result: dict) -> None:
         conn.close()
 
 
+def _run_mirror_login_at(listen: socket.socket, result: dict, version: int) -> None:
+    conn, _ = listen.accept()
+    stream = PacketStream(conn)
+    try:
+        result['user'], _sqlplus, _conn_key = handle_login(
+            stream, _DualBackend(), field_version=version
+        )
+        stream.read_packet()
+    except Exception as exc:  # noqa: BLE001 - surfaced to the test thread
+        result['error'] = exc
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize('version', [7, 16, 17])  # 12.1, 21c, 23ai (legacy handshake)
+def test_live_seerdb_login_at_a_higher_field_version(version: int) -> None:
+    # A Mirror advertising a 12c+ field version: the real client negotiates to it
+    # and logs in — a 12.1+ client length-prefixes the username in OSESSKEY /
+    # AUTH, which the auth parsers must honour for that version. The O5LOGON
+    # crypto itself is the same 11g SHA-1 verifier scheme at every version.
+    listen = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listen.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listen.bind(('127.0.0.1', 0))
+    listen.listen(1)
+    port = listen.getsockname()[1]
+
+    result: dict = {}
+    server = threading.Thread(
+        target=_run_mirror_login_at, args=(listen, result, version), daemon=True
+    )
+    server.start()
+
+    conn = seerdb.connect(
+        host='127.0.0.1',
+        port=port,
+        user='PYO',
+        password='pyo123',
+        service_name='XE',
+        timeout=5000,
+    )
+    try:
+        assert conn.field_version == version
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert result.get('user') == 'PYO'
+
+
 def test_live_seerdb_dual_query() -> None:
     # The 2.1.0 capstone: a real client runs SELECT * FROM DUAL against the
     # Mirror (no Oracle, no Postgres) and gets the DUMMY 'X' row back.

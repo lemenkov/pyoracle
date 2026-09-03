@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from seerdb.common import ano
 from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import encode_packet
-from seerdb.common.tns_consts import TNS_ACCEPT, TNS_DATA
+from seerdb.common.tns_consts import FIELD_VERSION_11_2, TNS_ACCEPT, TNS_DATA
 from seerdb.server._handshake_11g import (
     build_caps_block_reply,
     build_dty_type_reply,
@@ -195,7 +195,12 @@ def encode_ano_null_reply(*, sdu: int = DEFAULT_SDU) -> bytes:
     return packet
 
 
-def encode_pro_reply(*, sqlplus: bool = False, sdu: int = DEFAULT_SDU) -> bytes:
+def encode_pro_reply(
+    *,
+    sqlplus: bool = False,
+    sdu: int = DEFAULT_SDU,
+    field_version: int = FIELD_VERSION_11_2,
+) -> bytes:
     """Build the server's PRO (protocol negotiation) reply — §4.1.
 
     Reproduces the real 11g server's PRO reply, whose capability array pins the
@@ -204,12 +209,19 @@ def encode_pro_reply(*, sqlplus: bool = False, sdu: int = DEFAULT_SDU) -> bytes:
     (238B); pass whatever :func:`pro_is_sqlplus` reported for the request.
     Returns the full TNS_DATA packet.
     """
-    payload = build_pro_sqlplus_reply() if sqlplus else build_caps_block_reply()
+    payload = (
+        build_pro_sqlplus_reply() if sqlplus else build_caps_block_reply(field_version)
+    )
     packet, _ = encode_packet(TNS_DATA, payload, sdu)
     return packet
 
 
-def encode_dty_reply(*, sqlplus: bool = False, sdu: int = DEFAULT_SDU) -> bytes:
+def encode_dty_reply(
+    *,
+    sqlplus: bool = False,
+    sdu: int = DEFAULT_SDU,
+    field_version: int = FIELD_VERSION_11_2,
+) -> bytes:
     """Build the server's DTY (data-type negotiation) reply — §4.2.
 
     Reproduces the real 11g server's DTY reply as a full TNS_DATA packet.
@@ -218,7 +230,9 @@ def encode_dty_reply(*, sqlplus: bool = False, sdu: int = DEFAULT_SDU) -> bytes:
     type-conversion table); use the same value the PRO reply used so both halves
     of the handshake speak one dialect.
     """
-    payload = build_caps_block_reply() if sqlplus else build_dty_type_reply()
+    payload = (
+        build_caps_block_reply(field_version) if sqlplus else build_dty_type_reply()
+    )
     packet, _ = encode_packet(TNS_DATA, payload, sdu)
     return packet
 
