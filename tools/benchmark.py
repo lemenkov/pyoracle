@@ -30,7 +30,7 @@ sys.path.insert(0, ".")
 import seerdb  # noqa: E402
 
 _KW = dict(
-    host=os.environ.get("SEERDB_TEST_HOST", "localhost"),
+    host=os.environ.get("SEERDB_TEST_HOST", "127.0.0.1"),
     port=int(os.environ.get("SEERDB_TEST_PORT", "1521")),
     user=os.environ.get("SEERDB_TEST_USER", "pyo"),
     password=os.environ.get("SEERDB_TEST_PASSWORD", ""),

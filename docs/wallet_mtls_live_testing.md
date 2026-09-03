@@ -87,7 +87,7 @@ From the host, against the committed client wallet:
 SEERDB_WALLET_LIVE=1 python3 -m pytest tests/test_wallet_live.py -v
 ```
 
-Defaults (host `127.0.0.1`, TCPS port `2484`, service `FREEPDB1`, user `PYO`,
+Defaults (host `127.0.0.1` or `SEERDB_TEST_HOST` when set, TCPS port `2484`, service `FREEPDB1`, user `PYO`,
 DSN `seerdb_test`, wallet `tests/fixtures/wallet`) match the steps above. The
 test opens a wallet mTLS connection — presenting the client certificate,
 matching the server DN `CN=seerdb-test-server` — and runs a real `SELECT`, sync
