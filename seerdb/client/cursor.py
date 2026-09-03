@@ -159,7 +159,8 @@ class Cursor(_CursorLogic):
         # response it read out-of-band, without re-sending the request.
         # Wire result tuple from decode_token_oer:
         #   (call_status, oracle_error_code, cursor_id, (rowcount, col_meta),
-        #    rows, message_or_none, last_rowid, batch_errors)
+        #    rows, message_or_none, last_rowid, batch_errors, row_counts,
+        #    error_offset)
         # The trailing slots were added incrementally; tolerate a shorter shape
         # so a stale build doesn't crash here.
         try:
@@ -168,6 +169,7 @@ class Cursor(_CursorLogic):
             Rows = Result[4]
             Message = Result[5] if len(Result) > 5 else None
             LastRowid = Result[6] if len(Result) > 6 else None
+            ErrorOffset = Result[9] if len(Result) > 9 else None
         except (TypeError, IndexError, ValueError) as exc:
             raise DatabaseError(f'unexpected wire response: {Result!r}') from exc
 
@@ -184,7 +186,11 @@ class Cursor(_CursorLogic):
         NonFatal = (0, 1403, 24381) if BatchErrors else (0, 1403)
         if OraCode not in NonFatal:
             Detail = Message or f'ORA-{OraCode:05d}'
-            raise from_ora_code(OraCode)(Detail, code=OraCode)
+            Exc = from_ora_code(OraCode)(Detail, code=OraCode)
+            # oracledb parity: the 0-based character offset of the error in the
+            # statement text, for a parse/bind error (0 when the server reports none).
+            Exc.offset = ErrorOffset
+            raise Exc
 
         # PL/SQL OUT / IN OUT binds: write returned values back into any Var
         # objects the caller passed. REF CURSOR OUT binds are fetched here.

@@ -1981,7 +1981,7 @@ def decode_token_oer(Data: bytes, Acc: tuple) -> tuple:
     (_, Rest) = decode_ub4(Rest)  # array elem error #1
     (_, Rest) = decode_ub4(Rest)  # array elem error #2
     (CursorId, Rest) = decode_ub4(Rest)  # current cursor id
-    (_, Rest) = decode_ub4(Rest)  # error position
+    (ErrorPos, Rest) = decode_ub4(Rest)  # error position (parse offset into the SQL)
     Rest = Rest[6:]  # 6 single-byte fields:
     #   sql_type, fatal,
     #   flags, user_cursor_opts,
@@ -2077,6 +2077,7 @@ def decode_token_oer(Data: bytes, Acc: tuple) -> tuple:
         Rowid,
         BatchErrors,
         RowCounts,
+        ErrorPos,
     )
 
 
