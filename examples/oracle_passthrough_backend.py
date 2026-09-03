@@ -108,6 +108,20 @@ class OraclePassthroughBackend:
             raise _relay_error(exc) from exc
         return cursor.rowcount or 0
 
+    def execute_many_rowcounts(
+        self, sql: str, rows: Sequence[Sequence]
+    ) -> tuple[int, list[int]]:
+        # Array DML with the per-iteration affected-row counts (arraydmlrowcounts,
+        # #18): run the batch upstream asking for them, and return the total plus
+        # the count list the client reads back through getarraydmlrowcounts().
+        assert self._conn is not None  # authenticate() ran before any execute
+        cursor = self._conn.cursor()
+        try:
+            cursor.executemany(sql, [list(row) for row in rows], arraydmlrowcounts=True)
+        except seerdb.DatabaseError as exc:
+            raise _relay_error(exc) from exc
+        return cursor.rowcount or 0, list(cursor.getarraydmlrowcounts())
+
     def _execute_plsql(self, cursor, sql: str, binds: Sequence) -> Result:
         variables = []
         for bind in binds:

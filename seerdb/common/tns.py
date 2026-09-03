@@ -276,6 +276,8 @@ class ExecRequest:
     scrollable: bool = False
     scroll_orientation: int = 0
     scroll_position: int = 0
+    # Array-DML per-iteration row counts requested (al8i4[9] & 0xC000, #18).
+    arraydmlrowcounts: bool = False
 
 
 @dataclass(frozen=True)
@@ -1035,6 +1037,21 @@ def encode_status(rowcount: int = 0, cursor_id: int = 0) -> bytes:
     return _encode_oer(0, 0, rowcount, b'', cursor_id=cursor_id)
 
 
+def encode_status_with_rowcounts(
+    rowcount: int, counts: list[int], *, cursor_id: int = 0
+) -> bytes:
+    """The DML success status when the client requested arraydmlrowcounts (#18):
+    the per-iteration affected-row counts, then the ordinary status OER. The
+    counts ride in front of the OER as a minimal server-side session-state RPA
+    piggyback (`TTI_RPA`, zero fields) whose body is `ub4 count | count x ub4`,
+    exactly where the client's decode_token_rpa_piggyback reads them when its own
+    execute armed arraydmlrowcounts. Without the request the client never looks
+    for them, so this form is used only then."""
+    block = encode_sb4(len(counts)) + b''.join(encode_sb4(c) for c in counts)
+    piggyback = bytes([TTI_RPA]) + encode_sb4(0) + block
+    return piggyback + encode_status(rowcount, cursor_id=cursor_id)
+
+
 # ORA-24381: the array-DML summary code the server returns when a batcherrors
 # execute collected per-row failures — non-fatal, the client reads the errors
 # from getbatcherrors() rather than raising (#18).
@@ -1296,6 +1313,7 @@ def parse_exec(payload: bytes, bind_types: list | None = None) -> ExecRequest:
         al8_elem, after = decode_ub4(after)
         al8.append(al8_elem)
     scrollable = len(al8) > 9 and bool(al8[9] & TNS_EXEC_FLAGS_SCROLLABLE)
+    arraydmlrowcounts = len(al8) > 9 and bool(al8[9] & TNS_AL8I4_ARRAY_DML_ROWCOUNTS)
     scroll_orientation = al8[10] if len(al8) > 10 else 0
     scroll_position = al8[11] if len(al8) > 11 else 0
 
@@ -1367,6 +1385,7 @@ def parse_exec(payload: bytes, bind_types: list | None = None) -> ExecRequest:
         scrollable=scrollable,
         scroll_orientation=scroll_orientation,
         scroll_position=scroll_position,
+        arraydmlrowcounts=arraydmlrowcounts,
     )
 
 
