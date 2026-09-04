@@ -211,7 +211,21 @@ jobs:
             echo "the Mirror exited during startup"; cat mirror.log; exit 1
           fi
           status=0
-          python -m unittest -v tests.test_integration || status=$?
+          # pytest rather than unittest here, because this run has to skip a
+          # group and unittest's -k takes a pattern, not an expression. The
+          # step above already uses pytest, and so does
+          # tools/run_mirror_suite.py, which is how this same run is done
+          # locally.
+          #
+          # The skipped group is the one the Mirror cannot serve: a
+          # RETURNING ... INTO statement writes no value for its server-filled
+          # binds, and the Mirror's request parser reads a value for every
+          # bind, so it desyncs before the backend sees anything. It also has
+          # no way to send return data back. Both halves are issue #689; the
+          # local runner skips the same group for the same reason. Drop this to
+          # verify that work.
+          python -m pytest -q --tb=short tests/test_integration.py \
+            -k "not executemany_returning" || status=$?
           kill "$MIRROR_PID" 2>/dev/null || true
           if [ "$status" -ne 0 ]; then echo "--- mirror log ---"; tail -n 200 mirror.log; fi
           exit "$status"
