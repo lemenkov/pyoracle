@@ -1525,6 +1525,56 @@ def test_parse_exec_decodes_a_native_vector_bind_type_preserving() -> None:
     assert list(bound) == [1, -2, 3, -4]
 
 
+def test_parse_exec_decodes_a_ref_bind_with_its_type_oid() -> None:
+    # A REF bind (#139): its OAC carries the referenced type's 16-byte OID with a
+    # two-length framing that a plain-DALC OAC read would desync on (dropping the
+    # next bind -> ORA-01008). parse_exec must decode the OAC cleanly and rebuild
+    # a DbRef pairing the locator (from the value) with that OID, so a second
+    # bind after it still parses and the backend can re-bind the REF.
+    from seerdb.common.dbobject import DbRef
+    from seerdb.common.tns import (
+        _ENCODE_FIELD_VERSION,
+        encode_dictionary_exec,
+        parse_exec,
+    )
+    from seerdb.common.tns_consts import FIELD_VERSION_23_1
+
+    oid = bytes.fromhex('00280209' + 'a1' * 12)
+    ref = DbRef(bytes.fromhex('0028') + b'\xbb' * 30, type_oid=oid, type_name='T')
+    enc = _ENCODE_FIELD_VERSION.set(FIELD_VERSION_23_1)
+    dec = _DECODE_FIELD_VERSION.set(FIELD_VERSION_23_1)
+    try:
+        payload = encode_dictionary_exec(
+            {
+                'seq': 4,
+                'field_version': FIELD_VERSION_23_1,
+                'query': {
+                    'type': 'select',
+                    'auto': 0,
+                    'fetch': 0,
+                    'server_version': 186647040,
+                    'cursor': 0,
+                    'query': 'insert into t values (:1, :2)',
+                    # A scalar bind AFTER the REF proves the OAC realigned: a
+                    # desync would swallow it and surface as ORA-01008.
+                    'bind': [ref, 100],
+                    'batch': [],
+                    'def': [],
+                },
+            }
+        )
+        request = parse_exec(payload)
+    finally:
+        _ENCODE_FIELD_VERSION.reset(enc)
+        _DECODE_FIELD_VERSION.reset(dec)
+    assert request.bind_count == 2
+    bound = request.binds[0]
+    assert isinstance(bound, DbRef)
+    assert bound.bytes == ref.bytes
+    assert bound.type_oid == oid
+    assert request.binds[1] == 100
+
+
 def test_encode_value_emits_a_thin_lob_locator_for_lob_columns() -> None:
     # A thin (oracledb/seerdb) client's LOB column carries a minted opaque locator
     # inline; the content follows over TTI_LOBOPS. NULL is a bare 0x00 (#413).
@@ -2331,11 +2381,13 @@ def test_decode_oac_fields_exposes_csfrm() -> None:
     from seerdb.common.tns import decode_oac_fields, decode_token_oac, encode_tokens_oac
 
     # Build the OAC bytes the client sends for one VARCHAR bind, then confirm the
-    # new decoder surfaces the charset-form byte the 5-tuple form drops.
+    # new decoder surfaces the charset-form byte the 5-tuple form drops, and an
+    # empty type OID (a scalar bind carries none).
     oac = encode_tokens_oac(['hi'], b'')
-    dtype, maxlen, scale, charset, csfrm, rest = decode_oac_fields(oac)
+    dtype, maxlen, scale, charset, csfrm, toid, rest = decode_oac_fields(oac)
     assert csfrm == 1  # an ordinary (DB) char bind
-    # The 5-tuple form stays byte-compatible (same fields minus csfrm).
+    assert toid == b''  # a scalar bind has no referenced-type OID
+    # The 5-tuple form stays byte-compatible (same fields minus csfrm / toid).
     assert (dtype, maxlen, scale, charset, rest) == decode_token_oac(oac, ())
 
 

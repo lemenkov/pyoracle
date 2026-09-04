@@ -1103,6 +1103,18 @@ OID(0) | Version(0) | CharsetID(SB4) | CharsetForm(UB1) | MXLC(SB4)
 
 **CharsetForm**: `1` for database charset, `2` for national charset (AL16UTF16).
 
+**OID (object / REF binds)**: the `OID` slot holds the referenced type's 16-byte
+OID for an object (type 109) or REF (type 111) bind, and is written with **two
+lengths** (`write_bytes_with_two_lengths`: a `ub4` count then, only when
+non-empty, the length-prefixed bytes) — **not** a plain DALC. For a scalar bind
+the OID is empty and both forms are the single byte `0x00`, so a decoder that
+reads it as a bare DALC works for every scalar but **desyncs the whole OAC** on a
+real 16-byte OID (it reads the leading `ub4` count as the value), dropping the
+next bind — which the server reports as `ORA-01008` (missing placeholder). The
+Mirror's `decode_oac_fields` reads the two-length form and pairs the OID with the
+REF locator (the bind value, a plain DALC) to rebuild the `DbRef` the backend
+re-binds (#139).
+
 The layout above is the 11g form. 12c+ (field version >= 12.2,
 `encode_token_raw`) uses oracledb's `_write_column_metadata` layout instead:
 a fixed flag byte (`TNS_BIND_USE_INDICATORS = 1`), `ContFlags` as a `ub8`, an
