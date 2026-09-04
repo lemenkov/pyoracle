@@ -1138,6 +1138,39 @@ class CursorIntegration(_IntegrationBase):
 class BindIntegration(_IntegrationBase):
     """Verify Cursor.execute parameter binding."""
 
+    # ----- setinputsizes types a bind the value cannot (#696) -----
+    #
+    # What the declaration is *for* -- a NULL bind the server would otherwise
+    # take as CHAR -- cannot be asserted here. The statement that needs it is one
+    # the Mirror's PostgreSQL backend cannot type either, because the Mirror does
+    # not carry a bind's declared type through to its backend (#699), so such a
+    # test would fail there for a reason that has nothing to do with the driver.
+    # The exact type byte the declaration puts on the wire is pinned in
+    # tests/test_setinputsizes.py instead, which is the stronger check anyway;
+    # what is left here is that a declaration survives a real round trip.
+
+    def test_setinputsizes_does_not_disturb_an_ordinary_bind(self):
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, n NUMBER)')
+        self.cur.execute(f'INSERT INTO {self.TABLE} VALUES (1, 5)')
+        self.cur.setinputsizes(n=seerdb.DB_TYPE_NUMBER)
+        self.cur.execute(f'SELECT id FROM {self.TABLE} WHERE n = :n', {'n': 5})
+        self.assertEqual(self.cur.fetchall(), [(1,)])
+
+    def test_setinputsizes_positionally_and_by_python_type(self):
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, s VARCHAR2(20))')
+        self.cur.execute(f"INSERT INTO {self.TABLE} VALUES (1, 'x')")
+        self.cur.setinputsizes(str)
+        self.cur.execute(f'SELECT id FROM {self.TABLE} WHERE s = :1', ['x'])
+        self.assertEqual(self.cur.fetchall(), [(1,)])
+
+    def test_setinputsizes_is_spent_by_one_execute(self):
+        # PEP 249: the declaration applies to the next execute and is forgotten.
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER)')
+        self.cur.setinputsizes(seerdb.DB_TYPE_NUMBER)
+        self.assertNotEqual(self.cur._inputsizes, ((), {}))
+        self.cur.execute(f'SELECT id FROM {self.TABLE} WHERE id = :1', [1])
+        self.assertEqual(self.cur._inputsizes, ((), {}))
+
     # ----- var() reads back as the type it was asked for (#688) -----
 
     def test_var_float_reads_back_as_float(self):
@@ -3864,6 +3897,23 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(await Cur.fetchone(), (8,))
                 finally:
                     await Cur.execute('DROP TABLE PYORACLE_ASYNC_EM')
+
+    async def test_async_setinputsizes_reaches_the_execute(self):
+        # Async mirror of the setinputsizes round trip (#696): the declaration is
+        # applied in each cursor's own execute path, and spent there.
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                await Cur.execute('CREATE TABLE PYORACLE_ASYNC_SIS (id NUMBER)')
+                try:
+                    await Cur.execute('INSERT INTO PYORACLE_ASYNC_SIS VALUES (1)')
+                    Cur.setinputsizes(seerdb.DB_TYPE_NUMBER)
+                    await Cur.execute(
+                        'SELECT id FROM PYORACLE_ASYNC_SIS WHERE id = :1', [1]
+                    )
+                    self.assertEqual(await Cur.fetchall(), [(1,)])
+                    self.assertEqual(Cur._inputsizes, ((), {}))
+                finally:
+                    await Cur.execute('DROP TABLE PYORACLE_ASYNC_SIS')
 
     async def test_async_failing_returning_keeps_the_session(self):
         # Async mirror of test_failing_returning_raises_cleanly_and_keeps_the

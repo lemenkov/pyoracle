@@ -14,7 +14,6 @@ from seerdb.client.cursor import (
     _col_annotations,
     _column_description,
     _extract_implicit_results,
-    _is_plsql,
     _resolve_parameters,
 )
 from seerdb.common.datatypes import TempLob, Var
@@ -25,7 +24,7 @@ from seerdb.common.exceptions import (
     ProgrammingError,
     from_ora_code,
 )
-from seerdb.common.sqltext import returning_bind_positions
+from seerdb.common.sqltext import is_plsql, returning_bind_positions
 from seerdb.common.tns_consts import (
     AL32UTF8_CHARSET,
     FIELD_VERSION_10_2,
@@ -85,7 +84,7 @@ class AsyncCursor(_CursorLogic):
         Conn = self._connection
         if (
             getattr(Conn, 'field_version', 0) < FIELD_VERSION_12_1
-            or not _is_plsql(operation)
+            or not is_plsql(operation)
             or not Bind
         ):
             return Bind
@@ -111,6 +110,12 @@ class AsyncCursor(_CursorLogic):
         BatchErrors: bool = False,
         ArrayDmlRowCounts: bool = False,
     ) -> 'AsyncCursor':
+        # A pending setinputsizes types the binds it names before anything else
+        # looks at them, and is spent by this execute (#696).
+        Bind = self._typed_binds(operation, Bind)
+        if Batch:
+            Batch = [self._typed_binds(operation, Row) for Row in Batch]
+        self._inputsizes = ((), {})
         _check_object_bind_support(self._connection, Bind, Batch)
         Kw: dict[str, Any] = {
             'Bind': Bind,

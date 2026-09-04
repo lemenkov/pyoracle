@@ -3,7 +3,7 @@
 
 """Offline tests for the client-side SQL-text parsers (#439).
 
-``_is_plsql`` classifies a statement as a PL/SQL block (so execute picks the
+``is_plsql`` classifies a statement as a PL/SQL block (so execute picks the
 anonymous-block path and the temp-LOB promotion), and ``extract_bind_names``
 pulls the ``:name`` placeholders a dict bind is matched against. Both must see
 through leading comments and quoted text.
@@ -18,32 +18,33 @@ original.
 
 import unittest
 
-from seerdb.client.cursor import _is_plsql, _resolve_parameters
+from seerdb.client.cursor import _resolve_parameters
 from seerdb.common.sqltext import (
     bind_placeholders,
     canonical_bind_key,
     extract_bind_names,
+    is_plsql,
 )
 
 
 class TestIsPlsql(unittest.TestCase):
     def test_plain_block_forms(self):
-        self.assertTrue(_is_plsql('BEGIN null; END;'))
-        self.assertTrue(_is_plsql('DECLARE x number; BEGIN null; END;'))
+        self.assertTrue(is_plsql('BEGIN null; END;'))
+        self.assertTrue(is_plsql('DECLARE x number; BEGIN null; END;'))
 
     def test_case_insensitive_and_leading_whitespace(self):
-        self.assertTrue(_is_plsql('  begin null; end;'))
-        self.assertTrue(_is_plsql('\n\t declare x number; begin null; end;'))
+        self.assertTrue(is_plsql('  begin null; end;'))
+        self.assertTrue(is_plsql('\n\t declare x number; begin null; end;'))
 
     def test_leading_line_comments_before_block(self):
         # `--` line comments preceding BEGIN/DECLARE are stripped first.
-        self.assertTrue(_is_plsql('-- comment #1\n-- comment #2\nBEGIN null; END;'))
+        self.assertTrue(is_plsql('-- comment #1\n-- comment #2\nBEGIN null; END;'))
 
     def test_leading_block_comments_before_block(self):
         # `/* ... */` block comments (including multi-line) are stripped first.
-        self.assertTrue(_is_plsql('/* comment */ BEGIN null; END;'))
+        self.assertTrue(is_plsql('/* comment */ BEGIN null; END;'))
         self.assertTrue(
-            _is_plsql('/* multi\nline */\nDECLARE x number; BEGIN null; END;')
+            is_plsql('/* multi\nline */\nDECLARE x number; BEGIN null; END;')
         )
 
     def test_mixed_comments_before_declare_block(self):
@@ -52,19 +53,19 @@ class TestIsPlsql(unittest.TestCase):
             '  /* comment #4 */\nDECLARE\n  foo NUMBER := 42;\n'
             'BEGIN\n  INSERT INTO bar VALUES (foo);\nEND;\n'
         )
-        self.assertTrue(_is_plsql(sql))
+        self.assertTrue(is_plsql(sql))
 
     def test_comment_led_select_is_not_plsql(self):
         sql = '-- comment #1\n/* comment #2 */ select * from dual'
-        self.assertFalse(_is_plsql(sql))
+        self.assertFalse(is_plsql(sql))
 
     def test_comment_led_dml_is_not_plsql(self):
         sql = '/* comment */ update foo set bar = 1 where baz = 1'
-        self.assertFalse(_is_plsql(sql))
+        self.assertFalse(is_plsql(sql))
 
     def test_a_word_starting_with_begin_is_not_a_block(self):
         # `beginning` must not be mistaken for the BEGIN keyword.
-        self.assertFalse(_is_plsql('select beginning from t'))
+        self.assertFalse(is_plsql('select beginning from t'))
 
 
 class TestExtractBindNames(unittest.TestCase):
