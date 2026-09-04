@@ -1107,6 +1107,67 @@ class CursorIntegration(_IntegrationBase):
 class BindIntegration(_IntegrationBase):
     """Verify Cursor.execute parameter binding."""
 
+    # ----- quoted placeholders (#686) -----
+
+    def test_quoted_bind_names_the_plain_form_cannot_express(self):
+        # The reason this spelling exists. Unquoted, each of these names is
+        # refused, and each for a different reason: a reserved word with
+        # ORA-01745, a leading underscore with ORA-00911, and a leading digit is
+        # not a placeholder at all so nothing is bound for it. Quoting is how
+        # any of them gets through.
+        for name, value in (('desc', 7), ('2x', 8), ('_lead', 9)):
+            with self.subTest(name=name):
+                self.cur.execute(f'SELECT :"{name}" FROM dual', {f'"{name}"': value})
+                self.assertEqual(self.cur.fetchall(), [(value,)])
+
+    def test_quoted_bind_is_case_sensitive(self):
+        # Two placeholders differing only in case are two different binds, which
+        # is not true of the unquoted form.
+        self.cur.execute('SELECT :"p", :"P" FROM dual', {'"p"': 1, '"P"': 2})
+        self.assertEqual(self.cur.fetchall(), [(1, 2)])
+
+    def test_quoted_and_plain_binds_together(self):
+        self.cur.execute('SELECT :"a" + :b FROM dual', {'"a"': 1, 'b': 2})
+        self.assertEqual(self.cur.fetchall(), [(3,)])
+
+    def test_quoted_bind_repeated(self):
+        # Plain SQL sends one value per textual occurrence.
+        self.cur.execute('SELECT :"a", :"a" FROM dual', {'"a"': 5})
+        self.assertEqual(self.cur.fetchall(), [(5, 5)])
+
+    def test_quoted_bind_positional_parameters(self):
+        self.cur.execute('SELECT :"p" FROM dual', [9])
+        self.assertEqual(self.cur.fetchall(), [(9,)])
+
+    def test_quoted_bind_in_returning_into(self):
+        # The clause is counted by placeholder, so the quoted spelling has to be
+        # visible to that count as well.
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, v VARCHAR2(20))')
+        got = self.cur.var(int)
+        self.cur.execute(
+            f'INSERT INTO {self.TABLE} (id, v) VALUES (:"desc", :v) '
+            'RETURNING id INTO :"out"',
+            {'"desc"': 5, 'v': 'x', '"out"': got},
+        )
+        self.assertEqual(got.getvalue(), [5])
+
+    def test_quoted_identifier_is_not_mistaken_for_a_bind(self):
+        # A quoted table or column name looks like a quoted bind name a colon
+        # short, and the closing quote of a real one must not open an identifier
+        # that swallows the rest of the statement.
+        self.cur.execute(f'CREATE TABLE {self.TABLE} ("Col A" NUMBER)')
+        self.cur.execute(f'INSERT INTO {self.TABLE} ("Col A") VALUES (:v)', {'v': 3})
+        self.cur.execute(
+            f'SELECT "Col A" FROM {self.TABLE} WHERE "Col A" = :v', {'v': 3}
+        )
+        self.assertEqual(self.cur.fetchall(), [(3,)])
+
+    def test_unquoted_bind_name_stays_case_insensitive(self):
+        self.cur.execute('SELECT :q FROM dual', {'Q': 4})
+        self.assertEqual(self.cur.fetchall(), [(4,)])
+        self.cur.execute('SELECT :Q FROM dual', {'q': 4})
+        self.assertEqual(self.cur.fetchall(), [(4,)])
+
     # ----- positional binds -----
 
     def test_positional_int_string(self):

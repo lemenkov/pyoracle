@@ -65,7 +65,10 @@ What works:
   scroll; pre-10g (9i, 8i) uses a client-buffered fallback. Sync and async
 - Bind variables: `cur.execute(sql, [v1, v2])` (positional) or
   `cur.execute(sql, {"name": v})` (named, `:name` placeholders, case-
-  insensitive); accepted bind types are `int`, `float`, `Decimal`,
+  insensitive). A name the plain form cannot express — a reserved word,
+  or one starting with a digit — can be quoted as `:"name"`, which unlike
+  the plain form is case-sensitive and is keyed with the quotes included:
+  `{'"name"': v}`. Accepted bind types are `int`, `float`, `Decimal`,
   `str`, `bytes`, `bool`, `datetime.date` / `datetime` (with optional
   timezone and microseconds), `datetime.timedelta` (→ INTERVAL DAY TO
   SECOND), `seerdb.IntervalYM(years, months)` (→ INTERVAL YEAR TO
@@ -230,7 +233,7 @@ the 12c+ protocol the 21c tier exercises.
 | Area | Support |
 | --- | --- |
 | **DB-API 2.0** — `connect`, cursors, `execute` / `executemany`, `fetchone` / `fetchmany` / `fetchall`, `description`, `rowcount`, iteration, context managers, PEP 249 exception hierarchy | ✅ |
-| **Bind variables** — positional & named (`:name`), all scalar types, `None` | ✅ |
+| **Bind variables** — positional & named (`:name`, or `:"name"` for a name the plain form cannot express), all scalar types, `None` | ✅ |
 | **Scalar types** — NUMBER, VARCHAR2 / CHAR / NVARCHAR2 / NCHAR, DATE, TIMESTAMP [WITH [LOCAL] TIME ZONE], INTERVAL DAY-SECOND / YEAR-MONTH, RAW, BINARY_FLOAT / BINARY_DOUBLE, ROWID / UROWID | ✅ |
 | **LONG / LONG RAW** | ✅ |
 | **LOBs** — CLOB, NCLOB, BLOB, BFILE read; large `str` / `bytes` → CLOB / BLOB binds (streamed past the ~32 KiB inline limit) | ✅ |

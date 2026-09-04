@@ -282,14 +282,21 @@ def _to_interval_ym(value: 'OraInterval | None') -> 'IntervalYM | None':
 
 
 # One Oracle bind reference: `:` + an identifier or number (`:x`, `:my_var`,
-# `:1`). A `::` cast is left alone (handled by the scan below, which only starts
-# a bind where the previous char isn't `:`).
-_BIND_REF = re.compile(r':(\w+)')
+# `:1`), or a quoted name (`:"desc"`), which is how a client reaches a name the
+# plain form cannot express (#686). A `::` cast is left alone (handled by the
+# scan below, which only starts a bind where the previous char isn't `:`).
+_BIND_REF = re.compile(r':(?:"([^"\n]+)"|(\w+))')
+
+
+def _bind_name(match: 're.Match') -> str:
+    # The name either spelling refers to. The quotes are not part of it.
+    return match.group(1) if match.group(1) is not None else match.group(2)
 
 
 def _bind_key(name: str) -> str:
-    # A psycopg dict key for a bind name — a numbered bind (:1) isn't a valid
-    # placeholder key, so prefix it (b1). Named binds keep their name.
+    # A psycopg dict key for a bind name — a numbered bind (:1), and a quoted
+    # name that is not a plain identifier, aren't valid placeholder keys, so
+    # prefix them (b1). Ordinary named binds keep their name.
     return name if name.isidentifier() else f'b{name}'
 
 
@@ -320,7 +327,7 @@ def _translate_binds(sql: str, binds: Sequence) -> tuple[str, dict]:
             continue
         match = _BIND_REF.match(sql, i)
         if match is not None and (i == 0 or sql[i - 1] != ':'):
-            name = match.group(1)
+            name = _bind_name(match)
             if name not in names:
                 names.append(name)
             key = _bind_key(name)
@@ -750,8 +757,9 @@ def _distinct_bind_refs(text: str) -> list[str]:
             continue
         match = _BIND_REF.match(text, i)
         if match is not None and (i == 0 or text[i - 1] != ':'):
-            if match.group(1) not in seen:
-                seen.append(match.group(1))
+            name = _bind_name(match)
+            if name not in seen:
+                seen.append(name)
             i = match.end()
             continue
         i += 1
