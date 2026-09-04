@@ -3422,6 +3422,15 @@ Both must be consumed or the row stream desyncs (it surfaces as an unknown token
 value}` dict per annotated column (`''` value for a name-only annotation) or
 `None` for an unannotated column.
 
+For a native `VECTOR` column the descriptor's `vector_dimensions` (declared
+dimension count, `0` for a flexible `VECTOR`) and `vector_format` (element
+format: `2` FLOAT32, `3` FLOAT64, `4` INT8, `5` BINARY; `0` flexible — the same
+codes as the value image's element type, §18) are kept and exposed on the
+`cursor.description` entry, which is a `FetchInfo` (a 7-tuple subclass with
+`.vector_dimensions` / `.vector_format` attributes, oracledb parity). Both are
+`None` for a non-VECTOR column or a pre-23.4 server (which sends no descriptor).
+`vector_flags` bit `0x01` marks a flexible format and `0x02` a sparse column.
+
 ### 20.6 Token auth — OAuth2 / OCI IAM (#125)
 
 Token auth (for Autonomous Database / OCI) **replaces** the O5LOGON

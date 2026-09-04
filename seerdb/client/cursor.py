@@ -856,7 +856,7 @@ def _col_annotations(Col: dict) -> dict | None:
     return {_s(K): _s(V) for K, V in Ann.items()}
 
 
-def _column_description(Col: dict) -> tuple:
+def _column_description(Col: dict) -> 'FetchInfo':
     # PEP 249 description tuple, matching python-oracledb's FetchInfo exactly:
     #   (name, type_code, display_size, internal_size, precision, scale, null_ok)
     Name = Col.get('column_name')
@@ -900,7 +900,7 @@ def _column_description(Col: dict) -> tuple:
         DisplaySize = None
     # internal_size (oracledb): the byte buffer, only for sized char/raw types.
     InternalSize = BufferSize if DeclaredSize > 0 else None
-    return (
+    fields = (
         Name,
         TypeCode,
         DisplaySize,
@@ -909,3 +909,35 @@ def _column_description(Col: dict) -> tuple:
         OutScale,
         bool(Col.get('null_ok', 0)),
     )
+    # A native VECTOR column additionally carries its element format and declared
+    # dimension count (23ai, #55) — metadata a plain type code cannot express, so
+    # a describe would otherwise drop it. oracledb exposes the same on FetchInfo.
+    return FetchInfo(
+        fields,
+        vector_dimensions=Col.get('vector_dimensions'),
+        vector_format=Col.get('vector_format'),
+    )
+
+
+class FetchInfo(tuple):
+    """One ``cursor.description`` entry: the PEP-249 7-tuple ``(name, type_code,
+    display_size, internal_size, precision, scale, null_ok)``, with 23ai vector
+    metadata attached as attributes (oracledb parity).
+
+    It *is* the 7-tuple — it indexes, unpacks and compares equal to the plain
+    tuple every PEP-249 consumer expects — and adds:
+
+    * ``vector_dimensions`` — a native VECTOR column's declared dimension count
+      (0 for a flexible ``VECTOR`` with no fixed dimension), else ``None``.
+    * ``vector_format`` — its element format code (2 FLOAT32, 3 FLOAT64, 4 INT8,
+      5 BINARY; 0 flexible), matching the value image's element type, else
+      ``None``.
+
+    Both are ``None`` for a non-VECTOR column and whenever the server is older
+    than 23.4 (the describe carries no vector descriptor before then)."""
+
+    def __new__(cls, fields, *, vector_dimensions=None, vector_format=None):
+        self = super().__new__(cls, fields)
+        self.vector_dimensions = vector_dimensions
+        self.vector_format = vector_format
+        return self

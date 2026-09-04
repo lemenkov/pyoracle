@@ -106,6 +106,40 @@ class TestColumnDescription(unittest.TestCase):
         self.assertTrue(self.d(null_ok=1)[6])
         self.assertEqual(self.d(column_name=b'ID')[0], 'ID')
 
+    def test_entry_is_a_fetchinfo_that_behaves_as_the_7_tuple(self):
+        # FetchInfo is a tuple subclass: it indexes, unpacks and compares equal
+        # to the plain 7-tuple every PEP-249 consumer expects.
+        from seerdb.client.cursor import FetchInfo
+
+        fi = self.d(data_type=2, precision=10, data_scale=2, data_length=22)
+        self.assertIsInstance(fi, FetchInfo)
+        self.assertIsInstance(fi, tuple)
+        self.assertEqual(len(fi), 7)
+        self.assertEqual(fi, ('C', seerdb.DB_TYPE_NUMBER, 14, None, 10, 2, True))
+        name, type_code, *_ = fi
+        self.assertEqual(name, 'C')
+
+    def test_vector_metadata_exposed_for_vector_columns(self):
+        # A native VECTOR column (type 127) surfaces its element format and
+        # declared dimensions on the FetchInfo (23ai, #55).
+        fi = self.d(data_type=127, vector_format=4, vector_dimensions=8, vector_flags=0)
+        self.assertEqual(fi.vector_format, 4)  # INT8
+        self.assertEqual(fi.vector_dimensions, 8)
+
+    def test_vector_metadata_is_none_for_non_vector_columns(self):
+        # A plain column carries no vector metadata (and none is invented).
+        fi = self.d(data_type=2)
+        self.assertIsNone(fi.vector_format)
+        self.assertIsNone(fi.vector_dimensions)
+
+    def test_vector_metadata_is_none_without_a_descriptor(self):
+        # A VECTOR column described by a server that sends no vector descriptor
+        # (pre-23.4, or one negotiating field version <= 17) has no format keys
+        # on its Col dict; the metadata stays None rather than a fake 0.
+        fi = self.d(data_type=127)
+        self.assertIsNone(fi.vector_format)
+        self.assertIsNone(fi.vector_dimensions)
+
 
 if __name__ == '__main__':
     unittest.main()
