@@ -6549,5 +6549,75 @@ class TestO8iBfile(unittest.TestCase):
         self.assertEqual(content, b'Dump file C:\\oracle\\admin\\ORCL\\b')
 
 
+class TestZeroLengthColumn(unittest.TestCase):
+    """A column described with a zero data length is NULL and occupies nothing.
+
+    `SELECT NULL AS x` (and `SELECT ''`) describes exactly this way. The server
+    sends no bytes for it — not even the empty DALC an ordinary NULL would
+    carry — so reading one consumed the following token and desynced the rest of
+    the response (#682).
+    """
+
+    def test_it_is_null_and_consumes_nothing(self):
+        from seerdb.common.tns_consts import TNS_TYPE_VARCHAR, TTI_RXD, TTI_STA
+
+        row_format = [
+            {'data_type': TNS_TYPE_VARCHAR, 'column_name': b'A', 'data_length': 0}
+        ]
+        body = bytes([TTI_RXD]) + bytes([TTI_STA])
+        (done, acc) = decode_packet(body, (None, row_format, []))
+        self.assertTrue(done)
+        self.assertEqual(acc[2], [[None]])
+
+    def test_it_does_not_swallow_the_next_column(self):
+        from seerdb.common.tns import encode_value
+        from seerdb.common.tns_consts import (
+            TNS_TYPE_NUMBER,
+            TNS_TYPE_VARCHAR,
+            TTI_RXD,
+            TTI_STA,
+        )
+
+        row_format = [
+            {'data_type': TNS_TYPE_VARCHAR, 'column_name': b'A', 'data_length': 0},
+            {'data_type': TNS_TYPE_NUMBER, 'column_name': b'N', 'data_length': 22},
+        ]
+        body = bytes([TTI_RXD]) + encode_value(42, TNS_TYPE_NUMBER) + bytes([TTI_STA])
+        (done, acc) = decode_packet(body, (None, row_format, []))
+        self.assertTrue(done)
+        self.assertEqual(acc[2], [[None, 42]])
+
+    def test_a_number_is_not_mistaken_for_one(self):
+        # A NUMBER is described with max_size 0 but a non-zero data length, so
+        # keying the skip on max_size would drop every numeric value.
+        from seerdb.common.tns import encode_value
+        from seerdb.common.tns_consts import TNS_TYPE_NUMBER, TTI_RXD, TTI_STA
+
+        row_format = [
+            {
+                'data_type': TNS_TYPE_NUMBER,
+                'column_name': b'N',
+                'data_length': 22,
+                'max_size': 0,
+            }
+        ]
+        body = bytes([TTI_RXD]) + encode_value(7, TNS_TYPE_NUMBER) + bytes([TTI_STA])
+        (done, acc) = decode_packet(body, (None, row_format, []))
+        self.assertTrue(done)
+        self.assertEqual(acc[2], [[7]])
+
+    def test_a_row_format_without_the_field_still_reads_normally(self):
+        # A describe always sets the field; a hand-built format may omit it, and
+        # that must not be read as "zero length".
+        from seerdb.common.tns import encode_value
+        from seerdb.common.tns_consts import TNS_TYPE_NUMBER, TTI_RXD, TTI_STA
+
+        row_format = [{'data_type': TNS_TYPE_NUMBER, 'column_name': b'N'}]
+        body = bytes([TTI_RXD]) + encode_value(5, TNS_TYPE_NUMBER) + bytes([TTI_STA])
+        (done, acc) = decode_packet(body, (None, row_format, []))
+        self.assertTrue(done)
+        self.assertEqual(acc[2], [[5]])
+
+
 if __name__ == '__main__':
     unittest.main()

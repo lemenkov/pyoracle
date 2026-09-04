@@ -1557,6 +1557,27 @@ values with the *negotiated* form — `seerdb/server/query.py` uses `encode_chr`
 (field-version-aware), not the always-12c+ `_bytes_with_length`, or an 11g client
 decodes a value past 253 bytes as a "truncated DALC field".
 
+**A column described with a zero data length carries no bytes at all** — not
+even the empty DALC an ordinary NULL sends — and its value is always NULL. The
+describe is the only thing that says so; nothing in the row marks the omission.
+`SELECT NULL AS x` and `SELECT '' AS x` describe this way, as VARCHAR with data
+length 0. Reading a DALC for such a column consumes whatever follows, which is
+normally the response's terminating token, and the rest of the response then
+decodes as garbage (#682).
+
+Two neighbouring cases make this easy to get wrong:
+
+| Described as | data length | max size | Carries bytes? |
+|--------------|-------------|----------|----------------|
+| `NULL` / `''` literal | 0  | 0 | **no** |
+| `NUMBER`              | 22 | 0 | yes |
+| `LONG`                | 0  | 0 | yes, its own chunked framing |
+
+So the test is the **data length**, not the max size — a NUMBER is described
+with a max size of zero while carrying a value — and it has to be applied after
+the types that have their own row encoding, since a LONG is also described with
+a zero data length. Confirmed identically on 11g, 21c and 23ai.
+
 ### 6.3 Bit Vector for Changed Columns (TTI_BVC)
 
 When the server uses differential row encoding it emits a BVC token
