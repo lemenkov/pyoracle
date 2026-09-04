@@ -93,12 +93,14 @@ class OsonError(Exception):
 def json_to_text(value: object) -> str:
     """Serialise a Python value to JSON text for a JSON bind (#50).
 
-    seerdb binds this text as a string and the server casts it to the
-    column's JSON type — the native binary OSON encoder is future work (the
-    decoder is the inverse). ``Decimal`` is emitted as a JSON number (integral
-    values stay exact; others go through ``float``); other unsupported types
-    raise ``TypeError`` from :func:`json.dumps`. ``ensure_ascii=False`` keeps
-    UTF-8 text natural (seerdb advertises AL32UTF8)."""
+    The text-cast fallback: seerdb binds this string and the server casts it to
+    the column's JSON type. It is used when :func:`encode_oson` cannot build a
+    compact native image (a wide / large document, #70) — the native binary
+    OSON encoder covers the small-document shape the server accepts inline.
+    ``Decimal`` is emitted as a JSON number (integral values stay exact; others
+    go through ``float``); other unsupported types raise ``TypeError`` from
+    :func:`json.dumps`. ``ensure_ascii=False`` keeps UTF-8 text natural (seerdb
+    advertises AL32UTF8)."""
     import json
     from decimal import Decimal
 
@@ -110,7 +112,32 @@ def json_to_text(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, default=default)
 
 
-def _oson_scalar_node(value) -> bytes:
+def _width(n: int) -> int:
+    # The byte width a count / field-id / offset of magnitude `n` needs: ub1,
+    # ub2 or ub4. Mirrors the widths decode_oson reads (#69/#88).
+    return 1 if n <= 0xFF else (2 if n <= 0xFFFF else 4)
+
+
+def _count_bits(width: int) -> int:
+    # The container-tag bits selecting a ub2 / ub4 count + field-id width; ub1
+    # sets neither (the compact form).
+    return 0x00 if width == 1 else (_TAG_WIDE_COUNT if width == 2 else _TAG_UB4_COUNT)
+
+
+def _oson_str_node(b: bytes) -> bytes:
+    # A string node in the narrowest form its length allows: inline (<= 0x1F),
+    # 0x33 ub1 (<= 0xFF), 0x37 ub2 (<= 0xFFFF, #88), else 0x38 ub4 (#88).
+    n = len(b)
+    if n <= 0x1F:
+        return bytes([n]) + b
+    if n <= 0xFF:
+        return b'\x33' + bytes([n]) + b
+    if n <= 0xFFFF:
+        return b'\x37' + n.to_bytes(2, 'big') + b
+    return b'\x38' + n.to_bytes(4, 'big') + b
+
+
+def _oson_scalar_node(value, allow_wide: bool = False) -> bytes:
     from decimal import Decimal
 
     from seerdb.common.tns import encode_token_decimal, encode_token_num
@@ -123,11 +150,9 @@ def _oson_scalar_node(value) -> bytes:
         return b'\x32'
     if isinstance(value, str):
         b = value.encode('utf-8')
-        if len(b) > 0xFF:
+        if len(b) > 0xFF and not allow_wide:
             raise OsonError('string too long for the native OSON encoder')
-        return (
-            (bytes([len(b)]) + b) if len(b) <= 0x1F else b'\x33' + bytes([len(b)]) + b
-        )
+        return _oson_str_node(b)
     if isinstance(value, Decimal):
         nb = encode_token_decimal(value)
         return b'\x34' + bytes([len(nb)]) + nb
@@ -137,49 +162,72 @@ def _oson_scalar_node(value) -> bytes:
     raise OsonError(f'cannot OSON-encode {type(value).__name__}')
 
 
-def _oson_emit(value, buf: bytearray, fid) -> int:
-    # Append `value`'s node to `buf`; return its start offset. Containers use
-    # ub1 count + ub1 field-ids + ub2 value-offsets (matching the server's
-    # compact small-document form, flag 0x04). > 255 entries would need ub2 —
-    # raise so the caller falls back to the text cast.
+def _oson_emit(
+    value, buf: bytearray, fid, off_size: int, nfw: int, allow_wide: bool
+) -> int:
+    # Append `value`'s node to `buf`; return its start offset. A container's
+    # count + field-ids share a width (ub1 / ub2 / ub4, selected by the tag's
+    # 0x08 / 0x10 bits) sized to the larger of its entry count and — for an
+    # object — the field-id space `nfw`; value-offsets are `off_size` wide. The
+    # compact form (all ub1, ub2 offsets, tag 0x84 / 0xC4) is the small-document
+    # case and stays byte-for-byte what the server sends. With `allow_wide` off,
+    # a container that would need a wider count raises so the compact-only
+    # callers fall back to the text cast (#70); on the Mirror read path it is set
+    # so a wide / large document (#69/#88) re-encodes for the client's decoder.
     start = len(buf)
     if isinstance(value, dict):
-        if len(value) > 0xFF:
-            raise OsonError('object too wide for the native OSON encoder')
         items = list(value.items())
-        buf += bytes([0x84, len(items)])
+        cw = max(_width(len(items)), nfw)
+        if cw > 1 and not allow_wide:
+            raise OsonError('object too wide for the native OSON encoder')
+        buf += bytes([0x80 | _count_bits(cw) | 0x04]) + len(items).to_bytes(cw, 'big')
         for k in value:
-            buf += bytes([fid(k)])
+            buf += fid(k).to_bytes(cw, 'big')
         off_pos = len(buf)
-        buf += b'\x00\x00' * len(items)
-        offs = [_oson_emit(v, buf, fid) for _, v in items]
+        buf += b'\x00' * (off_size * len(items))
+        offs = [_oson_emit(v, buf, fid, off_size, nfw, allow_wide) for _, v in items]
         for i, o in enumerate(offs):
-            buf[off_pos + 2 * i : off_pos + 2 * i + 2] = o.to_bytes(2, 'big')
+            buf[off_pos + off_size * i : off_pos + off_size * (i + 1)] = o.to_bytes(
+                off_size, 'big'
+            )
         return start
     if isinstance(value, list):
-        if len(value) > 0xFF:
+        cw = _width(len(value))
+        if cw > 1 and not allow_wide:
             raise OsonError('array too long for the native OSON encoder')
-        buf += bytes([0xC4, len(value)])
+        buf += bytes([0xC0 | _count_bits(cw) | 0x04]) + len(value).to_bytes(cw, 'big')
         off_pos = len(buf)
-        buf += b'\x00\x00' * len(value)
-        offs = [_oson_emit(v, buf, fid) for v in value]
+        buf += b'\x00' * (off_size * len(value))
+        offs = [_oson_emit(v, buf, fid, off_size, nfw, allow_wide) for v in value]
         for i, o in enumerate(offs):
-            buf[off_pos + 2 * i : off_pos + 2 * i + 2] = o.to_bytes(2, 'big')
+            buf[off_pos + off_size * i : off_pos + off_size * (i + 1)] = o.to_bytes(
+                off_size, 'big'
+            )
         return start
-    buf += _oson_scalar_node(value)
+    buf += _oson_scalar_node(value, allow_wide)
     return start
 
 
-def encode_oson(value) -> bytes:
-    """Encode a Python value to an OSON image (the inverse of decode_oson) for a
-    native JSON bind (#70). Covers the common small-document shape — scalars,
-    objects/arrays up to 255 entries, strings up to 255 bytes, segments up to
-    64 KiB — and raises OsonError for anything larger so the bind path can fall
-    back to the text cast (which the server parses just as well). Container
-    value-offsets are ub2 (the compact 0x04 form); field-name hashes are sent as
-    zero (the server accepts that — verified by round-trip on 21c)."""
+def encode_oson(value, *, allow_wide: bool = False) -> bytes:
+    """Encode a Python value to an OSON image (the inverse of decode_oson).
+
+    The default (``allow_wide`` False) emits only the compact small-document
+    shape — scalars, objects/arrays up to 255 entries, strings up to 255 bytes,
+    segments up to 64 KiB — and raises OsonError for anything larger so a native
+    JSON bind falls back to the text cast (#70), which the server parses just as
+    well. This path is byte-for-byte the form the server sends: container
+    value-offsets are ub2 (the compact 0x04 form) and field-name hashes are zero
+    (the server accepts that — verified by round-trip on 21c).
+
+    ``allow_wide`` unlocks the large-document forms the decoder already reads
+    (#69/#88): ub2 / ub4 counts and field-ids, ub2 / ub4 string lengths, a ub4
+    tree size and ub4 value-offsets. The Mirror serves a JSON column's value
+    back to a thin client through it (that client decodes with decode_oson, the
+    exact inverse), so a wide (> 255-key) or large (> 64 KiB) document reads
+    back correctly. It is *not* used for a real bind: the server has never been
+    asked to parse a wide image the compact path can't already carry."""
     if not isinstance(value, (dict, list)):
-        node = _oson_scalar_node(value)
+        node = _oson_scalar_node(value, allow_wide)
         return OSON_MAGIC + b'\x01' + b'\x00\x16\x00' + bytes([len(node)]) + node
     fnames: list[str] = []
     ids = {}
@@ -190,7 +238,7 @@ def encode_oson(value) -> bytes:
         if name not in ids:
             ids[name] = len(fnames) + 1
             fnames.append(name)
-            if len(fnames) > 0xFF:
+            if len(fnames) > 0xFF and not allow_wide:
                 raise OsonError('too many distinct keys for the native encoder')
         return ids[name]
 
@@ -204,29 +252,62 @@ def encode_oson(value) -> bytes:
                 walk(sub)
 
     walk(value)
+    nfw = _width(len(fnames))
 
     fnames_b = [n.encode('utf-8') for n in fnames]
     fnames_seg = b''.join(bytes([len(b)]) + b for b in fnames_b)
-    off_arr = b''
-    pos = 0
-    for b in fnames_b:
-        off_arr += pos.to_bytes(2, 'big')
-        pos += 1 + len(b)
+    off_arr = b''.join(off.to_bytes(2, 'big') for off in _fname_offsets(fnames_b))
     hash_arr = b'\x00' * len(fnames)
+    # Build the tree with ub2 value-offsets; if the tree exceeds what a ub2
+    # offset can address (either it grows past 0xFFFF or an individual offset
+    # would overflow), rebuild with ub4 offsets (#88). Two passes at most.
     tree = bytearray()
-    _oson_emit(value, tree, fid)
-    if len(fnames_seg) > 0xFFFF or len(tree) > 0xFFFF:
+    off_size = 2
+    for off_size in (2, 4):
+        tree = bytearray()
+        try:
+            _oson_emit(value, tree, fid, off_size, nfw, allow_wide)
+        except OverflowError:
+            continue
+        if off_size == 4 or len(tree) <= 0xFFFF:
+            break
+    if not allow_wide and (len(fnames_seg) > 0xFFFF or len(tree) > 0xFFFF):
         raise OsonError('document too large for the native OSON encoder')
+    if len(fnames_seg) > 0xFFFF:
+        # The field-name offset array is always ub2, so the names segment must
+        # stay under 64 KiB even in the wide form (300 short keys is ~2 KiB).
+        raise OsonError('field-name segment too large for the OSON encoder')
+    flags = 0x2106
+    if off_size == 4:
+        flags &= ~_FLAG_UB2_OFFSETS
+    if len(fnames) > 0xFF:
+        flags |= _FLAG_UB2_FNAMES
+    tree_ub4 = len(tree) > 0xFFFF
+    if tree_ub4:
+        flags |= _FLAG_UB4_TREE_SIZE
+    num_fnames = len(fnames).to_bytes(2 if len(fnames) > 0xFF else 1, 'big')
+    tree_size = len(tree).to_bytes(4 if tree_ub4 else 2, 'big')
     header = (
         OSON_MAGIC
         + b'\x01'
-        + b'\x21\x06'
-        + bytes([len(fnames)])
+        + flags.to_bytes(2, 'big')
+        + num_fnames
         + len(fnames_seg).to_bytes(2, 'big')
-        + len(tree).to_bytes(2, 'big')
+        + tree_size
         + b'\x00\x00'
     )
     return header + hash_arr + off_arr + fnames_seg + bytes(tree)
+
+
+def _fname_offsets(fnames_b: list[bytes]) -> list[int]:
+    # The ub2 offset of each field name within the names segment (each name is a
+    # ub1 length + its bytes).
+    offsets = []
+    pos = 0
+    for b in fnames_b:
+        offsets.append(pos)
+        pos += 1 + len(b)
+    return offsets
 
 
 def _u16(buf: bytes, pos: int) -> int:

@@ -6353,7 +6353,9 @@ def oci_lob_contents(
             elif col.data_type == TNS_TYPE_JSON:
                 # A native JSON column reads back as a LOB whose content is the
                 # value's OSON image; the client decodes it as JSON (#30/#50).
-                out.append((encode_oson(value), False))
+                # allow_wide so a > 255-key or > 64 KiB document re-encodes for
+                # the client's decoder (the LOB read framing carries any size).
+                out.append((encode_oson(value, allow_wide=True), False))
             else:
                 out.append((bytes(value), False))
     return out

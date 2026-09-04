@@ -342,6 +342,35 @@ class TestEncodeOson(unittest.TestCase):
         with self.assertRaises(OsonError):
             encode_oson(list(range(256)))  # > 255 array entries
 
+    def _roundtrip_wide(self, value):
+        # allow_wide unlocks the large-document forms the decoder already reads;
+        # the encoder is still the exact inverse of decode_oson.
+        self.assertEqual(decode_oson(encode_oson(value, allow_wide=True)), value)
+
+    def test_wide_allows_over_255_keys(self):
+        # > 255 field names -> ub2 num_fnames + ub2 object count / field-ids.
+        self._roundtrip_wide({f'key{i:03d}': i for i in range(300)})
+
+    def test_wide_allows_long_strings(self):
+        self._roundtrip_wide({'s': 'x' * 500})  # ub2 string (0x37)
+        self._roundtrip_wide({'big': 'y' * 70000})  # ub4 string (0x38) + ub4 tree
+
+    def test_wide_allows_large_arrays(self):
+        self._roundtrip_wide(list(range(30000)))  # ub2 count, ub4 tree/offsets
+        self._roundtrip_wide(list(range(70000)))  # ub4 count (> 65535 entries)
+
+    def test_wide_allows_mixed_large_document(self):
+        self._roundtrip_wide(
+            {'a': {'b': {'c': 'z' * 1000}}, 'l': ['s' * 400, 't' * 60000]}
+        )
+
+    def test_wide_default_still_byte_identical_for_compact(self):
+        # allow_wide must not change the compact form the server sends: a small
+        # document encodes byte-for-byte the same with the flag on or off.
+        for v in ({'a': 1, 'b': [1, 2, 3]}, [1, 'two', None], 'scalar'):
+            with self.subTest(v=v):
+                self.assertEqual(encode_oson(v), encode_oson(v, allow_wide=True))
+
     def test_non_string_key_raises(self):
         with self.assertRaises(OsonError):
             encode_oson({1: 'a'})
