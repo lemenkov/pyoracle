@@ -280,6 +280,10 @@ def _to_column_meta(desc: tuple) -> ColumnMeta:
     name, type_code, display_size, internal_size, precision, scale, null_ok = desc
     tns_type = getattr(type_code, 'tns_type', type_code)
     csfrm = getattr(type_code, 'csfrm', 1)
+    # A native VECTOR column's element format (FetchInfo.vector_format, #55) so the
+    # Mirror re-encodes the value image with the right element type; None when the
+    # upstream describe does not report it (falls back to FLOAT32).
+    vector_format = getattr(desc, 'vector_format', None)
     byte_size = internal_size or display_size or 0
     if csfrm == 2:
         # National char (NCHAR / NVARCHAR2): UTF-16BE in AL16UTF16. data_length is
@@ -299,4 +303,5 @@ def _to_column_meta(desc: tuple) -> ColumnMeta:
         charset=charset,
         csfrm=csfrm,
         null_ok=int(bool(null_ok)),
+        vector_format=vector_format,
     )

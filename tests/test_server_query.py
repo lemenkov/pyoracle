@@ -1444,6 +1444,87 @@ def test_parse_exec_decodes_a_native_json_bind_as_a_json_value() -> None:
     assert request.binds[0].value == doc
 
 
+def test_oci_lob_contents_encodes_a_vector_cell_by_element_format() -> None:
+    # A native VECTOR column reads back over the LOB path with its binary image;
+    # the column's element format (ColumnMeta.vector_format) drives the re-encode
+    # so INT8 stays integral, not a default FLOAT32 (#55).
+    from seerdb.common.tns import ColumnMeta, oci_lob_contents
+    from seerdb.common.tns_consts import TNS_TYPE_VECTOR
+    from seerdb.common.vector import decode_vector
+
+    cols = [
+        ColumnMeta(
+            name=b'V',
+            data_type=TNS_TYPE_VECTOR,
+            data_length=0,
+            max_size=0,
+            vector_format=4,  # INT8
+        )
+    ]
+    got = oci_lob_contents(cols, [([1, -2, 3, -4],), (None,)])
+    assert len(got) == 1
+    image, is_clob = got[0]
+    assert is_clob is False
+    decoded = decode_vector(image)
+    assert decoded == [1, -2, 3, -4]
+    assert all(isinstance(v, int) for v in decoded)
+
+
+def test_encode_value_emits_a_thin_lob_locator_for_a_vector_column() -> None:
+    # A VECTOR value rides as a LOB locator inline (its binary image follows over
+    # TTI_LOBOPS), like a CLOB / BLOB / JSON; NULL is a bare 0x00 (#55).
+    from seerdb.common.tns import encode_lob_locator_thin, encode_value
+    from seerdb.common.tns_consts import TNS_TYPE_VECTOR
+
+    assert encode_value([1.0, 2.0], TNS_TYPE_VECTOR) == encode_lob_locator_thin()
+    assert encode_value(None, TNS_TYPE_VECTOR) == b'\x00'
+
+
+def test_parse_exec_decodes_a_native_vector_bind_type_preserving() -> None:
+    # A native VECTOR bind rides inline as its binary image (the
+    # _native_lob_bind_value framing). parse_exec decodes it to a type-preserving
+    # value (array.array by the image's element type) so the backend re-binds a
+    # FLOAT64 / INT8 / BINARY vector faithfully rather than as a FLOAT32 list (#55).
+    import array
+
+    from seerdb.common.tns import (
+        _ENCODE_FIELD_VERSION,
+        encode_dictionary_exec,
+        parse_exec,
+    )
+    from seerdb.common.tns_consts import FIELD_VERSION_23_1
+
+    vec = array.array('b', [1, -2, 3, -4])  # INT8
+    enc = _ENCODE_FIELD_VERSION.set(FIELD_VERSION_23_1)
+    dec = _DECODE_FIELD_VERSION.set(FIELD_VERSION_23_1)
+    try:
+        payload = encode_dictionary_exec(
+            {
+                'seq': 4,
+                'field_version': FIELD_VERSION_23_1,
+                'query': {
+                    'type': 'select',
+                    'auto': 0,
+                    'fetch': 0,
+                    'server_version': 186647040,
+                    'cursor': 0,
+                    'query': 'insert into t values (:1)',
+                    'bind': [vec],
+                    'batch': [],
+                    'def': [],
+                },
+            }
+        )
+        request = parse_exec(payload)
+    finally:
+        _ENCODE_FIELD_VERSION.reset(enc)
+        _DECODE_FIELD_VERSION.reset(dec)
+    bound = request.binds[0]
+    assert isinstance(bound, array.array)
+    assert bound.typecode == 'b'
+    assert list(bound) == [1, -2, 3, -4]
+
+
 def test_encode_value_emits_a_thin_lob_locator_for_lob_columns() -> None:
     # A thin (oracledb/seerdb) client's LOB column carries a minted opaque locator
     # inline; the content follows over TTI_LOBOPS. NULL is a bare 0x00 (#413).
