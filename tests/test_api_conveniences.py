@@ -5,9 +5,11 @@
 stmtcachesize, version, rowfactory, lastrowid. These exercise the
 client-side logic without a live server."""
 
+import datetime
 import types
 import unittest
 
+import seerdb
 from seerdb.client.connection import OracleConnect
 from seerdb.client.cursor import Cursor
 from seerdb.common.exceptions import InterfaceError, ProgrammingError
@@ -235,3 +237,79 @@ class TestScrollableCursor(unittest.TestCase):
         conn = OracleConnect()
         self.assertIs(conn.cursor(scrollable=True).scrollable, True)
         self.assertIs(conn.cursor().scrollable, False)
+
+
+class TestDbApiModuleInterface(unittest.TestCase):
+    """The module-level names PEP 249 requires (#683).
+
+    The driver advertises apilevel 2.0, so code written against the DB-API
+    generically — without knowing which driver is underneath — must find these.
+    """
+
+    def test_every_required_name_is_present_and_exported(self):
+        required = [
+            # constructors
+            'Date',
+            'Time',
+            'Timestamp',
+            'DateFromTicks',
+            'TimeFromTicks',
+            'TimestampFromTicks',
+            'Binary',
+            # type objects
+            'STRING',
+            'BINARY',
+            'NUMBER',
+            'DATETIME',
+            'ROWID',
+            # globals
+            'apilevel',
+            'threadsafety',
+            'paramstyle',
+            'connect',
+        ]
+        missing = [n for n in required if not hasattr(seerdb, n)]
+        self.assertEqual(missing, [], f'missing from the module: {missing}')
+        unexported = [n for n in required if n not in seerdb.__all__]
+        self.assertEqual(unexported, [], f'missing from __all__: {unexported}')
+
+    def test_the_globals_say_what_the_driver_actually_is(self):
+        self.assertEqual(seerdb.apilevel, '2.0')
+        self.assertEqual(seerdb.paramstyle, 'named')
+        self.assertIn(seerdb.threadsafety, (0, 1, 2, 3))
+
+    def test_constructors_build_the_stdlib_values_binds_accept(self):
+        self.assertEqual(seerdb.Date(2026, 9, 4), datetime.date(2026, 9, 4))
+        self.assertEqual(seerdb.Time(13, 45, 30), datetime.time(13, 45, 30))
+        self.assertEqual(
+            seerdb.Timestamp(2026, 9, 4, 13, 45, 30),
+            datetime.datetime(2026, 9, 4, 13, 45, 30),
+        )
+        # The hour/minute/second tail is optional, as it is for datetime.
+        self.assertEqual(
+            seerdb.Timestamp(2026, 9, 4), datetime.datetime(2026, 9, 4, 0, 0, 0)
+        )
+
+    def test_the_ticks_constructors_agree_with_their_plain_forms(self):
+        ticks = datetime.datetime(2026, 9, 4, 13, 45, 30).timestamp()
+        self.assertEqual(seerdb.DateFromTicks(ticks), seerdb.Date(2026, 9, 4))
+        self.assertEqual(seerdb.TimeFromTicks(ticks), seerdb.Time(13, 45, 30))
+        self.assertEqual(
+            seerdb.TimestampFromTicks(ticks), seerdb.Timestamp(2026, 9, 4, 13, 45, 30)
+        )
+
+    def test_binary_accepts_what_a_caller_is_likely_to_hold(self):
+        self.assertEqual(seerdb.Binary(b'\x00\xff'), b'\x00\xff')
+        self.assertEqual(seerdb.Binary(bytearray(b'ab')), b'ab')
+        self.assertEqual(seerdb.Binary(memoryview(b'ab')), b'ab')
+        self.assertEqual(seerdb.Binary('ab'), b'ab')
+        self.assertIsInstance(seerdb.Binary('ab'), bytes)
+
+    def test_type_objects_match_what_description_reports(self):
+        # Each is the DbType the server reports for that kind of column, so a
+        # caller can compare cursor.description[i][1] against it.
+        self.assertIs(seerdb.STRING, seerdb.DB_TYPE_VARCHAR)
+        self.assertIs(seerdb.NUMBER, seerdb.DB_TYPE_NUMBER)
+        self.assertIs(seerdb.BINARY, seerdb.DB_TYPE_RAW)
+        self.assertIs(seerdb.ROWID, seerdb.DB_TYPE_ROWID)
+        self.assertIs(seerdb.DATETIME, seerdb.DB_TYPE_DATE)

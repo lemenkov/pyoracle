@@ -22,7 +22,9 @@ from seerdb.client.pipeline import (
 )
 from seerdb.client.pool import Pool
 from seerdb.common.datatypes import (
+    BINARY,
     CURSOR,
+    DATETIME,
     DB_TYPE_BINARY_DOUBLE,
     DB_TYPE_BINARY_FLOAT,
     DB_TYPE_BLOB,
@@ -50,10 +52,18 @@ from seerdb.common.datatypes import (
     DB_TYPE_VECTOR,
     JSON,
     NUMBER,
+    ROWID,
     STRING,
+    Binary,
     BinaryDouble,
     BinaryFloat,
+    Date,
+    DateFromTicks,
     IntervalYM,
+    Time,
+    TimeFromTicks,
+    Timestamp,
+    TimestampFromTicks,
     Var,
 )
 from seerdb.common.dbobject import DbObject, DbObjectType, DbRef
@@ -203,6 +213,17 @@ __all__ = [
     'PURITY_SELF',
     'NUMBER',
     'STRING',
+    # The rest of the PEP 249 module interface (#683).
+    'BINARY',
+    'DATETIME',
+    'ROWID',
+    'Binary',
+    'Date',
+    'DateFromTicks',
+    'Time',
+    'TimeFromTicks',
+    'Timestamp',
+    'TimestampFromTicks',
     'DB_TYPE_NUMBER',
     'DB_TYPE_VARCHAR',
     'DB_TYPE_NVARCHAR',
