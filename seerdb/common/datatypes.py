@@ -119,6 +119,70 @@ DB_TYPE_JSON = _DbType('DB_TYPE_JSON', TNS_TYPE_JSON, 32767)
 DB_TYPE_BOOLEAN = _DbType('DB_TYPE_BOOLEAN', TNS_TYPE_BOOLEAN, 4)
 DB_TYPE_VECTOR = _DbType('DB_TYPE_VECTOR', TNS_TYPE_VECTOR, 32767)
 
+# The rest of the type objects PEP 249 requires a module to expose, alongside
+# STRING and NUMBER above. Each is an alias for the DbType the server reports for
+# that kind of column, which is the same convention STRING and NUMBER already
+# follow — so they double as `cursor.var()` type specs.
+#
+# One consequence worth stating: each matches a single wire type, so comparing
+# `cursor.description[i][1] == STRING` is true for VARCHAR but not for CHAR or
+# CLOB. PEP 249 allows a type object to match a whole family; broadening these
+# would change what the existing STRING and NUMBER compare equal to, so it is a
+# separate decision rather than part of adding the missing names.
+BINARY = DB_TYPE_RAW
+ROWID = DB_TYPE_ROWID
+# Oracle's DATE carries a time component, so it — not TIMESTAMP — is the type a
+# plain date/time column reports.
+DATETIME = DB_TYPE_DATE
+
+
+# The constructors PEP 249 requires. A caller that has a date, a time or a byte
+# string already can bind it directly; these exist so code written against the
+# DB-API generically, without knowing which driver is underneath, works here too.
+def Date(year: int, month: int, day: int) -> datetime.date:  # noqa: N802
+    """A value holding a date (PEP 249)."""
+    return datetime.date(year, month, day)
+
+
+def Time(hour: int, minute: int, second: int) -> datetime.time:  # noqa: N802
+    """A value holding a time of day (PEP 249)."""
+    return datetime.time(hour, minute, second)
+
+
+def Timestamp(  # noqa: N802
+    year: int, month: int, day: int, hour: int = 0, minute: int = 0, second: int = 0
+) -> datetime.datetime:
+    """A value holding a date and time (PEP 249)."""
+    return datetime.datetime(year, month, day, hour, minute, second)
+
+
+def DateFromTicks(ticks: float) -> datetime.date:  # noqa: N802
+    """A date from a Unix timestamp, in local time (PEP 249)."""
+    return datetime.date.fromtimestamp(ticks)
+
+
+def TimeFromTicks(ticks: float) -> datetime.time:  # noqa: N802
+    """A time of day from a Unix timestamp, in local time (PEP 249)."""
+    return datetime.datetime.fromtimestamp(ticks).time()
+
+
+def TimestampFromTicks(ticks: float) -> datetime.datetime:  # noqa: N802
+    """A date and time from a Unix timestamp, in local time (PEP 249)."""
+    return datetime.datetime.fromtimestamp(ticks)
+
+
+def Binary(value) -> bytes:  # noqa: N802
+    """A value holding binary data (PEP 249).
+
+    Accepts what a caller is likely to already have — bytes, a bytearray or a
+    memoryview pass through as bytes; a str is encoded UTF-8, which is what
+    binding one to a RAW column would do anyway.
+    """
+    if isinstance(value, str):
+        return value.encode('utf-8')
+    return bytes(value)
+
+
 # Map the (wire type code, charset form) the server reports for a fetched column
 # (DCB data_type + csfrm) to its DbType. Keyed on the actual fetch codes so
 # cursor.description[i][1] is the seerdb.DB_TYPE_* object (oracledb parity). The
