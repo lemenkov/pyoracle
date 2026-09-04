@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from seerdb.common.datatypes import Var
+from seerdb.common.datatypes import IntervalYM, Var
 from seerdb.common.exceptions import DataError, InterfaceError
 from seerdb.common.tns import (
     _DECODE_FIELD_VERSION,
@@ -15,6 +15,7 @@ from seerdb.common.tns import (
     _decode_describe_body,
     _skip_chunked_bytes,
     decode_packet,
+    describe_wire_length,
     encode_describe,
     encode_rows,
     parse_exec,
@@ -22,7 +23,20 @@ from seerdb.common.tns import (
 )
 from seerdb.common.tns_consts import (
     FIELD_VERSION_11_2,
+    TNS_TYPE_BDOUBLE,
+    TNS_TYPE_BFLOAT,
+    TNS_TYPE_BLOB,
+    TNS_TYPE_CHAR,
+    TNS_TYPE_CLOB,
+    TNS_TYPE_DATE,
+    TNS_TYPE_INTERVALDS,
+    TNS_TYPE_INTERVALYM,
     TNS_TYPE_NUMBER,
+    TNS_TYPE_RAW,
+    TNS_TYPE_REF,
+    TNS_TYPE_TIMESTAMP,
+    TNS_TYPE_TIMESTAMPLTZ,
+    TNS_TYPE_TIMESTAMPTZ,
     TNS_TYPE_VARCHAR,
     TTI_DCB,
     TTI_LOB,
@@ -415,6 +429,64 @@ def test_multiple_columns_and_not_null_roundtrip() -> None:
     assert cols[0]['data_type'] == TNS_TYPE_NUMBER
     assert cols[0]['null_ok'] == 0  # NOT NULL
     assert cols[1]['max_size'] == 30
+
+
+def test_describe_fills_in_the_length_a_backend_cannot_report() -> None:
+    # A zero buffer length is not a free "unknown": the client reads it as "this
+    # column sends nothing at all" and its row decoder then consumes the wrong
+    # bytes. A backend often cannot supply one -- the PEP 249 description tuple
+    # reports no size for a temporal, interval or REF column -- so the describe
+    # fills in what a real server reports (#690).
+    #
+    # The values are measured against live 10g, 11g, 21c and 23ai; the odd-looking
+    # ones are what Oracle sends.
+    expected = {
+        TNS_TYPE_NUMBER: 22,
+        TNS_TYPE_DATE: 1,
+        TNS_TYPE_TIMESTAMP: 11,
+        TNS_TYPE_TIMESTAMPTZ: 1,
+        TNS_TYPE_TIMESTAMPLTZ: 11,
+        TNS_TYPE_INTERVALYM: 1,
+        TNS_TYPE_INTERVALDS: 1,
+        TNS_TYPE_BFLOAT: 1,
+        TNS_TYPE_BDOUBLE: 1,
+        TNS_TYPE_REF: 2000,
+        TNS_TYPE_CLOB: 4000,
+        TNS_TYPE_BLOB: 4000,
+    }
+    for data_type, length in expected.items():
+        column = ColumnMeta(name=b'C', data_type=data_type, data_length=0, max_size=0)
+        assert describe_wire_length(column) == length, data_type
+
+
+def test_describe_keeps_a_length_the_backend_did_report() -> None:
+    column = ColumnMeta(
+        name=b'C', data_type=TNS_TYPE_TIMESTAMP, data_length=7, max_size=0
+    )
+    assert describe_wire_length(column) == 7
+
+
+def test_describe_leaves_a_truthful_zero_alone() -> None:
+    # `SELECT NULL AS x` describes a character column of zero length, and that
+    # zero is true: the column really does carry no bytes. Filling one in there
+    # would undo the fix for #682.
+    for data_type in (TNS_TYPE_VARCHAR, TNS_TYPE_CHAR, TNS_TYPE_RAW):
+        column = ColumnMeta(name=b'X', data_type=data_type, data_length=0, max_size=0)
+        assert describe_wire_length(column) == 0, data_type
+
+
+def test_an_interval_column_survives_the_round_trip() -> None:
+    # End to end through the codec: a describe built from a backend that reported
+    # no length, then a row decoded against it. Before #690 the decoder read the
+    # column as always-NULL, consumed nothing, and desynced on the next token.
+    from seerdb.common.tns import decode_packet, encode_query_response
+
+    column = ColumnMeta(
+        name=b'IVY', data_type=TNS_TYPE_INTERVALYM, data_length=0, max_size=0
+    )
+    blob = encode_query_response([column], [(IntervalYM(1, 6),)])
+    decoded = decode_packet(blob, (None, None, []))
+    assert decoded[4] == [[IntervalYM(1, 6)]]
 
 
 def test_describe_carries_number_precision_and_scale() -> None:

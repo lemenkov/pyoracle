@@ -1578,6 +1578,36 @@ with a max size of zero while carrying a value — and it has to be applied afte
 the types that have their own row encoding, since a LONG is also described with
 a zero data length. Confirmed identically on 11g, 21c and 23ai.
 
+**The obligation this puts on a server** (#690). A zero data length is a claim,
+not a way of saying "unknown": describe a column that does carry bytes as
+zero-length and a conforming client reads no bytes for it and then misreads the
+rest of the row. A real server never does this, and every type below has a
+non-zero length whatever the column holds. Measured identically on live 10g,
+11g, 21c and 23ai — the odd-looking values are what Oracle sends, not a
+convention:
+
+| Type | Code | data length |
+|------|------|-------------|
+| NUMBER               | 2   | 22 |
+| DATE                 | 12  | 1 |
+| TIMESTAMP            | 180 | 11 |
+| TIMESTAMP WITH TZ    | 181 | 1 |
+| TIMESTAMP WITH LTZ   | 231 | 11 |
+| INTERVAL YEAR TO MONTH | 182 | 1 |
+| INTERVAL DAY TO SECOND | 183 | 1 |
+| BINARY_FLOAT         | 100 | 1 |
+| BINARY_DOUBLE        | 101 | 1 |
+| REF                  | 111 | 2000 |
+| CLOB / BLOB          | 112 / 113 | 4000 |
+
+A character or RAW column is absent from that list on purpose: zero is a
+truthful answer there, and it is exactly what `SELECT NULL AS x` describes.
+
+This bites a server built over another database, which is where the Mirror hit
+it: a PEP 249 `description` tuple reports no size for a temporal, interval or
+REF column, so a backend deriving the length from one arrives at zero and
+describes something untrue.
+
 ### 6.3 Bit Vector for Changed Columns (TTI_BVC)
 
 When the server uses differential row encoding it emits a BVC token
