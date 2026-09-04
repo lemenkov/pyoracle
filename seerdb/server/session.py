@@ -152,6 +152,7 @@ from seerdb.server.handshake import (
     parse_connect,
     pro_is_sqlplus,
 )
+from seerdb.server.identity import IDENTITY_11_2, ServerIdentity, server_identity
 
 _T = TypeVar('_T')
 
@@ -294,6 +295,9 @@ def handle_login(
     mismatched session key (mutual auth).
     """
     # --- Handshake (§2, §4.1/§4.2) ---
+    # The release this session introduces itself as, in the auth result and (for
+    # sqlplus) the banner — it follows the field version being advertised.
+    identity = server_identity(field_version)
     request = parse_connect(_expect(stream, TNS_CONNECT, 'CONNECT'))
     stream.send_raw(encode_accept(request, tns_version=tns_version))
     # From protocol version 315 the post-ACCEPT DATA stream carries a 4-byte
@@ -373,9 +377,11 @@ def handle_login(
     if not verify_password(conn_key, auth_password, secret.encode('utf-8')):
         _deny_login(stream, f'wrong password for user: {user!r}')
     if sqlplus:
-        stream.send_raw(encode_result_oci(conn_key))
+        stream.send_raw(encode_result_oci(conn_key, identity=identity))
     else:
-        stream.write_packet(TNS_DATA, encode_result(conn_key))
+        stream.write_packet(
+            TNS_DATA, encode_result(conn_key, version_no=identity.version_no)
+        )
 
     logger.info('login OK: %s', user)
     return user, sqlplus, conn_key
@@ -478,7 +484,9 @@ def serve_session(
         tns_version=tns_version,
     )
     if sqlplus:
-        return _serve_oci_session(stream, backend, user, conn_key)
+        return _serve_oci_session(
+            stream, backend, user, conn_key, server_identity(field_version)
+        )
     cursors = _Cursors()
     # LOB contents (wire bytes + is_clob) the current statement's rows carry, in
     # the order their locators went out; the thin client drains them with
@@ -545,16 +553,12 @@ def serve_session(
             return user
 
 
-# The banner sqlplus prints after "Connected to:". The Mirror emulates an 11g
-# listener, so it reports the matching version string (naming is a later
-# discussion, like the Mirror's own name).
-_OCI_BANNER = (
-    b'Oracle Database 11g Express Edition Release 11.2.0.2.0 - 64bit Production'
-)
-
-
 def _serve_oci_session(
-    stream: PacketStream, backend: Backend, user: str, conn_key: bytes | None = None
+    stream: PacketStream,
+    backend: Backend,
+    user: str,
+    conn_key: bytes | None = None,
+    identity: ServerIdentity = IDENTITY_11_2,
 ) -> str:
     # The sqlplus / thick-OCI query loop (#265), built up one message shape at a
     # time. So far: the post-login version call (-> banner), the OCI execute
@@ -592,7 +596,10 @@ def _serve_oci_session(
         if packet_type != TNS_DATA:
             continue
         if is_version_call_oci(body):
-            stream.write_packet(TNS_DATA, encode_version_banner_oci(_OCI_BANNER))
+            # What sqlplus prints after "Connected to:" — the release this
+            # session introduced itself as (naming the Mirror itself is a
+            # separate discussion).
+            stream.write_packet(TNS_DATA, encode_version_banner_oci(identity.banner))
             continue
         # Every statement past the first arrives wrapped in an OCCA close-cursors
         # piggyback; unwrap it to reach the execute.

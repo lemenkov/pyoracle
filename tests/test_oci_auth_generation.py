@@ -95,7 +95,11 @@ class TestOciAuthGeneration(unittest.TestCase):
         )
 
     def test_result_regenerates_golden(self):
-        pairs = [(k, v, 0) for k, v in auth._RESULT_PARAMS]
+        # The 11.2 identity must still reproduce the captured server's result
+        # packet byte for byte — the identity refactor changed no 11.2 bytes.
+        from seerdb.server.identity import IDENTITY_11_2
+
+        pairs = [(k, v, 0) for k, v in auth._result_params(IDENTITY_11_2)]
         pairs.append((b'AUTH_SVR_RESPONSE', _CAP_SVR_RESPONSE.encode(), 0))
         self.assertEqual(
             auth._oci_auth_packet(pairs, auth._RESULT_TRAILER), RESULT_GOLDEN
