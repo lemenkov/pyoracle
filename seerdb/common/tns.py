@@ -28,6 +28,8 @@ from seerdb.common.date import date
 from seerdb.common.exceptions import DataError, InterfaceError
 from seerdb.common.vector import (
     VECTOR_BIND_DESCRIPTOR,
+    SparseVector,
+    decode_vector,
     encode_vector,
     is_vector_bind,
 )
@@ -40,6 +42,26 @@ def _json_bind_text(Token: object) -> str:
     from seerdb.common.oson import json_to_text
 
     return json_to_text(Token.value if isinstance(Token, JSON) else Token)
+
+
+# A VECTOR element format code (== the value image's element type) mapped to the
+# array typecode encode_vector reads it back from: FLOAT32/FLOAT64/INT8/BINARY.
+_VEC_FORMAT_TYPECODE = {2: 'f', 3: 'd', 4: 'b', 5: 'B'}
+
+
+def _vector_as(value: object, vector_format: int | None) -> object:
+    # Wrap a decoded dense vector as the array.array typecode for `vector_format`
+    # so encode_vector reproduces that element type (a plain list would default to
+    # FLOAT32, losing INT8 / BINARY typing and FLOAT64 precision). A SparseVector
+    # is self-typed and an unknown format falls through to the FLOAT32 default.
+    import array
+
+    if vector_format is None or isinstance(value, SparseVector) or value is None:
+        return value
+    typecode = _VEC_FORMAT_TYPECODE.get(vector_format)
+    if typecode is None:
+        return value
+    return array.array(typecode, cast('Any', value))
 
 
 def _native_lob_bind_value(image: bytes) -> bytes:
@@ -244,6 +266,11 @@ class ColumnMeta:
     type_oid: bytes = b''
     type_schema: bytes = b''
     type_name: bytes = b''
+    # A native VECTOR column's element format (2 FLOAT32, 3 FLOAT64, 4 INT8,
+    # 5 BINARY), so the Mirror re-encodes its value image with the right element
+    # type. None when unknown (a non-VECTOR column, or an upstream that does not
+    # report it) — the encoder then falls back to FLOAT32 (#55).
+    vector_format: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1237,6 +1264,21 @@ def _read_bind_value(data_type: int, csfrm: int, after: bytes) -> tuple[object, 
         # otherwise bind as a collection / VARCHAR (only a dict is auto-detected
         # as JSON). #50/#70.
         return JSON(decode_oson(bytes(image))), rest
+    if data_type == TNS_TYPE_VECTOR and after[:3] == _TEMP_LOB_BIND_PREFIX:
+        # A native VECTOR bind (#55/#62): the client sends the value inline as
+        # its binary image (same _native_lob_bind_value framing as JSON). Decode
+        # it to a type-preserving value (array.array by the image's own element
+        # type) so the backend re-binds FLOAT64 / INT8 / BINARY faithfully rather
+        # than as a default FLOAT32 list.
+        rest = after[_JSON_BIND_HEAD_LEN:]
+        raw_image, rest = decode_dalc(rest)
+        if isinstance(raw_image, list):
+            return None, rest
+        image = bytes(raw_image)
+        decoded = decode_vector(image)
+        if isinstance(decoded, SparseVector):
+            return decoded, rest
+        return _vector_as(decoded, image[4] if len(image) > 4 else None), rest
     raw, after = decode_dalc(after)
     return _decode_bind_value(data_type, csfrm, raw), after
 
@@ -6375,12 +6417,18 @@ def oci_lob_contents(
                 # allow_wide so a > 255-key or > 64 KiB document re-encodes for
                 # the client's decoder (the LOB read framing carries any size).
                 out.append((encode_oson(value, allow_wide=True), False))
+            elif col.data_type == TNS_TYPE_VECTOR:
+                # A native VECTOR column reads back as a LOB whose content is the
+                # value's binary image, re-encoded with the column's element
+                # format so INT8 / BINARY stay integral and FLOAT64 keeps its
+                # precision (#55).
+                out.append((encode_vector(_vector_as(value, col.vector_format)), False))
             else:
                 out.append((bytes(value), False))
     return out
 
 
-_LOB_CONTENT_TYPES = _OCI_LOB_TYPES | {TNS_TYPE_JSON}
+_LOB_CONTENT_TYPES = _OCI_LOB_TYPES | {TNS_TYPE_JSON, TNS_TYPE_VECTOR}
 
 
 def _encode_oci_value(value: object, col: ColumnMeta) -> bytes:
@@ -8948,10 +8996,10 @@ def encode_value(Value: object, DataType: int) -> bytes:
         return _bytes_with_length(encode_token_interval_ds(Value))
     if DataType == TNS_TYPE_INTERVALYM and isinstance(Value, IntervalYM):
         return _bytes_with_length(encode_token_interval_ym(Value))
-    if DataType in (TNS_TYPE_CLOB, TNS_TYPE_BLOB, TNS_TYPE_JSON):
-        # A thin CLOB / BLOB / JSON value is delivered as an opaque locator, not
-        # inline; the content follows over TTI_LOBOPS (#413). For a JSON column
-        # the content is the value's OSON image (see oci_lob_contents).
+    if DataType in (TNS_TYPE_CLOB, TNS_TYPE_BLOB, TNS_TYPE_JSON, TNS_TYPE_VECTOR):
+        # A thin CLOB / BLOB / JSON / VECTOR value is delivered as an opaque
+        # locator; the content follows over TTI_LOBOPS (#413). JSON content is the
+        # OSON image, VECTOR the binary image (see oci_lob_contents).
         return encode_lob_locator_thin()
     if DataType == TNS_TYPE_BOOLEAN:
         # Native SQL BOOLEAN (23ai): a one-byte value, 0x01 for TRUE and 0x00 for
