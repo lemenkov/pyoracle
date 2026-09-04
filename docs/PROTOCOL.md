@@ -157,6 +157,17 @@ The receive-side handshake that keeps the stream in sync (#45):
 - seerdb never *initiates* a break (no client-side Ctrl-C/interrupt path), so
   only the server-break case above arises.
 
+The **send side is symmetric, and a server must honour it**: a client that
+sends a marker blocks until it gets one back. A thick-OCI client (sqlplus)
+sends a bare reset (`01 00 02`) to resynchronise the line — after a cancelled
+call, or after a reply it could not line up — and then sends nothing further
+until the server answers. A server that silently drops the marker leaves the
+client waiting until its own timeout with the session wedged, which is not
+distinguishable on the wire from a hung server. Answer with a single reset, the
+same one-per-episode rule the receive side follows: echoing every marker
+ping-pongs the two ends into the same storm described above. Observed against
+sqlplus 23.26 through a logging proxy.
+
 ## 2. Connection Phase
 
 ### 2.1 TNS_CONNECT (Client -> Server)
