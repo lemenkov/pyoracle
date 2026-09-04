@@ -19,6 +19,20 @@ from __future__ import annotations
 
 from seerdb.common.datatypes import Var
 from seerdb.common.exceptions import ProgrammingError, from_ora_code
+from seerdb.common.sqltext import bind_placeholders, is_plsql
+
+
+def _declared_bind(declared: object, value: object) -> Var:
+    # One bind whose type was declared rather than deduced. An integer declares a
+    # string of that size, which is what PEP 249's "size" means and what
+    # python-oracledb does with one; anything else is a type as `var()` takes it.
+    if isinstance(declared, int) and not isinstance(declared, bool):
+        variable = Var(str, declared)
+    else:
+        variable = Var(declared)
+    if value is not None:
+        variable.setvalue(0, value)
+    return variable
 
 
 class _CursorLogic:
@@ -66,6 +80,9 @@ class _CursorLogic:
         # Pending implicit result sets (#121): (row_format, cursor_id) queue
         # left by a DBMS_SQL.RETURN_RESULT block, consumed via nextset().
         self._implicit_results: list = []
+        # Bind types declared by setinputsizes for the next execute (#696), as
+        # (positional, by name). Cleared once that execute has used them.
+        self._inputsizes: tuple[tuple, dict] = ((), {})
 
     @property
     def scrollable(self) -> bool:
@@ -205,9 +222,59 @@ class _CursorLogic:
             raise IndexError('scroll operation would leave the result set')
         self._row_index = Target - 1
 
-    def setinputsizes(self, sizes) -> None:
-        # PEP 249 allows this to be a no-op when sizing isn't required.
-        pass
+    def setinputsizes(self, *args, **kwargs) -> None:
+        """Declare the type of one or more binds for the next execute.
+
+        A bind's type is normally read off the value, which works until the
+        value cannot say what it is: a `None` carries no type, the server infers
+        CHAR, and comparing that to a DATE or a NUMBER column is refused with
+        ORA-00932. Declaring the type here is the way to say what the value
+        cannot (#696).
+
+        Positional arguments name the placeholders in order, one each, with
+        `None` to leave one alone; keyword arguments name them by bind name.
+        Each is a type as `var()` takes it — a Python type or an `seerdb.*`
+        constant — or an integer, which sizes a string bind. Matches
+        python-oracledb.
+
+        The declaration applies to the next `execute` or `executemany` and is
+        forgotten afterwards, as PEP 249 specifies. Calling it with no arguments
+        discards a pending one.
+        """
+        self._inputsizes = (tuple(args), dict(kwargs))
+
+    def _typed_binds(self, SQL: str, Bind: list) -> list:
+        # Apply a pending setinputsizes to a resolved bind list, by wrapping each
+        # declared position in a Var of that type. A Var's OAC announces its
+        # declared type rather than guessing from the value, which is the whole
+        # point; its row data is the value itself, so an ordinary IN bind still
+        # sends exactly what it did before (#696).
+        (positional, named) = self._inputsizes
+        if not positional and not named:
+            return Bind
+        wanted: dict[int, object] = {}
+        for index, declared in enumerate(positional):
+            if declared is not None and index < len(Bind):
+                wanted[index] = declared
+        if named:
+            # Placeholder names in the order the values were resolved into, so a
+            # name maps to the same position the value took.
+            names = [
+                name for name, _quoted in bind_placeholders(SQL, dedupe=is_plsql(SQL))
+            ]
+            for index, name in enumerate(names):
+                declared = named.get(name) or named.get(name.lower())
+                if declared is not None and index < len(Bind):
+                    wanted[index] = declared
+        if not wanted:
+            return Bind
+        Out = list(Bind)
+        for index, declared in wanted.items():
+            value = Out[index]
+            if isinstance(value, Var):
+                continue  # already carries its own declared type
+            Out[index] = _declared_bind(declared, value)
+        return Out
 
     def setoutputsize(self, size, column=None) -> None:
         pass

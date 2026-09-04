@@ -1206,6 +1206,25 @@ Bind values are encoded inline following OAC descriptors:
 | `seerdb.Var` (OUT/IN OUT) | the seeded value, or `0x00` (NULL) for a pure OUT; OAC driven by the Var's declared type |
 | `seerdb.cursor.cursor` / `Var(seerdb.CURSOR)` | `0x01, 0x00` (REF CURSOR placeholder); value returned in the IOV (§6.5) |
 
+**A NULL bind still has to declare a type** (#696). The row data for one is the
+same single `0x00` whatever it stands for, so the OAC in front of it is the only
+thing that says what the server should treat it as. A client that types the bind
+from the value has nothing to go on and sends the default character descriptor;
+the server then takes the bind as CHAR and refuses to compare it to anything
+else:
+
+```
+select id from t where case when :foo is not null then :foo else d end = d
+ORA-00932: expression ("T"."D") is of data type DATE,
+           which is incompatible with expected data type CHAR
+```
+
+This is not a driver quirk — it is what any client does until told the type, and
+python-oracledb fails on the same statement identically. The type is supplied out
+of band, through `Cursor.setinputsizes`, which changes only the OAC: seerdb binds
+such a position as a `Var` of the declared type, so the descriptor announces it
+while the row data stays the same `0x00`.
+
 **Chunked encoding** (for data > 64 bytes): `0xFE` header, then repeated `<length><data>` chunks of up to 64 bytes each, terminated by `0x00`.
 
 **Array DML** (`executemany`): the OAC descriptors are sent once (sized to the

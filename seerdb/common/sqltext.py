@@ -159,3 +159,12 @@ def strip_returning_into(SQL: str) -> str:
     Tail = SQL[Into.end() :]
     Trailing = Tail[len(Tail.rstrip().rstrip(';')) :]
     return SQL[: Into.start()].rstrip() + Trailing
+
+
+def is_plsql(SQL: str) -> bool:
+    # PL/SQL blocks start with BEGIN or DECLARE after stripping leading
+    # whitespace and SQL comments. Anonymous blocks, packaged calls
+    # wrapped in BEGIN...END;, and DECLARE...BEGIN forms all match.
+    Stripped = re.sub(r'^\s*(?:--[^\n]*\n|/\*.*?\*/|\s)+', '', SQL, flags=re.S)
+    Head = Stripped[:8].upper()
+    return Head.startswith('BEGIN') or Head.startswith('DECLARE')

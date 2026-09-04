@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: 2019 Peter Lemenkov <lemenkov@gmail.com>
 # SPDX-License-Identifier: MIT
 
-import re
 from typing import Any
 
 from seerdb.client._cursor_logic import _CursorLogic
@@ -23,6 +22,7 @@ from seerdb.common.exceptions import (
 from seerdb.common.sqltext import (
     bind_placeholders,
     canonical_bind_key,
+    is_plsql,
     returning_bind_positions,
 )
 from seerdb.common.tns_consts import (
@@ -106,7 +106,7 @@ class Cursor(_CursorLogic):
         Conn = self._connection
         if (
             getattr(Conn, 'field_version', 0) < FIELD_VERSION_12_1
-            or not _is_plsql(operation)
+            or not is_plsql(operation)
             or not Bind
         ):
             return Bind
@@ -132,6 +132,12 @@ class Cursor(_CursorLogic):
         BatchErrors: bool = False,
         ArrayDmlRowCounts: bool = False,
     ) -> 'Cursor':
+        # A pending setinputsizes types the binds it names before anything else
+        # looks at them, and is spent by this execute (#696).
+        Bind = self._typed_binds(operation, Bind)
+        if Batch:
+            Batch = [self._typed_binds(operation, Row) for Row in Batch]
+        self._inputsizes = ((), {})
         _check_object_bind_support(self._connection, Bind, Batch)
         Kw: dict[str, Any] = {
             'Bind': Bind,
@@ -779,7 +785,7 @@ def _resolve_parameters(SQL: str, Params) -> list:
     if isinstance(Params, (list, tuple)):
         return list(Params)
     if isinstance(Params, dict):
-        Placeholders = bind_placeholders(SQL, dedupe=_is_plsql(SQL))
+        Placeholders = bind_placeholders(SQL, dedupe=is_plsql(SQL))
         Keyed = {canonical_bind_key(str(K)): V for K, V in Params.items()}
         Out = []
         for Name, Quoted in Placeholders:
@@ -791,15 +797,6 @@ def _resolve_parameters(SQL: str, Params) -> list:
     raise NotSupportedError(
         f'parameters must be a list, tuple, or dict; got {type(Params).__name__}'
     )
-
-
-def _is_plsql(SQL: str) -> bool:
-    # PL/SQL blocks start with BEGIN or DECLARE after stripping leading
-    # whitespace and SQL comments. Anonymous blocks, packaged calls
-    # wrapped in BEGIN...END;, and DECLARE...BEGIN forms all match.
-    Stripped = re.sub(r'^\s*(?:--[^\n]*\n|/\*.*?\*/|\s)+', '', SQL, flags=re.S)
-    Head = Stripped[:8].upper()
-    return Head.startswith('BEGIN') or Head.startswith('DECLARE')
 
 
 def _col_annotations(Col: dict) -> dict | None:

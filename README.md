@@ -68,7 +68,11 @@ What works:
   insensitive). A name the plain form cannot express — a reserved word,
   or one starting with a digit — can be quoted as `:"name"`, which unlike
   the plain form is case-sensitive and is keyed with the quotes included:
-  `{'"name"': v}`. Accepted bind types are `int`, `float`, `Decimal`,
+  `{'"name"': v}`. A bind whose value cannot say what type it is — a
+  `None` — takes its type from `cur.setinputsizes(name=seerdb.DB_TYPE_DATE)`
+  (or positionally, or with a Python type); without that the server
+  infers CHAR and rejects the comparison. The declaration applies to the
+  next `execute` only. Accepted bind types are `int`, `float`, `Decimal`,
   `str`, `bytes`, `bool`, `datetime.date` / `datetime` (with optional
   timezone and microseconds), `datetime.timedelta` (→ INTERVAL DAY TO
   SECOND), `seerdb.IntervalYM(years, months)` (→ INTERVAL YEAR TO
