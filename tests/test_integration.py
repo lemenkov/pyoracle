@@ -1109,6 +1109,70 @@ class CursorIntegration(_IntegrationBase):
 class BindIntegration(_IntegrationBase):
     """Verify Cursor.execute parameter binding."""
 
+    # ----- var() reads back as the type it was asked for (#688) -----
+
+    def test_var_float_reads_back_as_float(self):
+        # A NUMBER column can be read as an int, a float or a Decimal, and the
+        # wire says nothing about which the caller wanted. Asking for a float and
+        # receiving a Decimal made the type argument worthless.
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (f NUMBER)')
+        got = self.cur.var(float)
+        self.cur.execute(
+            f'INSERT INTO {self.TABLE} (f) VALUES (:1) RETURNING f INTO :2',
+            [8.5514716, got],
+        )
+        self.assertEqual(got.getvalue(), [8.5514716])
+        self.assertIsInstance(got.getvalue()[0], float)
+
+    def test_var_float_reads_back_a_whole_number_as_float(self):
+        # A NUMBER with no fractional part decodes to an int; it is still a float
+        # that was asked for.
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (f NUMBER)')
+        got = self.cur.var(float)
+        self.cur.execute(
+            f'INSERT INTO {self.TABLE} (f) VALUES (:1) RETURNING f INTO :2',
+            [42, got],
+        )
+        self.assertIsInstance(got.getvalue()[0], float)
+        self.assertEqual(got.getvalue(), [42.0])
+
+    def test_var_decimal_reads_back_as_decimal(self):
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (f NUMBER)')
+        got = self.cur.var(Decimal)
+        self.cur.execute(
+            f'INSERT INTO {self.TABLE} (f) VALUES (:1) RETURNING f INTO :2',
+            [42, got],
+        )
+        self.assertIsInstance(got.getvalue()[0], Decimal)
+
+    def test_var_float_out_of_a_plsql_block(self):
+        # The same on the OUT-bind path, which carries a bare value rather than
+        # the list a RETURNING clause produces.
+        got = self.cur.var(float)
+        self.cur.execute('BEGIN :o := 8.5514716; END;', {'o': got})
+        self.assertIsInstance(got.getvalue(), float)
+        self.assertEqual(got.getvalue(), 8.5514716)
+
+    def test_var_float_in_every_iteration_of_an_array_returning(self):
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, f NUMBER)')
+        got = self.cur.var(float)
+        self.cur.executemany(
+            f'INSERT INTO {self.TABLE} (id, f) VALUES (:1, :2) RETURNING f INTO :3',
+            [[1, 1.5, got], [2, 2.5, got]],
+        )
+        self.assertEqual([got.getvalue(i) for i in range(2)], [[1.5], [2.5]])
+
+    def test_var_asked_with_a_database_type_decides_for_itself(self):
+        # Asking with a database type rather than a Python one states no
+        # preference, so the value arrives however that type decodes.
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (f NUMBER)')
+        got = self.cur.var(seerdb.DB_TYPE_NUMBER)
+        self.cur.execute(
+            f'INSERT INTO {self.TABLE} (f) VALUES (:1) RETURNING f INTO :2',
+            [8.55, got],
+        )
+        self.assertIsInstance(got.getvalue()[0], Decimal)
+
     # ----- quoted placeholders (#686) -----
 
     def test_quoted_bind_names_the_plain_form_cannot_express(self):
