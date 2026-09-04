@@ -752,6 +752,9 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
         (DomainSchema, Rest) = _read_str_with_length(Rest)
         (DomainName, Rest) = _read_str_with_length(Rest)
     Annotations = {}
+    VecDims: int | None
+    VecFormat: int | None
+    VecFlags: int | None
     if _DECODE_FIELD_VERSION.get() > FIELD_VERSION_23_1:  # 23ai fv >= 18 (#89)
         # Each column carries its annotation map and the vector descriptor after
         # the domain fields (oracledb base.pyx _process_metadata). Both must be
@@ -770,8 +773,18 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
                 (_, Rest) = decode_ub4(Rest)  # per-pair flags
             (_, Rest) = decode_ub4(Rest)  # trailing flags
         # Vector descriptor (23.4+): dimensions (ub4) + format + flags (ub1 each).
-        (_, Rest) = decode_ub4(Rest)
+        # For a native VECTOR column these carry the declared dimension count and
+        # element format (2 FLOAT32, 3 FLOAT64, 4 INT8, 5 BINARY; 0 = flexible),
+        # with flags bit 0x01 flexible-format and 0x02 sparse — the metadata a
+        # thin describe otherwise drops (a plain VECTOR column is indistinguishable
+        # by data type alone). Captured for TNS_TYPE_VECTOR, discarded otherwise.
+        (VecDims, Rest) = decode_ub4(Rest)
+        VecFormat, VecFlags = Rest[0], Rest[1]
         Rest = Rest[2:]
+    else:
+        # No vector descriptor on the wire (a pre-23.4 server, or one that
+        # negotiates field version <= 17): report None, not a fake 0 format.
+        VecDims = VecFormat = VecFlags = None
     Col = {
         'column_name': ColName,
         'data_type': DataType,
@@ -797,6 +810,12 @@ def _decode_dcb_column(Rest: bytes) -> tuple[dict, bytes]:
         Col['type_name'] = (
             TypeName.decode('ascii', 'replace') or None if TypeName else None
         )
+    if DataType == TNS_TYPE_VECTOR:
+        # A native VECTOR column's element format + declared dimension count, so
+        # the describe carries what the value's self-describing image would (#55).
+        Col['vector_format'] = VecFormat
+        Col['vector_dimensions'] = VecDims
+        Col['vector_flags'] = VecFlags
     return (Col, Rest)
 
 

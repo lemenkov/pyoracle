@@ -12,6 +12,7 @@ from seerdb.client.aconnection import AsyncOracleConnect
 from seerdb.client.apool import AsyncPool
 from seerdb.client.aq import DeqOptions, EnqOptions, MessageProperties, Queue
 from seerdb.client.connection import OracleConnect, Xid
+from seerdb.client.cursor import FetchInfo
 from seerdb.client.pipeline import (
     Pipeline,
     PipelineOp,
@@ -174,6 +175,7 @@ __all__ = [
     'IntervalYM',
     'JSON',
     'SparseVector',
+    'FetchInfo',
     'Var',
     'DbObject',
     'DbObjectType',

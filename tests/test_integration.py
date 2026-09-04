@@ -2210,6 +2210,27 @@ class VectorIntegration(_IntegrationBase):
         sv = SparseVector(8, [2, 5], [1.5, 2.5])
         self.assertEqual(self._bind_roundtrip('VECTOR(8, FLOAT32, SPARSE)', sv), sv)
 
+    def test_description_reports_vector_format_and_dimensions(self):
+        # The describe carries a VECTOR column's element format + dimension count
+        # (#55), exposed on the FetchInfo description entry. The per-column vector
+        # descriptor is a 23.4+ addition, and even then not every 23ai release
+        # populates it: a server that omits it reports None (pre-23.4, no
+        # descriptor) or 0 (descriptor sent but the per-column format left
+        # unset) — seerdb faithfully surfaces whatever the server sends. Assert
+        # the exact codes only where the server provides them.
+        self._setup_vec('VECTOR(4, INT8)')
+        self.cur.execute(f'SELECT v FROM {self.TABLE}')
+        info = self.cur.description[0]
+        # Every VECTOR column's description entry carries the attributes …
+        self.assertTrue(hasattr(info, 'vector_format'))
+        self.assertTrue(hasattr(info, 'vector_dimensions'))
+        # … and stays the ordinary 7-tuple for every PEP-249 consumer.
+        self.assertEqual(len(info), 7)
+        if not info.vector_format:
+            self.skipTest('server does not populate the vector describe format')
+        self.assertEqual(info.vector_format, 4)  # 4 = INT8
+        self.assertEqual(info.vector_dimensions, 4)
+
 
 @unittest.skipUnless(_USER, _SKIP_REASON)
 class JSONIntegration(_IntegrationBase):
