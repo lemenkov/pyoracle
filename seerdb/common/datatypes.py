@@ -262,7 +262,15 @@ class Var:
     result afterwards with `getvalue()`.
     """
 
-    __slots__ = ('dbtype', 'size', '_value', 'has_value', 'is_array', 'num_elements')
+    __slots__ = (
+        'dbtype',
+        'size',
+        '_value',
+        'has_value',
+        'is_array',
+        'num_elements',
+        '_iteration_values',
+    )
 
     def __init__(
         self,
@@ -279,12 +287,25 @@ class Var:
         # the bulk-array form; num_elements is the declared maximum capacity.
         self.is_array = is_array
         self.num_elements = num_elements
+        # One entry per execute iteration, set only by an array execute whose
+        # statement has a RETURNING ... INTO clause (#687). `getvalue(pos)`
+        # reads it; a single execute leaves it None and reads `_value`.
+        self._iteration_values: list | None = None
 
     def setvalue(self, pos: int, value: object) -> None:
         self._value = value
         self.has_value = True
 
     def getvalue(self, pos: int = 0) -> object:
+        """The value this bind received.
+
+        After an array execute of a `RETURNING ... INTO` statement, each
+        iteration returns its own rows, so `pos` selects the iteration and the
+        result is that iteration's list of values. Everywhere else there is a
+        single iteration and `pos` is ignored, matching python-oracledb.
+        """
+        if self._iteration_values is not None:
+            return self._iteration_values[pos]
         return self._value
 
     def __repr__(self) -> str:

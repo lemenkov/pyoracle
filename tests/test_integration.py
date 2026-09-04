@@ -901,6 +901,92 @@ class CursorIntegration(_IntegrationBase):
         self.cur.execute(f'SELECT COUNT(*) FROM {self.TABLE}')
         self.assertEqual(self.cur.fetchone(), (7,))
 
+    # ----- executemany + RETURNING ... INTO (#687) -----
+
+    def test_executemany_returning_collects_every_iteration(self):
+        # Each iteration returns its own rows, so the receiving Var holds one
+        # entry per iteration and getvalue(pos) selects it. Before #687 the
+        # request itself was malformed: a value was sent for the server-filled
+        # bind in every row, the server rejected the call with ORA-03137 and
+        # dropped the connection.
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, v VARCHAR2(20))')
+        got = self.cur.var(int)
+        rows = [[1, 'a', got], [2, 'bb', got], [3, 'ccc', got]]
+        self.cur.executemany(
+            f'INSERT INTO {self.TABLE} (id, v) VALUES (:1, :2) RETURNING id INTO :3',
+            rows,
+        )
+        self.assertEqual(self.cur.rowcount, 3)
+        self.assertEqual([got.getvalue(i) for i in range(3)], [[1], [2], [3]])
+        # The rows really landed, and the connection is still usable.
+        self.cur.execute(f'SELECT id, v FROM {self.TABLE} ORDER BY id')
+        self.assertEqual(self.cur.fetchall(), [(1, 'a'), (2, 'bb'), (3, 'ccc')])
+
+    def test_executemany_returning_iteration_row_counts_differ(self):
+        # An UPDATE iteration can affect any number of rows, and the counts are
+        # per iteration rather than shared.
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, v VARCHAR2(20))')
+        self.cur.executemany(
+            f'INSERT INTO {self.TABLE} (id, v) VALUES (:1, :2)',
+            [(1, 'a'), (2, 'b'), (3, 'c')],
+        )
+        got = self.cur.var(int)
+        self.cur.executemany(
+            f'UPDATE {self.TABLE} SET v = v || :1 WHERE id <= :2 RETURNING id INTO :3',
+            [['x', 2, got], ['y', 3, got]],
+        )
+        self.assertEqual(self.cur.rowcount, 5)
+        self.assertEqual(got.getvalue(0), [1, 2])
+        self.assertEqual(got.getvalue(1), [1, 2, 3])
+
+    def test_executemany_returning_keeps_the_slot_of_a_no_op_iteration(self):
+        # An iteration that matches nothing still occupies its position, with an
+        # empty list, so the positions stay aligned with the submitted rows.
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER)')
+        self.cur.executemany(
+            f'INSERT INTO {self.TABLE} (id) VALUES (:1)', [(1,), (2,), (3,)]
+        )
+        got = self.cur.var(int)
+        self.cur.executemany(
+            f'UPDATE {self.TABLE} SET id = id WHERE id = :1 RETURNING id INTO :2',
+            [[1, got], [99, got], [3, got]],
+        )
+        self.assertEqual([got.getvalue(i) for i in range(3)], [[1], [], [3]])
+
+    def test_executemany_returning_named_binds(self):
+        # The form the report was filed with: named placeholders and a dict per
+        # row, all rows sharing one receiving Var (#687).
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, v VARCHAR2(10))')
+        got = self.cur.var(int)
+        self.cur.executemany(
+            f'INSERT INTO {self.TABLE} (id, v) VALUES (:id, :v) RETURNING id INTO :out',
+            [{'id': 1, 'v': 'a', 'out': got}, {'id': 2, 'v': 'b', 'out': got}],
+        )
+        self.assertEqual([got.getvalue(i) for i in range(2)], [[1], [2]])
+
+    def test_executemany_returning_several_binds(self):
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, v VARCHAR2(20))')
+        ids = self.cur.var(int)
+        names = self.cur.var(str)
+        self.cur.executemany(
+            f'INSERT INTO {self.TABLE} (id, v) VALUES (:1, :2) '
+            'RETURNING id, v INTO :3, :4',
+            [[1, 'a', ids, names], [2, 'bb', ids, names]],
+        )
+        self.assertEqual([ids.getvalue(i) for i in range(2)], [[1], [2]])
+        self.assertEqual([names.getvalue(i) for i in range(2)], [['a'], ['bb']])
+
+    def test_executemany_returning_single_row_batch_stays_flat(self):
+        # One iteration is one iteration however it was submitted, so the value
+        # reads back the same way a plain execute's does.
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER)')
+        got = self.cur.var(int)
+        self.cur.executemany(
+            f'INSERT INTO {self.TABLE} (id) VALUES (:1) RETURNING id INTO :2',
+            [[7, got]],
+        )
+        self.assertEqual(got.getvalue(), [7])
+
     def test_executemany_empty(self):
         self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER)')
         self.cur.executemany(f'INSERT INTO {self.TABLE} VALUES (:1)', [])
@@ -3622,6 +3708,29 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(await Cur.fetchone(), (8,))
                 finally:
                     await Cur.execute('DROP TABLE PYORACLE_ASYNC_EM')
+
+    async def test_async_executemany_returning(self):
+        # Async mirror of test_executemany_returning_collects_every_iteration
+        # (#687): the encoder and the per-iteration assignment are shared, so
+        # this pins that the async path really reaches them.
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                await Cur.execute('CREATE TABLE PYORACLE_ASYNC_EMR (id NUMBER)')
+                try:
+                    got = Cur.var(int)
+                    await Cur.executemany(
+                        'INSERT INTO PYORACLE_ASYNC_EMR (id) VALUES (:1) '
+                        'RETURNING id INTO :2',
+                        [[1, got], [2, got], [3, got]],
+                    )
+                    self.assertEqual(Cur.rowcount, 3)
+                    self.assertEqual(
+                        [got.getvalue(i) for i in range(3)], [[1], [2], [3]]
+                    )
+                    await Cur.execute('SELECT COUNT(*) FROM PYORACLE_ASYNC_EMR')
+                    self.assertEqual(await Cur.fetchone(), (3,))
+                finally:
+                    await Cur.execute('DROP TABLE PYORACLE_ASYNC_EMR')
 
     async def test_async_error_offset_points_at_the_bad_token(self):
         # Async mirror of test_error_offset_points_at_the_bad_token: the parse
