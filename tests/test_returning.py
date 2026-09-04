@@ -15,7 +15,11 @@ from seerdb.client.cursor import (
     _returning_bind_positions,
 )
 from seerdb.common.datatypes import Var
-from seerdb.common.tns import decode_token_rxd, set_decode_return_binds
+from seerdb.common.tns import (
+    decode_token_rxd,
+    encode_dictionary_exec,
+    set_decode_return_binds,
+)
 from seerdb.common.tns_consts import TTI_STA
 
 
@@ -102,6 +106,137 @@ class TestReturningDecode(unittest.TestCase):
         _assign_return_binds(bind, result)
         self.assertEqual(bind[1].getvalue(), [42])
         self.assertEqual(bind[2].getvalue(), ['hi'])
+
+
+def _exec_bytes(bind, batch, return_binds):
+    """The wire bytes of one array execute of a RETURNING statement."""
+    return encode_dictionary_exec(
+        {
+            'seq': 3,
+            'query': {
+                'type': 'change',
+                'auto': 0,
+                'fetch': 0,
+                'server_version': 0x0B200200,
+                'cursor': 0,
+                'query': 'insert into t (v) values (:1) returning id into :2',
+                'bind': bind,
+                'batch': batch,
+                'def': [],
+                'batcherrors': False,
+                'arraydmlrowcounts': False,
+                'return_binds': return_binds,
+                'scrollable': False,
+                'scroll': None,
+            },
+        }
+    )
+
+
+class TestArrayReturningEncode(unittest.TestCase):
+    """An array execute must not send a value for a server-filled bind (#687).
+
+    Every bind is described once in the type block, but a `RETURNING ... INTO`
+    out-bind is filled by the server from the rows each iteration affected. Its
+    value therefore belongs in no iteration's row data. Sending one shifted
+    everything after it, and the server rejected the whole call as a malformed
+    packet and dropped the connection.
+    """
+
+    def _cost_of_the_receiver(self, iterations):
+        """How many more bytes the receiver adds over the same batch without it.
+
+        The receiver is described once, so this is one descriptor's worth and
+        must not depend on how many iterations there are. If it did, the
+        receiver would be travelling in the row data.
+        """
+        receiver = Var(int)
+        inputs = [[f'v{n}'] for n in range(iterations)]
+        rows = [row + [receiver] for row in inputs]
+        with_receiver = _exec_bytes(rows[0], rows[1:], frozenset({1}))
+        without = _exec_bytes(inputs[0], inputs[1:], None)
+        return len(with_receiver) - len(without)
+
+    def test_return_bind_costs_the_same_at_any_batch_size(self):
+        self.assertEqual(self._cost_of_the_receiver(2), self._cost_of_the_receiver(8))
+
+    def test_return_bind_value_absent_from_every_iteration(self):
+        receiver = Var(int)
+        rows = [['a', receiver], ['bb', receiver], ['ccc', receiver]]
+        encoded = _exec_bytes(rows[0], rows[1:], frozenset({1}))
+        # Each iteration contributes exactly its own input value, and nothing
+        # for the receiver.
+        for value in (b'a', b'bb', b'ccc'):
+            self.assertIn(value, encoded)
+        self.assertEqual(encoded.count(b'ccc'), 1)
+
+    def test_matches_the_same_batch_without_the_receiver(self):
+        """The row data is byte-identical to a batch of the inputs alone.
+
+        The two differ only in the type block, which describes the extra bind.
+        Comparing the tail past the longest shared prefix isolates the row data,
+        which is where the bug was.
+        """
+        receiver = Var(int)
+        with_receiver = _exec_bytes(
+            ['a', receiver], [['bb', receiver], ['ccc', receiver]], frozenset({1})
+        )
+        # A three-row batch of the inputs only, no RETURNING involved.
+        inputs_only = _exec_bytes(['a'], [['bb'], ['ccc']], None)
+        self.assertTrue(with_receiver.endswith(inputs_only[-len(b'ccc') - 8 :]))
+
+    def test_without_return_binds_every_bind_still_travels(self):
+        """A plain array execute is unchanged."""
+        encoded = _exec_bytes(['a', 'x'], [['bb', 'y']], None)
+        for value in (b'a', b'x', b'bb', b'y'):
+            self.assertIn(value, encoded)
+
+
+class TestArrayReturningAssign(unittest.TestCase):
+    """Each iteration returns its own rows, and all of them must be kept."""
+
+    def tearDown(self):
+        set_decode_return_binds(None)
+
+    def _record(self, values):
+        return {'return_positions': [0], 'return_values': [values]}
+
+    def test_per_iteration_values(self):
+        result = (
+            None,
+            None,
+            None,
+            None,
+            [self._record([b'\xc1\x02']), self._record([b'\xc1\x03'])],
+        )
+        bind = [Var(int)]
+        _assign_return_binds(bind, result)
+        self.assertEqual(bind[0].getvalue(0), [1])
+        self.assertEqual(bind[0].getvalue(1), [2])
+        # No argument keeps reading the first iteration, as before.
+        self.assertEqual(bind[0].getvalue(), [1])
+
+    def test_iteration_returning_several_rows(self):
+        """An UPDATE can affect many rows in a single iteration."""
+        result = (
+            None,
+            None,
+            None,
+            None,
+            [self._record([b'\xc1\x02', b'\xc1\x03']), self._record([b'\xc1\x04'])],
+        )
+        bind = [Var(int)]
+        _assign_return_binds(bind, result)
+        self.assertEqual(bind[0].getvalue(0), [1, 2])
+        self.assertEqual(bind[0].getvalue(1), [3])
+
+    def test_single_iteration_keeps_the_flat_shape(self):
+        """One execute has one iteration, so `pos` is ignored."""
+        result = (None, None, None, None, [self._record([b'\xc1\x02'])])
+        bind = [Var(int)]
+        _assign_return_binds(bind, result)
+        self.assertEqual(bind[0].getvalue(), [1])
+        self.assertEqual(bind[0].getvalue(4), [1])
 
 
 if __name__ == '__main__':

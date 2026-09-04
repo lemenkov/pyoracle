@@ -600,25 +600,40 @@ def _assign_out_binds(Bind, Result) -> list:
 
 
 def _assign_return_binds(Bind, Result) -> None:
-    # DML RETURNING ... INTO (#120): the response decoder left a
-    # {'return_positions', 'return_values'} record as the single "row", where
-    # return_values[i] is the list of raw values for that bind (one per affected
-    # row). Decode each by its Var's declared type and store the list on the Var
-    # (getvalue() returns the list, matching python-oracledb).
+    # DML RETURNING ... INTO (#120): the response decoder left one
+    # {'return_positions', 'return_values'} record per execute iteration, where
+    # return_values[i] is the list of raw values for that bind (one per row the
+    # iteration affected). Decode each by its Var's declared type and store the
+    # list on the Var (getvalue() returns it, matching python-oracledb).
+    #
+    # An array execute produces several such records, one per iteration, and
+    # they all have to be kept: the values a later iteration returned are not in
+    # the first record, and reading only that one silently reported a single
+    # returned key for a batch of any size (#687). They go on the Var as its
+    # per-iteration values, selected by getvalue(pos); getvalue() with no
+    # argument still reads the first iteration, so a single execute is unchanged.
     if not isinstance(Bind, list) or not isinstance(Result, tuple) or len(Result) < 5:
         return
     Rows = Result[4]
-    if not Rows or not isinstance(Rows[0], dict) or 'return_positions' not in Rows[0]:
+    Records = [R for R in Rows or () if isinstance(R, dict) and 'return_positions' in R]
+    if not Records:
         return
     from seerdb.common.types import decode_value
 
-    Record = Rows[0]
-    for Pos, Values in zip(Record['return_positions'], Record['return_values']):
-        if Pos >= len(Bind) or not isinstance(Bind[Pos], Var):
-            continue
+    PerBind: dict = {}
+    for Record in Records:
+        for Pos, Values in zip(Record['return_positions'], Record['return_values']):
+            if Pos >= len(Bind) or not isinstance(Bind[Pos], Var):
+                continue
+            Variable = Bind[Pos]
+            Column = {'data_type': Variable.dbtype.tns_type, 'charset': UTF8_CHARSET}
+            PerBind.setdefault(Pos, []).append(
+                [decode_value(Column, V if V else None) for V in Values]
+            )
+    for Pos, Iterations in PerBind.items():
         Variable = Bind[Pos]
-        Column = {'data_type': Variable.dbtype.tns_type, 'charset': UTF8_CHARSET}
-        Variable._value = [decode_value(Column, V if V else None) for V in Values]
+        Variable._value = Iterations[0]
+        Variable._iteration_values = Iterations if len(Iterations) > 1 else None
         Variable.has_value = True
 
 

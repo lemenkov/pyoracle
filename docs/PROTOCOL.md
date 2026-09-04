@@ -3756,7 +3756,32 @@ ContextVar, like the array-DML row counts), keeps the raw return-value bytes,
 and the cursor decodes each by its `Var`'s type. `var.getvalue()` returns the
 list of returned values (python-oracledb-compatible). Sync + async; verified on
 10g/11g/21c/23ai (INSERT / multi-row UPDATE / multi-row DELETE / zero-row /
-all-return-no-input). Array (`executemany`) RETURNING is out of scope here.
+all-return-no-input).
+
+### 22.1 Array RETURNING (`executemany`, #687)
+
+An array execute of a RETURNING statement follows the same two rules, applied
+per iteration. Both halves are easy to get wrong, and getting either wrong is
+not a soft failure:
+
+1. **Request**: the OAC still describes every bind exactly once, sized across
+   all iterations as for any array DML, but **no** iteration's `TTI_RXD` carries
+   a value for a return bind. Emitting one shifts the server's read of the
+   following iteration and the whole call is rejected with **ORA-03137**
+   (`opiexe: protocol violation`), followed by **ORA-03106** — the connection
+   does not survive it.
+2. **Response**: the server sends **one `TTI_RXD` per iteration**, each laid out
+   exactly as the single-execute form above. The `num_rows` in a record counts
+   the rows *that iteration* affected, so an array UPDATE returns a different
+   count in each. Reading only the first record silently reports one iteration's
+   values for the whole batch.
+
+seerdb keeps every record and stores them on the `Var` as its per-iteration
+values: `var.getvalue(pos)` selects the iteration and yields that iteration's
+list, while `var.getvalue()` still reads the first — so a single execute is
+unchanged. python-oracledb-compatible. Sync + async; verified on
+10g/11g/21c/23ai (array INSERT, array UPDATE with a different row count per
+iteration, single-row batch, and multiple return binds).
 
 ## 23. Implicit result sets — DBMS_SQL.RETURN_RESULT (#121)
 

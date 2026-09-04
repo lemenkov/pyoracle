@@ -6819,6 +6819,19 @@ def _oac_rep_row(Rows: list) -> list:
     return Rep
 
 
+def _in_bind_rows(Bind: list, Batch: list, ReturnBinds) -> list:
+    # The rows whose values actually travel in the RXD tokens of an array
+    # execute. Every bind is described once in the OAC, but a RETURNING ... INTO
+    # out-bind is filled by the server from the affected rows, so it must not
+    # carry a value here -- in any iteration (#687). Sending one made the server
+    # read the next iteration's first value as this one's tail and reject the
+    # whole call as a malformed TTC packet, which also killed the connection.
+    AllRows = [Bind] + Batch
+    if not ReturnBinds:
+        return AllRows
+    return [[V for I, V in enumerate(R) if I not in ReturnBinds] for R in AllRows]
+
+
 def encode_dictionary_exec(Dictionary: dict) -> bytes:
     # Publish the field version for the bind-OAC encoder (encode_token_raw).
     FieldVersion = Dictionary.get('field_version', FIELD_VERSION_11_2)
@@ -6952,7 +6965,10 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
         Tokens = b''
     elif DefLen == QueryLen == 0:
         if BatchLen > 0:
-            Tokens = b''.join(encode_tokens_rxd(R, b'') for R in [Bind] + Batch)
+            Tokens = b''.join(
+                encode_tokens_rxd(R, b'')
+                for R in _in_bind_rows(Bind, Batch, ReturnBinds)
+            )
         elif ReturnBinds:
             # Cached-cursor RETURNING: values for the input binds only.
             Tokens = encode_tokens_rxd(InBind, b'') if InBind else b''
@@ -6965,7 +6981,10 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
             # the declared buffer), then one RXD row per iteration.
             AllRows = [Bind] + Batch
             Oac = encode_tokens_oac(_oac_rep_row(AllRows), b'')
-            Tokens = Oac + b''.join(encode_tokens_rxd(R, b'') for R in AllRows)
+            Tokens = Oac + b''.join(
+                encode_tokens_rxd(R, b'')
+                for R in _in_bind_rows(Bind, Batch, ReturnBinds)
+            )
         elif ReturnBinds:
             # DML RETURNING ... INTO: OAC for every bind, then an RXD carrying
             # only the input binds' values (the return binds are server-filled).
