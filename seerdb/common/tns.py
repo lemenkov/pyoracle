@@ -870,6 +870,46 @@ def _encode_signed_sb4(value: int) -> bytes:
     return bytes([0x80 | len(magnitude)]) + magnitude
 
 
+# The buffer length a real server reports for a column type that always carries
+# bytes in the row (#690). A zero length is not a free "unknown": the client reads
+# it as "this column sends nothing at all, its value is always NULL"
+# (docs/PROTOCOL.md 6.2), so a describe claiming zero for one of these makes the
+# row decoder consume the wrong bytes and desync.
+#
+# A backend often cannot supply one -- the PEP 249 description tuple reports no
+# size for a temporal, interval or REF column -- and the Mirror fills it in here
+# rather than leaving each backend to remember. Measured against live 10g, 11g,
+# 21c and 23ai, which all report exactly these; the odd-looking values are what
+# Oracle sends, not a guess. A character or RAW column is absent on purpose: zero
+# is a truthful answer there (`SELECT NULL AS x` describes exactly that way) and
+# must be left alone.
+_DESCRIBE_WIRE_LENGTH = {
+    TNS_TYPE_NUMBER: 22,
+    TNS_TYPE_DATE: 1,
+    TNS_TYPE_TIMESTAMP: 11,
+    TNS_TYPE_TIMESTAMPTZ: 1,
+    TNS_TYPE_TIMESTAMPLTZ: 11,
+    TNS_TYPE_INTERVALYM: 1,
+    TNS_TYPE_INTERVALDS: 1,
+    TNS_TYPE_BFLOAT: 1,
+    TNS_TYPE_BDOUBLE: 1,
+    TNS_TYPE_REF: 2000,
+    TNS_TYPE_CLOB: 4000,
+    TNS_TYPE_BLOB: 4000,
+}
+
+
+def describe_wire_length(col: ColumnMeta) -> int:
+    """The buffer length to describe ``col`` with.
+
+    The backend's own figure when it has one, else the length a real server
+    reports for that type. Zero survives only for a type where it is true.
+    """
+    if col.data_length:
+        return col.data_length
+    return _DESCRIBE_WIRE_LENGTH.get(col.data_type, 0)
+
+
 def _encode_dcb_column(col: ColumnMeta, position: int) -> bytes:
     # Inverse of _decode_dcb_column, in the layout the negotiated field version's
     # client reads: 12.2+ carries the scale as one signed byte and appends an
@@ -882,7 +922,7 @@ def _encode_dcb_column(col: ColumnMeta, position: int) -> bytes:
     return (
         bytes([col.data_type, 0, col.precision & 0xFF])
         + (bytes([col.scale & 0xFF]) if is_12c else _encode_signed_sb4(col.scale))
-        + encode_sb4(col.data_length)  # buffer size
+        + encode_sb4(describe_wire_length(col))  # buffer size
         + encode_sb4(0)  # max array elements
         + encode_sb4(0)  # cont flags
         # For an ADT / REF column the referenced type's OID (else absent) (#494).
