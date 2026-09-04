@@ -2678,6 +2678,24 @@ def _decode_rxd_step(Data: bytes, Acc: tuple) -> tuple:
                 (Val, Rest) = _read_object_column(Rest, Col)
                 Row.append(Val)
                 continue
+            if Col.get('data_length', None) == 0:
+                # A column the server describes with a zero data length carries
+                # NO bytes in the row — not even the empty DALC that an ordinary
+                # NULL would send. Its value is always NULL. `SELECT NULL AS x`
+                # (and `SELECT ''`) describes exactly this way, and reading a
+                # DALC for it consumed the following token instead, desyncing
+                # the rest of the response: the end-of-fetch OER was eaten as a
+                # column value and decoding then failed on a bogus token (#682).
+                #
+                # This has to sit after the branches above, not before them: a
+                # LONG is described with a zero data length too, and it *does*
+                # carry data. It also has to key on the data length rather than
+                # the max size, because a NUMBER is described with a max size of
+                # zero while carrying a value. And it tests for an explicit zero
+                # rather than a falsy value, because a describe always sets the
+                # field while a hand-built row format may leave it out.
+                Row.append(None)
+                continue
             (Val, Rest) = decode_dalc(Rest)
             Row.append(decode_value(Col, Val))
     Rows.append(Row)
