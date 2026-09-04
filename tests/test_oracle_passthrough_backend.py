@@ -18,7 +18,10 @@ from pathlib import Path
 import seerdb
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'examples'))
-from oracle_passthrough_backend import _relay_error  # noqa: E402
+from oracle_passthrough_backend import (  # noqa: E402
+    OraclePassthroughBackend,
+    _relay_error,
+)
 
 
 def test_strips_the_redundant_ora_prefix():
@@ -67,3 +70,59 @@ def test_missing_offset_is_none():
     # .offset defaults to None on a DatabaseError with no parse position.
     err = _relay_error(exc)
     assert err.error_offset is None
+
+
+class _FakeVar:
+    def __init__(self, value=None):
+        self._value = value
+
+    def setvalue(self, _pos, value):
+        self._value = value
+
+    def getvalue(self):
+        return self._value
+
+
+class _FakeCursor:
+    """Records what _execute_plsql binds, without a database."""
+
+    def __init__(self, out_values=None):
+        self.bound = None
+        self._out_values = out_values or {}
+
+    def var(self, dbtype, size=None):
+        return _FakeVar()
+
+    def execute(self, sql, variables):
+        self.bound = list(variables)
+        # Seed each Var with a fake OUT value so getvalue() returns something.
+        for i, v in enumerate(self.bound):
+            if isinstance(v, _FakeVar):
+                v.setvalue(0, self._out_values.get(i))
+
+
+def _plsql_binds(*binds):
+    from seerdb.server.backend import BindVar
+
+    return [BindVar(value=v, tns_type=t, max_size=m) for (v, t, m) in binds]
+
+
+def test_large_lob_in_bind_is_bound_as_a_plain_value_not_a_var():
+    # A large CLOB / BLOB IN bind (#91) resolves to plain str / bytes; the
+    # passthrough must bind that value directly (seerdb re-promotes it upstream),
+    # not a cursor.var(LOB) — which has no client-side OAC (ORA-00600 "Unsupported
+    # Var OAC type"). Its OUT slot is None; a real OUT Var still returns its value.
+    from seerdb.common.tns_consts import TNS_TYPE_CLOB, TNS_TYPE_NUMBER
+
+    backend = OraclePassthroughBackend(host='h', port=1, service='s', credentials={})
+    cursor = _FakeCursor(out_values={1: 42})
+    binds = _plsql_binds(
+        ('X' * 40000, TNS_TYPE_CLOB, 160000), (None, TNS_TYPE_NUMBER, 1)
+    )
+    result = backend._execute_plsql(cursor, 'BEGIN :r := f(:p); END;', binds)
+    # :p bound as the plain string; :r bound as a Var.
+    assert cursor.bound[0] == 'X' * 40000
+    assert isinstance(cursor.bound[1], _FakeVar)
+    # OUT binds: the LOB IN slot is None (discarded by the client); the Var yields
+    # its assigned value.
+    assert result.out_binds == [None, 42]

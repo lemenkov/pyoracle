@@ -23,7 +23,12 @@ from dataclasses import replace
 import seerdb
 from seerdb.common.datatypes import dbtype_for_oracle_type
 from seerdb.common.tns import AL16UTF16_CHARSET, ColumnMeta
-from seerdb.common.tns_consts import TNS_TYPE_REF, TNS_TYPE_REFCURSOR
+from seerdb.common.tns_consts import (
+    TNS_TYPE_BLOB,
+    TNS_TYPE_CLOB,
+    TNS_TYPE_REF,
+    TNS_TYPE_REFCURSOR,
+)
 from seerdb.server.backend import BackendError, BindVar, CursorResult, Result
 
 
@@ -123,8 +128,20 @@ class OraclePassthroughBackend:
         return cursor.rowcount or 0, list(cursor.getarraydmlrowcounts())
 
     def _execute_plsql(self, cursor, sql: str, binds: Sequence) -> Result:
+        # Each PL/SQL bind is registered as an OUT-capable Var (the wire carries
+        # no direction) except a large LOB IN value: a resolved temp-LOB CLOB /
+        # BLOB (#91) is bound as its plain str / bytes, which seerdb re-promotes
+        # through an upstream temp LOB. A cursor.var(LOB) has no client-side OAC,
+        # and such a bind is only ever IN here, so it needs no Var — its OUT slot
+        # is None (the client discards a non-Var position anyway).
         variables = []
         for bind in binds:
+            if (
+                bind.tns_type in (TNS_TYPE_CLOB, TNS_TYPE_BLOB)
+                and bind.value is not None
+            ):
+                variables.append(bind.value)
+                continue
             dbtype = dbtype_for_oracle_type(bind.tns_type, 1)
             if bind.tns_type == TNS_TYPE_REFCURSOR:
                 # A REF CURSOR OUT param: the DB opens the cursor, so bind a
@@ -142,7 +159,14 @@ class OraclePassthroughBackend:
             cursor.execute(sql, variables)
         except seerdb.DatabaseError as exc:
             raise _relay_error(exc) from exc
-        return Result(out_binds=[_out_value(var.getvalue()) for var in variables])
+        # A plain-value (LOB IN) position has no OUT value — None; a Var yields
+        # its assigned value (a nested cursor for a REF CURSOR).
+        return Result(
+            out_binds=[
+                _out_value(v.getvalue()) if hasattr(v, 'getvalue') else None
+                for v in variables
+            ]
+        )
 
     def sessionless_begin(self, transaction_id: bytes, timeout: int) -> None:
         # Start a sessionless transaction on the upstream connection so the
