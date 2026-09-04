@@ -141,7 +141,6 @@ from seerdb.server.backend import (
 )
 from seerdb.server.framing import PacketStream
 from seerdb.server.handshake import (
-    TNS_VERSION_11_2,
     encode_accept,
     encode_ano_null_reply,
     encode_dty_reply,
@@ -151,6 +150,7 @@ from seerdb.server.handshake import (
     negotiated_tns_version,
     parse_connect,
     pro_is_sqlplus,
+    server_tns_version,
 )
 from seerdb.server.identity import IDENTITY_11_2, ServerIdentity, server_identity
 
@@ -271,7 +271,7 @@ def handle_login(
     encryption: str = 'accepted',
     token_public_key: bytes | None = None,
     field_version: int = FIELD_VERSION_11_2,
-    tns_version: int = TNS_VERSION_11_2,
+    tns_version: int | None = None,
 ) -> tuple[str, bool, bytes | None]:
     """Run the server side of the handshake + O5LOGON.
 
@@ -298,6 +298,9 @@ def handle_login(
     # The release this session introduces itself as, in the auth result and (for
     # sqlplus) the banner — it follows the field version being advertised.
     identity = server_identity(field_version)
+    # The protocol version goes with the field version unless a caller pins it.
+    if tns_version is None:
+        tns_version = server_tns_version(field_version)
     request = parse_connect(_expect(stream, TNS_CONNECT, 'CONNECT'))
     stream.send_raw(encode_accept(request, tns_version=tns_version))
     # From protocol version 315 the post-ACCEPT DATA stream carries a 4-byte
@@ -460,7 +463,7 @@ def serve_session(
     encryption: str = 'accepted',
     token_public_key: bytes | None = None,
     field_version: int = FIELD_VERSION_11_2,
-    tns_version: int = TNS_VERSION_11_2,
+    tns_version: int | None = None,
 ) -> str:
     """Log a client in, then answer its queries until it disconnects.
 

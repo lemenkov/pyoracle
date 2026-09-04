@@ -32,9 +32,6 @@ def main() -> None:
     # The field version the Mirror advertises (default 11.2); a 12c+/23ai value
     # makes a thin client negotiate to it and exercises those wire formats.
     field_version = int(os.environ.get('MIRROR_FIELD_VERSION', '6'))
-    # The TNS protocol version the ACCEPT answers with (default 11.2's 314).
-    # 316 (12.2) and up switch the DATA stream to the 4-byte packet length.
-    tns_version = int(os.environ.get('MIRROR_TNS_VERSION', '314'))
     user = os.environ.get('SEERDB_TEST_USER', 'PYO')
     password = os.environ.get('SEERDB_TEST_PASSWORD', 'pyo123')
 
@@ -49,7 +46,6 @@ def main() -> None:
         '127.0.0.1',
         listen_port,
         field_version=field_version,
-        tns_version=tns_version,
         backend_factory=lambda: OraclePassthroughBackend(
             host=host,
             port=int(port),
