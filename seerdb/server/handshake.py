@@ -17,7 +17,12 @@ from dataclasses import dataclass
 from seerdb.common import ano
 from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import encode_packet
-from seerdb.common.tns_consts import FIELD_VERSION_11_2, TNS_ACCEPT, TNS_DATA
+from seerdb.common.tns_consts import (
+    FIELD_VERSION_11_2,
+    TNS_ACCEPT,
+    TNS_DATA,
+    TNS_VERSION_MIN_LARGE_SDU,
+)
 from seerdb.server._handshake_11g import (
     build_caps_block_reply,
     build_dty_type_reply,
@@ -45,11 +50,23 @@ _OFF_CDATA_LEN = 16
 _OFF_CDATA_OFFSET = 18
 _MIN_HEADER = 20  # bytes we must have to read every field above
 
-# The highest TNS protocol version the Mirror speaks. Pinned to 11g (0x013a =
-# 314): < 315 so the connection uses legacy 2-byte framing, no large SDU, no
-# end-of-response. A newer client negotiates down to this, exactly as it would
-# against a real 11g listener.
-_SERVER_TNS_VERSION = 314
+# The TNS protocol version the Mirror answers with. 314 (0x013a) is 11.2: below
+# ``TNS_VERSION_MIN_LARGE_SDU`` (315), so the session keeps the legacy 2-byte
+# packet framing. A client that speaks a newer version negotiates down to
+# whatever is set here, exactly as it would against a real listener of that age.
+#
+# The version scale, anchored on what the testbeds actually answer: 11.2 -> 314,
+# 21c -> 318, 23ai/26ai -> 320. 12.1 and 12.2 sit in the gap, so 12.2 is taken as
+# 316 — inferred from those anchors rather than captured, since there is no 12.2
+# testbed here. What is *behavioural* about the number (and is captured) is which
+# side of two thresholds it falls on: >= 315 switches the post-ACCEPT DATA stream
+# to the 4-byte packet length, and >= 318 (``TNS_VERSION_MIN_OOB_CHECK``) adds the
+# extended ``flags2`` word a client reads for end-of-response support. 316 is
+# large-SDU but not end-of-response, which is what a 12.2 server is.
+TNS_VERSION_11_2 = 314
+TNS_VERSION_12_2 = 316
+
+_SERVER_TNS_VERSION = TNS_VERSION_11_2
 
 # ACCEPT body fields that are server constants at 11g, read straight off the
 # captured XE 11.2 ACCEPT (tests/handshake_11g.py): protocol characteristics,
@@ -59,6 +76,20 @@ _ACCEPT_DATA_LEN = 0x0000
 _ACCEPT_FLAGS = 0x0020
 _ACCEPT_RESERVED = 0x4141
 _DEFAULT_TDU = 0xFFFF
+
+# A >= 315 ACCEPT carries the real SDU/TDU as 32-bit fields and zeroes the 16-bit
+# pair the legacy form used, so the body grows past the legacy 24 bytes. Offsets
+# and length are read off a live 21c ACCEPT (version 318, body 37 bytes) — the
+# nearest capture below the end-of-response era: 16-byte fixed head, 8 zero bytes,
+# ub4 SDU at 24, ub4 TDU at 28, then a byte and the flags2 word at 33. A client
+# only reads flags2 at >= 318, so at 316 it stays zero and no end-of-response is
+# advertised. The 21c flags/reserved words differ from the 11g pair above.
+_ACCEPT_LARGE_BODY_LEN = 37
+_OFF_ACCEPT_SDU32 = 24
+_OFF_ACCEPT_TDU32 = 28
+_ACCEPT_LARGE_FLAGS = 0x002D
+_ACCEPT_LARGE_RESERVED = 0x4101
+_LARGE_DEFAULT_TDU = 0x2000
 
 # The classic sqlplus / thick-OCI PRO request leads its TTC payload with the ANO
 # container magic (0xDEADBEEF) instead of TTI_PRO (0x01); the Mirror must answer
@@ -140,7 +171,12 @@ def parse_connect(body: bytes) -> ConnectRequest:
     )
 
 
-def encode_accept(request: ConnectRequest, *, sdu: int = DEFAULT_SDU) -> bytes:
+def encode_accept(
+    request: ConnectRequest,
+    *,
+    sdu: int = DEFAULT_SDU,
+    tns_version: int = _SERVER_TNS_VERSION,
+) -> bytes:
     """Build the ACCEPT reply to a parsed CONNECT (the server side of §2.2).
 
     Negotiates the TNS version down to what the Mirror speaks, echoes the
@@ -148,8 +184,31 @@ def encode_accept(request: ConnectRequest, *, sdu: int = DEFAULT_SDU) -> bytes:
     each side's. Returns the full TNS_ACCEPT packet (header included), ready to
     hand to :meth:`PacketStream.write_packet`.
     """
-    version = min(request.protocol_version, _SERVER_TNS_VERSION)
+    version = negotiated_tns_version(request, tns_version)
     negotiated_sdu = min(request.sdu, sdu)
+    if version >= TNS_VERSION_MIN_LARGE_SDU:
+        # The 16-bit SDU/TDU pair is zeroed and the real values move to the ub4
+        # fields the client reads at offsets 24 / 28.
+        large_body = bytearray(_ACCEPT_LARGE_BODY_LEN)
+        struct.pack_into(
+            '>HHHHHHHH',
+            large_body,
+            0,
+            version,
+            request.global_service_options,
+            0,
+            0,
+            _ACCEPT_PROTO_CHARS,
+            _ACCEPT_DATA_LEN,
+            _ACCEPT_LARGE_FLAGS,
+            _ACCEPT_LARGE_RESERVED,
+        )
+        struct.pack_into('>I', large_body, _OFF_ACCEPT_SDU32, negotiated_sdu)
+        struct.pack_into(
+            '>I', large_body, _OFF_ACCEPT_TDU32, min(request.tdu, _LARGE_DEFAULT_TDU)
+        )
+        packet, _ = encode_packet(TNS_ACCEPT, bytes(large_body), sdu)
+        return packet
     negotiated_tdu = min(request.tdu, _DEFAULT_TDU)
     body = struct.pack(
         '>HHHHHHHH',
@@ -164,6 +223,19 @@ def encode_accept(request: ConnectRequest, *, sdu: int = DEFAULT_SDU) -> bytes:
     ) + bytes(8)
     packet, _ = encode_packet(TNS_ACCEPT, body, sdu)
     return packet
+
+
+def negotiated_tns_version(
+    request: ConnectRequest, tns_version: int = _SERVER_TNS_VERSION
+) -> int:
+    """The protocol version this connection settles on.
+
+    At or above :data:`TNS_VERSION_MIN_LARGE_SDU` the post-ACCEPT ``DATA`` stream
+    switches to the 4-byte packet length, so the session has to know this to
+    frame the rest of the connection (the CONNECT and ACCEPT packets themselves
+    stay in the legacy 16-bit form either way — §1.1).
+    """
+    return min(request.protocol_version, tns_version)
 
 
 # A modern thin client (seerdb, go-ora, python-oracledb) runs an ANO (native

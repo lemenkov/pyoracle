@@ -187,8 +187,17 @@ class PacketStream:
         path (#448) — its body is encrypted + MAC'd like any other DATA — so the
         captured-template handshake replies (PRO/DTY) still go out encrypted.
         """
-        if self._ano is not None and self._ano.active and packet[4] == TNS_DATA:
-            # Strip the 8-byte header + 2-byte data flags, then re-emit encrypted.
-            self._write_data_ano(packet[10:])
+        if packet[4] == TNS_DATA:
+            # Strip the 8-byte header + 2-byte data flags and re-emit the body
+            # through the normal write path, so a pre-framed packet picks up
+            # whatever framing this stream is on: encrypted once ANO is active
+            # (#448), and the 4-byte packet length on a >= 315 session. The
+            # callers build these with the legacy header, which is byte-identical
+            # to what _write_data emits for a small packet on a legacy stream —
+            # so this only changes what goes out when the stream is not legacy.
+            if self._ano is not None and self._ano.active:
+                self._write_data_ano(packet[10:])
+            else:
+                self._write_data(packet[10:])
             return
         self._sock.sendall(packet)

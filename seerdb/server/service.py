@@ -20,6 +20,7 @@ from collections.abc import Callable
 from seerdb.common.tns_consts import FIELD_VERSION_11_2
 from seerdb.server.backend import Backend
 from seerdb.server.framing import PacketStream
+from seerdb.server.handshake import TNS_VERSION_11_2
 from seerdb.server.session import serve_session
 
 logger = logging.getLogger('seerdb.server')
@@ -44,6 +45,7 @@ class Server:
         *,
         backend_factory: BackendFactory,
         field_version: int = FIELD_VERSION_11_2,
+        tns_version: int = TNS_VERSION_11_2,
     ) -> None:
         self._backend_factory = backend_factory
         # The field version the Mirror advertises to thin clients (default the
@@ -51,6 +53,7 @@ class Server:
         # gates on that version; the login path handles them, the query path is
         # being brought up format by format.
         self._field_version = field_version
+        self._tns_version = tns_version
         self._running = True
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -80,7 +83,10 @@ class Server:
         try:
             backend = self._backend_factory()
             user = serve_session(
-                PacketStream(client), backend, field_version=self._field_version
+                PacketStream(client),
+                backend,
+                field_version=self._field_version,
+                tns_version=self._tns_version,
             )
             logger.info('%s:%d session ended (%s)', addr[0], addr[1], user)
         except Exception:
@@ -105,10 +111,15 @@ def serve(
     *,
     backend_factory: BackendFactory,
     field_version: int = FIELD_VERSION_11_2,
+    tns_version: int = TNS_VERSION_11_2,
 ) -> None:
     """Run a Mirror server until interrupted — the one-call convenience."""
     server = Server(
-        host, port, backend_factory=backend_factory, field_version=field_version
+        host,
+        port,
+        backend_factory=backend_factory,
+        field_version=field_version,
+        tns_version=tns_version,
     )
     try:
         server.serve_forever()

@@ -298,6 +298,29 @@ without error — the capture is conformant, not a guess.
 Unlike modern versions, **PRO and DTY are ordinary TTC `DATA` messages**, not
 distinct TNS packet types — the server's replies are DATA-framed payloads.
 
+**ACCEPT specifics at ≥ 315 (large SDU).** From `TNS_VERSION_MIN_LARGE_SDU` the
+body grows past the legacy 24 bytes and the SDU/TDU move: the **16-bit pair at
+offsets 4–7 is zeroed** and the real values become **`ub4` SDU at offset 24** and
+**`ub4` TDU at offset 28**. Captured live:
+
+| Server | Version | Body len | SDU16/TDU16 | SDU32 @24 | TDU32 @28 | flags2 @33 |
+|--------|---------|----------|-------------|-----------|-----------|------------|
+| XE 11.2    | 314 | 24 | 8192 / 65535 | –    | –       | –          |
+| XE 21c     | 318 | 37 | 0 / 0        | 8192 | 8192    | `0x00000000` |
+| 23ai/26ai  | 320 | 53 | 0 / 0        | 8192 | 2097152 | `0x1a000000` |
+
+A client reads `flags2` only at ≥ 318 (`TNS_VERSION_MIN_OOB_CHECK`), so a server
+below that never advertises end-of-response whatever it puts there. **The version
+number alone drives the framing switch**, and it applies to everything *after*
+the ACCEPT: the CONNECT and ACCEPT packets themselves stay in the legacy 16-bit
+form (§1.1), and both ends move to the 4-byte packet length from the next `DATA`
+onward.
+
+The version scale is anchored by those three captures (11.2 → 314, 21c → 318,
+23ai → 320). **12.1 and 12.2 fall in the gap and are not captured here**; the
+Mirror takes 12.2 as **316**, which is what matters behaviourally — large-SDU
+framing, no end-of-response.
+
 ## 3. Presentation Layer: TTC (Two-Task Common)
 
 Once the TNS connection is accepted, all further communication occurs inside TNS_DATA packets using the TTC/TTI protocol. Each TTC message begins with a 1-byte token identifier.
