@@ -57,6 +57,8 @@ from seerdb.common.exceptions import (
 from seerdb.common.tns import (
     _DTY_8I,
     CCAP_FIELD_VERSION,
+    FLUSH_OUT_BINDS,
+    MAX_FLUSH_OUT_BINDS,
     assemble_packet,
     decode_packet,
     decode_token_pro,
@@ -122,6 +124,7 @@ from seerdb.common.tns_consts import (
     TPC_END_NORMAL,
     TPC_TXN_FLAGS_SESSIONLESS,
     TTI_DTY,
+    TTI_FOB,
     TTI_OER,
     TTI_PRO,
     TTI_RPA,
@@ -873,13 +876,20 @@ class AsyncOracleConnect(_ConnectionLogic):
     async def _handle_response(self, Acc: tuple | None = None) -> object:
         if Acc is None:
             Acc = (None, None, [])
-        Received = await self._next_data_packet(b'', b'')
-        if Received is False:
-            raise InterfaceError('connection closed while awaiting response')
-        (Type, Packet) = Received
-        if Type == TNS_DATA:
-            return decode_packet(Packet, Acc, self.field_version)
-        raise Exception('Unexpected response type', Type)
+        for _ in range(MAX_FLUSH_OUT_BINDS + 1):
+            Received = await self._next_data_packet(b'', b'')
+            if Received is False:
+                raise InterfaceError('connection closed while awaiting response')
+            (Type, Packet) = Received
+            if Type != TNS_DATA:
+                raise Exception('Unexpected response type', Type)
+            Result = decode_packet(Packet, Acc, self.field_version)
+            if Result != FLUSH_OUT_BINDS:
+                return Result
+            # A flush-out-binds request, not a result: echo the token back and
+            # read on for the response it is standing in front of (§6.9, #697).
+            await self.send(TNS_DATA, bytes([TTI_FOB]))
+        raise InterfaceError('server kept asking to flush out binds')
 
     # ----- execute / fetch (kept minimal for the first cut) -----
 

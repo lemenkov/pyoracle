@@ -10,15 +10,25 @@
 
 import unittest
 
+from seerdb.client.connection import OracleConnect
 from seerdb.client.cursor import _assign_return_binds
 from seerdb.common.datatypes import Var
+from seerdb.common.exceptions import InterfaceError
 from seerdb.common.sqltext import returning_bind_positions
 from seerdb.common.tns import (
+    FLUSH_OUT_BINDS,
+    MAX_FLUSH_OUT_BINDS,
+    decode_packet,
     decode_token_rxd,
     encode_dictionary_exec,
     set_decode_return_binds,
 )
-from seerdb.common.tns_consts import TTI_STA
+from seerdb.common.tns_consts import (
+    FIELD_VERSION_11_2,
+    TNS_DATA,
+    TTI_FOB,
+    TTI_STA,
+)
 
 
 class TestReturningDetection(unittest.TestCase):
@@ -235,6 +245,70 @@ class TestArrayReturningAssign(unittest.TestCase):
         _assign_return_binds(bind, result)
         self.assertEqual(bind[0].getvalue(), [1])
         self.assertEqual(bind[0].getvalue(4), [1])
+
+
+class TestFlushOutBindsRequest(unittest.TestCase):
+    """The server asks before it answers, when a RETURNING statement fails (#697).
+
+    Its whole reply is one byte -- the TTI_FOB token, nothing else -- and it then
+    waits. The real error only arrives once the client has echoed the token back.
+    Reading that packet as if it were a result abandoned the response mid-stream
+    and left the connection unusable: the next statement on it came back
+    ORA-03137, a protocol violation, because the server was still waiting.
+    """
+
+    def test_a_bare_fob_packet_decodes_to_the_marker(self):
+        (Done, Marker) = decode_packet(bytes([TTI_FOB]), (None, None, []))
+        self.assertIs(Done, False)
+        self.assertEqual((Done, Marker), FLUSH_OUT_BINDS)
+
+    def test_the_marker_is_not_mistaken_for_a_result(self):
+        # It has to be distinguishable from anything a caller would keep, or the
+        # request gets handed on as an answer -- which is how it surfaced, as
+        # "unexpected wire response: (False, 'fob')".
+        (Done, _Acc) = decode_packet(bytes([TTI_STA]), (None, None, []))
+        self.assertNotEqual((Done, _Acc), FLUSH_OUT_BINDS)
+
+
+class TestFlushOutBindsAcknowledged(unittest.TestCase):
+    """The connection answers the request and reads on, rather than giving up."""
+
+    class _Wire:
+        """A connection stripped to what _handle_response touches."""
+
+        field_version = FIELD_VERSION_11_2
+
+        def __init__(self, packets):
+            self._packets = list(packets)
+            self.sent = []
+
+        def _next_data_packet(self, _a, _b):
+            return (TNS_DATA, self._packets.pop(0)) if self._packets else False
+
+        def send(self, _type, data):
+            self.sent.append(data)
+
+    def _read(self, packets):
+        wire = self._Wire(packets)
+        result = OracleConnect._handle_response(wire)
+        return wire, result
+
+    def test_the_token_is_echoed_back_and_the_answer_read(self):
+        wire, result = self._read([bytes([TTI_FOB]), bytes([TTI_STA])])
+        # Exactly the one byte the server sent, straight back.
+        self.assertEqual(wire.sent, [bytes([TTI_FOB])])
+        # And the response behind it is what the caller receives.
+        self.assertIsNot(result, FLUSH_OUT_BINDS)
+
+    def test_an_ordinary_response_sends_nothing(self):
+        wire, _ = self._read([bytes([TTI_STA])])
+        self.assertEqual(wire.sent, [])
+
+    def test_a_server_that_never_stops_asking_ends_the_call(self):
+        # A cap, not a fix for anything real: one request is what a server sends.
+        # Without it a broken server would spin here forever.
+        with self.assertRaises(InterfaceError):
+            self._read([bytes([TTI_FOB])] * (MAX_FLUSH_OUT_BINDS + 1))
 
 
 if __name__ == '__main__':

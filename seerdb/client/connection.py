@@ -106,6 +106,7 @@ from seerdb.common.tns_consts import (
     TPC_TXN_FLAGS_SESSIONLESS,
     TTI_AUTH,
     TTI_DTY,
+    TTI_FOB,
     TTI_OER,
     TTI_PRO,
     TTI_RPA,
@@ -2241,21 +2242,32 @@ class OracleConnect(_ConnectionLogic):
         # default `(None, None, [])` is right for any response that starts
         # with a DCB (which sets RowFormat for the subsequent RXDs). FETCH
         # responses skip the DCB and need the prior RowFormat passed in.
-        from seerdb.common.tns import decode_packet
+        from seerdb.common.tns import (
+            FLUSH_OUT_BINDS,
+            MAX_FLUSH_OUT_BINDS,
+            decode_packet,
+        )
 
         if Acc is None:
             Acc = (None, None, [])
-        # Receive the next DATA packet, transparently completing any server
-        # break/reset handshake (#45). _next_data_packet sends a single reset
-        # per break episode and drains the rest, so a cancelled/errored call
-        # no longer storms the line or discards the trailing error/result.
-        Received = self._next_data_packet(b'', b'')
-        if Received is False:
-            raise Exception('Connection closed while awaiting response')
-        (Type, Packet) = Received
-        if Type == TNS_DATA:
-            return decode_packet(Packet, Acc, self.field_version)
-        raise Exception('Unexpected response type', Type)
+        for _ in range(MAX_FLUSH_OUT_BINDS + 1):
+            # Receive the next DATA packet, transparently completing any server
+            # break/reset handshake (#45). _next_data_packet sends a single reset
+            # per break episode and drains the rest, so a cancelled/errored call
+            # no longer storms the line or discards the trailing error/result.
+            Received = self._next_data_packet(b'', b'')
+            if Received is False:
+                raise Exception('Connection closed while awaiting response')
+            (Type, Packet) = Received
+            if Type != TNS_DATA:
+                raise Exception('Unexpected response type', Type)
+            Result = decode_packet(Packet, Acc, self.field_version)
+            if Result != FLUSH_OUT_BINDS:
+                return Result
+            # A flush-out-binds request, not a result: echo the token back and
+            # read on for the response it is standing in front of (§6.9, #697).
+            self.send(TNS_DATA, bytes([TTI_FOB]))
+        raise InterfaceError('server kept asking to flush out binds')
 
     def send(self, Type: int, Data: bytes | None) -> bool | None:
         # Iterative split-and-send. Was previously recursive, which blew
