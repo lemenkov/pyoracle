@@ -66,6 +66,7 @@ from seerdb.common.tns import (
     encode_query_response_oci,
     encode_reexec_row_oci,
     encode_result,
+    encode_returning_response,
     encode_scroll_open_response,
     encode_scroll_response,
     encode_status,
@@ -138,6 +139,7 @@ from seerdb.server.backend import (
     Capability,
     CursorResult,
     Result,
+    UnsupportedFeature,
 )
 from seerdb.server.framing import PacketStream
 from seerdb.server.handshake import (
@@ -1126,6 +1128,33 @@ def _resolve_temp_lob_binds(
     return replace(request, binds=rows[0], bind_rows=rows)
 
 
+def _run_returning(backend: Backend, sql: str, request: ExecRequest) -> Result:
+    # Hand a RETURNING statement to the backend with a BindVar standing in at
+    # every position the clause fills, so the backend knows which binds it owes
+    # values for and what type is wanted there (#689). A backend with no
+    # execute_returning is told so plainly rather than left to mangle the reply.
+    run = getattr(backend, 'execute_returning', None)
+    if run is None:
+        raise UnsupportedFeature('RETURNING is not supported by this backend')
+    meta = request.bind_meta
+    rows = [
+        [
+            BindVar(value=None, tns_type=meta[i][0], max_size=meta[i][1])
+            if i in request.return_binds
+            else value
+            for i, value in enumerate(row)
+        ]
+        for row in request.bind_rows
+    ]
+    result = run(sql, rows)
+    # One record per iteration is what the client reads positionally, so a
+    # backend that reported fewer (or none) is padded rather than silently
+    # shifting a later iteration's values onto an earlier one.
+    returned = list(result.returned_rows)
+    returned += [[] for _ in range(len(rows) - len(returned))]
+    return Result(rowcount=result.rowcount, returned_rows=returned[: len(rows)])
+
+
 def _is_plsql_block(sql: str) -> bool:
     head = sql.lstrip().upper()
     return head.startswith('BEGIN') or head.startswith('DECLARE')
@@ -1185,6 +1214,22 @@ def _answer_query(
     if sql is None:
         sql = request.sql
     try:
+        if request.return_binds and request.bind_rows:
+            # DML ... RETURNING col INTO :b (#689). The reply owes one set of
+            # returned values per iteration, so this cannot go through the
+            # ordinary DML paths below, which report only a row count.
+            result = _run_returning(backend, sql, request)
+            if request.autocommit:
+                backend.commit()
+            stream.write_packet(
+                TNS_DATA,
+                encode_returning_response(
+                    result.rowcount,
+                    result.returned_rows,
+                    [request.bind_meta[i][0] for i in sorted(request.return_binds)],
+                ),
+            )
+            return lobs
         if len(request.bind_rows) > 1:
             # Array DML (executemany): apply each bind row and report the total
             # affected-row count — one execute message, one aggregated reply.

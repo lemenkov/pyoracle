@@ -76,6 +76,7 @@ from psycopg.types.composite import CompositeInfo, register_composite
 
 from seerdb.common.datatypes import IntervalYM
 from seerdb.common.dbobject import DbRef
+from seerdb.common.sqltext import strip_returning_into
 from seerdb.common.tns_consts import (
     TNS_TYPE_BDOUBLE,
     TNS_TYPE_BFLOAT,
@@ -1162,6 +1163,29 @@ class PostgresBackend:
         if is_ddl:
             self._conn.commit()
         return result
+
+    def execute_returning(self, sql: str, rows: Sequence[Sequence]) -> Result:
+        # DML ... RETURNING col INTO :b (#689). PostgreSQL has the feature but
+        # spells it without the INTO part, handing the columns back as rows
+        # rather than assigning them to binds, so the clause is trimmed to the
+        # form it knows and the rows are read.
+        #
+        # Each iteration goes through `execute` so the whole dialect rewrite,
+        # bind translation and per-statement savepoint apply exactly as they do
+        # to any other statement. The binds the clause fills carry no value and
+        # are dropped: their placeholders are gone from the trimmed text.
+        statement = strip_returning_into(sql)
+        returned: list[list[tuple]] = []
+        affected = 0
+        for row in rows:
+            values = [v for v in row if not isinstance(v, BindVar)]
+            result = self.execute(statement, values)
+            iteration = [tuple(r) for r in result.rows]
+            returned.append(iteration)
+            # A RETURNING statement gives back one row per row it changed, so
+            # the count is the rows read rather than a separate report.
+            affected += len(iteration)
+        return Result(rowcount=affected, returned_rows=returned)
 
     def _rewrite_iot_rowid(self, sql: str) -> str:
         # ROWID on a registered index-organized table → its logical-rowid

@@ -127,6 +127,43 @@ class OraclePassthroughBackend:
             raise _relay_error(exc) from exc
         return cursor.rowcount or 0, list(cursor.getarraydmlrowcounts())
 
+    def execute_returning(self, sql: str, rows: Sequence[Sequence]) -> Result:
+        # DML ... RETURNING col INTO :b (#689). The upstream is a real Oracle, so
+        # the statement goes over unchanged; only the binds the clause fills need
+        # building, as Vars of the type the client declared. One Var per return
+        # bind is shared across the whole batch, which is how the driver reports
+        # per-iteration values: getvalue(i) is what iteration i returned.
+        assert self._conn is not None  # authenticate() ran before any execute
+        cursor = self._conn.cursor()
+        positions = [i for i, b in enumerate(rows[0]) if isinstance(b, BindVar)]
+        receivers = {}
+        for i in positions:
+            bind = rows[0][i]
+            dbtype = dbtype_for_oracle_type(bind.tns_type, 1)
+            size = bind.max_size if bind.max_size and bind.max_size > 0 else None
+            receivers[i] = (
+                cursor.var(dbtype, size) if dbtype is not None else cursor.var(str)
+            )
+        batch = [
+            [receivers[i] if i in receivers else value for i, value in enumerate(row)]
+            for row in rows
+        ]
+        try:
+            if len(batch) > 1:
+                cursor.executemany(sql, batch)
+            else:
+                cursor.execute(sql, batch[0])
+        except seerdb.DatabaseError as exc:
+            raise _relay_error(exc) from exc
+        # Per iteration, each receiver yields the list of values for the rows that
+        # iteration affected. Transpose to rows so every returned row carries one
+        # value per return bind, in bind order.
+        returned = []
+        for iteration in range(len(batch)):
+            columns = [receivers[i].getvalue(iteration) or [] for i in positions]
+            returned.append([tuple(values) for values in zip(*columns)])
+        return Result(rowcount=cursor.rowcount or 0, returned_rows=returned)
+
     def _execute_plsql(self, cursor, sql: str, binds: Sequence) -> Result:
         # Each PL/SQL bind is registered as an OUT-capable Var (the wire carries
         # no direction) except a large LOB IN value: a resolved temp-LOB CLOB /

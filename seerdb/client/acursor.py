@@ -16,7 +16,6 @@ from seerdb.client.cursor import (
     _extract_implicit_results,
     _is_plsql,
     _resolve_parameters,
-    _returning_bind_positions,
 )
 from seerdb.common.datatypes import TempLob, Var
 from seerdb.common.exceptions import (
@@ -26,6 +25,7 @@ from seerdb.common.exceptions import (
     ProgrammingError,
     from_ora_code,
 )
+from seerdb.common.sqltext import returning_bind_positions
 from seerdb.common.tns_consts import (
     AL32UTF8_CHARSET,
     FIELD_VERSION_10_2,
@@ -118,7 +118,7 @@ class AsyncCursor(_CursorLogic):
             'BatchErrors': BatchErrors,
             'ArrayDmlRowCounts': ArrayDmlRowCounts,
         }
-        ReturnBinds = _returning_bind_positions(operation, len(Bind or []))
+        ReturnBinds = returning_bind_positions(operation, len(Bind or []))
         if ReturnBinds:  # DML RETURNING ... INTO (#120)
             Kw['ReturnBinds'] = ReturnBinds
         # Server-side scrollable open (#181), 10g+ only; 9i (fv2) falls back to

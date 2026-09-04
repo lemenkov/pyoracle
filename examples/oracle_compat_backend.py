@@ -24,7 +24,14 @@ import re
 from collections.abc import Sequence
 
 from seerdb.common.tns_consts import TNS_TYPE_VARCHAR
-from seerdb.server import Backend, BackendError, BindVar, ColumnMeta, Result
+from seerdb.server import (
+    Backend,
+    BackendError,
+    BindVar,
+    ColumnMeta,
+    Result,
+    UnsupportedFeature,
+)
 
 # Oracle's one-row ``DUAL`` table has no equal on a plain backend, but a bare
 # ``SELECT <expr>`` (no FROM) is the same thing there — so drop a trailing
@@ -128,6 +135,17 @@ class OracleCompatBackend:
         if inner_many is not None:
             return inner_many(sql, rows)
         return sum(self.execute(sql, row).rowcount for row in rows)
+
+    def execute_returning(self, sql: str, rows: Sequence[Sequence]) -> Result:
+        # DML ... RETURNING col INTO :b (#689): the inner backend's own path when
+        # it has one. There is nothing to translate here — a RETURNING statement
+        # is plain INSERT / UPDATE / DELETE, so none of the sqlplus idioms
+        # execute() handles apply. Without an inner path the attribute is absent
+        # here too, and the session refuses the statement with an ORA error.
+        inner = getattr(self._inner, 'execute_returning', None)
+        if inner is None:
+            raise UnsupportedFeature('RETURNING is not supported by this backend')
+        return inner(sql, rows)
 
     def change_password(
         self, username: str, old_password: str, new_password: str

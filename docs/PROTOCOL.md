@@ -3783,6 +3783,34 @@ unchanged. python-oracledb-compatible. Sync + async; verified on
 10g/11g/21c/23ai (array INSERT, array UPDATE with a different row count per
 iteration, single-row batch, and multiple return binds).
 
+### 22.2 Serving it — the same rule read backwards (#689)
+
+A **server** parsing such a request faces the exact mirror of §22.1's first
+rule, and getting it wrong fails the same way. The RXD row carries one value per
+bind **except** the return binds, so a parser that reads a value for every bind
+consumes the next value as this one's tail and misreads everything after it. The
+row order in an array request is per iteration, so the mistake compounds: with
+one receiver and three iterations, the second iteration's value is read as the
+first's, and the third packet ends short.
+
+The reply owes **one `TTI_RXD` record per iteration**, in submitted order, each
+laid out exactly as §22 describes and grouped **by bind, not by row**: for each
+return bind in bind order, `ub4 num_rows` then that many `DALC + sb4 0` values.
+An iteration that affected nothing still sends its record, with a zero count —
+omitting it slides every later iteration's values one position earlier. The
+records precede the ordinary success status OER.
+
+Row order **within** a record is not defined. A RETURNING clause takes no
+`ORDER BY`, and neither Oracle nor any other server promises one, so a client
+must treat a record as the set of rows that iteration touched.
+
+seerdb's Mirror implements both halves: `parse_exec` derives the return-bind
+positions from the statement text (the same scan the client uses, shared in
+`seerdb/common/sqltext.py`, so the two cannot drift) and keeps a `None` in each
+so the row stays aligned with the bind descriptors;
+`encode_returning_response` builds the reply. A backend that cannot do
+RETURNING is refused with an ORA error rather than a broken connection.
+
 ## 23. Implicit result sets — DBMS_SQL.RETURN_RESULT (#121)
 
 A 12c+ PL/SQL block can hand result sets back to the client with

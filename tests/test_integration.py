@@ -936,8 +936,10 @@ class CursorIntegration(_IntegrationBase):
             [['x', 2, got], ['y', 3, got]],
         )
         self.assertEqual(self.cur.rowcount, 5)
-        self.assertEqual(got.getvalue(0), [1, 2])
-        self.assertEqual(got.getvalue(1), [1, 2, 3])
+        # Which rows each iteration returned, not the order it returned them in:
+        # a RETURNING clause has no ORDER BY and no database promises one.
+        self.assertEqual(sorted(got.getvalue(0)), [1, 2])
+        self.assertEqual(sorted(got.getvalue(1)), [1, 2, 3])
 
     def test_executemany_returning_keeps_the_slot_of_a_no_op_iteration(self):
         # An iteration that matches nothing still occupies its position, with an

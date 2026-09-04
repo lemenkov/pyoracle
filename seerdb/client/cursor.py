@@ -20,6 +20,11 @@ from seerdb.common.exceptions import (
     ProgrammingError,
     from_ora_code,
 )
+from seerdb.common.sqltext import (
+    bind_placeholders,
+    canonical_bind_key,
+    returning_bind_positions,
+)
 from seerdb.common.tns_consts import (
     AL32UTF8_CHARSET,
     FIELD_VERSION_10_2,
@@ -33,51 +38,6 @@ from seerdb.common.tns_consts import (
     TNS_TYPE_RAW,
     UTF8_CHARSET,
 )
-
-# A `:name` placeholder, in either spelling. An unquoted name follows normal SQL
-# identifier rules and is case-insensitive; pure-digit forms (`:1`, `:2`) are
-# handled separately as positional indices.
-#
-# A quoted name (`:"name"`) is how a name the unquoted form cannot express gets
-# through — a reserved word, or one starting with a digit — and unlike the
-# unquoted form it is case-SENSITIVE, so `:"a"` and `:"A"` are two different
-# placeholders (#686). Group 1 is the quoted name, group 2 the unquoted one.
-_NAMED_BIND_RE = re.compile(r':(?:"([^"\n]+)"|([A-Za-z_]\w*))')
-# The same, plus the numeric `:1` form. Used to count the placeholders after a
-# RETURNING clause's INTO, where only how many there are matters.
-_ANY_BIND_RE = re.compile(r':\s*(?:"[^"\n]+"|\w+)')
-
-
-def _strip_non_bind_text(SQL: str) -> str:
-    """SQL with everything a placeholder cannot appear inside blanked out.
-
-    String literals and comments go, and so do quoted identifiers — but *not* a
-    quoted bind name, which is a colon away from looking exactly like one.
-    """
-    Cleaned = re.sub(r"'(?:''|[^'])*'", "''", SQL)
-    # One pass over both, so a quoted bind name is consumed whole rather than
-    # leaving its closing quote to open a spurious identifier that then swallows
-    # the rest of the statement. The first alternative wins where they overlap.
-    Cleaned = re.sub(
-        r'(:\s*"[^"\n]*")|"(?:""|[^"])*"',
-        lambda M: M.group(1) or '""',
-        Cleaned,
-    )
-    Cleaned = re.sub(r'--[^\n]*', '', Cleaned)
-    return re.sub(r'/\*.*?\*/', '', Cleaned, flags=re.S)
-
-
-def _canonical_bind_key(Key: str) -> str:
-    """The lookup form of a caller-supplied bind name.
-
-    A key written with quotes means the quoted placeholder of that exact name;
-    anything else is an unquoted placeholder, which is case-insensitive and so
-    folds. Matches python-oracledb, where `:"P"` is reachable as both `'"P"'`
-    and `'p'` while `:"p"` is reachable only as `'"p"'`.
-    """
-    if len(Key) > 2 and Key.startswith('"') and Key.endswith('"'):
-        return Key[1:-1]
-    return Key.upper()
 
 
 class cursor(RefCursorBind):
@@ -179,7 +139,7 @@ class Cursor(_CursorLogic):
             'BatchErrors': BatchErrors,
             'ArrayDmlRowCounts': ArrayDmlRowCounts,
         }
-        ReturnBinds = _returning_bind_positions(operation, len(Bind or []))
+        ReturnBinds = returning_bind_positions(operation, len(Bind or []))
         if ReturnBinds:  # DML RETURNING ... INTO (#120)
             Kw['ReturnBinds'] = ReturnBinds
         # Server-side scrollable open (#181): mark the cursor scrollable and cap
@@ -795,32 +755,6 @@ def _resolve_objects(Connection, Row: list) -> list:
     return Out
 
 
-_RETURNING_RE = re.compile(r'\bRETURNING\b', re.I)
-_INTO_RE = re.compile(r'\bINTO\b', re.I)
-
-
-def _returning_bind_positions(SQL: str, num_binds: int) -> frozenset:
-    # 0-based positions of the OUT binds in a DML
-    # `... RETURNING col[, ...] INTO :b[, ...]` (#120). Empty if the statement
-    # isn't a RETURNING-INTO. The INTO binds are the trailing K of the bind
-    # list (the leading binds are the VALUES/SET/WHERE inputs); K is the count
-    # of placeholders after the RETURNING's INTO, so this is robust to both
-    # named and numeric placeholder styles.
-    if num_binds <= 0:
-        return frozenset()
-    Cleaned = _strip_non_bind_text(SQL)
-    Ret = _RETURNING_RE.search(Cleaned)
-    if Ret is None:
-        return frozenset()
-    Into = _INTO_RE.search(Cleaned, Ret.end())
-    if Into is None:
-        return frozenset()
-    K = len(_ANY_BIND_RE.findall(Cleaned[Into.end() :]))
-    if K <= 0 or K > num_binds:
-        return frozenset()
-    return frozenset(range(num_binds - K, num_binds))
-
-
 def _resolve_parameters(SQL: str, Params) -> list:
     # Translate the caller-supplied parameters into a positional list. The
     # wire protocol sends bind values positionally; named placeholders
@@ -845,8 +779,8 @@ def _resolve_parameters(SQL: str, Params) -> list:
     if isinstance(Params, (list, tuple)):
         return list(Params)
     if isinstance(Params, dict):
-        Placeholders = _bind_placeholders(SQL, dedupe=_is_plsql(SQL))
-        Keyed = {_canonical_bind_key(str(K)): V for K, V in Params.items()}
+        Placeholders = bind_placeholders(SQL, dedupe=_is_plsql(SQL))
+        Keyed = {canonical_bind_key(str(K)): V for K, V in Params.items()}
         Out = []
         for Name, Quoted in Placeholders:
             if Name not in Keyed:
@@ -857,40 +791,6 @@ def _resolve_parameters(SQL: str, Params) -> list:
     raise NotSupportedError(
         f'parameters must be a list, tuple, or dict; got {type(Params).__name__}'
     )
-
-
-def _bind_placeholders(SQL: str, dedupe: bool = False) -> list[tuple[str, bool]]:
-    # Every `:name` placeholder in left-to-right SQL order as (name, quoted),
-    # with string literals, comments and quoted identifiers stripped so we don't
-    # match inside them.
-    #
-    # The name is in its lookup form: an unquoted one folds to upper (it is
-    # case-insensitive), a quoted one keeps its exact text (it is not). The flag
-    # says which spelling it was, which is what tells `:"a"` apart from `:A` —
-    # the two fold to the same string but are different placeholders (#686).
-    #
-    # If `dedupe` is True (PL/SQL path), keep only the first occurrence of each.
-    # Otherwise (plain SQL path) return every occurrence — Oracle expects one
-    # bind value per textual occurrence in DML.
-    Cleaned = _strip_non_bind_text(SQL)
-    Seen: list[tuple[str, bool]] = []
-    Found: set[tuple[str, bool]] = set()
-    for M in _NAMED_BIND_RE.finditer(Cleaned):
-        Quoted = M.group(1) is not None
-        Entry = (M.group(1), True) if Quoted else (M.group(2).upper(), False)
-        if dedupe:
-            if Entry not in Found:
-                Found.add(Entry)
-                Seen.append(Entry)
-        else:
-            Seen.append(Entry)
-    return Seen
-
-
-def _extract_bind_names(SQL: str, dedupe: bool = False) -> list[str]:
-    # The placeholder names alone, in SQL order. See `_bind_placeholders` for
-    # what "name" means for each spelling.
-    return [Name for Name, _Quoted in _bind_placeholders(SQL, dedupe)]
 
 
 def _is_plsql(SQL: str) -> bool:
