@@ -52,8 +52,10 @@ _DECLARED_STREAMED_TYPES = {
     'CLOB': (TNS_TYPE_CLOB, 4000),  # a LOB describes with data_length 4000
     'BLOB': (TNS_TYPE_BLOB, 4000),
 }
+from seerdb.common.sqltext import strip_returning_into
 from seerdb.server import (
     BackendError,
+    BindVar,
     Capability,
     ColumnMeta,
     Credentials,
@@ -200,6 +202,30 @@ class SqliteBackend:
             for index, description in enumerate(cursor.description)
         ]
         return Result(columns=columns, rows=rows)
+
+    def execute_returning(self, sql: str, rows: Sequence[Sequence]) -> Result:
+        # DML ... RETURNING col INTO :b (#689). SQLite has the feature from 3.35
+        # but spells it without the INTO part, handing the columns back as rows
+        # rather than assigning them to binds, so the clause is trimmed to the
+        # form it knows and the rows are read.
+        #
+        # The binds the clause fills carry no value and are dropped: their
+        # placeholders are gone from the trimmed text.
+        statement = _ORACLE_BIND.sub('?', strip_returning_into(sql))
+        returned: list[list[tuple]] = []
+        affected = 0
+        for row in rows:
+            values = tuple(v for v in row if not isinstance(v, BindVar))
+            try:
+                cursor = self._conn.execute(statement, values)
+                iteration = list(cursor.fetchall())
+            except sqlite3.Error as exc:
+                raise BackendError(str(exc), ora_code=_ORA_INVALID_SQL) from exc
+            returned.append(iteration)
+            # A RETURNING statement gives back one row per row it changed, so the
+            # count is the rows read rather than a separate report.
+            affected += len(iteration)
+        return Result(rowcount=affected, returned_rows=returned)
 
     def _declared_types(self, sql: str) -> dict[str, str]:
         # Map result column name (upper-case) -> declared SQLite type, for a plain

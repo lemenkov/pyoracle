@@ -10,11 +10,9 @@
 
 import unittest
 
-from seerdb.client.cursor import (
-    _assign_return_binds,
-    _returning_bind_positions,
-)
+from seerdb.client.cursor import _assign_return_binds
 from seerdb.common.datatypes import Var
+from seerdb.common.sqltext import returning_bind_positions
 from seerdb.common.tns import (
     decode_token_rxd,
     encode_dictionary_exec,
@@ -26,28 +24,28 @@ from seerdb.common.tns_consts import TTI_STA
 class TestReturningDetection(unittest.TestCase):
     def test_insert_returning_into(self):
         sql = 'INSERT INTO t VALUES (:1, :2) RETURNING id INTO :3'
-        self.assertEqual(_returning_bind_positions(sql, 3), frozenset({2}))
+        self.assertEqual(returning_bind_positions(sql, 3), frozenset({2}))
 
     def test_multiple_return_binds(self):
         sql = 'UPDATE t SET n=:1 WHERE id=:2 RETURNING id, n INTO :3, :4'
-        self.assertEqual(_returning_bind_positions(sql, 4), frozenset({2, 3}))
+        self.assertEqual(returning_bind_positions(sql, 4), frozenset({2, 3}))
 
     def test_all_return_no_input(self):
         sql = "INSERT INTO t VALUES (1, 'x') RETURNING name INTO :1"
-        self.assertEqual(_returning_bind_positions(sql, 1), frozenset({0}))
+        self.assertEqual(returning_bind_positions(sql, 1), frozenset({0}))
 
     def test_not_returning(self):
         self.assertEqual(
-            _returning_bind_positions('INSERT INTO t VALUES (:1)', 1), frozenset()
+            returning_bind_positions('INSERT INTO t VALUES (:1)', 1), frozenset()
         )
         # the INSERT's own INTO must not be mistaken for a RETURNING INTO
         self.assertEqual(
-            _returning_bind_positions('INSERT INTO t (a) VALUES (:1)', 1), frozenset()
+            returning_bind_positions('INSERT INTO t (a) VALUES (:1)', 1), frozenset()
         )
 
     def test_returning_in_string_literal_ignored(self):
         sql = "UPDATE t SET note = 'returning into x' WHERE id = :1"
-        self.assertEqual(_returning_bind_positions(sql, 1), frozenset())
+        self.assertEqual(returning_bind_positions(sql, 1), frozenset())
 
 
 # A TTI_RXD (0x07) carrying return data for two binds: NUMBER 42 and VARCHAR

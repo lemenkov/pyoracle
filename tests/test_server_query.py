@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from seerdb.common.datatypes import Var
 from seerdb.common.exceptions import DataError, InterfaceError
 from seerdb.common.tns import (
     _DECODE_FIELD_VERSION,
@@ -112,7 +113,15 @@ def _at_field_version(version: int):
     return pinned()
 
 
-def _client_exec_request(version: int, sql: str, binds: list) -> bytes:
+def _client_exec_request(
+    version: int,
+    sql: str,
+    binds: list,
+    *,
+    batch: list | None = None,
+    return_binds=None,
+    kind: str = 'select',
+) -> bytes:
     # The real client's OALL8 encoder, at the given field version.
     from seerdb.common.tns import encode_dictionary_exec
 
@@ -121,18 +130,18 @@ def _client_exec_request(version: int, sql: str, binds: list) -> bytes:
             'field_version': version,
             'seq': 3,
             'query': {
-                'type': 'select',
+                'type': kind,
                 'auto': 0,
                 'fetch': 15,
                 'server_version': 0,
                 'cursor': 0,
                 'query': sql,
                 'bind': binds,
-                'batch': [],
+                'batch': batch or [],
                 'def': [],
                 'batcherrors': None,
                 'arraydmlrowcounts': None,
-                'return_binds': None,
+                'return_binds': return_binds,
                 'scrollable': False,
                 'scroll': None,
             },
@@ -243,6 +252,76 @@ def test_parse_exec_reads_the_12c_request_layout(version: int) -> None:
         plain = parse_exec(_client_exec_request(version, 'select 1 from dual', []))
     assert plain.sql == 'select 1 from dual'
     assert plain.binds == []
+
+
+@pytest.mark.parametrize('version', [6, 8, 17])  # 11.2, 12.2, 23ai
+def test_parse_exec_skips_the_binds_a_returning_clause_fills(version: int) -> None:
+    # A `RETURNING ... INTO` bind is described like any other but carries NO value
+    # in the row data -- the server fills it from the affected rows. Reading one
+    # anyway consumed the next value as this one's tail, and everything after it
+    # was misread (#689). The parsed row keeps a None in that position so it stays
+    # aligned with bind_meta, which does describe every bind.
+    sql = 'insert into t (v) values (:1) returning id into :2'
+    receiver = Var(int)
+    with _at_field_version(version):
+        request = parse_exec(
+            _client_exec_request(
+                version,
+                sql,
+                ['abc', receiver],
+                return_binds=frozenset({1}),
+                kind='change',
+            )
+        )
+    assert request.sql == sql
+    assert request.return_binds == frozenset({1})
+    assert request.binds == ['abc', None]
+    # Every bind is still described, receiver included.
+    assert len(request.bind_meta) == 2
+
+
+@pytest.mark.parametrize('version', [6, 17])
+def test_parse_exec_skips_the_returning_bind_in_every_iteration(version: int) -> None:
+    # The same rule per iteration of an array execute: one value each, none for
+    # the receiver, and the rows must not slide into one another.
+    sql = 'insert into t (v) values (:1) returning id into :2'
+    receiver = Var(int)
+    rows = [['a', receiver], ['bb', receiver], ['ccc', receiver]]
+    with _at_field_version(version):
+        request = parse_exec(
+            _client_exec_request(
+                version,
+                sql,
+                rows[0],
+                batch=rows[1:],
+                return_binds=frozenset({1}),
+                kind='change',
+            )
+        )
+    assert request.bind_rows == [['a', None], ['bb', None], ['ccc', None]]
+
+
+def test_returning_response_round_trips_to_the_client_decoder() -> None:
+    # The reply carries one record per iteration, values grouped by bind. Decode
+    # it with the client's own reader to prove the two agree (#689).
+    from seerdb.common.tns import (
+        decode_packet,
+        encode_returning_response,
+        set_decode_return_binds,
+    )
+
+    blob = encode_returning_response(
+        4, [[(1,), (2,)], [], [(3,)], [(4,)]], [TNS_TYPE_NUMBER]
+    )
+    set_decode_return_binds([1])
+    try:
+        decoded = decode_packet(blob, (None, None, []))
+    finally:
+        set_decode_return_binds(None)
+    records = [row for row in decoded[4] if isinstance(row, dict)]
+    # Four iterations, in order, including the one that matched nothing -- it
+    # keeps its place so the client's positions stay aligned.
+    assert [len(r['return_values'][0]) for r in records] == [2, 0, 1, 1]
 
 
 @pytest.mark.parametrize('version', [8, 17])

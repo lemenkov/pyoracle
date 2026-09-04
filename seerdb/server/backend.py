@@ -96,6 +96,12 @@ class Result:
     rows: list[tuple] = field(default_factory=list)
     rowcount: int = 0
     out_binds: list = field(default_factory=list)
+    # What a `RETURNING ... INTO` statement gave back: one entry per execute
+    # iteration, each the rows that iteration affected, each row holding one
+    # value per return bind in bind order (#689). An iteration that matched
+    # nothing contributes an empty list rather than being left out, so the
+    # positions stay aligned with the rows the client sent.
+    returned_rows: list[list[tuple]] = field(default_factory=list)
 
 
 class BackendError(Exception):
@@ -128,7 +134,30 @@ class UnsupportedFeature(BackendError):
 
 @runtime_checkable
 class Backend(Protocol):
-    """What the Mirror needs from an underlying database (one per session)."""
+    """What the Mirror needs from an underlying database (one per session).
+
+    The methods below are required. Beyond them the session probes for optional
+    extensions and falls back cleanly when they are absent, so a backend
+    implements only what it can do:
+
+    ``execute_many(sql, rows) -> int``
+        Apply a whole array-DML batch in one call, returning the total
+        affected-row count. Without it the session applies the rows one at a
+        time.
+
+    ``execute_many_rowcounts(sql, rows) -> tuple[int, list[int]]``
+        The same, plus the per-iteration counts a 12c client can ask for.
+
+    ``execute_returning(sql, rows) -> Result``
+        Run a ``DML ... RETURNING col INTO :b`` statement and report what came
+        back, in :attr:`Result.returned_rows` (#689). ``rows`` is one entry per
+        execute iteration -- a plain execute has one, an array execute one per
+        row submitted -- each holding the bind values in bind order with a
+        :class:`BindVar` standing in at every position the RETURNING clause
+        fills. Those carry no value from the client, and the BindVar says what
+        type is wanted there. Without it such a statement is refused with an ORA
+        error rather than breaking the connection.
+    """
 
     capabilities: frozenset[Capability]
 

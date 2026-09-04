@@ -26,6 +26,7 @@ from seerdb.common.datatypes import (
 )
 from seerdb.common.date import date
 from seerdb.common.exceptions import DataError, InterfaceError
+from seerdb.common.sqltext import returning_bind_positions
 from seerdb.common.vector import (
     VECTOR_BIND_DESCRIPTOR,
     SparseVector,
@@ -305,6 +306,10 @@ class ExecRequest:
     scroll_position: int = 0
     # Array-DML per-iteration row counts requested (al8i4[9] & 0xC000, #18).
     arraydmlrowcounts: bool = False
+    # Positions of the binds a `RETURNING ... INTO` clause fills (#689). They are
+    # described like any other bind but carry no value in the row data, and the
+    # reply owes one set of values per iteration.
+    return_binds: frozenset = frozenset()
 
 
 @dataclass(frozen=True)
@@ -1452,12 +1457,23 @@ def parse_exec(payload: bytes, bind_types: list | None = None) -> ExecRequest:
                 # OID for a REF / object bind (empty otherwise, #139). All ride
                 # alongside the type.
                 types.append((data_type, csfrm, maxlen, toid))
-        # Each row is a TTI_RXD token followed by one value per bind column; loop
-        # until the rows run out (executemany sends N, a plain execute sends 1).
+        # Each row is a TTI_RXD token followed by one value per bind column,
+        # EXCEPT the binds a `RETURNING ... INTO` clause fills from the affected
+        # rows -- the client writes no value for those, in any iteration
+        # (docs/PROTOCOL.md 22 and 22.1). Reading one anyway consumed the next
+        # value as this one's tail and everything after it was misread (#689).
+        # The row keeps a None in each such position so it stays aligned with
+        # `bind_meta`, which does describe every bind.
+        return_binds = returning_bind_positions(sql, bind_count)
+        # Loop until the rows run out (executemany sends N, a plain execute
+        # sends 1).
         while after and after[0] == TTI_RXD:
             after = after[1:]
-            row = []
-            for data_type, csfrm, _maxlen, toid in types:
+            row: list = []
+            for index, (data_type, csfrm, _maxlen, toid) in enumerate(types):
+                if index in return_binds:
+                    row.append(None)
+                    continue
                 value, after = _read_bind_value(data_type, csfrm, after, toid)
                 row.append(value)
             bind_rows.append(row)
@@ -1469,6 +1485,7 @@ def parse_exec(payload: bytes, bind_types: list | None = None) -> ExecRequest:
         bind_type_list = list(types)
     else:
         bind_type_list = []
+        return_binds = frozenset()
 
     return ExecRequest(
         sql=sql,
@@ -1485,6 +1502,7 @@ def parse_exec(payload: bytes, bind_types: list | None = None) -> ExecRequest:
         scroll_orientation=scroll_orientation,
         scroll_position=scroll_position,
         arraydmlrowcounts=arraydmlrowcounts,
+        return_binds=return_binds,
     )
 
 
@@ -1716,6 +1734,38 @@ def encode_out_bind_response_thin(
         else:
             rxd += encode_value(bind.value, bind.tns_type) + encode_sb4(0)
     return iov + bytes(rxd) + encode_status(0)
+
+
+def encode_returning_response(
+    rowcount: int,
+    iterations: list[list[tuple]],
+    return_types: list[int],
+    *,
+    cursor_id: int = 0,
+) -> bytes:
+    """The reply to a `DML ... RETURNING col INTO :b` execute (#689).
+
+    One `TTI_RXD` per execute iteration, then the ordinary success status. A
+    plain execute is one iteration; an array execute is one per row submitted,
+    and an iteration that matched nothing still sends its record, with a zero
+    count, so the client's positions stay aligned with the rows it sent
+    (docs/PROTOCOL.md 22 and 22.1).
+
+    Within a record the values are grouped **by bind, not by row**: for each
+    return bind in bind order, the number of rows that iteration affected, then
+    that many values, each a DALC followed by an sb4 truncation length (always 0
+    here -- the client discards it). ``iterations`` arrives the other way round,
+    as the rows each iteration returned, so it is transposed here.
+    """
+    out = bytearray()
+    for rows in iterations:
+        out.append(TTI_RXD)
+        for position, tns_type in enumerate(return_types):
+            out += encode_sb4(len(rows))
+            for row in rows:
+                value = row[position] if position < len(row) else None
+                out += encode_value(value, tns_type) + encode_sb4(0)
+    return bytes(out) + encode_status(rowcount, cursor_id=cursor_id)
 
 
 def scroll_start_row(orientation: int, position: int, total: int) -> int:

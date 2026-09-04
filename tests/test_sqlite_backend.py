@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime
 import socket
+import sqlite3
 import sys
 import threading
 from decimal import Decimal
@@ -253,6 +254,48 @@ def test_bind_variables() -> None:
 
     assert result.get('error') is None, result.get('error')
     assert row == ('bob',)
+
+
+@pytest.mark.skipif(
+    sqlite3.sqlite_version_info < (3, 35),
+    reason='RETURNING needs SQLite 3.35 or newer',
+)
+def test_returning_into_bind() -> None:
+    # DML ... RETURNING col INTO :b over the whole stack (#689). The client sends
+    # no value for the receiving bind and expects one record back per iteration;
+    # the backend runs the statement in the form SQLite spells and reads the rows.
+    listen, server, result = _start_mirror()
+    conn = _connect(listen.getsockname()[1])
+    try:
+        cur = conn.cursor()
+        cur.execute('create table t (id number, v varchar2(20))')
+        single = cur.var(int)
+        cur.execute(
+            'insert into t (id, v) values (:1, :2) returning id into :3',
+            [7, 'one', single],
+        )
+        single_value = single.getvalue()
+        batch = cur.var(int)
+        cur.executemany(
+            'insert into t (id, v) values (:1, :2) returning id into :3',
+            [[1, 'a', batch], [2, 'bb', batch], [3, 'ccc', batch]],
+        )
+        per_iteration = [batch.getvalue(i) for i in range(3)]
+        cur.execute('select count(*) from t')
+        total = cur.fetchone()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert single_value == [7]
+    # Each iteration reports its own row, not the first one repeated.
+    assert per_iteration == [[1], [2], [3]]
+    assert total == (4,)
 
 
 def test_batched_fetch_large_row_count() -> None:
