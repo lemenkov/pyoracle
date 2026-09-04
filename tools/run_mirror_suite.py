@@ -77,7 +77,10 @@ def _default_pytest_args() -> list[str]:
     # no way to send the return data back. Both halves are issue #689; the wire
     # formats are already documented (docs/PROTOCOL.md 22 and 22.1). Drop this
     # deselection to verify that work — it is the check for it.
-    return ['tests/test_integration.py', '-k', 'not executemany_returning']
+    #
+    # The pattern covers the whole group rather than one class of it: any test
+    # that reaches a RETURNING statement dies the same way, wherever it lives.
+    return ['tests/test_integration.py', '-k', 'not returning']
 
 
 def main(argv: list[str]) -> int:
