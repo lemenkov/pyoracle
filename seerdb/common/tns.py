@@ -1230,12 +1230,24 @@ _TEMP_LOB_BIND_PREFIX = b'\x01\x28\x28'
 _JSON_BIND_HEAD_LEN = len(VECTOR_BIND_DESCRIPTOR) + 2 + 22
 
 
-def _read_bind_value(data_type: int, csfrm: int, after: bytes) -> tuple[object, bytes]:
+def _read_bind_value(
+    data_type: int, csfrm: int, after: bytes, toid: bytes = b''
+) -> tuple[object, bytes]:
     # One RXD bind value and the bytes past it. A CLOB / BLOB bind is a temp-LOB
     # descriptor (#412), not a plain DALC: 01 28 28 | ub2 loclen | locator, with
     # no outer length — the server reads it by type (the descriptor's leading
     # 0x01 would otherwise be mistaken for a DALC length). Everything else is the
-    # ordinary DALC value decoded by its OAC type and charset form.
+    # ordinary DALC value decoded by its OAC type and charset form. `toid` is the
+    # referenced type's OID from the OAC, used to rebuild a REF bind (#139).
+    if data_type == TNS_TYPE_REF:
+        # A REF bind (#139): the value is just the opaque locator (a DALC). Pair
+        # it with the OID the OAC carried so the backend re-binds a DbRef with
+        # the referenced type's identity (its bind OAC needs the 16-byte OID).
+        from seerdb.common.dbobject import DbRef
+
+        raw, after = decode_dalc(after)
+        locator = bytes(raw) if not isinstance(raw, list) else b''
+        return DbRef(locator, type_oid=toid or None), after
     if (
         data_type in (TNS_TYPE_CLOB, TNS_TYPE_BLOB)
         and after[:3] == _TEMP_LOB_BIND_PREFIX
@@ -1421,6 +1433,7 @@ def parse_exec(payload: bytes, bind_types: list | None = None) -> ExecRequest:
                     _scale,
                     _charset,
                     csfrm,
+                    toid,
                     after,
                 ) = decode_oac_fields(after)
                 if field_version >= FIELD_VERSION_12_2:
@@ -1435,22 +1448,24 @@ def parse_exec(payload: bytes, bind_types: list | None = None) -> ExecRequest:
                     after = after[1:]
                 # csfrm distinguishes an NCHAR / NVARCHAR bind (2 → UTF-16BE) from
                 # an ordinary char bind (1); maxlen is the OUT return-buffer size a
-                # PL/SQL OUT bind needs (#483/#484). Both ride alongside the type.
-                types.append((data_type, csfrm, maxlen))
+                # PL/SQL OUT bind needs (#483/#484). toid is the referenced type's
+                # OID for a REF / object bind (empty otherwise, #139). All ride
+                # alongside the type.
+                types.append((data_type, csfrm, maxlen, toid))
         # Each row is a TTI_RXD token followed by one value per bind column; loop
         # until the rows run out (executemany sends N, a plain execute sends 1).
         while after and after[0] == TTI_RXD:
             after = after[1:]
             row = []
-            for data_type, csfrm, _maxlen in types:
-                value, after = _read_bind_value(data_type, csfrm, after)
+            for data_type, csfrm, _maxlen, toid in types:
+                value, after = _read_bind_value(data_type, csfrm, after, toid)
                 row.append(value)
             bind_rows.append(row)
         if bind_rows:
             binds = bind_rows[0]
         # Per-bind (tns_type, max_size) — what a PL/SQL block's OUT binds need to
         # be registered on the backend with a correctly-sized buffer (#483).
-        bind_meta = [(data_type, maxlen) for data_type, _csfrm, maxlen in types]
+        bind_meta = [(data_type, maxlen) for data_type, _csfrm, maxlen, _toid in types]
         bind_type_list = list(types)
     else:
         bind_type_list = []
@@ -2298,28 +2313,39 @@ def decode_lobops_oer(Packet: bytes, FieldVersion: int) -> tuple[int, str | None
     return (0, None)
 
 
-def decode_oac_fields(Data: bytes) -> tuple[int, int, int, int, int, bytes]:
+def decode_oac_fields(Data: bytes) -> tuple[int, int, int, int, int, bytes, bytes]:
     # The full OAC field set, including the charset form (csfrm) byte the common
-    # 5-tuple form skips. csfrm distinguishes national char data (2 → AL16UTF16 /
+    # 5-tuple form skips, and the referenced type's OID (an object / REF bind,
+    # #116/#139). csfrm distinguishes national char data (2 → AL16UTF16 /
     # UTF-16BE) from ordinary char data (1) — the server needs it to decode an
     # NCHAR / NVARCHAR bind (#484). Returns (DataType, MaxDataLength, DataScale,
-    # Charset, Csfrm, Rest).
+    # Charset, Csfrm, ToId, Rest).
     (DataType, Flg, Pre) = struct.unpack('>BBB', Data[:3])
     (DataScale, R0) = decode_ub4(Data[3:])
     (MaxDataLength, R1) = decode_ub4(R0)
     (Mal, R2) = decode_ub4(R1)
     (Fl2, R3) = decode_ub4(R2)
-    (ToId, R4) = decode_dalc(R3)
+    # The type OID is written with two lengths (write_bytes_with_two_lengths): a
+    # ub4 count then, only when non-empty, the length-prefixed bytes — not a
+    # plain DALC. An empty OID (every scalar bind) is a single 0x00 under either
+    # reading, but a real OID (object type 109 / REF type 111, #139) is 16 bytes
+    # behind the ub4 count, and reading it as a bare DALC desyncs the whole OAC.
+    (ToIdLen, R3a) = decode_ub4(R3)
+    if ToIdLen:
+        (ToIdRaw, R4) = decode_dalc(R3a)
+        ToId = bytes(ToIdRaw) if not isinstance(ToIdRaw, list) else b''
+    else:
+        ToId, R4 = b'', R3a
     (VSN, R5) = decode_ub4(R4)
     (Charset, R6) = decode_ub4(R5)
     Csfrm = R6[0]
     (Mxlc, R7) = decode_ub4(R6[1:])
-    return (DataType, MaxDataLength, DataScale, Charset, Csfrm, R7)
+    return (DataType, MaxDataLength, DataScale, Charset, Csfrm, ToId, R7)
 
 
 def decode_token_oac(Data: bytes, Acc: tuple) -> tuple[int, int, int, int, bytes]:
-    (DataType, MaxDataLength, DataScale, Charset, _Csfrm, Rest) = decode_oac_fields(
-        Data
+    (DataType, MaxDataLength, DataScale, Charset, _Csfrm, _ToId, Rest) = (
+        decode_oac_fields(Data)
     )
     return (DataType, MaxDataLength, DataScale, Charset, Rest)
 
