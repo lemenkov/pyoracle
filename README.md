@@ -89,7 +89,10 @@ What works:
   `seerdb.DB_TYPE_TIMESTAMP_TZ` / `seerdb.DB_TYPE_BINARY_FLOAT` /
   `seerdb.DB_TYPE_BINARY_DOUBLE` / `seerdb.DB_TYPE_INTERVAL_DS` /
   `seerdb.DB_TYPE_INTERVAL_YM`). Seed an IN OUT value with
-  `var.setvalue(0, v)`; read results with `var.getvalue()`. `callproc`
+  `var.setvalue(0, v)`; read results with `var.getvalue()`, which gives
+  back the Python type the `var` was created with — a `var(float)` reads
+  as a `float` even though a NUMBER column can also be read as an `int`
+  or a `Decimal`. `callproc`
   returns the argument list with OUT slots replaced by their values.
   OUT binds also work through `cur.execute` directly (pass a `Var`).
   Stored functions: `cur.callfunc(name, return_type, [args...])` returns

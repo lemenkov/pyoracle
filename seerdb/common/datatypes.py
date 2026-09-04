@@ -270,6 +270,7 @@ class Var:
         'is_array',
         'num_elements',
         '_iteration_values',
+        '_pytype',
     )
 
     def __init__(
@@ -280,6 +281,12 @@ class Var:
         num_elements: int = 0,
     ):
         self.dbtype = _resolve_dbtype(typ)
+        # The Python type the caller asked for, when they asked with one. Three
+        # of them share a single database type, so the wire cannot say which was
+        # wanted and the value has to be brought back to it on the way out
+        # (#688). Asking with a database type instead records nothing here, and
+        # the value arrives however that type decodes.
+        self._pytype = typ if isinstance(typ, type) else None
         self.size = size if size is not None else self.dbtype.default_size
         self._value: object = [] if is_array else None
         self.has_value = False
@@ -296,8 +303,37 @@ class Var:
         self._value = value
         self.has_value = True
 
+    def _as_requested(self, value: object) -> object:
+        """`value` brought back to the Python type this bind was created with.
+
+        Only the numeric types need it. A NUMBER column can be read as an `int`,
+        a `float` or a `Decimal`, and the wire says nothing about which, so
+        without this a `var(float)` came back holding a `Decimal` -- the type the
+        caller named gave them nothing (#688). Text, bytes and the temporal types
+        each have their own database type, which already decides the result.
+
+        `int` is deliberately left alone. Rounding a value to it would discard
+        the fractional part the statement actually returned, which is worse than
+        handing back a number of a neighbouring type; a NUMBER that is whole
+        already arrives as an `int`.
+        """
+        if isinstance(value, list):
+            return [self._as_requested(item) for item in value]
+        if value is None or self._pytype not in (float, Decimal):
+            return value
+        if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+            return value
+        if self._pytype is Decimal and isinstance(value, float):
+            # Through the decimal string, not the float itself: Decimal(8.55) is
+            # the exact binary value, which reads as
+            # 8.550000000000000710542735760100185871124267578125. Reachable by
+            # seeding an IN OUT bind with a float and reading it back before the
+            # server has written one.
+            return Decimal(str(value))
+        return self._pytype(value)
+
     def getvalue(self, pos: int = 0) -> object:
-        """The value this bind received.
+        """The value this bind received, as the type it was created with.
 
         After an array execute of a `RETURNING ... INTO` statement, each
         iteration returns its own rows, so `pos` selects the iteration and the
@@ -305,8 +341,8 @@ class Var:
         single iteration and `pos` is ignored, matching python-oracledb.
         """
         if self._iteration_values is not None:
-            return self._iteration_values[pos]
-        return self._value
+            return self._as_requested(self._iteration_values[pos])
+        return self._as_requested(self._value)
 
     def __repr__(self) -> str:
         if self.is_array:
