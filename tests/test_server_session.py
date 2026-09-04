@@ -912,3 +912,61 @@ def test_oci_loop_answers_a_break_marker() -> None:
     # Exactly one reply, and it is a reset marker: replying to every marker
     # ping-pongs the two ends into a reset storm.
     assert stream.sent == [(TNS_MARKER, bytes([1, 0, TNS_MARKER_TYPE_RESET]))]
+
+
+def _run_mirror_at_tns_version(listen: socket.socket, result: dict, tns: int) -> None:
+    conn, _ = listen.accept()
+    try:
+        result['user'] = serve_session(
+            PacketStream(conn), _DualBackend(), field_version=8, tns_version=tns
+        )
+    except Exception as exc:  # noqa: BLE001 - surfaced to the test thread
+        result['error'] = exc
+    finally:
+        conn.close()
+
+
+def test_live_seerdb_over_large_sdu_framing() -> None:
+    """A 12.2 Mirror frames the DATA stream with the 4-byte packet length.
+
+    The version alone drives it: at >= 315 both ends switch after the ACCEPT, so
+    a login plus a query round-trip here proves the server's read and write paths
+    agree with the real client's on the wider header.
+    """
+    from seerdb.server.handshake import TNS_VERSION_12_2
+
+    listen = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listen.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listen.bind(('127.0.0.1', 0))
+    listen.listen(1)
+    port = listen.getsockname()[1]
+
+    result: dict = {}
+    server = threading.Thread(
+        target=_run_mirror_at_tns_version,
+        args=(listen, result, TNS_VERSION_12_2),
+        daemon=True,
+    )
+    server.start()
+
+    conn = seerdb.connect(
+        host='127.0.0.1',
+        port=port,
+        user='PYO',
+        password='pyo123',
+        service_name='XE',
+        timeout=5000,
+    )
+    try:
+        assert conn._large_packets is True, 'client must switch to the 4-byte header'
+        cursor = conn.cursor()
+        cursor.execute('select * from dual')
+        assert cursor.fetchone() == ('X',)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+    assert result.get('error') is None, result.get('error')

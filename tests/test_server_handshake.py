@@ -24,9 +24,12 @@ from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import CCAP_FIELD_VERSION, decode_token_pro
 from seerdb.common.tns_consts import FIELD_VERSION_11_2, TNS_DATA, TTI_DTY, TTI_PRO
 from seerdb.server.handshake import (
+    TNS_VERSION_11_2,
+    TNS_VERSION_12_2,
     encode_accept,
     encode_dty_reply,
     encode_pro_reply,
+    negotiated_tns_version,
     parse_connect,
     pro_is_sqlplus,
 )
@@ -194,3 +197,38 @@ def test_bad_offset_raises() -> None:
     struct.pack_into('>H', body, 18, 9000)  # cdata_offset field
     with pytest.raises(InterfaceError):
         parse_connect(bytes(body))
+
+
+def test_accept_at_12_2_uses_the_large_sdu_layout() -> None:
+    """A >= 315 ACCEPT moves the SDU/TDU into ub4 fields and zeroes the ub2 pair.
+
+    Modelled on a live 21c ACCEPT (version 318), the nearest capture below the
+    end-of-response era: body 37 bytes, ub4 SDU at 24, ub4 TDU at 28.
+    """
+    req = replace(parse_connect(fx.CONNECT[8:]), protocol_version=319, sdu=8192)
+    accept = encode_accept(req, sdu=8192, tns_version=TNS_VERSION_12_2)
+    body = accept[8:]
+    assert struct.unpack('>H', body[0:2])[0] == TNS_VERSION_12_2
+    assert len(body) == 37
+    # The legacy 16-bit SDU/TDU pair is zeroed; the real values live in the ub4s.
+    assert struct.unpack('>HH', body[4:8]) == (0, 0)
+    assert struct.unpack('>I', body[24:28])[0] == 8192
+    assert struct.unpack('>I', body[28:32])[0] > 0
+    # flags2 stays zero: a client only reads it at >= 318, and a 12.2 server does
+    # not advertise end-of-response.
+    assert struct.unpack('>I', body[33:37])[0] == 0
+
+
+def test_accept_at_11_2_is_unchanged_by_the_large_sdu_path() -> None:
+    # The default is still the byte-exact captured 11g ACCEPT.
+    req = parse_connect(fx.CONNECT[8:])
+    assert encode_accept(req, tns_version=TNS_VERSION_11_2) == fx.ACCEPT
+
+
+def test_negotiated_version_takes_the_lower_of_the_two_sides() -> None:
+    req = parse_connect(fx.CONNECT[8:])  # a 314 client
+    # A 12.2 Mirror still speaks 314 to an 11.2 client, so that session keeps the
+    # legacy framing — the version alone decides which framing both ends use.
+    assert negotiated_tns_version(req, TNS_VERSION_12_2) == 314
+    newer = replace(req, protocol_version=319)
+    assert negotiated_tns_version(newer, TNS_VERSION_12_2) == TNS_VERSION_12_2
