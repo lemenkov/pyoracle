@@ -879,6 +879,18 @@ the server's release. Decode it as `major` (bits 24-31), `minor`
 `Connection.version` and masks the major release out for its protocol
 version gate.
 
+Decoding what three live servers send confirms the layout across releases:
+
+| Server | `AUTH_VERSION_NO` | Packed | Decodes to | `AUTH_VERSION_SQL` |
+|--------|-------------------|--------|------------|--------------------|
+| XE 11.2   | `186647040` | `0x0B200200` | 11.2.0.2.0   | `22` |
+| XE 21c    | `352518144` | `0x15030000` | 21.0.48.0.0  | `25` |
+| 23ai/26ai | `387588096` | `0x171A2000` | 23.1.162.0.0 | `26` |
+
+`AUTH_VERSION_SQL` is a small counter that moves with the release. Nothing reads
+it back — a client decodes only `AUTH_VERSION_NO` into its version property — so
+it is descriptive rather than load-bearing.
+
 ### 4.7 Password Change (TTI_FUN/TTI_AUTH on a live session)
 
 `Connection.changepassword(old, new)` (#21) reuses the **already-authenticated

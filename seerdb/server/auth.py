@@ -54,7 +54,6 @@ from seerdb.common.tns import (
     _CHALLENGE_TRAILER,
     _DECODE_FIELD_VERSION,
     _RESULT_TRAILER,
-    _SERVER_VERSION_NO,
     Challenge,
     _hexval,
     decode_dalc,
@@ -70,6 +69,7 @@ from seerdb.common.tns_consts import (
     TTI_RPA,
     TTI_SESS,
 )
+from seerdb.server.identity import IDENTITY_11_2, ServerIdentity
 
 # 11g accounts carry the SHA1 verifier → the 192-bit AES key schedule.
 _BITS_11G = 192
@@ -157,11 +157,8 @@ def verify_password(
     return decrypt_password(session_key, auth_password) == password
 
 
-_RESULT_PARAMS: tuple[tuple[bytes, bytes], ...] = (
-    (b'AUTH_VERSION_STRING', b'- 64bit Production'),
-    (b'AUTH_VERSION_SQL', b'22'),
+_RESULT_PARAMS_TAIL: tuple[tuple[bytes, bytes], ...] = (
     (b'AUTH_XACTION_TRAITS', b'3'),
-    (b'AUTH_VERSION_NO', str(_SERVER_VERSION_NO).encode('ascii')),
     (b'AUTH_VERSION_STATUS', b'0'),
     (b'AUTH_CAPABILITY_TABLE', b''),
     (b'AUTH_DBNAME', b'XE'),
@@ -198,6 +195,18 @@ _RESULT_PARAMS: tuple[tuple[bytes, bytes], ...] = (
     (b'AUTH_NLS_LXCSTZNFM\x00', b'DD-MON-RR HH.MI.SSXFF AM TZR'),
 )
 _AUTH_GLOBALLY_UNIQUE_DBID = b'2C55FD5F1FE1101DA2455B7A62312B1D'
+
+
+def _result_params(identity: ServerIdentity) -> tuple[tuple[bytes, bytes], ...]:
+    # The release fields lead the table, in the order the captured 11g server
+    # sends them, then the fixed remainder.
+    return (
+        (b'AUTH_VERSION_STRING', identity.version_string),
+        (b'AUTH_VERSION_SQL', identity.version_sql),
+        *_RESULT_PARAMS_TAIL[:1],
+        (b'AUTH_VERSION_NO', str(identity.version_no).encode('ascii')),
+        *_RESULT_PARAMS_TAIL[1:],
+    )
 
 
 def encode_kv_oci(key: bytes, val: bytes, flags: int = 0) -> bytes:
@@ -249,17 +258,22 @@ def encode_challenge_oci(challenge: Challenge) -> bytes:
     return _oci_auth_packet(pairs, _CHALLENGE_TRAILER)
 
 
-def encode_result_oci(session_key: bytes, *, nonce: bytes | None = None) -> bytes:
+def encode_result_oci(
+    session_key: bytes,
+    *,
+    nonce: bytes | None = None,
+    identity: ServerIdentity = IDENTITY_11_2,
+) -> bytes:
     """Build the sqlplus / thick-OCI (deadbeef dialect) O5LOGON result (#265).
 
     Returns the **full TNS_DATA packet** (header included), ready for
     ``PacketStream.send_raw``. ``AUTH_SVR_RESPONSE`` (the freshly computed 48-byte
-    server proof) is the one per-login value; every other field is the Mirror's
-    fixed identity. ``nonce`` is forwarded to :func:`server_proof_oci` for
-    deterministic tests.
+    server proof) is the one per-login value; the release fields come from
+    ``identity`` and the rest is the Mirror's fixed identity. ``nonce`` is
+    forwarded to :func:`server_proof_oci` for deterministic tests.
     """
     proof = _hexval(server_proof_oci(session_key, nonce=nonce))
-    pairs = [(k, v, 0) for k, v in _RESULT_PARAMS]
+    pairs = [(k, v, 0) for k, v in _result_params(identity)]
     pairs.append((b'AUTH_SVR_RESPONSE', proof, 0))
     return _oci_auth_packet(pairs, _RESULT_TRAILER)
 

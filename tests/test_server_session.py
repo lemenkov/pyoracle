@@ -17,7 +17,7 @@ import pytest
 
 import seerdb
 from seerdb.common.tns import ColumnMeta
-from seerdb.common.tns_consts import TNS_TYPE_VARCHAR
+from seerdb.common.tns_consts import TNS_DATA, TNS_TYPE_VARCHAR
 from seerdb.server.backend import Result, UnsupportedFeature, credential_lookup
 from seerdb.server.framing import PacketStream
 from seerdb.server.session import handle_login, serve_session
@@ -970,3 +970,90 @@ def test_live_seerdb_over_large_sdu_framing() -> None:
         server.join(timeout=5)
         listen.close()
     assert result.get('error') is None, result.get('error')
+
+
+def _run_mirror_identity_at(listen: socket.socket, result: dict, version: int) -> None:
+    conn, _ = listen.accept()
+    try:
+        result['user'] = serve_session(
+            PacketStream(conn), _DualBackend(), field_version=version
+        )
+    except Exception as exc:  # noqa: BLE001 - surfaced to the test thread
+        result['error'] = exc
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    ('version', 'expected'), [(6, '11.2.0.2.0'), (8, '12.2.0.1.0')]
+)
+def test_live_client_reads_the_release_for_the_field_version(
+    version: int, expected: str
+) -> None:
+    """A real client's connection.version reflects what the Mirror advertises.
+
+    The release rides in the login result as AUTH_VERSION_NO, so this proves the
+    identity reaches the wire rather than only the table that builds it.
+    """
+    listen = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listen.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listen.bind(('127.0.0.1', 0))
+    listen.listen(1)
+    port = listen.getsockname()[1]
+
+    result: dict = {}
+    server = threading.Thread(
+        target=_run_mirror_identity_at, args=(listen, result, version), daemon=True
+    )
+    server.start()
+
+    conn = seerdb.connect(
+        host='127.0.0.1',
+        port=port,
+        user='PYO',
+        password='pyo123',
+        service_name='XE',
+        timeout=5000,
+    )
+    try:
+        assert conn.version == expected
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+    assert result.get('error') is None, result.get('error')
+
+
+@pytest.mark.parametrize(('version', 'expected'), [(6, b'11g'), (8, b'12c')])
+def test_oci_banner_follows_the_advertised_release(
+    version: int, expected: bytes
+) -> None:
+    """sqlplus's "Connected to:" banner reports the release, not a fixed 11g one.
+
+    Driven offline through the OCI loop: a version call in, the banner reply out.
+    """
+    from seerdb.common import oci
+    from seerdb.common.tns import _OCI_80SES_FIXED
+    from seerdb.server.identity import server_identity
+    from seerdb.server.session import _serve_oci_session
+
+    version_call = oci.OCI_VERSION_CALL + bytes(_OCI_80SES_FIXED - 2) + b'\x03\x3b'
+
+    class _Stream:
+        def __init__(self) -> None:
+            self.inbox = [(TNS_DATA, version_call), None]
+            self.sent: list[bytes] = []
+
+        def read_packet(self):
+            return self.inbox.pop(0)
+
+        def write_packet(self, ptype: int, body: bytes, **_kw) -> None:
+            self.sent.append(body)
+
+    stream = _Stream()
+    _serve_oci_session(stream, object(), 'PYO', None, server_identity(version))
+    assert stream.sent, 'the version call must be answered with a banner'
+    assert expected in stream.sent[0]
