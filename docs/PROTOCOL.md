@@ -1860,7 +1860,34 @@ Indicates successful completion of a transaction operation (COMMIT, ROLLBACK, PI
 
 ### 6.9 Flush Out Binds (TTI_FOB)
 
-Sent by the server when processing RETURNING clauses. The client acknowledges by echoing TTI_FOB back.
+Sent by the server when processing RETURNING clauses. The client acknowledges by
+echoing TTI_FOB back.
+
+**When it arrives** (#697): on a DML statement carrying a `RETURNING` clause that
+**fails**. The same statement succeeding never produces one, and a failing
+statement *without* a RETURNING clause answers with its error directly. Verified
+identically on 10g, 11g, 21c and 23ai — this is not a version quirk, and it is
+not specific to the array form.
+
+**What arrives**: a DATA packet whose entire body is the single byte `0x13`. No
+error, no status, nothing after it. The server then **waits**. The real error
+response is only sent once the client has echoed the token back, in a DATA packet
+that is likewise just `0x13`.
+
+So it is a request, not a result, and a client that reads it as one is left in
+the worst position available: it has an unusable value in hand, and the server is
+still waiting for an answer that is never coming. The next statement on that
+connection is rejected — **ORA-03137** (`opiexe: protocol violation`) on 11g and
+later, **ORA-00600** with the same text on 10g — because the server is still in
+the middle of the previous call. The failure therefore does not look like what it
+is: it lands on whatever statement runs next.
+
+seerdb answers it in the connection's response loop, which reads on afterwards
+for the response the request was standing in front of, so the caller sees the
+ordinary exception the statement earned (`ORA-01400` for a NOT NULL violation,
+say) and the connection stays usable. One request is what a real server sends;
+the loop caps how many it will answer so that a server which never stops asking
+ends the call rather than spinning on it.
 
 ## 7. Piggyback Functions (TTI_PFN)
 

@@ -487,6 +487,18 @@ def parse_redirect_address(Body: bytes) -> tuple[str | None, int | None]:
     return (None, None)
 
 
+# What the decoder yields for a bare TTI_FOB response (docs/PROTOCOL.md 6.9).
+# The server sends one -- a packet holding nothing but the token -- when a
+# statement with a RETURNING clause fails, and then waits: the real error only
+# follows once the client has echoed the token back. It is a request, not a
+# result, so a caller that reads it must answer it rather than hand it on (#697).
+FLUSH_OUT_BINDS = (False, 'fob')
+# How many of those to answer before giving up. One is what a real server asks
+# for; the cap is only so a server that never stops asking ends the call instead
+# of spinning on it forever.
+MAX_FLUSH_OUT_BINDS = 4
+
+
 def decode_packet(Data: bytes, Acc: tuple, FieldVersion: int | None = None) -> tuple:
     # FieldVersion is passed only by the top-level caller (the connection's
     # response handler); recursive token decoders omit it and inherit the value
@@ -511,8 +523,8 @@ def decode_packet(Data: bytes, Acc: tuple, FieldVersion: int | None = None) -> t
     match Token:
         case t if t == TTI_DCB:
             return decode_token_dcb(Data, Acc)
-        case t if t == TTI_FOB:  # return
-            return (False, 'fob')
+        case t if t == TTI_FOB:
+            return FLUSH_OUT_BINDS
         case t if t == TTI_IOV:
             return decode_token_iov(Data, Acc)
         case t if t == TTI_IRD:

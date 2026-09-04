@@ -901,6 +901,35 @@ class CursorIntegration(_IntegrationBase):
         self.cur.execute(f'SELECT COUNT(*) FROM {self.TABLE}')
         self.assertEqual(self.cur.fetchone(), (7,))
 
+    def test_failing_returning_raises_cleanly_and_keeps_the_session(self):
+        # A statement with a RETURNING clause that fails does not answer with the
+        # error straight away: the server sends a bare flush-out-binds token and
+        # waits for the client to echo it back first. Reading that as a result
+        # abandoned the response, and the *next* statement on the connection then
+        # got ORA-03137 because the server was still waiting (#697).
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER NOT NULL, v NUMBER)')
+        got = self.cur.var(int)
+        with self.assertRaises(seerdb.IntegrityError) as ctx:
+            self.cur.execute(
+                f'INSERT INTO {self.TABLE} (v) VALUES (:1) RETURNING id INTO :2',
+                [1.5, got],
+            )
+        self.assertEqual(ctx.exception.code, 1400)
+        # The session is still usable, which is the half that made this dangerous.
+        self.cur.execute('SELECT 1 FROM dual')
+        self.assertEqual(self.cur.fetchall(), [(1,)])
+
+    def test_failing_array_returning_raises_cleanly(self):
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER NOT NULL, v NUMBER)')
+        got = self.cur.var(int)
+        with self.assertRaises(seerdb.IntegrityError):
+            self.cur.executemany(
+                f'INSERT INTO {self.TABLE} (v) VALUES (:1) RETURNING id INTO :2',
+                [[1.5, got], [2.5, got]],
+            )
+        self.cur.execute('SELECT 1 FROM dual')
+        self.assertEqual(self.cur.fetchall(), [(1,)])
+
     # ----- executemany + RETURNING ... INTO (#687) -----
 
     def test_executemany_returning_collects_every_iteration(self):
@@ -3835,6 +3864,28 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(await Cur.fetchone(), (8,))
                 finally:
                     await Cur.execute('DROP TABLE PYORACLE_ASYNC_EM')
+
+    async def test_async_failing_returning_keeps_the_session(self):
+        # Async mirror of test_failing_returning_raises_cleanly_and_keeps_the
+        # _session (#697): the flush-out-binds handshake is in the connection's
+        # response loop, which each path has its own copy of.
+        async with await seerdb.connect_async(**self._kwargs()) as Conn:
+            async with Conn.cursor() as Cur:
+                await Cur.execute(
+                    'CREATE TABLE PYORACLE_ASYNC_FOB (id NUMBER NOT NULL, v NUMBER)'
+                )
+                try:
+                    got = Cur.var(int)
+                    with self.assertRaises(seerdb.IntegrityError):
+                        await Cur.execute(
+                            'INSERT INTO PYORACLE_ASYNC_FOB (v) VALUES (:1) '
+                            'RETURNING id INTO :2',
+                            [1.5, got],
+                        )
+                    await Cur.execute('SELECT 1 FROM dual')
+                    self.assertEqual(await Cur.fetchall(), [(1,)])
+                finally:
+                    await Cur.execute('DROP TABLE PYORACLE_ASYNC_FOB')
 
     async def test_async_executemany_returning(self):
         # Async mirror of test_executemany_returning_collects_every_iteration
