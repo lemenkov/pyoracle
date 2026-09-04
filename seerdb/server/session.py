@@ -96,6 +96,8 @@ from seerdb.common.tns_consts import (
     TNS_FUNC_SESSION_STATE,
     TNS_FUNC_SET_END_TO_END_ATTR,
     TNS_FUNC_TPC_TXN_SWITCH,
+    TNS_MARKER,
+    TNS_MARKER_TYPE_RESET,
     TNS_TYPE_BLOB,
     TNS_TYPE_CLOB,
     TNS_TYPE_LONG,
@@ -564,6 +566,17 @@ def _serve_oci_session(
         if received is None:
             return user
         packet_type, body = received
+        if packet_type == TNS_MARKER:
+            # A break / reset marker. The client sends one to resynchronise the
+            # line — after a cancelled call, or a reply it could not line up —
+            # and then WAITS for the server's marker before saying anything
+            # else. A real server always answers. This loop used to fall into
+            # the "not DATA, ignore it" branch below, so the client sat there
+            # until its own timeout with the session wedged. Answer with a
+            # single reset: the client side replies once per break episode too,
+            # because echoing every marker ping-pongs into a reset storm.
+            stream.write_packet(TNS_MARKER, bytes([1, 0, TNS_MARKER_TYPE_RESET]))
+            continue
         if packet_type != TNS_DATA:
             continue
         if is_version_call_oci(body):

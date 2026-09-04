@@ -884,3 +884,31 @@ def test_backend_codec_context_does_not_leak_into_the_session() -> None:
     assert result.get('error') is None, result.get('error')
     assert row == ('X',)
     assert backend.binds[1] == [text]
+
+
+def test_oci_loop_answers_a_break_marker() -> None:
+    """A break / reset marker gets a marker back, not silence.
+
+    The thick-OCI client sends one to resynchronise the line and then blocks
+    until the server answers; ignoring it wedged the session until the client
+    timed out.
+    """
+    from seerdb.common.tns_consts import TNS_MARKER, TNS_MARKER_TYPE_RESET
+    from seerdb.server.session import _serve_oci_session
+
+    class _Stream:
+        def __init__(self) -> None:
+            self.inbox = [(TNS_MARKER, bytes([1, 0, TNS_MARKER_TYPE_RESET])), None]
+            self.sent: list[tuple[int, bytes]] = []
+
+        def read_packet(self):
+            return self.inbox.pop(0)
+
+        def write_packet(self, ptype: int, body: bytes, **_kw) -> None:
+            self.sent.append((ptype, body))
+
+    stream = _Stream()
+    assert _serve_oci_session(stream, object(), 'PYO') == 'PYO'
+    # Exactly one reply, and it is a reset marker: replying to every marker
+    # ping-pongs the two ends into a reset storm.
+    assert stream.sent == [(TNS_MARKER, bytes([1, 0, TNS_MARKER_TYPE_RESET]))]
