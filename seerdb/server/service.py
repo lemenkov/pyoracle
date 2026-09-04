@@ -20,7 +20,6 @@ from collections.abc import Callable
 from seerdb.common.tns_consts import FIELD_VERSION_11_2
 from seerdb.server.backend import Backend
 from seerdb.server.framing import PacketStream
-from seerdb.server.handshake import TNS_VERSION_11_2
 from seerdb.server.session import serve_session
 
 logger = logging.getLogger('seerdb.server')
@@ -45,7 +44,7 @@ class Server:
         *,
         backend_factory: BackendFactory,
         field_version: int = FIELD_VERSION_11_2,
-        tns_version: int = TNS_VERSION_11_2,
+        tns_version: int | None = None,
     ) -> None:
         self._backend_factory = backend_factory
         # The field version the Mirror advertises to thin clients (default the
@@ -111,7 +110,7 @@ def serve(
     *,
     backend_factory: BackendFactory,
     field_version: int = FIELD_VERSION_11_2,
-    tns_version: int = TNS_VERSION_11_2,
+    tns_version: int | None = None,
 ) -> None:
     """Run a Mirror server until interrupted — the one-call convenience."""
     server = Server(

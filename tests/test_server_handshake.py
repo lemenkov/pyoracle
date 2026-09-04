@@ -22,7 +22,16 @@ from test_handshake_generation import (
 
 from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import CCAP_FIELD_VERSION, decode_token_pro
-from seerdb.common.tns_consts import FIELD_VERSION_11_2, TNS_DATA, TTI_DTY, TTI_PRO
+from seerdb.common.tns_consts import (
+    FIELD_VERSION_11_2,
+    FIELD_VERSION_12_1,
+    FIELD_VERSION_12_2,
+    FIELD_VERSION_23_1,
+    TNS_DATA,
+    TNS_VERSION_MIN_LARGE_SDU,
+    TTI_DTY,
+    TTI_PRO,
+)
 from seerdb.server.handshake import (
     TNS_VERSION_11_2,
     TNS_VERSION_12_2,
@@ -32,6 +41,7 @@ from seerdb.server.handshake import (
     negotiated_tns_version,
     parse_connect,
     pro_is_sqlplus,
+    server_tns_version,
 )
 
 
@@ -232,3 +242,24 @@ def test_negotiated_version_takes_the_lower_of_the_two_sides() -> None:
     assert negotiated_tns_version(req, TNS_VERSION_12_2) == 314
     newer = replace(req, protocol_version=319)
     assert negotiated_tns_version(newer, TNS_VERSION_12_2) == TNS_VERSION_12_2
+
+
+def test_protocol_version_follows_the_field_version() -> None:
+    """The two are one decision: a 12.2 field version implies 12.2's framing.
+
+    Advertising 12.2 capabilities and a 12.2 release while answering 314 would
+    describe a server that does not exist.
+    """
+    assert server_tns_version(FIELD_VERSION_11_2) == TNS_VERSION_11_2
+    assert server_tns_version(FIELD_VERSION_12_1) == TNS_VERSION_11_2
+    assert server_tns_version(FIELD_VERSION_12_2) == TNS_VERSION_12_2
+    # Above 12.2 stays on 12.2's framing — the newest release the Mirror models.
+    assert server_tns_version(FIELD_VERSION_23_1) == TNS_VERSION_12_2
+
+
+def test_a_12_2_mirror_is_large_sdu_without_being_asked() -> None:
+    # Asking for a 12.2 field version alone must produce the >= 315 ACCEPT.
+    req = replace(parse_connect(fx.CONNECT[8:]), protocol_version=319)
+    accept = encode_accept(req, tns_version=server_tns_version(FIELD_VERSION_12_2))
+    assert struct.unpack('>H', accept[8:10])[0] >= TNS_VERSION_MIN_LARGE_SDU
+    assert len(accept[8:]) == 37

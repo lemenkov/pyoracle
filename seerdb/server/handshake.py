@@ -19,6 +19,7 @@ from seerdb.common.exceptions import InterfaceError
 from seerdb.common.tns import encode_packet
 from seerdb.common.tns_consts import (
     FIELD_VERSION_11_2,
+    FIELD_VERSION_12_2,
     TNS_ACCEPT,
     TNS_DATA,
     TNS_VERSION_MIN_LARGE_SDU,
@@ -67,6 +68,26 @@ TNS_VERSION_11_2 = 314
 TNS_VERSION_12_2 = 316
 
 _SERVER_TNS_VERSION = TNS_VERSION_11_2
+
+
+def server_tns_version(field_version: int) -> int:
+    """The protocol version that goes with an advertised field version.
+
+    These two are one decision, not two. A session that advertises a 12.2 field
+    version but answers 314 is not a server that exists: it claims 12.2
+    capabilities and reports a 12.2 release, then frames the connection the 11.2
+    way. Deriving one from the other means asking for a 12.2 Mirror gets a 12.2
+    Mirror end to end.
+
+    Tiered like :func:`seerdb.server.identity.server_identity`, and on the same
+    threshold. A field version above 12.2 also lands here — 12.2 is the newest
+    release the Mirror models, and answering 316 is nearer the truth than
+    dropping back to 11.2's framing.
+    """
+    if field_version >= FIELD_VERSION_12_2:
+        return TNS_VERSION_12_2
+    return TNS_VERSION_11_2
+
 
 # ACCEPT body fields that are server constants at 11g, read straight off the
 # captured XE 11.2 ACCEPT (tests/handshake_11g.py): protocol characteristics,
