@@ -2,7 +2,7 @@ Entries are sorted chronologically from oldest to youngest within each release,
 releases are sorted from youngest to oldest.
 
 version 2.5.0:
-- **SQLAlchemy**: the `sqlalchemy-seerdb` dialect (released alongside as 0.1.0) passes SQLAlchemy's dialect compliance suite against Oracle 23ai and 11g. Running that suite is what found most of the driver fixes below.
+- **SQLAlchemy**: the `sqlalchemy-seerdb` dialect (released alongside as 0.2.0) passes SQLAlchemy's dialect compliance suite against Oracle 23ai and 11g. Running that suite is what found most of the driver fixes below.
 - **Quoted bind placeholders**: `:"name"` is recognised and matched case-sensitively; an unquoted `:name` stays case-insensitive, as in python-oracledb (#686).
 - **`Cursor.setinputsizes()`**, positional and by name, declares a bind's type, which is the only way to type a NULL bind; a declared type also governs how the value is sent (a DATE is seven bytes, a TIMESTAMP eleven; BINARY_FLOAT / BINARY_DOUBLE their IEEE form) (#696, #701).
 - **`Cursor.var(float)` / `var(Decimal)`** read back as the Python type they were asked for, and `Var.getvalue(pos)` returns the value of each iteration of an array `RETURNING` (#688).
