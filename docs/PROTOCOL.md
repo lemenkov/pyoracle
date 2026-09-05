@@ -1225,6 +1225,22 @@ of band, through `Cursor.setinputsizes`, which changes only the OAC: seerdb bind
 such a position as a `Var` of the declared type, so the descriptor announces it
 while the row data stays the same `0x00`.
 
+**And once declared, the declaration governs the payload too** (#701). The server
+measures the row data against the descriptor, so a bind that announces one type
+and sends another is rejected — `ORA-01483: invalid length for DATE or NUMBER
+bind variable`. This bites wherever one Python type has more than one width on
+the wire:
+
+| Value | Declared | Sent |
+|-------|----------|------|
+| `datetime` with microseconds | DATE | 7 bytes, microseconds dropped |
+| the same value | TIMESTAMP | 11 bytes, microseconds kept |
+| `float` | NUMBER (default) | base-100 NUMBER |
+| the same value | BINARY_DOUBLE / BINARY_FLOAT | 8 / 4 IEEE-754 bytes |
+
+The declared type wins and the value is coerced to it, which is both what the
+descriptor already promised and what python-oracledb does.
+
 **Chunked encoding** (for data > 64 bytes): `0xFE` header, then repeated `<length><data>` chunks of up to 64 bytes each, terminated by `0x00`.
 
 **Array DML** (`executemany`): the OAC descriptors are sent once (sized to the

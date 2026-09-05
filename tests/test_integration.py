@@ -1149,6 +1149,26 @@ class BindIntegration(_IntegrationBase):
     # tests/test_setinputsizes.py instead, which is the stronger check anyway;
     # what is left here is that a declaration survives a real round trip.
 
+    def test_a_declared_type_governs_how_the_value_is_sent(self):
+        # A declaration tells the server what the bind is; the value then has to
+        # be sent as that, or the payload does not match the descriptor and the
+        # server rejects the pair (#701). Declared DATE, a microsecond value is
+        # truncated; declared TIMESTAMP, it survives. Matches python-oracledb.
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, d TIMESTAMP)')
+        moment = datetime.datetime(2012, 10, 15, 12, 57, 18, 396)
+        self.cur.setinputsizes(d=seerdb.DB_TYPE_DATE)
+        self.cur.execute(
+            f'INSERT INTO {self.TABLE} (id, d) VALUES (1, :d)', {'d': moment}
+        )
+        self.cur.execute(f'SELECT d FROM {self.TABLE} WHERE id = 1')
+        self.assertEqual(self.cur.fetchall(), [(moment.replace(microsecond=0),)])
+        self.cur.setinputsizes(d=seerdb.DB_TYPE_TIMESTAMP)
+        self.cur.execute(
+            f'INSERT INTO {self.TABLE} (id, d) VALUES (2, :d)', {'d': moment}
+        )
+        self.cur.execute(f'SELECT d FROM {self.TABLE} WHERE id = 2')
+        self.assertEqual(self.cur.fetchall(), [(moment,)])
+
     def test_setinputsizes_does_not_disturb_an_ordinary_bind(self):
         self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, n NUMBER)')
         self.cur.execute(f'INSERT INTO {self.TABLE} VALUES (1, 5)')
