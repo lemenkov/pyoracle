@@ -1284,6 +1284,8 @@ what lets a plain string over 4000 bytes reach a CLOB on 11g through the regular
 bind path (its OAC is sized to the value, so it is LONG-class there). PL/SQL
 blocks are exempt: their values always ride in place. So are associative-array
 binds. python-oracledb applies exactly this rule; the Mirror reads rows by it.
+8i applies the same 4000-byte rule through its own request form (§19.11), so
+the 8i builder writes rows the same way (#714); 9i is unverified until #711.
 
 ## 6. Response Processing
 
