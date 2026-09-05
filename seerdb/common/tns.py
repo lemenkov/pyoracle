@@ -7901,7 +7901,7 @@ def _encode_8i_oall8(Seq: int, Sql: bytes, StmtType: int, Binds: list) -> bytes:
             # columns with the next bind. The declared size is the OAC's
             # little-endian ub2 at +4. A PL/SQL block's values ride in place.
             Long = [
-                StmtType != O8I_STMT_BEGIN and int.from_bytes(Oac[4:6], 'little') > 4000
+                not IsBlock and int.from_bytes(Oac[4:6], 'little') > 4000
                 for Oac in Oacs
             ]
             for Value, IsLong in zip(Binds, Long):
