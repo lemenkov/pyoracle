@@ -110,6 +110,34 @@ class TestTheClientWritesLongClassValuesLast(unittest.TestCase):
         )
 
 
+class TestThe9iBuilderWritesLongClassValuesLast(unittest.TestCase):
+    """9i has its own request builder and the same rule (#723)."""
+
+    SQL = 'insert into t values (:1, :2, :3)'
+
+    def test_a_wide_bind_is_written_after_the_row(self):
+        from seerdb.common.tns import encode_o7_parse
+
+        encoded = encode_o7_parse(3, self.SQL, [1, _wide('WIDE'), 'PLAIN'])
+        self.assertLess(encoded.index(b'PLAIN'), encoded.index(b'WIDE'))
+
+    def test_a_bind_within_4000_bytes_stays_in_place(self):
+        from seerdb.common.tns import encode_o7_parse
+
+        small = Var(str, 4000)
+        small.setvalue(0, 'SMALL')
+        encoded = encode_o7_parse(3, self.SQL, [1, small, 'PLAIN'])
+        self.assertLess(encoded.index(b'SMALL'), encoded.index(b'PLAIN'))
+
+    def test_a_plsql_block_keeps_every_value_in_place(self):
+        from seerdb.common.tns import encode_o7_block
+
+        encoded = encode_o7_block(
+            3, 'begin p(:1, :2, :3); end;', [1, _wide('WIDE'), 'PLAIN']
+        )
+        self.assertLess(encoded.index(b'WIDE'), encoded.index(b'PLAIN'))
+
+
 class TestThe8iBuilderWritesLongClassValuesLast(unittest.TestCase):
     """8i has its own request builder and the same rule (#714)."""
 
