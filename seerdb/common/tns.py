@@ -7341,8 +7341,19 @@ def encode_o7_parse(Seq: int, Sql: str, Binds: list | None = None) -> bytes:
         + _O7_PARSE_TAIL
     )
     if Binds:
-        Out += b''.join(_o7_bind_oac(V) for V in Binds)
-        Out += encode_tokens_rxd(Binds, b'')
+        Oacs = [_o7_bind_oac(V) for V in Binds]
+        Out += b''.join(Oacs)
+        # 9i applies the LONG-class rule too (docs/PROTOCOL.md 5.4, #723): a
+        # bind declared wider than 4000 bytes has its value read after the
+        # row's others. The declared size is the descriptor's sb4 at +4; a
+        # plain string is declared 4000 there and stays in place. A PL/SQL
+        # block (encode_o7_block) keeps every value in place.
+        Long = [decode_ub4(Oac[4:])[0] > 4000 for Oac in Oacs]
+        Out += encode_tokens_rxd(
+            [V for V, L in zip(Binds, Long) if not L]
+            + [V for V, L in zip(Binds, Long) if L],
+            b'',
+        )
     return Out
 
 
