@@ -31,6 +31,11 @@ on:
         required: false
         default: "tag"
         type: string
+      dialect:
+        description: "tag (the dialect's newest git tag) | pypi (its newest PyPI release, harness from the matching tag)"
+        required: false
+        default: "pypi"
+        type: string
   schedule:
     - cron: "47 5 * * 1"
 
@@ -40,7 +45,7 @@ concurrency:
 
 jobs:
   compliance:
-    name: SQLAlchemy compliance (${{ matrix.db.name }}, driver ${{ inputs.driver || (github.event_name == 'schedule' && 'tag') || 'checkout' }})
+    name: SQLAlchemy compliance (${{ matrix.db.name }}, driver ${{ inputs.driver || (github.event_name == 'schedule' && 'tag') || 'checkout' }}, dialect ${{ inputs.dialect || (github.event_name == 'schedule' && 'pypi') || 'tag' }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -73,6 +78,10 @@ jobs:
       # Pushes and pull requests test the checkout; a dispatch defaults to the
       # newest tag and the weekly run always uses it.
       DRIVER: ${{ inputs.driver || (github.event_name == 'schedule' && 'tag') || 'checkout' }}
+      # Pushes and pull requests take the dialect from its newest git tag,
+      # robust to PyPI's index lag; a dispatch defaults to its newest PyPI
+      # release and the weekly run always uses it: the artifact a user installs.
+      DIALECT: ${{ inputs.dialect || (github.event_name == 'schedule' && 'pypi') || 'tag' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -86,16 +95,26 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - name: Resolve the dialect's newest tag
+      # The wheel ships only the package; the compliance harness (test/,
+      # conftest.py, the mandatory test.cfg) lives in the repository, so the
+      # `pypi` mode installs the release and checks out the repository at the
+      # tag matching the installed version, for the harness alone.
+      - name: Resolve the dialect
         id: dialect
         run: |
-          TAG=$(git ls-remote --tags --refs https://github.com/seerdb/sqlalchemy-seerdb \
-                | sed 's#.*/##' | grep -E '^v?[0-9]+(\.[0-9]+)+$' | sort -V | tail -1)
-          if [ -z "$TAG" ]; then
-            echo "::warning::the dialect has no release tag yet; testing its master instead"
-            TAG=master
+          if [ "$DIALECT" = "pypi" ]; then
+            pip install "sqlalchemy-seerdb[test]"
+            TAG=$(pip show sqlalchemy-seerdb | awk '/^Version:/{print $2}')
+            echo "newest sqlalchemy-seerdb release on PyPI: $TAG"
+          else
+            TAG=$(git ls-remote --tags --refs https://github.com/seerdb/sqlalchemy-seerdb \
+                  | sed 's#.*/##' | grep -E '^v?[0-9]+(\.[0-9]+)+$' | sort -V | tail -1)
+            if [ -z "$TAG" ]; then
+              echo "::warning::the dialect has no release tag yet; testing its master instead"
+              TAG=master
+            fi
+            echo "newest sqlalchemy-seerdb tag: $TAG"
           fi
-          echo "newest sqlalchemy-seerdb tag: $TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
       - name: Check out the dialect at that tag
         uses: actions/checkout@v7
@@ -107,14 +126,15 @@ jobs:
       # dependency floor may pull a released driver from PyPI; the driver from
       # this checkout goes on top of it afterwards, force-reinstalled because
       # master carries the last release's version string until the next bump.
-      - name: Install the dialect, then this driver on top
-        run: |
-          pip install "./dialect[test]"
-          pip install --force-reinstall --no-deps .
+      - name: Install the dialect from the checkout
+        if: env.DIALECT != 'pypi'
+        run: pip install "./dialect[test]"
+      - name: This driver on top
+        run: pip install --force-reinstall --no-deps .
       - name: Which driver and dialect this run uses
         run: |
           python -c "import seerdb, inspect, pathlib; print('driver from:', pathlib.Path(inspect.getfile(seerdb)).parent)"
-          python -c "import sqlalchemy_seerdb; print('dialect', sqlalchemy_seerdb.__version__, 'tag ${{ steps.dialect.outputs.tag }}')"
+          python -c "import sqlalchemy_seerdb, inspect, pathlib; print('dialect', sqlalchemy_seerdb.__version__, 'from:', pathlib.Path(inspect.getfile(sqlalchemy_seerdb)).parent, '| harness at', '${{ steps.dialect.outputs.tag }}')"
           pip show seerdb | grep -E '^(Version|Location)'
       # SQLAlchemy's suite requires a second namespace called test_schema, which
       # on this backend is a username, and the test account has to be able to
