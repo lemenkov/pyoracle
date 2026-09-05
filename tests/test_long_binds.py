@@ -110,6 +110,35 @@ class TestTheClientWritesLongClassValuesLast(unittest.TestCase):
         )
 
 
+class TestThe8iBuilderWritesLongClassValuesLast(unittest.TestCase):
+    """8i has its own request builder and the same rule (#714)."""
+
+    def _bytes(self, bind):
+        from seerdb.common.tns import encode_8i_oall8_query
+
+        return encode_8i_oall8_query(
+            3, b'select 1 from t where a = :1 and b = :2 and c = :3', bind
+        )
+
+    def test_a_wide_bind_is_written_after_the_row(self):
+        encoded = self._bytes([1, _wide('WIDE'), 'PLAIN'])
+        self.assertLess(encoded.index(b'PLAIN'), encoded.index(b'WIDE'))
+
+    def test_a_plsql_block_keeps_every_value_in_place(self):
+        from seerdb.common.tns import O8I_STMT_BEGIN, encode_8i_oall8_dml
+
+        encoded = encode_8i_oall8_dml(
+            3, b'begin p(:1, :2, :3); end;', O8I_STMT_BEGIN, [1, _wide('WIDE'), 'PLAIN']
+        )
+        self.assertLess(encoded.index(b'WIDE'), encoded.index(b'PLAIN'))
+
+    def test_a_bind_within_4000_bytes_stays_in_place(self):
+        small = Var(str, 4000)
+        small.setvalue(0, 'SMALL')
+        encoded = self._bytes([1, small, 'PLAIN'])
+        self.assertLess(encoded.index(b'SMALL'), encoded.index(b'PLAIN'))
+
+
 class TestTheMirrorReadsByTheSameRule(unittest.TestCase):
     """The Mirror's parser is the inverse: fed the client's bytes and the same
     threshold it recovers the rows exactly, on every field version."""

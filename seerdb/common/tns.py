@@ -7892,11 +7892,24 @@ def _encode_8i_oall8(Seq: int, Sql: bytes, StmtType: int, Binds: list) -> bytes:
             + bytes(19)
         )
         if NumBinds:
-            for Value in Binds:
-                Message += _encode_8i_bind_oac(Value)
+            Oacs = [_encode_8i_bind_oac(Value) for Value in Binds]
+            Message += b''.join(Oacs)
             Message += bytes([0x07])  # bind-value section marker
-            for Value in Binds:
-                Message += _encode_8i_bind_value(Value)
+            # 8i applies the 10g+ rule too (docs/PROTOCOL.md 5.4, #714): a bind
+            # declared wider than 4000 bytes is LONG-class and the server reads
+            # its value after the row's others; written in place it swapped
+            # columns with the next bind. The declared size is the OAC's
+            # little-endian ub2 at +4. A PL/SQL block's values ride in place.
+            Long = [
+                not IsBlock and int.from_bytes(Oac[4:6], 'little') > 4000
+                for Oac in Oacs
+            ]
+            for Value, IsLong in zip(Binds, Long):
+                if not IsLong:
+                    Message += _encode_8i_bind_value(Value)
+            for Value, IsLong in zip(Binds, Long):
+                if IsLong:
+                    Message += _encode_8i_bind_value(Value)
         return Message
     finally:
         _ENCODE_FIELD_VERSION.reset(Token)
