@@ -1579,6 +1579,20 @@ class OracleConnect(_ConnectionLogic):
                 Timer.cancel()
             self._break_in_progress = False
             self._timed_out = False
+        # A cached cursor whose execute failed is gone on the server side: a
+        # later re-execute of the same id answers ORA-01001 for the rest of the
+        # connection, whatever the values (#709). Forget it, so the next execute
+        # of this statement parses afresh. An Oracle error is an ordinary status
+        # here, not an exception, so the except above never sees it. A batch
+        # error (24381) leaves the cursor usable: the batch ran, some rows failed.
+        if (
+            CachedCursor
+            and CacheKey is not None
+            and isinstance(Result, tuple)
+            and len(Result) >= 2
+            and Result[1] not in (0, 1403, 24381)
+        ):
+            self._cursor_cache.pop(CacheKey, None)
         # Stash the cursor id the server returned so the next execute of
         # the same SQL can skip parsing. Same scoping as the lookup:
         # DML only, no Def overrides.
