@@ -63,6 +63,7 @@ _FV2_UNSUPPORTED = (
     ('changepassword', 'changepassword is not supported on Oracle 9i'),
     ('cache_evicts', 'the cursor cache is a fv4+ feature; 9i re-parses'),
     ('reuses_cursor', 'the cursor cache is a fv4+ feature; 9i re-parses'),
+    ('forgets_the_cached_cursor', 'the cursor cache is a fv4+ feature; 9i re-parses'),
     ('pipeline', 'the pipeline test uses array DML, unsupported on Oracle 9i'),
     # The 9i test DB is WE8ISO8859P1 (Latin-1). #174 made representable VARCHAR2
     # text round-trip (see test_db_charset_varchar_roundtrip) and full Unicode
@@ -1923,6 +1924,22 @@ class CursorCacheIntegration(_IntegrationBase):
         # And the rows are what we expect.
         self.cur.execute(f'SELECT id, v FROM {self.TABLE} ORDER BY id')
         self.assertEqual(self.cur.fetchall(), [(1, 'z'), (2, 'b')])
+
+    def test_a_failed_execute_forgets_the_cached_cursor(self):
+        # The server drops a cursor whose execute failed. Keeping its id made
+        # every later execute of the same statement answer ORA-01001 (#709).
+        if self.conn.field_version >= FIELD_VERSION_12_1:
+            self.skipTest('cursor cache is disabled on 12c+ (re-parse each execute)')
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER PRIMARY KEY)')
+        Sql = f'INSERT INTO {self.TABLE} VALUES (:id)'
+        self.cur.execute(Sql, {'id': 1})
+        self.assertIsNotNone(self._cached_handle(Sql))
+        with self.assertRaises(seerdb.DatabaseError):
+            self.cur.execute(Sql, {'id': 1})  # ORA-00001, as it should
+        self.assertIsNone(self._cached_handle(Sql))
+        self.cur.execute(Sql, {'id': 2})  # parses afresh: no ORA-01001
+        self.cur.execute(f'SELECT COUNT(*) FROM {self.TABLE}')
+        self.assertEqual(self.cur.fetchone(), (2,))
 
     def test_cache_does_not_apply_to_select(self):
         # SELECT cache is intentionally skipped — caching a SELECT would

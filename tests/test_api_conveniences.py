@@ -313,3 +313,42 @@ class TestDbApiModuleInterface(unittest.TestCase):
         self.assertIs(seerdb.BINARY, seerdb.DB_TYPE_RAW)
         self.assertIs(seerdb.ROWID, seerdb.DB_TYPE_ROWID)
         self.assertIs(seerdb.DATETIME, seerdb.DB_TYPE_DATE)
+
+
+class TestFailedCachedExecuteIsForgotten(unittest.TestCase):
+    """A cached cursor whose execute failed must leave the cache (#709).
+
+    The server drops such a cursor; re-executing its id answered ORA-01001 for
+    the rest of the connection. The error arrives as an ordinary status, not an
+    exception, so the eviction has to look at the status.
+    """
+
+    SQL = 'INSERT INTO t VALUES (:1)'
+
+    def _run(self, status):
+        from unittest.mock import patch
+
+        from seerdb.common.tns import exec_oac_signature
+        from seerdb.common.tns_consts import FIELD_VERSION_11_2
+
+        conn = OracleConnect()
+        conn.field_version = FIELD_VERSION_11_2
+        key = (self.SQL, exec_oac_signature([1], []))
+        conn._cursor_cache[key] = 7  # a hit: the execute reuses cursor 7
+        result = (None, status, 7, [], [], f'ORA-{status:05d}')
+        with (
+            patch.object(OracleConnect, 'send', return_value=True),
+            patch.object(OracleConnect, '_handle_response', return_value=result),
+        ):
+            conn.execute(self.SQL, [1])
+        return key in conn._cursor_cache
+
+    def test_an_error_status_evicts_the_entry(self):
+        self.assertFalse(self._run(1))  # ORA-00001
+
+    def test_a_success_keeps_it(self):
+        self.assertTrue(self._run(0))
+
+    def test_a_batch_error_keeps_it(self):
+        # ORA-24381: the batch ran, some rows failed; the cursor is still good.
+        self.assertTrue(self._run(24381))
