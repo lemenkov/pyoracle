@@ -38,6 +38,23 @@ tag it. The steps:
    `x.y.z` tag. Tagging is what publishes to PyPI and creates the GitHub
    release — it is deliberately a human step.
 
+### Compatibility with the SQLAlchemy dialect
+
+The driver and `sqlalchemy-seerdb` release independently, so each one's suite
+says what the other may rely on:
+
+- **This driver must pass the released dialect's compliance suite**: the
+  `SQLAlchemy` workflow checks out the dialect at its newest git tag, installs
+  the driver from the checkout on top of it, and runs SQLAlchemy's dialect
+  compliance suite against 11g and 23ai. It gates: a driver change that breaks
+  what users have installed fails here.
+- **The dialect, for its part, must pass against this driver's releases**,
+  and only watches this driver's `master` as an early warning that does not
+  gate. A failure on that leg is raised here, as a driver regression, unless
+  it is a dialect change waiting for the next driver release.
+- Release order follows: this driver releases first, then the dialect raises
+  its `seerdb>=` floor and releases against it.
+
 ### Versioning
 
 Follow semantic versioning against the **client (DB-API 2.0) surface**, which is
