@@ -6974,6 +6974,16 @@ def _long_bind_positions(Oac: list, MaxStringSize: int) -> frozenset:
     return frozenset(Out)
 
 
+def has_long_class_bind(Bind: list, Batch: list, MaxStringSize: int) -> bool:
+    """Whether this execute carries a bind declared wider than the server takes
+    in place (docs/PROTOCOL.md 5.4). Such a statement must not be cursor-cached:
+    a cached cursor re-executed after DDL on its table made a pre-12c server
+    reuse the previous execution's LONG-class value for a NULL (#720)."""
+    if not Bind:
+        return False
+    return bool(_long_bind_positions(_oac_rep_row([Bind] + Batch), MaxStringSize))
+
+
 def _rxd_rows(Bind: list, Batch: list, ReturnBinds, LongBinds) -> list:
     # The rows whose values actually travel in the RXD tokens, each in the order
     # the server reads it. Every bind is described once in the OAC, but a

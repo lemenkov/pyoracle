@@ -1405,6 +1405,18 @@ must therefore be re-parsed, including statements the client cannot classify —
 being wrong that way costs a parse, while being wrong the other way loses the
 statement.
 
+**DDL flushes the cache, and a LONG-class statement is never cached** (#720).
+A cursor the server has invalidated, because its table was dropped and
+re-created, is not merely re-parsed on the next re-execute: on 10g and 11g the
+server reused the **previous execution's value** for a LONG-class bind (§5.4)
+when the new execution bound NULL for it. The stale bytes then hit the new
+column, `ORA-12899` when it is too narrow for them, stored in silence when it is
+not. The client therefore forgets every cached cursor when the session runs
+DDL or a PL/SQL block (closing them with the next call's OCCA piggyback), and
+never caches a statement that carries a LONG-class bind at all, since the DDL
+may come from another session. A plain string bind is sized to its value and
+is safe to cache.
+
 **OUT-bind reply (the Mirror, OCI dialect).** The classic sqlplus `VARIABLE v
 NUMBER` / `EXEC :v := 42` flow sends a PL/SQL block that assigns literals to OUT
 binds; the client parks bind buffers and expects the values back. The Mirror

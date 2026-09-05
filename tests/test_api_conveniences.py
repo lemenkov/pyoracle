@@ -352,3 +352,60 @@ class TestFailedCachedExecuteIsForgotten(unittest.TestCase):
     def test_a_batch_error_keeps_it(self):
         # ORA-24381: the batch ran, some rows failed; the cursor is still good.
         self.assertTrue(self._run(24381))
+
+
+class TestDdlForgetsCachedCursors(unittest.TestCase):
+    """DDL and PL/SQL blocks flush the cursor cache; a LONG-class statement is
+    never cached (#720)."""
+
+    def _conn(self):
+        from seerdb.common.tns_consts import FIELD_VERSION_11_2
+
+        conn = OracleConnect()
+        conn.field_version = FIELD_VERSION_11_2
+        conn._cursor_cache[('INSERT INTO t VALUES (:1)', b'sig')] = 7
+        return conn
+
+    def _run(self, conn, sql, bind=None, status=0, cursor_id=9):
+        from unittest.mock import patch
+
+        sent = []
+        result = (None, status, cursor_id, [], [], None)
+        with (
+            patch.object(
+                OracleConnect, 'send', lambda self, t, d: sent.append(bytes(d)) or True
+            ),
+            patch.object(OracleConnect, '_handle_response', return_value=result),
+        ):
+            conn.execute(sql, bind or [])
+        return b''.join(sent)
+
+    def test_ddl_flushes_and_queues_the_cursors_for_close(self):
+        conn = self._conn()
+        request = self._run(conn, 'DROP TABLE t')
+        self.assertEqual(dict(conn._cursor_cache), {})
+        # The flushed cursor rides out in the close-cursors piggyback of the
+        # DDL's own request (TTI_MSG_TYPE_PIGGYBACK + TTI_OCCA).
+        self.assertIn(bytes([0x11, 0x69]), request)
+
+    def test_a_block_flushes_too(self):
+        conn = self._conn()
+        self._run(conn, 'begin null; end;')
+        self.assertEqual(dict(conn._cursor_cache), {})
+
+    def test_dml_keeps_the_cache(self):
+        conn = self._conn()
+        self._run(conn, 'UPDATE t SET x = 1')
+        self.assertIn(('INSERT INTO t VALUES (:1)', b'sig'), conn._cursor_cache)
+
+    def test_a_long_class_statement_is_not_cached(self):
+        conn = self._conn()
+        wide = seerdb.Var(str)  # 32767: LONG-class below 12c
+        self._run(conn, 'INSERT INTO w VALUES (:1, :2)', [1, wide])
+        self.assertFalse(
+            any(k[0].startswith('INSERT INTO w') for k in conn._cursor_cache)
+        )
+        self._run(conn, 'INSERT INTO n VALUES (:1, :2)', [1, 'short'])
+        self.assertTrue(
+            any(k[0].startswith('INSERT INTO n') for k in conn._cursor_cache)
+        )

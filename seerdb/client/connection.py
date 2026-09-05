@@ -50,6 +50,8 @@ from seerdb.common.tns import (
     encode_tpc_switch,
     exec_oac_signature,
     find_fast_auth_rpa,
+    has_long_class_bind,
+    max_string_size,
     set_decode_dml_rowcounts,
     set_decode_prev_row,
     set_decode_return_binds,
@@ -1506,11 +1508,23 @@ class OracleConnect(_ConnectionLogic):
         # never be cached (#703). A CREATE or DROP does its work when the server
         # *parses* it, so a cached re-execute has nothing left to do: the server
         # reports success and the statement silently never happens.
+        # DDL invalidates the server cursors this session holds, and so may a
+        # PL/SQL block. A cached id re-executed afterwards made a pre-12c server
+        # reuse the previous execution's value for a NULL LONG-class bind
+        # (#720). Forget them all, closing them with the next call.
+        if Type == 'block' or (Type == 'change' and not is_reusable_dml(Query)):
+            self._cursors_to_close.extend(self._cursor_cache.values())
+            self._cursor_cache.clear()
         if (
             Type == 'change'
             and is_reusable_dml(Query)
             and not Def
             and self.field_version < FIELD_VERSION_12_1
+            # A statement with a LONG-class bind is never cached: DDL from
+            # another session would leave the same stale buffer behind (#720).
+            and not has_long_class_bind(
+                Bind, Batch, max_string_size(self._server_runtime_caps)
+            )
         ):
             CacheKey = (Query, exec_oac_signature(Bind, Batch))
             CachedCursor = self._cursor_cache.get(CacheKey, 0)
