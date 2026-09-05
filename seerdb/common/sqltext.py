@@ -168,3 +168,25 @@ def is_plsql(SQL: str) -> bool:
     Stripped = re.sub(r'^\s*(?:--[^\n]*\n|/\*.*?\*/|\s)+', '', SQL, flags=re.S)
     Head = Stripped[:8].upper()
     return Head.startswith('BEGIN') or Head.startswith('DECLARE')
+
+
+_REUSABLE_DML_RE = re.compile(r'\s*(INSERT|UPDATE|DELETE|MERGE)\b', re.I)
+
+
+def is_reusable_dml(SQL: str) -> bool:
+    """Whether a server cursor for this statement may be reused for a re-execute.
+
+    True only for real DML. Such a statement is parsed once and then executed
+    again per set of bind values, so keeping the server's handle saves a parse
+    and changes nothing about the outcome.
+
+    DDL is excluded, and that is the whole point of this function (#703). A
+    `CREATE` or `DROP` does its work when the server **parses** it, so a cached
+    re-execute has nothing left to do -- the server reports success and the
+    statement never happens. Silently: the caller is told the table was created
+    and it was not.
+
+    Everything unrecognised is excluded too. Being wrong in this direction costs
+    a re-parse; being wrong in the other loses the statement.
+    """
+    return _REUSABLE_DML_RE.match(strip_non_bind_text(SQL)) is not None

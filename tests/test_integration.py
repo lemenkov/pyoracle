@@ -1138,6 +1138,45 @@ class CursorIntegration(_IntegrationBase):
 class BindIntegration(_IntegrationBase):
     """Verify Cursor.execute parameter binding."""
 
+    def test_repeated_ddl_actually_runs_every_time(self):
+        # The DML cursor cache reuses a server handle to save a parse, which is
+        # right for DML and wrong for DDL: a CREATE or DROP does its work when
+        # the server parses it, so a cached re-execute has nothing left to do
+        # and reports success without acting. Issuing the same CREATE twice
+        # silently created nothing the second time, on every server old enough
+        # to use the cache (#703).
+        #
+        # A fresh cursor per statement, because that is what an ORM does and it
+        # is what made the reuse visible.
+        def run(sql):
+            with self.conn.cursor() as cur:
+                cur.execute(sql)
+
+        def exists():
+            # Ask the table itself rather than a data-dictionary view, so this
+            # means the same thing against a real server and against the Mirror.
+            try:
+                run(f'SELECT 1 FROM {self.TABLE} WHERE 1 = 0')
+                return True
+            except seerdb.DatabaseError:
+                return False
+
+        for _ in range(3):
+            run(f'CREATE TABLE {self.TABLE} (id NUMBER)')
+            self.assertTrue(exists(), 'the CREATE did not take effect')
+            run(f'DROP TABLE {self.TABLE}')
+            self.assertFalse(exists(), 'the DROP did not take effect')
+
+    def test_repeated_dml_still_reuses_its_cursor(self):
+        # The other half: real DML must keep the cache, which is the parse it
+        # exists to save. Behaviourally all that can be checked is that
+        # re-executing the same statement keeps working and keeps applying.
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER)')
+        for n in range(3):
+            self.cur.execute(f'INSERT INTO {self.TABLE} VALUES (:1)', [n])
+        self.cur.execute(f'SELECT COUNT(*) FROM {self.TABLE}')
+        self.assertEqual(self.cur.fetchone(), (3,))
+
     # ----- setinputsizes types a bind the value cannot (#696) -----
     #
     # What the declaration is *for* -- a NULL bind the server would otherwise

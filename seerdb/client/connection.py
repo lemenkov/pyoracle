@@ -28,6 +28,7 @@ from seerdb.common.exceptions import (
     NotSupportedError,
     OperationalError,
 )
+from seerdb.common.sqltext import is_reusable_dml
 from seerdb.common.tns import (
     _DTY_8I,
     CCAP_FIELD_VERSION,
@@ -1499,7 +1500,18 @@ class OracleConnect(_ConnectionLogic):
         # server expects the binds (and OAC) declared every execute. Disable
         # the cache on 12c+ — each execute re-parses, which is correct, just
         # without the handle-reuse speedup.
-        if Type == 'change' and not Def and self.field_version < FIELD_VERSION_12_1:
+        #
+        # `Type == 'change'` is a catch-all for everything that is neither a
+        # SELECT nor a block, so it covers DDL as well as DML — and DDL must
+        # never be cached (#703). A CREATE or DROP does its work when the server
+        # *parses* it, so a cached re-execute has nothing left to do: the server
+        # reports success and the statement silently never happens.
+        if (
+            Type == 'change'
+            and is_reusable_dml(Query)
+            and not Def
+            and self.field_version < FIELD_VERSION_12_1
+        ):
             CacheKey = (Query, exec_oac_signature(Bind, Batch))
             CachedCursor = self._cursor_cache.get(CacheKey, 0)
         SendQuery = '' if CachedCursor else Query

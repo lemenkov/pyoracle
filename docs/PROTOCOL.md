@@ -1347,6 +1347,25 @@ remembered bind types to `parse_exec` so the OAC-less RXD decodes, runs the stor
 SQL with the new binds, and replies with the same cursor id. A PL/SQL block is
 never assigned an id (the client doesn't cache blocks).
 
+**Only real DML may be cached** (#703). Reusing a cursor is a saved *parse*: the
+statement is parsed once and executed again per set of binds, which is exactly
+how INSERT / UPDATE / DELETE / MERGE work. DDL is different — it does its work
+when the server **parses** it, so a re-execute has nothing left to do. The server
+answers such a re-execute with an ordinary success status and changes nothing,
+raising no error, so the statement is lost in silence:
+
+```
+create table t (id number)   -- first time: parsed, table created
+drop table t
+create table t (id number)   -- cached re-execute: "success", no table
+```
+
+Measured on 10g and 11g, which use the cache; 21c and 23ai are unaffected because
+the cache is disabled from 12.1. Anything that is not one of the four DML verbs
+must therefore be re-parsed, including statements the client cannot classify —
+being wrong that way costs a parse, while being wrong the other way loses the
+statement.
+
 **OUT-bind reply (the Mirror, OCI dialect).** The classic sqlplus `VARIABLE v
 NUMBER` / `EXEC :v := 42` flow sends a PL/SQL block that assigns literals to OUT
 binds; the client parks bind buffers and expects the values back. The Mirror
