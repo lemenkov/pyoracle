@@ -1248,6 +1248,30 @@ widest value in each column across all rows), the All8 iteration count is the
 number of rows, and each row's values follow as its own `TTI_RXD` token after
 the OAC block.
 
+**LONG-class binds come last** (#705). The server takes a character or RAW bind
+in place only up to its *maximum string size*: 32767 bytes when its runtime
+capability vector carries the 32K TTC bit (`RCAP_TTC` bit `0x04`, which 12c and
+later advertise), 4000 bytes otherwise (10g, 11g). A bind whose OAC declares
+more than that is a LONG-class bind, and the server reads a row's LONG-class
+values only after it has read all the row's other values. So each `TTI_RXD` row
+is written as the non-LONG values in bind order, then the LONG-class values in
+bind order:
+
+```
+insert into t (id, a, b) values (:1, :2, :3)     :2 = Var(str) -> OAC 32767
+OAC   NUMBER(22)  VARCHAR(32767)  VARCHAR(6)
+RXD   1  'second'  'first'                       <- :3 before :2 on 11g
+```
+
+Written in place nothing fails: the server takes `:3`'s value for `:2` and
+`:2`'s for `:3`, and the two columns silently swap. A `seerdb.Var(str)` declares
+32767 by default, so any Var followed by a plain bind hit this on 10g and 11g,
+while 21c and 23ai, which take 32767 in place, never showed it. The same rule is
+what lets a plain string over 4000 bytes reach a CLOB on 11g through the regular
+bind path (its OAC is sized to the value, so it is LONG-class there). PL/SQL
+blocks are exempt: their values always ride in place. So are associative-array
+binds. python-oracledb applies exactly this rule; the Mirror reads rows by it.
+
 ## 6. Response Processing
 
 ### 6.0 A SELECT response, server-side (the Mirror)

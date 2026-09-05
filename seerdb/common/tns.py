@@ -26,7 +26,7 @@ from seerdb.common.datatypes import (
 )
 from seerdb.common.date import date
 from seerdb.common.exceptions import DataError, InterfaceError
-from seerdb.common.sqltext import returning_bind_positions
+from seerdb.common.sqltext import is_plsql, returning_bind_positions
 from seerdb.common.vector import (
     VECTOR_BIND_DESCRIPTOR,
     SparseVector,
@@ -1406,7 +1406,9 @@ def _skip_exec_middle_12c(rest: bytes, field_version: int) -> bytes:
     return rest
 
 
-def parse_exec(payload: bytes, bind_types: list | None = None) -> ExecRequest:
+def parse_exec(
+    payload: bytes, bind_types: list | None = None, max_string_size: int = 4000
+) -> ExecRequest:
     """Parse an OALL8 execute payload (the TTC message from ``read_packet``).
 
     Extracts the SQL text and any bind values (positional, decoded by their OAC
@@ -1418,6 +1420,11 @@ def parse_exec(payload: bytes, bind_types: list | None = None) -> ExecRequest:
     first parse. Pass the remembered ``bind_types`` (the ``(data_type, csfrm,
     max_size)`` list from that first parse, exposed as ``ExecRequest.bind_types``)
     so the RXD values decode without re-reading OACs.
+
+    ``max_string_size`` is the widest bind the server this Mirror presents as
+    takes in place (what its runtime capabilities promised the client, see
+    :func:`max_string_size`); a bind declared wider is LONG-class and its value
+    is read after the row's others.
     """
     if len(payload) < 3 or payload[0] != TTI_FUN or payload[1] != TTI_ALL8:
         raise InterfaceError('not an OALL8 execute')
@@ -1517,17 +1524,27 @@ def parse_exec(payload: bytes, bind_types: list | None = None) -> ExecRequest:
         # The row keeps a None in each such position so it stays aligned with
         # `bind_meta`, which does describe every bind.
         return_binds = returning_bind_positions(sql, bind_count)
+        # A row's LONG-class values -- binds declared wider than the server takes
+        # in place -- come after all its other values (docs/PROTOCOL.md 5.4); a
+        # PL/SQL block's ride in place. (A cached re-execute carries no SQL, but
+        # a cached cursor is DML only, #703.)
+        long_binds = frozenset(
+            index
+            for index, (_data_type, _csfrm, maxlen, _toid) in enumerate(types)
+            if maxlen > max_string_size and not is_plsql(sql)
+        )
+        carried = [index for index in range(len(types)) if index not in return_binds]
+        order = [index for index in carried if index not in long_binds] + [
+            index for index in carried if index in long_binds
+        ]
         # Loop until the rows run out (executemany sends N, a plain execute
         # sends 1).
         while after and after[0] == TTI_RXD:
             after = after[1:]
-            row: list = []
-            for index, (data_type, csfrm, _maxlen, toid) in enumerate(types):
-                if index in return_binds:
-                    row.append(None)
-                    continue
-                value, after = _read_bind_value(data_type, csfrm, after, toid)
-                row.append(value)
+            row: list = [None] * len(types)
+            for index in order:
+                data_type, csfrm, _maxlen, toid = types[index]
+                row[index], after = _read_bind_value(data_type, csfrm, after, toid)
             bind_rows.append(row)
         if bind_rows:
             binds = bind_rows[0]
@@ -3842,6 +3859,17 @@ RCAP_COMPAT_81 = 2
 RCAP_TTC_ZERO_COPY = 0x01
 RCAP_TTC_32K = 0x04
 RCAP_TTC_SESSION_STATE_OPS = 0x10  # server accepts request-boundary markers (#464)
+
+
+def max_string_size(RuntimeCaps: bytes) -> int:
+    """The widest character / RAW bind the server takes in place: 32767 bytes
+    when its runtime capabilities carry the 32K TTC bit (12c+), else 4000. A
+    bind declared wider is a LONG-class bind, and its value travels after the
+    row's other values (docs/PROTOCOL.md 5.4)."""
+    if len(RuntimeCaps) > RCAP_TTC and RuntimeCaps[RCAP_TTC] & RCAP_TTC_32K:
+        return 32767
+    return 4000
+
 
 # Per-field-version capability vectors as {index: byte}; unset indices are 0.
 # 11.2 reproduces seerdb's historical 11g vector byte-for-byte (asserted by
@@ -6921,17 +6949,38 @@ def _oac_rep_row(Rows: list) -> list:
     return Rep
 
 
-def _in_bind_rows(Bind: list, Batch: list, ReturnBinds) -> list:
-    # The rows whose values actually travel in the RXD tokens of an array
-    # execute. Every bind is described once in the OAC, but a RETURNING ... INTO
-    # out-bind is filled by the server from the affected rows, so it must not
-    # carry a value here -- in any iteration (#687). Sending one made the server
-    # read the next iteration's first value as this one's tail and reject the
-    # whole call as a malformed TTC packet, which also killed the connection.
-    AllRows = [Bind] + Batch
-    if not ReturnBinds:
-        return AllRows
-    return [[V for I, V in enumerate(R) if I not in ReturnBinds] for R in AllRows]
+def _long_bind_positions(Oac: list, MaxStringSize: int) -> frozenset:
+    # The binds declared wider than the server takes in place. Their OAC makes
+    # them LONG-class binds, whose values the server reads after the row's
+    # others (docs/PROTOCOL.md 5.4). Read off the OAC actually sent, so the two
+    # can never disagree. An associative-array bind (#122) is never LONG-class,
+    # whatever its element size. Matches python-oracledb.
+    Out = set()
+    for Index, Token in enumerate(Oac):
+        if isinstance(Token, Var) and Token.is_array:
+            continue
+        (_, MaxLen, *_rest) = decode_oac_fields(encode_token_oac(Token))
+        if MaxLen > MaxStringSize:
+            Out.add(Index)
+    return frozenset(Out)
+
+
+def _rxd_rows(Bind: list, Batch: list, ReturnBinds, LongBinds) -> list:
+    # The rows whose values actually travel in the RXD tokens, each in the order
+    # the server reads it. Every bind is described once in the OAC, but a
+    # RETURNING ... INTO out-bind is filled by the server from the affected rows,
+    # so it must not carry a value here -- in any iteration (#687). Sending one
+    # made the server read the next iteration's first value as this one's tail
+    # and reject the whole call as a malformed TTC packet. And a LONG-class
+    # bind's value comes after the row's others: written in place, the server
+    # took the next bind's value for it and the two silently swapped columns.
+    def _row(R):
+        Kept = [(I, V) for I, V in enumerate(R) if I not in ReturnBinds]
+        return [V for I, V in Kept if I not in LongBinds] + [
+            V for I, V in Kept if I in LongBinds
+        ]
+
+    return [_row(R) for R in [Bind] + Batch]
 
 
 def encode_dictionary_exec(Dictionary: dict) -> bytes:
@@ -6957,13 +7006,23 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
     # All binds get an OAC, but only the non-return binds carry a value in the
     # RXD row (the server fills the return binds from the affected rows).
     ReturnBinds = Dictionary['query'].get('return_binds') or frozenset()
-    InBind = [V for I, V in enumerate(Bind) if I not in ReturnBinds]
     Batch = Dictionary['query']['batch']
     # Batch is a list of *additional* rows (each a list of column values) for
-    # array DML: the OAC describes the columns once (from `Bind`, the first
-    # row), the iteration count is 1 + len(Batch), and each row is sent as its
-    # own RXD token after the OAC.
+    # array DML: the OAC describes the columns once (sized to the widest value
+    # in each column, so a later row can't exceed the declared buffer), the
+    # iteration count is 1 + len(Batch), and each row is sent as its own RXD
+    # token after the OAC.
     BatchLen = len(Batch)
+    Oac = _oac_rep_row([Bind] + Batch) if Bind else []
+    # A PL/SQL block's values ride in place whatever their size; elsewhere a
+    # LONG-class bind's value goes after the row's others (docs/PROTOCOL.md
+    # 5.4). The threshold is the server's, read at connect; 4000 is pre-12c's.
+    LongBinds = (
+        frozenset()
+        if Type == 'block'
+        else _long_bind_positions(Oac, Dictionary.get('max_string_size', 4000))
+    )
+    Rows = [R for R in _rxd_rows(Bind, Batch, ReturnBinds, LongBinds) if R]
     Def = Dictionary['query']['def']
     DefLen = len(Def)
     DefFlag = 1 if DefLen > 0 else 0
@@ -7063,38 +7122,17 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
     All8Flag = 1 if All8Len > 0 else 0
     All8s = reduce(lambda x, y: x + y, [encode_sb4(A) for A in All8])
 
+    RowData = b''.join(encode_tokens_rxd(R, b'') for R in Rows)
     if BindLen == DefLen == 0:
         Tokens = b''
     elif DefLen == QueryLen == 0:
-        if BatchLen > 0:
-            Tokens = b''.join(
-                encode_tokens_rxd(R, b'')
-                for R in _in_bind_rows(Bind, Batch, ReturnBinds)
-            )
-        elif ReturnBinds:
-            # Cached-cursor RETURNING: values for the input binds only.
-            Tokens = encode_tokens_rxd(InBind, b'') if InBind else b''
-        else:
-            Tokens = encode_tokens_rxd(Bind, b'')
+        # Cached-cursor re-execute: the server kept the OAC from the parse, so
+        # only the row data travels.
+        Tokens = RowData
     elif DefLen == 0:
-        if BatchLen > 0:
-            # Array DML: OAC describes the columns once (sized to the widest
-            # value in each column across all rows so a later row can't exceed
-            # the declared buffer), then one RXD row per iteration.
-            AllRows = [Bind] + Batch
-            Oac = encode_tokens_oac(_oac_rep_row(AllRows), b'')
-            Tokens = Oac + b''.join(
-                encode_tokens_rxd(R, b'')
-                for R in _in_bind_rows(Bind, Batch, ReturnBinds)
-            )
-        elif ReturnBinds:
-            # DML RETURNING ... INTO: OAC for every bind, then an RXD carrying
-            # only the input binds' values (the return binds are server-filled).
-            Oac = encode_tokens_oac(Bind, b'')
-            Tokens = encode_tokens_rxd(InBind, Oac) if InBind else Oac
-        else:
-            Oac = encode_tokens_oac(Bind, b'')
-            Tokens = encode_tokens_rxd(Bind, Oac)
+        # Every bind described once, then one RXD row per iteration carrying
+        # the values the server does not fill itself.
+        Tokens = encode_tokens_oac(Oac, b'') + RowData
     elif BindLen == QueryLen == 0:
         Tokens = encode_tokens_oac(Def, b'')
     else:

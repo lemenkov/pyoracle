@@ -31,6 +31,7 @@ from seerdb.common.oci import OCI_CMD_COMMIT, OCI_CMD_ROLLBACK
 from seerdb.common.tns import (
     _DECODE_FIELD_VERSION,
     _ENCODE_FIELD_VERSION,
+    _SERVER_RUNTIME_CAPS,
     ColumnMeta,
     ExecRequest,
     FetchRequest,
@@ -76,6 +77,7 @@ from seerdb.common.tns import (
     encode_version_banner_oci,
     is_reexecute_oci,
     is_version_call_oci,
+    max_string_size,
     mint_temp_lob_locator,
     oci_lob_contents,
     parse_describe_oci,
@@ -528,7 +530,12 @@ def serve_session(
                 else None
             )
             request = _resolve_temp_lob_binds(
-                parse_exec(body, bind_types=cached_types), temp_lobs
+                parse_exec(
+                    body,
+                    bind_types=cached_types,
+                    max_string_size=max_string_size(_SERVER_RUNTIME_CAPS),
+                ),
+                temp_lobs,
             )
             if request.scrollable:
                 lobs = _answer_scroll(stream, backend, request, cursors)

@@ -1230,6 +1230,38 @@ class BindIntegration(_IntegrationBase):
         self.cur.execute(f'SELECT id FROM {self.TABLE} WHERE id = :1', [1])
         self.assertEqual(self.cur._inputsizes, ((), {}))
 
+    # ----- a wide bind's value comes after the row's others (#705) -----
+
+    def test_a_wide_bind_before_a_plain_one_lands_in_its_own_column(self):
+        # A Var(str) declares 32767 bytes; a pre-12c server takes only 4000 in
+        # place and reads a wider bind's value after the row's others. Written
+        # in place, the two columns silently swapped.
+        self.cur.execute(
+            f'CREATE TABLE {self.TABLE} (id NUMBER, a VARCHAR2(50), b VARCHAR2(50))'
+        )
+        wide = self.cur.var(str)
+        wide.setvalue(0, 'first')
+        self.cur.execute(
+            f'INSERT INTO {self.TABLE} VALUES (:1, :2, :3)', [1, wide, 'second']
+        )
+        self.cur.execute(f'SELECT a, b FROM {self.TABLE}')
+        self.assertEqual(self.cur.fetchall(), [('first', 'second')])
+
+    def test_executemany_with_a_declared_bind_keeps_the_columns_apart(self):
+        # The shape an ORM produces: named binds, one of them declared.
+        self.cur.execute(
+            f'CREATE TABLE {self.TABLE} (id NUMBER, a VARCHAR2(50), b VARCHAR2(50))'
+        )
+        self.cur.setinputsizes(a=seerdb.DB_TYPE_VARCHAR)
+        self.cur.executemany(
+            f'INSERT INTO {self.TABLE} (id, a, b) VALUES (:id, :a, :b)',
+            [{'id': n, 'a': f'a{n}', 'b': f'b{n}'} for n in (1, 2, 3)],
+        )
+        self.cur.execute(f'SELECT id, a, b FROM {self.TABLE} ORDER BY id')
+        self.assertEqual(
+            self.cur.fetchall(), [(1, 'a1', 'b1'), (2, 'a2', 'b2'), (3, 'a3', 'b3')]
+        )
+
     # ----- var() reads back as the type it was asked for (#688) -----
 
     def test_var_float_reads_back_as_float(self):
