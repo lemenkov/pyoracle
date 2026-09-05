@@ -1262,6 +1262,24 @@ class BindIntegration(_IntegrationBase):
             self.cur.fetchall(), [(1, 'a1', 'b1'), (2, 'a2', 'b2'), (3, 'a3', 'b3')]
         )
 
+    # ----- a 253-byte value must not ride behind a single length byte (#707) -----
+
+    def test_a_253_byte_bind_value_round_trips(self):
+        # 253 is the TTC escape byte, so a value of exactly that length sent
+        # with a plain length byte is an escape where a 12c+ server expects a
+        # length, and it rejected the call with ORA-03125. 252 and 254 were fine.
+        for length in (252, 253, 254):
+            self.cur.execute('SELECT LENGTH(:1) FROM dual', ['y' * length])
+            self.assertEqual(self.cur.fetchone(), (length,))
+
+    def test_a_253_byte_statement_runs(self):
+        # The statement text takes the same length prefix on 12c+.
+        for length in (252, 253, 254):
+            text = 'SELECT 1 FROM dual --'
+            text += 'x' * (length - len(text))
+            self.cur.execute(text)
+            self.assertEqual(self.cur.fetchone(), (1,))
+
     # ----- var() reads back as the type it was asked for (#688) -----
 
     def test_var_float_reads_back_as_float(self):

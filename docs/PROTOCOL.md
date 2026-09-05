@@ -1170,8 +1170,13 @@ a fixed flag byte (`TNS_BIND_USE_INDICATORS = 1`), `ContFlags` as a `ub8`, an
 `ORA-03115` (unsupported network datatype). The bind *value* (TTI_RXD) is the
 same in both, except long values use the version-gated `bytes_with_length`
 chunking described in §6.4 (`encode_chr`): 11g chunks anything over 64 bytes
-with single-byte lengths, 12c+ sends a single length below 254 and `ub4`
-chunks above it (sending the 11g chunking to 12c gives `ORA-03120`).
+with single-byte lengths, 12c+ sends a single length byte for values up to
+252 bytes and `ub4` chunks from 253 bytes up (sending the 11g chunking to 12c
+gives `ORA-03120`). The boundary is 252, not 253: `0xFD` (253) is the TTC
+escape byte, `0xFE` opens a chunked value and `0xFF` is NULL, so a 253-byte
+value or statement text sent behind a plain length byte is an escape where
+the server expects a length, and 12c+ rejects the whole call with `ORA-03125`
+(#707). python-oracledb's `TNS_MAX_SHORT_LENGTH` is the same 252.
 
 **MaxDataLength and the LONG-reorder trap**: `MaxDataLength` must reflect the
 value's real size, **not** a flat maximum. A VARCHAR/RAW bind whose
