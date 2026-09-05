@@ -217,6 +217,12 @@ profile with the benchmark harness (#166) and optimize the Python — or ship an
 
 ## Compatibility
 
+**Oracle 8i and 9i.** `RETURNING ... INTO` is refused with `NotSupportedError`
+below 10g: the 9i server rejects the clause for this client's request form
+(`ORA-00439`) and 8i drops the connection when such a statement fails, so the
+driver says so before sending anything. `DatabaseError.offset` is `None` on
+those servers, whose error reply carries no position.
+
 The driver negotiates the wire dialect per connection, so a single build speaks
 to every supported server — from Oracle **8i (8.1.7) through 26ai**:
 

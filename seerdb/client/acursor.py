@@ -11,6 +11,7 @@ from seerdb.client.cursor import (
     _assign_out_binds,
     _assign_return_binds,
     _check_object_bind_support,
+    _check_returning_support,
     _col_annotations,
     _column_description,
     _extract_implicit_results,
@@ -124,6 +125,7 @@ class AsyncCursor(_CursorLogic):
             'ArrayDmlRowCounts': ArrayDmlRowCounts,
         }
         ReturnBinds = returning_bind_positions(operation, len(Bind or []))
+        _check_returning_support(self._connection, ReturnBinds)
         if ReturnBinds:  # DML RETURNING ... INTO (#120)
             Kw['ReturnBinds'] = ReturnBinds
         # Server-side scrollable open (#181), 10g+ only; 9i (fv2) falls back to

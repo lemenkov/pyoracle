@@ -3059,6 +3059,13 @@ the short OER whose **first field is the affected-row count** (ORA code 0 =
 success). 9i's parse carries no autocommit bit, so the client issues an explicit
 `TTI_COMMIT` when autocommit is on (verified to persist on 9.2.0.4).
 
+`RETURNING ... INTO` cannot be carried in this form: the 9.2 server answers
+`ORA-00439: feature not enabled: RETURNING clause from this client type`, and
+the 8i OALL8 form (§19.12) returns no value and drops the connection when the
+statement fails. The client refuses the clause below 10g (#716); the native 9.2
+client's request for it is not captured yet. The pre-10 error reply (§19.2)
+carries the code and text but no error position.
+
 The RPA piggyback is `08`, a `ub4` parameter count, then exactly that many
 `ub4` parameters; the first is a counter that grows with the instance. Its
 length byte reads `0x04` once the counter passes 2**24, which is also the OER
