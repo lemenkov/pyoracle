@@ -2226,6 +2226,39 @@ class LOBIntegration(_IntegrationBase):
     issue — see the README's "still in progress" list.
     """
 
+    def test_lob_columns_are_readable_inside_an_open_transaction(self):
+        # call_status reads 2 while a transaction is open; keyed on the value 1,
+        # the drain never fetched the row the server had deferred (pre-12c) and
+        # the LOB reader never saw the end of call (12c+) (#712).
+        if self.conn.field_version < FIELD_VERSION_10_2:
+            self.skipTest('LOB reads inside a transaction are not exercised on fv2')
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, t CLOB, b BLOB)')
+        Conn = seerdb.connect(
+            host=_HOST,
+            port=_PORT,
+            user=_USER,
+            password=_PASSWORD,
+            service_name=_SERVICE,
+            autocommit=False,
+            **_FV_KW,
+        )
+        try:
+            Cur = Conn.cursor()
+            Cur.execute(
+                f'INSERT INTO {self.TABLE} VALUES (:1, :2, :3)',
+                [1, 'some text', b'\x00\x01'],
+            )
+            Cur.execute(f'SELECT t, b FROM {self.TABLE}')
+            Row = Cur.fetchone()
+            self.assertIsNotNone(Row, 'the uncommitted LOB row was not returned')
+            Values = tuple(V.read() if hasattr(V, 'read') else V for V in Row)
+            self.assertEqual(Values, ('some text', b'\x00\x01'))
+            Conn.rollback()
+        finally:
+            Conn.close()
+        self.cur.execute(f'SELECT COUNT(*) FROM {self.TABLE}')
+        self.assertEqual(self.cur.fetchone(), (0,))
+
     def _setup(self):
         self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, c CLOB, b BLOB)')
 
@@ -3463,6 +3496,37 @@ class AsyncConnectionIntegration(unittest.IsolatedAsyncioTestCase):
         await Conn.close()
         if Fv < FIELD_VERSION_10_2:
             self.skipTest(Reason)
+
+    async def test_lob_columns_are_readable_inside_an_open_transaction(self):
+        # The async twin of LOBIntegration's test (#712).
+        Table = 'PYO_ASYNC_LOB_TXN'
+        Conn = await seerdb.connect_async(**{**self._kwargs(), 'autocommit': False})
+        try:
+            if Conn.field_version < FIELD_VERSION_10_2:
+                self.skipTest('LOB reads inside a transaction are not exercised on fv2')
+            Cur = Conn.cursor()
+            try:
+                await Cur.execute(f'DROP TABLE {Table}')
+            except seerdb.DatabaseError:
+                pass
+            await Cur.execute(f'CREATE TABLE {Table} (id NUMBER, t CLOB, b BLOB)')
+            try:
+                await Cur.execute(
+                    f'INSERT INTO {Table} VALUES (:1, :2, :3)',
+                    [1, 'some text', b'\x00\x01'],
+                )
+                await Cur.execute(f'SELECT t, b FROM {Table}')
+                Row = await Cur.fetchone()
+                self.assertIsNotNone(Row, 'the uncommitted LOB row was not returned')
+                Values = []
+                for V in Row:
+                    Values.append((await V.read()) if hasattr(V, 'read') else V)
+                self.assertEqual(tuple(Values), ('some text', b'\x00\x01'))
+                await Conn.rollback()
+            finally:
+                await Cur.execute(f'DROP TABLE {Table}')
+        finally:
+            await Conn.close()
 
     async def test_connect_and_simple_query(self):
         Conn = await seerdb.connect_async(**self._kwargs())

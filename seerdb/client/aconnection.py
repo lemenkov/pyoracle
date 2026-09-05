@@ -1172,7 +1172,15 @@ class AsyncOracleConnect(_ConnectionLogic):
             and isinstance(RetFormat[1], list)
         ):
             RowFormat = RetFormat[1]
-        if RowFormat and CursorId and CallStatus == 1 and OraCode != 1403:
+        # Fetch whenever the server has not signalled end-of-fetch, whatever
+        # the call status. call_status is NOT a "more rows" flag: it reads 2
+        # while a transaction is open, for an ordinary row as much as a LOB one.
+        # Requiring 1 here meant that with autocommit off -- which is what
+        # SQLAlchemy and any explicit transaction ask for -- a SELECT of a LOB
+        # column whose row was still uncommitted returned no rows at all: the
+        # server defers those rows to a FETCH (call_status 2, no 1403, nothing
+        # inline) and the client never asked for them (#712).
+        if RowFormat and CursorId and OraCode != 1403:
             try:
                 while True:
                     # Seed the last row so a BVC-reused column in the next
@@ -1187,7 +1195,9 @@ class AsyncOracleConnect(_ConnectionLogic):
                     (CallStatus, OraCode, _, _, MoreRows, *_) = FetchResult
                     if MoreRows:
                         AllRows.extend(MoreRows)
-                    if OraCode == 1403 or CallStatus != 1:
+                    # End of fetch, or a batch that brought nothing back --
+                    # which also guarantees this loop terminates.
+                    if OraCode == 1403 or not MoreRows:
                         break
             finally:
                 set_decode_prev_row(None)
@@ -1273,7 +1283,7 @@ class AsyncOracleConnect(_ConnectionLogic):
                 (CallStatus, OraCode, _, _, MoreRows, *_) = Result
                 if MoreRows:
                     AllRows.extend(MoreRows)
-                if OraCode == 1403 or CallStatus != 1:
+                if OraCode == 1403 or not MoreRows:
                     break
         finally:
             set_decode_prev_row(None)
@@ -1585,12 +1595,16 @@ class AsyncOracleConnect(_ConnectionLogic):
                     # to the trailing OER. Match the stable `04 01 01` prefix as
                     # well as the historical `04 01 XX 01` form (mirrors sync;
                     # 12c+ uses the former, so missing it hangs the read).
+                    # call_status is a flag word, not always 1: it reads 2 while
+                    # a transaction is open and 5 after a PL/SQL execute (#712).
+                    # Accept any small value; matching only `04 01 01` left the
+                    # reader waiting for a packet that never came with autocommit off.
                     Found = -1
                     for I in range(Pos, len(Packet) - 3):
                         if (
                             Packet[I] == TTI_OER
                             and Packet[I + 1] == 0x01
-                            and (Packet[I + 2] == 0x01 or Packet[I + 3] == 0x01)
+                            and (Packet[I + 2] < 0x10 or Packet[I + 3] == 0x01)
                         ):
                             Found = I
                             break
