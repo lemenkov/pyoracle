@@ -1,0 +1,139 @@
+# SPDX-FileCopyrightText: 2026 Peter Lemenkov <lemenkov@gmail.com>
+# SPDX-License-Identifier: MIT
+
+# Does this driver still pass the released SQLAlchemy dialect's compliance
+# suite? The dialect (sqlalchemy-seerdb) is checked out at its newest git tag,
+# the driver comes from this checkout, and SQLAlchemy's own dialect compliance
+# suite runs against two live servers: the oldest the dialect reaches and a
+# current one. The setup mirrors the dialect's own CI, which is where the
+# grants and the tablespace step were learned the hard way.
+name: SQLAlchemy
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'seerdb/**'
+      - 'pyproject.toml'
+      - '.github/workflows/sqlalchemy.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'seerdb/**'
+      - 'pyproject.toml'
+      - '.github/workflows/sqlalchemy.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compliance:
+    name: SQLAlchemy compliance (${{ matrix.db.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        db:
+          - name: "11g"
+            image: "gvenzl/oracle-xe:11-slim"
+            service: "XE"
+          - name: "23ai Free"
+            image: "gvenzl/oracle-free:23-slim"
+            service: "FREEPDB1"
+    services:
+      oracle:
+        image: ${{ matrix.db.image }}
+        env:
+          ORACLE_PASSWORD: oracle
+          APP_USER: pyo
+          APP_USER_PASSWORD: pyo123
+        ports:
+          - 1521:1521
+        options: >-
+          --health-cmd healthcheck.sh
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 40
+          --health-start-period 90s
+          --shm-size=2g
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Resolve the dialect's newest tag
+        id: dialect
+        run: |
+          TAG=$(git ls-remote --tags --refs https://github.com/seerdb/sqlalchemy-seerdb \
+                | sed 's#.*/##' | grep -E '^v?[0-9]+(\.[0-9]+)+$' | sort -V | tail -1)
+          echo "newest sqlalchemy-seerdb tag: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - name: Check out the dialect at that tag
+        uses: actions/checkout@v7
+        with:
+          repository: seerdb/sqlalchemy-seerdb
+          ref: ${{ steps.dialect.outputs.tag }}
+          path: dialect
+      # The dialect's test extras bring SQLAlchemy and pytest, and its
+      # dependency floor may pull a released driver from PyPI; the driver from
+      # this checkout goes on top of it afterwards, force-reinstalled because
+      # master carries the last release's version string until the next bump.
+      - name: Install the dialect, then this driver on top
+        run: |
+          pip install "./dialect[test]"
+          pip install --force-reinstall --no-deps .
+      - name: Which driver and dialect this run uses
+        run: |
+          python -c "import seerdb, inspect, pathlib; print('driver from:', pathlib.Path(inspect.getfile(seerdb)).parent)"
+          python -c "import sqlalchemy_seerdb; print('dialect', sqlalchemy_seerdb.__version__, 'tag ${{ steps.dialect.outputs.tag }}')"
+          pip show seerdb | grep -E '^(Version|Location)'
+      # SQLAlchemy's suite requires a second namespace called test_schema, which
+      # on this backend is a username, and the test account has to be able to
+      # create and drop tables inside it. The test user's own tables must live
+      # in the USERS tablespace: the Oracle dialect hides SYSTEM-tablespace
+      # tables from reflection, and the suite then never empties them between
+      # tests. The broad ANY-object grants are deliberate and safe *here*: this
+      # container is created for one run and thrown away.
+      - name: Create the test_schema namespace
+        run: |
+          python - <<'PY'
+          import seerdb
+
+          conn = seerdb.connect(
+              host='localhost', port=1521, service_name='${{ matrix.db.service }}',
+              user='system', password='oracle',
+          )
+          cur = conn.cursor()
+          statements = [
+              'ALTER USER pyo DEFAULT TABLESPACE USERS',
+              'ALTER USER pyo QUOTA UNLIMITED ON USERS',
+              'CREATE USER test_schema IDENTIFIED BY test_schema',
+              'GRANT CREATE SESSION TO test_schema',
+              'ALTER USER test_schema DEFAULT TABLESPACE USERS',
+              'GRANT UNLIMITED TABLESPACE TO test_schema',
+              'GRANT CREATE ANY TABLE, DROP ANY TABLE, SELECT ANY TABLE, '
+              'INSERT ANY TABLE, UPDATE ANY TABLE, DELETE ANY TABLE, '
+              'CREATE ANY INDEX, DROP ANY INDEX, CREATE ANY VIEW, '
+              'DROP ANY VIEW, CREATE ANY SEQUENCE, DROP ANY SEQUENCE, '
+              'SELECT ANY SEQUENCE, '
+              'COMMENT ANY TABLE, ANALYZE ANY TO pyo',
+          ]
+          for statement in statements:
+              try:
+                  cur.execute(statement)
+              except Exception as exc:  # already present from a previous attempt
+                  print(f'skipped: {statement[:40]}... -> {exc}')
+          conn.commit()
+          conn.close()
+          print('test_schema ready')
+          PY
+      # Gating: a driver change that breaks the released dialect is a
+      # regression. The suite runs from the dialect checkout, where its
+      # mandatory test.cfg lives.
+      - name: Run the compliance suite against ${{ matrix.db.name }}
+        working-directory: dialect
+        run: >-
+          python -m pytest -q --tb=short
+          --dburi "oracle+seerdb://pyo:pyo123@localhost:1521/?service_name=${{ matrix.db.service }}"
