@@ -1720,7 +1720,15 @@ class OracleConnect(_ConnectionLogic):
             RowFormat = RetFormat[1]
         # No row format means there's nothing further to fetch (DDL / DML
         # responses), and CursorId == 0 means no cursor to fetch from.
-        if RowFormat and CursorId and CallStatus == 1 and OraCode != 1403:
+        # Fetch whenever the server has not signalled end-of-fetch, whatever
+        # the call status. call_status is NOT a "more rows" flag: it reads 2
+        # while a transaction is open, for an ordinary row as much as a LOB one.
+        # Requiring 1 here meant that with autocommit off -- which is what
+        # SQLAlchemy and any explicit transaction ask for -- a SELECT of a LOB
+        # column whose row was still uncommitted returned no rows at all: the
+        # server defers those rows to a FETCH (call_status 2, no 1403, nothing
+        # inline) and the client never asked for them (#712).
+        if RowFormat and CursorId and OraCode != 1403:
             try:
                 while True:
                     # Bit-vector (BVC) duplicate-column detection is per fetch
@@ -1740,7 +1748,9 @@ class OracleConnect(_ConnectionLogic):
                         AllRows.extend(MoreRows)
                     # ORA-01403 is the server saying "you've drained the cursor";
                     # call_status != 1 means the same thing via a different field.
-                    if OraCode == 1403 or CallStatus != 1:
+                    # End of fetch, or a batch that brought nothing back --
+                    # which also guarantees this loop terminates.
+                    if OraCode == 1403 or not MoreRows:
                         break
             finally:
                 set_decode_prev_row(None)
@@ -1780,7 +1790,7 @@ class OracleConnect(_ConnectionLogic):
                 (CallStatus, OraCode, _, _, MoreRows, *_) = Result
                 if MoreRows:
                     AllRows.extend(MoreRows)
-                if OraCode == 1403 or CallStatus != 1:
+                if OraCode == 1403 or not MoreRows:
                     break
         finally:
             set_decode_prev_row(None)
@@ -2135,16 +2145,19 @@ class OracleConnect(_ConnectionLogic):
                     # Likely TTI_RPA (0x08) carrying the updated locator and
                     # actual amount read — we don't decode it. Scan forward for
                     # the OER and stop. The OER opens with TTI_OER + call_status
-                    # (ub4 len 1, value 1) = `04 01 01`, then the end-to-end
-                    # seq# whose length byte (the original 11g signature's 4th
-                    # byte) varies per call — so match the stable `04 01 01`
-                    # prefix as well as the historical `04 01 XX 01` form.
+                    # (ub4 len 1, then the value), then the end-to-end seq#
+                    # whose length byte (the original 11g signature's 4th byte)
+                    # varies per call. call_status is a flag word, not always 1:
+                    # it reads 2 while a transaction is open (#712), so accept
+                    # the low flag values as well as the historical `04 01 XX 01`
+                    # form. Matching only `04 01 01` left the reader waiting for
+                    # a packet that never came whenever autocommit was off.
                     Found = -1
                     for I in range(Pos, len(Packet) - 3):
                         if (
                             Packet[I] == TTI_OER
                             and Packet[I + 1] == 0x01
-                            and (Packet[I + 2] == 0x01 or Packet[I + 3] == 0x01)
+                            and (Packet[I + 2] < 0x10 or Packet[I + 3] == 0x01)
                         ):
                             Found = I
                             break

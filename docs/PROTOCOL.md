@@ -1029,17 +1029,25 @@ The default fetch size is 100 rows (configurable via the `fetch` parameter),
 matching oracledb's effective batch so a large `fetchall` drains in ~n/100
 round-trips rather than ~n/15.
 
-**When a follow-up FETCH is required.** The execute response carries
-the OER `call_status` field (`§6.7`). When that value is non-zero it
-signals "the server has returned what it can in this packet; more rows
-are available on the cursor". The client must then issue a TTI_FETCH
-against the open cursor handle to receive the actual row data. This
-happens unconditionally when at least one column is a LOB (`§11.9`) —
-Oracle returns DCB + RPA piggyback + OER with `call_status = 1` and
-no inline rows for LOB queries, regardless of the result-set size.
+**When a follow-up FETCH is required.** The execute response ends with an
+OER (`§6.7`). What says "more rows are available on the cursor" is the
+*absence* of the end-of-fetch code: an OER whose error is `ORA-01403` means
+the cursor is drained, anything else with a cursor handle means the client
+must issue `TTI_FETCH` against that handle to receive the remaining rows.
+This happens unconditionally when at least one column is a LOB (`§11.9`):
+Oracle returns DCB + RPA piggyback + OER and no inline rows for LOB queries,
+regardless of the result-set size, and in an open transaction it defers even
+a single LOB row this way.
+
+The OER's `call_status` is **not** a "more rows" flag. It is a flag word
+(python-oracledb's `TNS_EOCS_FLAGS_*`): it reads `1` with autocommit on, `2`
+while a transaction is in progress (`TXN_IN_PROGRESS`), `5` right after a
+PL/SQL execute. seerdb once fetched only on `call_status == 1`, which worked
+solely because autocommit on was the default; with autocommit off a LOB
+SELECT of an uncommitted row returned no rows at all (#712).
 
 seerdb implements the FETCH flow in `OracleConnect._drain_cursor`:
-after the initial EXEC response, if `call_status == 1` and a cursor
+after the initial EXEC response, if the OER is not `ORA-01403` and a cursor
 handle was returned, it loops issuing `TTI_FETCH` (with the prior
 DCB's RowFormat threaded into the decoder via `_handle_response`'s
 `Acc` parameter, since FETCH responses don't repeat the DCB) until
@@ -2510,8 +2518,8 @@ content desyncs and the reader blocks waiting for a packet that never
 comes (the LOB fetch hangs).
 
 **The OER `call_status` is not always 1.** It is `1` after a standalone
-LOBOPS, but `5` immediately after a PL/SQL execute (the temp-LOB bind path,
-§14.4). A content-free LOBOPS response (WRITE / temp ops) is therefore decoded
+LOBOPS with autocommit on, `2` while a transaction is open (#712), and `5`
+immediately after a PL/SQL execute (the temp-LOB bind path, §14.4). A content-free LOBOPS response (WRITE / temp ops) is therefore decoded
 by `decode_lobops_oer`, which skips the RPA's binary locator (it can contain a
 stray `0x04`) using the `ub2` length prefix, then matches the OER token + a
 valid `ub4` length **regardless of the status value** — a fixed `04 01 01`
