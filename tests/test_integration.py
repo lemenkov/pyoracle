@@ -89,6 +89,16 @@ _FV2_UNSUPPORTED = (
     # real 200-row table returns all 200 — so this is a fixture limitation, not a
     # 9i bug. Already skipped on 8i for the same reason.
     ('bit_vector_reuse', 'CONNECT BY LEVEL returns few rows on Oracle 9i'),
+    # RETURNING ... INTO needs the 10g+ request form: 9i refuses the clause for
+    # this client type (ORA-00439) and 8i drops the connection on a failure, so
+    # the driver refuses it up front (#716). The var() read-back tests reach the
+    # server through that clause.
+    ('returning', 'RETURNING ... INTO needs a 10g+ server (#716)'),
+    ('var_float_reads_back', 'RETURNING ... INTO needs a 10g+ server (#716)'),
+    ('var_decimal_reads_back', 'RETURNING ... INTO needs a 10g+ server (#716)'),
+    ('var_asked_with_a_database_type', 'RETURNING ... INTO needs a 10g+ server (#716)'),
+    # The pre-10 error reply carries the code and text but no position.
+    ('error_offset', 'the 9i/8i error reply carries no offset (#719)'),
 )
 
 
@@ -115,6 +125,7 @@ _8I_UNSUPPORTED = (
     # Async-only / connectivity tests (AsyncConnectionIntegration, Redirect).
     ('async_iteration', 'CONNECT BY LEVEL returns one row on Oracle 8i'),
     ('fetchall_and_fetchmany', 'CONNECT BY LEVEL returns one row on Oracle 8i'),
+    ('declared_type_governs', '8i mis-types a declared bind, ORA-00902 (#717)'),
 )
 
 
@@ -1960,6 +1971,21 @@ class CursorCacheIntegration(_IntegrationBase):
         self.cur.execute(Sql, {'id': 2, 'd': self.cur.var(str)})  # NULL
         self.cur.execute(f'SELECT id, d FROM {self.TABLE}')
         self.assertEqual(self.cur.fetchall(), [(2, None)])
+
+    def test_pre_10g_refuses_the_into_clause_cleanly(self):
+        # Below 10g the clause cannot be sent (#716): the driver must say so
+        # before any I/O, and the session must stay usable afterwards.
+        if self.conn.field_version >= FIELD_VERSION_10_2:
+            self.skipTest('RETURNING ... INTO is supported from 10g')
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER)')
+        with self.assertRaises(seerdb.NotSupportedError):
+            self.cur.execute(
+                f'INSERT INTO {self.TABLE} (id) VALUES (:1) RETURNING id INTO :2',
+                [1, self.cur.var(int)],
+            )
+        self.cur.execute(f'INSERT INTO {self.TABLE} (id) VALUES (:1)', [2])
+        self.cur.execute(f'SELECT id FROM {self.TABLE}')
+        self.assertEqual(self.cur.fetchall(), [(2,)])
 
     def test_a_wide_bind_is_never_cached(self):
         # DDL from another session would leave the same stale buffer behind,

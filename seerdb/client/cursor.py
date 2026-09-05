@@ -146,6 +146,7 @@ class Cursor(_CursorLogic):
             'ArrayDmlRowCounts': ArrayDmlRowCounts,
         }
         ReturnBinds = returning_bind_positions(operation, len(Bind or []))
+        _check_returning_support(self._connection, ReturnBinds)
         if ReturnBinds:  # DML RETURNING ... INTO (#120)
             Kw['ReturnBinds'] = ReturnBinds
         # Server-side scrollable open (#181): mark the cursor scrollable and cap
@@ -684,6 +685,20 @@ def _resolve_lobs(Connection, Row: list) -> list:
             Val._connection = Connection
             Out[I] = Val.read()
     return Out
+
+
+def _check_returning_support(Connection, ReturnBinds) -> None:
+    # RETURNING ... INTO needs the 10g+ request form. The 9i dialect drives DML
+    # through OALL7 and the server refuses the clause for that client type
+    # (ORA-00439); the 8i form returns no value and, when the statement fails,
+    # the server drops the connection. Refuse up front with a clear error
+    # instead (#716); the fix is a capture of a native 9.2 client's request.
+    Version = getattr(Connection, 'field_version', None)
+    if ReturnBinds and Version is not None and Version < FIELD_VERSION_10_2:
+        raise NotSupportedError(
+            'RETURNING ... INTO requires an Oracle 10g+ server '
+            '(9i refuses it for this client type, 8i drops the connection)'
+        )
 
 
 def _check_object_bind_support(Connection, Bind, Batch=None) -> None:

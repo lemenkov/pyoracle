@@ -313,3 +313,50 @@ class TestFlushOutBindsAcknowledged(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestReturningIsRefusedBelow10g(unittest.TestCase):
+    """RETURNING ... INTO needs the 10g+ request form (#716).
+
+    9i refuses the clause for this client type and 8i drops the connection on
+    a failure, so the driver says so before any I/O. A connection whose version
+    is not yet known is not refused.
+    """
+
+    def _check(self, version):
+        import types
+
+        from seerdb.client.cursor import _check_returning_support
+
+        conn = (
+            types.SimpleNamespace(field_version=version)
+            if version
+            else types.SimpleNamespace()
+        )
+        _check_returning_support(conn, frozenset({1}))
+
+    def test_9i_is_refused(self):
+        from seerdb.common.exceptions import NotSupportedError
+        from seerdb.common.tns_consts import FIELD_VERSION_9_2
+
+        with self.assertRaises(NotSupportedError):
+            self._check(FIELD_VERSION_9_2)
+
+    def test_10g_and_later_are_not(self):
+        from seerdb.common.tns_consts import FIELD_VERSION_10_2, FIELD_VERSION_11_2
+
+        self._check(FIELD_VERSION_10_2)
+        self._check(FIELD_VERSION_11_2)
+
+    def test_an_unknown_version_is_not_refused(self):
+        self._check(None)
+
+    def test_a_statement_without_the_clause_is_never_refused(self):
+        import types
+
+        from seerdb.client.cursor import _check_returning_support
+        from seerdb.common.tns_consts import FIELD_VERSION_9_2
+
+        _check_returning_support(
+            types.SimpleNamespace(field_version=FIELD_VERSION_9_2), frozenset()
+        )
