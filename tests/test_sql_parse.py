@@ -24,6 +24,7 @@ from seerdb.common.sqltext import (
     canonical_bind_key,
     extract_bind_names,
     is_plsql,
+    is_reusable_dml,
 )
 
 
@@ -177,6 +178,50 @@ class TestBindKeyMatching(unittest.TestCase):
             _resolve_parameters('select :"a" + :b from dual', {'"a"': 1, 'b': 2}),
             [1, 2],
         )
+
+
+class TestReusableDml(unittest.TestCase):
+    """Which statements may have their server cursor reused (#703).
+
+    Reusing a cursor is a parse saved: the statement is parsed once and executed
+    again per set of bind values. That is true of DML and of nothing else. DDL
+    does its work when the server *parses* it, so a re-execute has nothing left
+    to do -- the server reports success and the statement never happens, without
+    raising anything. A `CREATE TABLE` issued twice silently created nothing the
+    second time, on every server old enough to use the cache.
+    """
+
+    def test_the_four_that_may_be_reused(self):
+        for sql in (
+            'insert into t values (1)',
+            'UPDATE t SET a = 1',
+            'delete from t where id = 1',
+            'merge into t using s on (t.id = s.id) when matched then update set a = 1',
+        ):
+            self.assertTrue(is_reusable_dml(sql), sql)
+
+    def test_ddl_may_not_be(self):
+        for sql in (
+            'create table t (id number)',
+            'drop table t',
+            'alter table t add c number',
+            'truncate table t',
+            'create or replace view v as select 1 from dual',
+            "comment on table t is 'x'",
+            'grant select on t to someone',
+            'rename t to u',
+        ):
+            self.assertFalse(is_reusable_dml(sql), sql)
+
+    def test_leading_comments_and_whitespace_do_not_hide_the_verb(self):
+        self.assertTrue(is_reusable_dml('  /* note */ insert into t values (1)'))
+        self.assertFalse(is_reusable_dml('  -- note\ncreate table t (id number)'))
+
+    def test_anything_unrecognised_is_excluded(self):
+        # Wrong in this direction costs a re-parse; wrong in the other loses the
+        # statement, so the default has to be "do not reuse".
+        for sql in ('call p()', 'explain plan for select 1 from dual', 'commit', ''):
+            self.assertFalse(is_reusable_dml(sql), sql)
 
 
 if __name__ == '__main__':

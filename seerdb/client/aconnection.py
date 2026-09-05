@@ -54,6 +54,7 @@ from seerdb.common.exceptions import (
     NotSupportedError,
     OperationalError,
 )
+from seerdb.common.sqltext import is_reusable_dml
 from seerdb.common.tns import (
     _DTY_8I,
     CCAP_FIELD_VERSION,
@@ -961,7 +962,12 @@ class AsyncOracleConnect(_ConnectionLogic):
         # cached re-execute fails (ORA-01009 / ORA-03115) because the server
         # expects the binds/OAC declared every execute. Disable on 12c+ (mirrors
         # the sync OracleConnect.execute guard).
-        if Type == 'change' and not Def and self.field_version < FIELD_VERSION_12_1:
+        if (
+            Type == 'change'
+            and is_reusable_dml(Query)
+            and not Def
+            and self.field_version < FIELD_VERSION_12_1
+        ):
             CacheKey = (Query, exec_oac_signature(Bind, Batch))
             CachedCursor = self._cursor_cache.get(CacheKey, 0)
         SendQuery = '' if CachedCursor else Query
