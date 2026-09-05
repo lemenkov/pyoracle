@@ -64,6 +64,7 @@ _FV2_UNSUPPORTED = (
     ('cache_evicts', 'the cursor cache is a fv4+ feature; 9i re-parses'),
     ('reuses_cursor', 'the cursor cache is a fv4+ feature; 9i re-parses'),
     ('forgets_the_cached_cursor', 'the cursor cache is a fv4+ feature; 9i re-parses'),
+    ('never_cached', 'the cursor cache is a fv4+ feature; 9i re-parses'),
     ('pipeline', 'the pipeline test uses array DML, unsupported on Oracle 9i'),
     # The 9i test DB is WE8ISO8859P1 (Latin-1). #174 made representable VARCHAR2
     # text round-trip (see test_db_charset_varchar_roundtrip) and full Unicode
@@ -1940,6 +1941,39 @@ class CursorCacheIntegration(_IntegrationBase):
         self.cur.execute(Sql, {'id': 2})  # parses afresh: no ORA-01001
         self.cur.execute(f'SELECT COUNT(*) FROM {self.TABLE}')
         self.assertEqual(self.cur.fetchone(), (2,))
+
+    def test_ddl_forgets_the_cached_cursors(self):
+        # A cached cursor re-executed after its table was dropped and
+        # re-created made the server reuse the previous execution's value for
+        # a NULL LONG-class bind: ORA-12899 here, silent corruption into a
+        # wider column (#720). DDL flushes the cache.
+        if self.conn.field_version >= FIELD_VERSION_12_1:
+            self.skipTest('cursor cache is disabled on 12c+ (re-parse each execute)')
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, d CLOB)')
+        Sql = f'INSERT INTO {self.TABLE} (id, d) VALUES (:id, :d)'
+        Wide = self.cur.var(str)
+        Wide.setvalue(0, 'x' * 3826)
+        self.cur.execute(Sql, {'id': 1, 'd': Wide})
+        self.cur.execute(f'DROP TABLE {self.TABLE}')
+        self.assertEqual(self.conn._cursor_cache, {})
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, d VARCHAR2(255))')
+        self.cur.execute(Sql, {'id': 2, 'd': self.cur.var(str)})  # NULL
+        self.cur.execute(f'SELECT id, d FROM {self.TABLE}')
+        self.assertEqual(self.cur.fetchall(), [(2, None)])
+
+    def test_a_wide_bind_is_never_cached(self):
+        # DDL from another session would leave the same stale buffer behind,
+        # so a statement with a LONG-class bind parses afresh every time (#720).
+        if self.conn.field_version >= FIELD_VERSION_12_1:
+            self.skipTest('cursor cache is disabled on 12c+ (re-parse each execute)')
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, d VARCHAR2(50))')
+        Sql = f'INSERT INTO {self.TABLE} (id, d) VALUES (:id, :d)'
+        Wide = self.cur.var(str)
+        Wide.setvalue(0, 'w')
+        self.cur.execute(Sql, {'id': 1, 'd': Wide})
+        self.assertIsNone(self._cached_handle(Sql))
+        self.cur.execute(Sql, {'id': 2, 'd': 'plain'})
+        self.assertIsNotNone(self._cached_handle(Sql))
 
     def test_cache_does_not_apply_to_select(self):
         # SELECT cache is intentionally skipped — caching a SELECT would
