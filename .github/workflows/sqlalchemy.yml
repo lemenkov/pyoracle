@@ -129,6 +129,12 @@ jobs:
       - name: Install the dialect from the checkout
         if: env.DIALECT != 'pypi'
         run: pip install "./dialect[test]"
+      # pytest runs from the dialect checkout, where its package directory
+      # would shadow the installed wheel; in the `pypi` mode only the harness
+      # stays.
+      - name: Keep only the harness from the checkout
+        if: env.DIALECT == 'pypi'
+        run: rm -rf dialect/sqlalchemy_seerdb
       - name: This driver on top
         run: pip install --force-reinstall --no-deps .
       - name: Which driver and dialect this run uses
