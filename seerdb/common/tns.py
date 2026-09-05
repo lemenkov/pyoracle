@@ -641,11 +641,20 @@ def _skip_bytes_with_length(Data: bytes) -> bytes:
     return Rest
 
 
+# The longest value a single length byte may announce. The three bytes above it
+# are markers, not lengths: 253 (0xFD) is the TTC escape byte, 254 (0xFE) opens
+# a chunked value and 255 (0xFF) is NULL. A 253-byte value sent with a plain
+# length byte is therefore an escape where the server expects a length, and a
+# 12c+ server rejects the whole call with ORA-03125 (#707). Same limit as
+# python-oracledb's TNS_MAX_SHORT_LENGTH.
+_MAX_SHORT_LENGTH = 252
+
+
 def _bytes_with_length(Data: bytes) -> bytes:
     # Inverse of `_skip_chunked_bytes` (oracledb write_bytes_with_length): a
-    # 1-byte length + data for short values (< 254), or the 254 LONG marker
-    # followed by ub4-prefixed chunks terminated by a zero-length chunk.
-    if len(Data) < 254:
+    # 1-byte length + data for short values (<= 252 bytes), or the 254 LONG
+    # marker followed by ub4-prefixed chunks terminated by a zero-length chunk.
+    if len(Data) <= _MAX_SHORT_LENGTH:
         return bytes([len(Data)]) + Data
     Out = bytearray([254])
     for I in range(0, len(Data), 0x40):
@@ -9290,7 +9299,8 @@ def encode_chr(String: str | bytes) -> bytes:
     Bytes = String.encode('utf-8') if isinstance(String, str) else String
     if _ENCODE_FIELD_VERSION.get() >= FIELD_VERSION_12_2:
         # 12c+ bind data follows write_bytes_with_length: a single length byte
-        # for values < 254, otherwise the 254 marker + ub4-prefixed chunks.
+        # for values up to 252 bytes, otherwise the 254 marker + ub4-prefixed
+        # chunks.
         # 11g instead chunks anything over 64 bytes with single-byte lengths;
         # sending that to a 12c server desyncs it (ORA-03120 integer overflow).
         return _bytes_with_length(Bytes)

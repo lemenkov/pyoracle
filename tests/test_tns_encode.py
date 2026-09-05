@@ -7115,3 +7115,44 @@ class TestO8iQueryMessages(unittest.TestCase):
         self.assertEqual(
             _encode_8i_bind_oac(b'\x00' * 300)[2:6], bytes.fromhex('00002c01')
         )
+
+
+class TestShortLengthBoundary(unittest.TestCase):
+    """A single length byte announces at most 252 bytes (#707).
+
+    253 (0xFD) is the TTC escape byte, 254 opens a chunked value and 255 is
+    NULL, so a 253-byte value behind a plain length byte is an escape where a
+    12c+ server expects a length, and it rejects the call with ORA-03125.
+    """
+
+    def test_252_bytes_take_a_single_length_byte(self):
+        from seerdb.common.tns import _bytes_with_length
+
+        out = _bytes_with_length(b'y' * 252)
+        self.assertEqual(out, bytes([252]) + b'y' * 252)
+
+    def test_253_bytes_are_chunked(self):
+        from seerdb.common.tns import _bytes_with_length
+
+        out = _bytes_with_length(b'y' * 253)
+        self.assertEqual(out[0], 254)
+        self.assertNotIn(bytes([253]), out[:2])
+
+    def test_the_chunked_form_carries_the_whole_value(self):
+        from seerdb.common.tns import _bytes_with_length, _skip_chunked_bytes
+
+        for length in (253, 254, 1000):
+            out = _bytes_with_length(b'y' * length)
+            # The decoder's inverse walks the chunks and lands exactly at the end.
+            self.assertEqual(_skip_chunked_bytes(out), b'')
+
+    def test_encode_chr_uses_the_same_boundary_on_12c(self):
+        from seerdb.common.tns import _ENCODE_FIELD_VERSION
+        from seerdb.common.tns_consts import FIELD_VERSION_11_2, FIELD_VERSION_23_1
+
+        _ENCODE_FIELD_VERSION.set(FIELD_VERSION_23_1)
+        try:
+            self.assertEqual(encode_chr('y' * 252)[0], 252)
+            self.assertEqual(encode_chr('y' * 253)[0], 254)
+        finally:
+            _ENCODE_FIELD_VERSION.set(FIELD_VERSION_11_2)
