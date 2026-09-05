@@ -22,7 +22,7 @@ from decimal import Decimal
 import seerdb
 from seerdb.client._cursor_logic import _CursorLogic
 from seerdb.common.datatypes import Var
-from seerdb.common.tns import encode_token_oac
+from seerdb.common.tns import encode_token_oac, encode_token_rxd
 from seerdb.common.tns_consts import (
     TNS_TYPE_DATE,
     TNS_TYPE_NUMBER,
@@ -129,6 +129,54 @@ class TestWhenItApplies(unittest.TestCase):
         logic.setinputsizes()
         bind = [None]
         self.assertIs(logic._typed_binds('select :1 from dual', bind), bind)
+
+
+class TestTheDeclarationGovernsTheValue(unittest.TestCase):
+    """The row data must match the type the descriptor announced (#701).
+
+    A `Var` tells the server its declared type in the OAC. If the value is then
+    encoded from its own Python type instead, the server measures a payload
+    against a descriptor that does not describe it and rejects the pair --
+    `ORA-01483: invalid length for DATE or NUMBER bind variable` for the case
+    below, where DATE is 7 bytes and the microsecond value wanted 11.
+
+    So the declaration wins, and a value that does not fit it is coerced. That is
+    also what python-oracledb does: declared DATE, the microseconds are dropped;
+    declared TIMESTAMP, they survive.
+    """
+
+    def _sent(self, declared, value):
+        var = Var(declared)
+        var.setvalue(0, value)
+        return encode_token_rxd(var)
+
+    def test_a_microsecond_datetime_declared_date_is_truncated(self):
+        moment = datetime.datetime(2012, 10, 15, 12, 57, 18, 396)
+        sent = self._sent(seerdb.DB_TYPE_DATE, moment)
+        # A DATE is seven bytes of payload, and the descriptor said so.
+        self.assertEqual(sent[0], 7)
+
+    def test_the_same_value_declared_timestamp_keeps_them(self):
+        moment = datetime.datetime(2012, 10, 15, 12, 57, 18, 396)
+        sent = self._sent(seerdb.DB_TYPE_TIMESTAMP, moment)
+        self.assertEqual(sent[0], 11)
+
+    def test_a_float_declared_binary_double(self):
+        # The other family where one Python type has two possible widths: a
+        # float is a base-100 NUMBER by default and eight IEEE-754 bytes here.
+        self.assertEqual(self._sent(seerdb.DB_TYPE_BINARY_DOUBLE, 1.5)[0], 8)
+        self.assertEqual(self._sent(seerdb.DB_TYPE_BINARY_FLOAT, 1.5)[0], 4)
+
+    def test_a_value_with_one_encoding_is_left_to_the_bind_encoder(self):
+        # Where the declaration cannot disagree with the value, the ordinary
+        # bind encoder keeps it -- that is the path that knows about temp LOBs,
+        # objects, REFs, JSON and vectors, and must not be bypassed.
+        var = Var(str)
+        var.setvalue(0, 'text')
+        self.assertEqual(encode_token_rxd(var), encode_token_rxd('text'))
+
+    def test_a_null_is_still_a_null(self):
+        self.assertEqual(encode_token_rxd(Var(seerdb.DB_TYPE_DATE)), bytes([0]))
 
 
 if __name__ == '__main__':

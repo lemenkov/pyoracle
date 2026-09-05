@@ -9349,6 +9349,44 @@ def exec_oac_signature(Bind: list, Batch: list) -> bytes:
     return encode_tokens_oac(Bind, b'')
 
 
+# The declared types whose wire width differs from the one the value's own Python
+# type would pick. A `Var` announces its declared type in the OAC, so the row data
+# has to match it or the server measures the payload against the descriptor and
+# rejects the pair (#701).
+_DECLARED_TEMPORAL = (
+    TNS_TYPE_DATE,
+    TNS_TYPE_TIMESTAMP,
+    TNS_TYPE_TIMESTAMPTZ,
+    TNS_TYPE_TIMESTAMPLTZ,
+)
+
+
+def _declared_value_bytes(Value: object, DataType: int) -> bytes | None:
+    """A bind's value encoded as the type its `Var` declared, or None.
+
+    None means the declaration cannot disagree with the value: the Python type
+    has one encoding whatever was declared, so the ordinary bind encoder --
+    which knows about temp LOBs, objects, REFs, JSON and vectors -- keeps the
+    value.
+
+    Where they *can* disagree, the declaration wins, which is what the
+    descriptor already promised the server and what python-oracledb does: a
+    microsecond datetime declared DATE is truncated to the 7-byte form rather
+    than widening the payload to an 11-byte TIMESTAMP the descriptor did not
+    announce.
+    """
+    if Value is None:
+        return None
+    if isinstance(Value, datetime.date) and DataType in _DECLARED_TEMPORAL:
+        return _bytes_with_length(_encode_temporal(Value, DataType))
+    if isinstance(Value, (int, float)) and not isinstance(Value, bool):
+        if DataType == TNS_TYPE_BDOUBLE:
+            return _bytes_with_length(encode_token_binary_double(float(Value)))
+        if DataType == TNS_TYPE_BFLOAT:
+            return _bytes_with_length(encode_token_binary_float(float(Value)))
+    return None
+
+
 def encode_token_rxd(Token: object) -> bytes:
     if isinstance(Token, Var):
         # OUT / IN OUT bind: send the current value (NULL for an unseeded pure
@@ -9370,6 +9408,9 @@ def encode_token_rxd(Token: object) -> bytes:
             # AL16UTF16 (UTF-16 big-endian), independent of the DB charset.
             # encode_chr length-frames the raw bytes (it only re-encodes str).
             return encode_chr(Token._value.encode('utf-16-be'))
+        Declared = _declared_value_bytes(Token._value, Token.dbtype.tns_type)
+        if Declared is not None:
+            return Declared
         return encode_token_rxd(Token._value)
     if isinstance(Token, TempLob):
         # Temp-LOB locator bind (#91): the LOB-descriptor prefix (shared with the
