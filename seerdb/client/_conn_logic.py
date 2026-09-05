@@ -38,6 +38,7 @@ from seerdb.common.tns import (
     encode_end_to_end_piggyback,
     encode_end_user_sec_piggyback,
     encode_session_state_piggyback,
+    max_string_size,
 )
 from seerdb.common.tns_consts import (
     FIELD_VERSION_10_2,
@@ -314,6 +315,7 @@ class _ConnectionLogic:
             'req': self.charset,
             'seq': self._next_seq(),
             'field_version': self.field_version,
+            'max_string_size': max_string_size(self._server_runtime_caps),
             'supports_eor': self._supports_eor,
         }
         d.update(extra)
