@@ -22,6 +22,17 @@ on:
       - 'seerdb/**'
       - 'pyproject.toml'
       - '.github/workflows/sqlalchemy.yml'
+  # On demand and weekly: release against release, this driver at its newest
+  # tag with the dialect at its newest tag, the pairing a user installs.
+  workflow_dispatch:
+    inputs:
+      driver:
+        description: "checkout (this code) | tag (this repository's newest git tag)"
+        required: false
+        default: "tag"
+        type: string
+  schedule:
+    - cron: "47 5 * * 1"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -29,7 +40,7 @@ concurrency:
 
 jobs:
   compliance:
-    name: SQLAlchemy compliance (${{ matrix.db.name }})
+    name: SQLAlchemy compliance (${{ matrix.db.name }}, driver ${{ inputs.driver || (github.event_name == 'schedule' && 'tag') || 'checkout' }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -58,8 +69,20 @@ jobs:
           --health-retries 40
           --health-start-period 90s
           --shm-size=2g
+    env:
+      # Pushes and pull requests test the checkout; a dispatch defaults to the
+      # newest tag and the weekly run always uses it.
+      DRIVER: ${{ inputs.driver || (github.event_name == 'schedule' && 'tag') || 'checkout' }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Use this repository's newest tag
+        if: env.DRIVER == 'tag'
+        run: |
+          TAG=$(git tag --list | grep -E '^v?[0-9]+(\.[0-9]+)+$' | sort -V | tail -1)
+          echo "newest seerdb tag: $TAG"
+          git checkout -q "$TAG"
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
