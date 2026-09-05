@@ -130,12 +130,16 @@ class TestThe9iBuilderWritesLongClassValuesLast(unittest.TestCase):
         self.assertLess(encoded.index(b'SMALL'), encoded.index(b'PLAIN'))
 
     def test_a_plsql_block_keeps_every_value_in_place(self):
-        from seerdb.common.tns import encode_o7_block
+        # A 9i block's parse carries only the descriptors; the dialect sends the
+        # values afterwards as one RXD built straight from the bind list, which
+        # is the in-place order the server wants for a block.
+        from seerdb.common.tns import encode_o7_block, encode_tokens_rxd
 
-        encoded = encode_o7_block(
-            3, 'begin p(:1, :2, :3); end;', [1, _wide('WIDE'), 'PLAIN']
-        )
-        self.assertLess(encoded.index(b'WIDE'), encoded.index(b'PLAIN'))
+        bind = [1, _wide('WIDE'), 'PLAIN']
+        parse = encode_o7_block(3, 'begin p(:1, :2, :3); end;', bind)
+        self.assertNotIn(b'PLAIN', parse)
+        values = encode_tokens_rxd(bind, b'')
+        self.assertLess(values.index(b'WIDE'), values.index(b'PLAIN'))
 
 
 class TestThe8iBuilderWritesLongClassValuesLast(unittest.TestCase):
