@@ -115,7 +115,6 @@ from seerdb.common.tns_consts import (
     FIELD_VERSION_21_1,
     FIELD_VERSION_23_1,
     ISO_LATIN_1_CHARSET,
-    SERVER_VERSION_11_2_0_2,
     TNS_AL8I4_ARRAY_DML_ROWCOUNTS,
     TNS_AQ_ARRAY_ENQ,
     TNS_AQ_ARRAY_FLAGS_RETURN_MESSAGE_ID,
@@ -241,6 +240,7 @@ from seerdb.common.tns_consts import (
     TTI_UDS,
     TTI_WRN,
     UTF8_CHARSET,
+    VERSION_11_2_0_2,
     CharsetDict,
     DictionaryType,
 )
@@ -2097,7 +2097,7 @@ def encode_rpa_kv(pairs: list[tuple[bytes, bytes]]) -> bytes:
 
 
 def encode_token_result(
-    *, session_id: int = 0, version_no: int = SERVER_VERSION_11_2_0_2
+    *, session_id: int = 0, version_no: int = VERSION_11_2_0_2
 ) -> bytes:
     """The token-auth result RPA — version + session id, and no server proof
     (token auth has no ConnKey, so there is nothing for the client to validate)."""
@@ -2163,7 +2163,7 @@ def encode_result(
     session_key: bytes,
     *,
     session_id: int = 0,
-    version_no: int = SERVER_VERSION_11_2_0_2,
+    version_no: int = VERSION_11_2_0_2,
 ) -> bytes:
     """The auth-result RPA payload — the server proof, version, and session id.
 

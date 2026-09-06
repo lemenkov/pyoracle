@@ -495,7 +495,7 @@ decodes (via the project's own `decode_ano`) as a container plus four services:
 | data-integrity (svc 3) | version `0x0B200200`, selected-algo **`0`** | null checksum — no MAC |
 
 The container version is `0x00000000` while every *service* still echoes the
-modern `ANO_VERSION` (`0x0B200200`) — the one wrinkle that separates this reply
+modern `VERSION_11_2_0_2` (`0x0B200200`) — the one wrinkle that separates this reply
 from `encode_ano_response` (§33), together with the `0xFBFF` auth status and the
 null algorithm selections. `tests/test_handshake_generation.py` pins the built
 bytes to the live 11g capture.

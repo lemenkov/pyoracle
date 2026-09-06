@@ -19,6 +19,7 @@ from seerdb.common.tns_consts import (
     TNS_RESEND,
     TTI_AUTH,
     TTI_SESS,
+    VERSION_11_2_0_2,
 )
 
 
@@ -3711,7 +3712,7 @@ class TestTnsCommandDecoders(unittest.TestCase):
         Resp = b'660791387066EA55E70C3FDCD901B76DE29BA53FE0BDB744828AB6273824DAC5226C3D2818F4E5051259566AD87C41DE'
         # Full packed AUTH_VERSION_NO (0x0b200200 = 11.2.0.2.0); the connection
         # masks the major release out of this for its protocol gate.
-        Ver = 186647040
+        Ver = VERSION_11_2_0_2
         SessId = b'160'
         self.assertEqual(decode_token_rpa(Data, None), (TTI_AUTH, Resp, Ver, SessId))
 
@@ -5771,7 +5772,7 @@ class TestTnsBaseDecoders(unittest.TestCase):
                 b'F0C03C0EA9D932BBBFC1443735355FE41DA5A8A2BC42DD7F0F6F4B0AF1468A34E9402C1587952080028B5C4F23CBE48B',
             ),
             (b'AUTH_USER_ID', b'5'),
-            (b'AUTH_VERSION_NO', b'186647040'),
+            (b'AUTH_VERSION_NO', str(VERSION_11_2_0_2).encode()),
             (b'AUTH_VERSION_SQL', b'22'),
             (b'AUTH_VERSION_STATUS', b'0'),
             (b'AUTH_VERSION_STRING', b'- 64bit Production'),

@@ -23,7 +23,7 @@ from seerdb.common.tns import (
     encode_dictionary_sess,
     encode_result,
 )
-from seerdb.common.tns_consts import TTI_AUTH, TTI_SESS
+from seerdb.common.tns_consts import TTI_AUTH, TTI_SESS, VERSION_11_2_0_2
 from seerdb.server.auth import (
     derive_conn_key,
     make_challenge,
@@ -92,7 +92,7 @@ def test_encode_result_decodes_as_an_auth_result() -> None:
     payload = encode_result(bytes(24), session_id=59)
     kind, resp, version, session_id = decode_token_rpa(payload[1:], ())
     assert kind == TTI_AUTH
-    assert version == 186647040
+    assert version == VERSION_11_2_0_2
     assert session_id == b'59'
 
 
