@@ -151,6 +151,33 @@ def test_real_sql_round_trip() -> None:
     assert second == ('bob',)  # the post-fetch statement was answered
 
 
+def test_typed_null_bind_is_a_null() -> None:
+    # A NULL bind the client declared a type for reaches the backend as a
+    # BindVar (#699); SQLite binds the NULL and ignores the declaration.
+    listen, server, result = _start_mirror()
+    conn = _connect(listen.getsockname()[1])
+    try:
+        cur = conn.cursor()
+        cur.execute('create table t (id number, d number)')
+        cur.execute('insert into t values (1, 5)')
+        cur.setinputsizes(foo=seerdb.DB_TYPE_NUMBER)
+        cur.execute(
+            'select id from t where case when :foo is not null then :foo else d end = d',
+            {'foo': None},
+        )
+        rows = cur.fetchall()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert rows == [(1,)]
+
+
 def test_encrypted_round_trip() -> None:
     # The Mirror requires ANO, so the client negotiates AES256 + SHA256 and the
     # whole login + query runs encrypted end to end (#448) — the server half on

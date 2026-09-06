@@ -1192,14 +1192,26 @@ class BindIntegration(_IntegrationBase):
 
     # ----- setinputsizes types a bind the value cannot (#696) -----
     #
-    # What the declaration is *for* -- a NULL bind the server would otherwise
-    # take as CHAR -- cannot be asserted here. The statement that needs it is one
-    # the Mirror's PostgreSQL backend cannot type either, because the Mirror does
-    # not carry a bind's declared type through to its backend (#699), so such a
-    # test would fail there for a reason that has nothing to do with the driver.
     # The exact type byte the declaration puts on the wire is pinned in
-    # tests/test_setinputsizes.py instead, which is the stronger check anyway;
-    # what is left here is that a declaration survives a real round trip.
+    # tests/test_setinputsizes.py; what is checked here is what the server makes
+    # of it. The Mirror carries the declared type through to its backend (#699),
+    # so the tests hold against it as well.
+
+    def test_a_declared_type_lets_a_null_bind_take_part(self):
+        # What the declaration is *for*: a NULL carries no type, the server takes
+        # it as CHAR, and a CASE arm pairing it with a NUMBER column is refused
+        # (ORA-00932). Declared NUMBER, the NULL takes part. Matches python-oracledb.
+        self.cur.execute(f'CREATE TABLE {self.TABLE} (id NUMBER, d NUMBER)')
+        self.cur.execute(f'INSERT INTO {self.TABLE} VALUES (1, 5)')
+        query = (
+            f'SELECT id FROM {self.TABLE} '
+            'WHERE CASE WHEN :foo IS NOT NULL THEN :foo ELSE d END = d'
+        )
+        with self.assertRaises(seerdb.DatabaseError):
+            self.cur.execute(query, {'foo': None})
+        self.cur.setinputsizes(foo=seerdb.DB_TYPE_NUMBER)
+        self.cur.execute(query, {'foo': None})
+        self.assertEqual(self.cur.fetchall(), [(1,)])
 
     def test_a_declared_type_governs_how_the_value_is_sent(self):
         # A declaration tells the server what the bind is; the value then has to

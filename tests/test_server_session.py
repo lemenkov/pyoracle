@@ -616,7 +616,7 @@ def test_is_plsql_block_detects_begin_and_declare() -> None:
     assert not _is_plsql_block('INSERT INTO t VALUES (:1)')
 
 
-def test_plsql_bind_vars_wraps_block_binds_with_type_and_size() -> None:
+def test_bind_vars_wraps_block_binds_with_type_and_size() -> None:
     from seerdb.common.tns import ExecRequest
     from seerdb.common.tns_consts import (
         TNS_TYPE_NUMBER,
@@ -624,7 +624,7 @@ def test_plsql_bind_vars_wraps_block_binds_with_type_and_size() -> None:
         TNS_TYPE_VARCHAR,
     )
     from seerdb.server.backend import BindVar
-    from seerdb.server.session import _plsql_bind_vars
+    from seerdb.server.session import _bind_vars
 
     block = ExecRequest(
         sql='BEGIN p(:1, :2); END;',
@@ -634,7 +634,7 @@ def test_plsql_bind_vars_wraps_block_binds_with_type_and_size() -> None:
         binds=[7, None],
         bind_meta=[(TNS_TYPE_NUMBER, 22), (TNS_TYPE_VARCHAR, 32767)],
     )
-    wrapped = _plsql_bind_vars(block)
+    wrapped = _bind_vars(block)
     assert all(isinstance(b, BindVar) for b in wrapped)
     assert (wrapped[0].value, wrapped[0].tns_type, wrapped[0].max_size) == (
         7,
@@ -652,7 +652,7 @@ def test_plsql_bind_vars_wraps_block_binds_with_type_and_size() -> None:
         binds=[7],
         bind_meta=[(TNS_TYPE_NUMBER, 22)],
     )
-    assert _plsql_bind_vars(dml) == [7]
+    assert _bind_vars(dml) == [7]
 
     # A REF CURSOR bind also rides the OUT path — the backend opens the cursor
     # and its rows come back on a parked cursor id (#483).
@@ -664,9 +664,41 @@ def test_plsql_bind_vars_wraps_block_binds_with_type_and_size() -> None:
         binds=[None],
         bind_meta=[(TNS_TYPE_REFCURSOR, 1)],
     )
-    wrapped_rc = _plsql_bind_vars(refc)
+    wrapped_rc = _bind_vars(refc)
     assert len(wrapped_rc) == 1
     assert wrapped_rc[0].tns_type == TNS_TYPE_REFCURSOR
+
+
+def test_bind_vars_wraps_only_a_null_of_an_ordinary_statement() -> None:
+    # A NULL bind carries no type of its own, so it goes over with the type the
+    # client declared for it; a value goes over bare (#699).
+    from seerdb.common.tns import ExecRequest
+    from seerdb.common.tns_consts import TNS_TYPE_NUMBER, TNS_TYPE_VARCHAR
+    from seerdb.server.backend import BindVar
+    from seerdb.server.session import _bind_vars
+
+    select = ExecRequest(
+        sql='SELECT id FROM t WHERE CASE WHEN :1 IS NOT NULL THEN :1 ELSE d END = :2',
+        cursor=0,
+        bind_count=2,
+        fetch=0,
+        binds=[None, 'x'],
+        bind_meta=[(TNS_TYPE_NUMBER, 22), (TNS_TYPE_VARCHAR, 32)],
+    )
+    wrapped = _bind_vars(select)
+    assert wrapped[1] == 'x'
+    assert isinstance(wrapped[0], BindVar)
+    assert (wrapped[0].value, wrapped[0].tns_type) == (None, TNS_TYPE_NUMBER)
+    # A shape mismatch passes everything through untouched.
+    mismatched = ExecRequest(
+        sql=select.sql,
+        cursor=0,
+        bind_count=2,
+        fetch=0,
+        binds=[None, 'x'],
+        bind_meta=[(TNS_TYPE_NUMBER, 22)],
+    )
+    assert _bind_vars(mismatched) == [None, 'x']
 
 
 def test_oci_sequence_advances_per_reply() -> None:

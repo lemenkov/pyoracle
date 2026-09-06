@@ -1144,6 +1144,42 @@ def test_translate_binds_positional_and_casts() -> None:
     assert params == {'a': 'x'}
 
 
+def test_translate_binds_casts_a_typed_null() -> None:
+    # A NULL bind arrives as a BindVar carrying the type the client declared,
+    # and becomes a cast placeholder, so PostgreSQL can type it (#699). A type
+    # with no PostgreSQL counterpart stays a bare placeholder.
+    from seerdb.common.tns_consts import (
+        TNS_TYPE_NUMBER,
+        TNS_TYPE_REFCURSOR,
+        TNS_TYPE_VARCHAR,
+    )
+    from seerdb.server.backend import BindVar
+
+    sql, params = _translate_binds(
+        'SELECT id FROM t WHERE CASE WHEN :foo IS NOT NULL THEN :foo ELSE d END = d',
+        [BindVar(value=None, tns_type=TNS_TYPE_NUMBER, max_size=22)],
+    )
+    assert sql == (
+        'SELECT id FROM t WHERE CASE WHEN %(foo)s::numeric IS NOT NULL '
+        'THEN %(foo)s::numeric ELSE d END = d'
+    )
+    assert params == {'foo': None}
+    sql, params = _translate_binds(
+        'SELECT :1 FROM t',
+        [BindVar(value=None, tns_type=TNS_TYPE_REFCURSOR, max_size=1)],
+    )
+    assert sql == 'SELECT %(b1)s FROM t'
+    assert params == {'b1': None}
+    # A string type stays uncast too: an undeclared NULL travels as VARCHAR, and
+    # `id = :x` on a NUMBER column has to keep letting PostgreSQL infer numeric.
+    sql, params = _translate_binds(
+        'SELECT id FROM t WHERE id = :x OR :x IS NULL',
+        [BindVar(value=None, tns_type=TNS_TYPE_VARCHAR, max_size=1)],
+    )
+    assert sql == 'SELECT id FROM t WHERE id = %(x)s OR %(x)s IS NULL'
+    assert params == {'x': None}
+
+
 def test_translate_binds_mixed_named_first_appearance_order() -> None:
     sql, params = _translate_binds(
         'SELECT * FROM t WHERE a = :x AND b = :y AND c = :x', [1, 2]

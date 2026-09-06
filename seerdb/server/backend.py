@@ -63,6 +63,12 @@ class BindVar:
     ``Var`` (see ``_assign_out_binds``). ``max_size`` is the OAC buffer length the
     client declared (e.g. 32767 for a VARCHAR OUT) — the fix for the
     ``ORA-06502: buffer too small`` a value-only bind hit.
+
+    An ordinary statement's NULL bind arrives the same way: ``value`` None and
+    ``tns_type`` the type the client declared for it (``setinputsizes``). A NULL
+    says nothing about its type, and a backend that has to know — a CASE arm, a
+    parameter it cannot otherwise infer — reads it from here (#699). Every other
+    bind of such a statement is passed as its bare value.
     """
 
     value: object
