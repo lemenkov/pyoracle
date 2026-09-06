@@ -51,6 +51,7 @@ class RedirectListener:
         self._thread.start()
 
     def _serve(self) -> None:
+        assert self._sock is not None  # start() opened it
         try:
             conn, _ = self._sock.accept()
         except OSError:

@@ -15,11 +15,12 @@ from seerdb.server import (
     UnsupportedFeature,
     credential_lookup,
 )
+from seerdb.server.backend import Capability
 
 
 class _DualBackend:
     # A fresh instance is created per session by the factory below.
-    capabilities = frozenset()
+    capabilities: frozenset[Capability] = frozenset()
 
     def authenticate(self, username: str) -> str | None:
         return credential_lookup({'PYO': 'pyo123'}, username)

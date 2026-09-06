@@ -59,7 +59,7 @@ seerdb = ["py.typed"]
 
 [tool.mypy]
 python_version = "3.10"
-files = ["seerdb", "examples", "tools"]
+files = ["seerdb", "examples", "tools", "tests"]
 # Runtime deps (pycryptodome, pyarrow) ship no stubs; treat them as Any.
 ignore_missing_imports = true
 

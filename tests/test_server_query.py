@@ -1641,7 +1641,7 @@ def test_oci_lob_contents_encodes_a_vector_cell_by_element_format() -> None:
     image, is_clob = got[0]
     assert is_clob is False
     decoded = decode_vector(image)
-    assert decoded == [1, -2, 3, -4]
+    assert isinstance(decoded, list) and decoded == [1, -2, 3, -4]
     assert all(isinstance(v, int) for v in decoded)
 
 

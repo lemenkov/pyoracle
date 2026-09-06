@@ -104,6 +104,7 @@ class TLSProxy:
             w.join(timeout=2)
 
     def _serve(self) -> None:
+        assert self._sock is not None  # start() opened it
         while not self._stop.is_set():
             try:
                 client, _ = self._sock.accept()
@@ -116,6 +117,7 @@ class TLSProxy:
             t.start()
 
     def _handle(self, plain_client: socket.socket) -> None:
+        assert self._ctx is not None  # start() built it
         try:
             tls_client = self._ctx.wrap_socket(plain_client, server_side=True)
         except (ssl.SSLError, OSError):

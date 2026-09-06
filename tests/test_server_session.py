@@ -12,13 +12,19 @@ from __future__ import annotations
 
 import socket
 import threading
+from typing import Any
 
 import pytest
 
 import seerdb
 from seerdb.common.tns import ColumnMeta
 from seerdb.common.tns_consts import TNS_DATA, TNS_TYPE_VARCHAR
-from seerdb.server.backend import Result, UnsupportedFeature, credential_lookup
+from seerdb.server.backend import (
+    Capability,
+    Result,
+    UnsupportedFeature,
+    credential_lookup,
+)
 from seerdb.server.framing import PacketStream
 from seerdb.server.session import handle_login, serve_session
 
@@ -28,7 +34,7 @@ _CREDS = {'PYO': 'pyo123'}
 class _DualBackend:
     # A trivial Backend: DUAL returns 'X'; anything else is refused with a clean
     # ORA error (so the Mirror answers, never desyncs).
-    capabilities = frozenset()
+    capabilities: frozenset[Capability] = frozenset()
 
     def authenticate(self, username: str) -> str | None:
         return credential_lookup(_CREDS, username)
@@ -55,7 +61,11 @@ class _DualBackend:
         self.tracing = {**getattr(self, 'tracing', {}), **attrs}
 
     def sessionless_begin(self, transaction_id: bytes, timeout: int) -> None:
-        self.sessionless = ('begin', transaction_id, timeout)
+        self.sessionless: tuple[str, bytes | None, int] = (
+            'begin',
+            transaction_id,
+            timeout,
+        )
 
     def sessionless_resume(self, transaction_id: bytes, timeout: int) -> None:
         self.sessionless = ('resume', transaction_id, timeout)
@@ -590,7 +600,7 @@ def test_free_temp_drops_the_buffer_and_state_ops_ack() -> None:
 
     locator = b'\x00seerdb-mirror-temp-lob-\x00\x00\x00\x00\x01'
     temp_lobs = {bytes(locator): bytearray(b'written-bytes')}
-    stream = _FakeStream()
+    stream: Any = _FakeStream()
 
     # FREE_TEMP drops the buffer and replies with a success ack.
     _answer_lobops(stream, op_request(TNS_LOB_OP_FREE_TEMP, locator), [], temp_lobs)
@@ -810,8 +820,10 @@ def test_oci_changepassword_decrypts_and_applies() -> None:
         def next(self) -> int:
             return 1
 
-    stream = _Stream()
-    _answer_changepassword_oci(stream, _Backend(), frame, conn_key, 'PWTEST', _Seq())
+    stream: Any = _Stream()
+    backend: Any = _Backend()
+    seq: Any = _Seq()
+    _answer_changepassword_oci(stream, backend, frame, conn_key, 'PWTEST', seq)
     # decrypted the pair and drove the backend change, then acked with the
     # OCIPasswordChange success frame sqlplus renders as "Password changed".
     assert calls == [('PWTEST', 'oldpw', 'newpw')]
@@ -835,9 +847,13 @@ def test_oci_changepassword_unsupported_backend_replies_ora_error() -> None:
         def next(self) -> int:
             return 1
 
-    stream = _Stream()
+    stream: Any = _Stream()
     # A backend with no change_password: reply with an ORA error, never desync.
-    _answer_changepassword_oci(stream, object(), frame, conn_key, 'PWTEST', _Seq())
+    no_change_password: Any = object()
+    seq: Any = _Seq()
+    _answer_changepassword_oci(
+        stream, no_change_password, frame, conn_key, 'PWTEST', seq
+    )
     assert stream.sent, 'must answer even when unsupported'
     assert b'ORA-01031' in stream.sent[-1]
 
@@ -939,8 +955,9 @@ def test_oci_loop_answers_a_break_marker() -> None:
         def write_packet(self, ptype: int, body: bytes, **_kw) -> None:
             self.sent.append((ptype, body))
 
-    stream = _Stream()
-    assert _serve_oci_session(stream, object(), 'PYO') == 'PYO'
+    stream: Any = _Stream()
+    backend: Any = object()
+    assert _serve_oci_session(stream, backend, 'PYO') == 'PYO'
     # Exactly one reply, and it is a reset marker: replying to every marker
     # ping-pongs the two ends into a reset storm.
     assert stream.sent == [(TNS_MARKER, bytes([1, 0, TNS_MARKER_TYPE_RESET]))]
@@ -1085,7 +1102,8 @@ def test_oci_banner_follows_the_advertised_release(
         def write_packet(self, ptype: int, body: bytes, **_kw) -> None:
             self.sent.append(body)
 
-    stream = _Stream()
-    _serve_oci_session(stream, object(), 'PYO', None, server_identity(version))
+    stream: Any = _Stream()
+    backend: Any = object()
+    _serve_oci_session(stream, backend, 'PYO', None, server_identity(version))
     assert stream.sent, 'the version call must be answered with a banner'
     assert expected in stream.sent[0]
