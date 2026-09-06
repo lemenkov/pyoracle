@@ -69,11 +69,18 @@ class BindVar:
     says nothing about its type, and a backend that has to know — a CASE arm, a
     parameter it cannot otherwise infer — reads it from here (#699). Every other
     bind of such a statement is passed as its bare value.
+
+    A PL/SQL associative-array bind (``cursor.arrayvar``, #122) has
+    ``array_size`` set to the capacity the client declared and ``value`` a list
+    of its elements (empty for a pure OUT); the backend registers an array
+    variable of that capacity and returns the list it holds afterwards (#743).
+    A scalar bind has ``array_size`` 0.
     """
 
     value: object
     tns_type: int
     max_size: int
+    array_size: int = 0
 
 
 @dataclass(frozen=True)

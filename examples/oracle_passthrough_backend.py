@@ -200,6 +200,17 @@ class OraclePassthroughBackend:
                 variables.append(bind.value)
                 continue
             dbtype = dbtype_for_oracle_type(bind.tns_type, 1)
+            if bind.array_size:
+                # An associative-array bind (#743): an array variable of the
+                # declared capacity, seeded with the elements the client sent
+                # (none for a pure OUT); getvalue() returns the list afterwards.
+                var = cursor.arrayvar(
+                    dbtype if dbtype is not None else str, bind.array_size
+                )
+                if bind.value:
+                    var.setvalue(0, list(bind.value))
+                variables.append(var)
+                continue
             if bind.tns_type == TNS_TYPE_REFCURSOR:
                 # A REF CURSOR OUT param: the DB opens the cursor, so bind a
                 # cursor var and don't seed it.

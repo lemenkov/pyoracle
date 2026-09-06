@@ -646,6 +646,7 @@ def test_bind_vars_wraps_block_binds_with_type_and_size() -> None:
     )
     wrapped = _bind_vars(block)
     assert all(isinstance(b, BindVar) for b in wrapped)
+    assert [b.array_size for b in wrapped] == [0, 0]  # scalars
     assert (wrapped[0].value, wrapped[0].tns_type, wrapped[0].max_size) == (
         7,
         TNS_TYPE_NUMBER,
@@ -677,6 +678,25 @@ def test_bind_vars_wraps_block_binds_with_type_and_size() -> None:
     wrapped_rc = _bind_vars(refc)
     assert len(wrapped_rc) == 1
     assert wrapped_rc[0].tns_type == TNS_TYPE_REFCURSOR
+
+
+def test_bind_vars_carries_an_array_binds_capacity() -> None:
+    # An associative-array bind's elements and capacity reach the backend (#743).
+    from seerdb.common.tns import ExecRequest
+    from seerdb.common.tns_consts import TNS_TYPE_NUMBER
+    from seerdb.server.session import _bind_vars
+
+    block = ExecRequest(
+        sql='BEGIN p(:1, :2); END;',
+        cursor=0,
+        bind_count=2,
+        fetch=0,
+        binds=[[1, 2], []],
+        bind_meta=[(TNS_TYPE_NUMBER, 22), (TNS_TYPE_NUMBER, 22)],
+        bind_arrays=[10, 4],
+    )
+    wrapped = _bind_vars(block)
+    assert [(b.value, b.array_size) for b in wrapped] == [([1, 2], 10), ([], 4)]
 
 
 def test_bind_vars_wraps_only_a_null_of_an_ordinary_statement() -> None:

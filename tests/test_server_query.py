@@ -2618,6 +2618,61 @@ def test_encode_out_bind_response_thin_roundtrips_via_client() -> None:
     assert v_io.getvalue() == 'hi!'
 
 
+@pytest.mark.parametrize('version', [6, 17])  # 11.2 and 23ai OAC layouts
+def test_parse_exec_reads_an_associative_array_bind(version: int) -> None:
+    # An arrayvar bind (#122) carries the ARRAY flag and its capacity in the
+    # OAC, and its value as a ub4 count plus the elements; a pure OUT array sends
+    # a count of 0. The Mirror keeps the capacity per bind and the elements as a
+    # list, so a backend can register an array variable (#743).
+    from seerdb.common.datatypes import Var
+
+    seeded = Var(int, is_array=True, num_elements=3)
+    seeded.setvalue(0, [11, 22, 33])
+    empty = Var(str, is_array=True, num_elements=5)
+    msg = _client_exec_request(
+        version, 'BEGIN p(:1, :2, :3); END;', [seeded, 7, empty], kind='block'
+    )
+    with _at_field_version(version):
+        req = parse_exec(msg)
+    assert req.binds == [[11, 22, 33], 7, []]
+    assert req.bind_arrays == [3, 0, 5]
+    assert [t for t, _s in req.bind_meta] == [
+        TNS_TYPE_NUMBER,
+        TNS_TYPE_NUMBER,
+        TNS_TYPE_VARCHAR,
+    ]
+
+
+def test_encode_out_bind_response_thin_array_roundtrips_via_client() -> None:
+    # An associative-array OUT bind comes back as its element count and the
+    # elements; the client's arrayvar receives the list (#743).
+    from seerdb.client.cursor import _assign_out_binds
+    from seerdb.common.datatypes import Var
+    from seerdb.common.tns import (
+        ArrayOutBind,
+        ScalarOutBind,
+        decode_packet,
+        encode_out_bind_response_thin,
+    )
+
+    _DECODE_FIELD_VERSION.set(FIELD_VERSION_11_2)
+    resp = encode_out_bind_response_thin(
+        [
+            ScalarOutBind(3, TNS_TYPE_NUMBER),
+            ArrayOutBind(['a', 'bb', None], TNS_TYPE_VARCHAR),
+            ArrayOutBind([], TNS_TYPE_NUMBER),
+        ]
+    )
+    names = Var(str, is_array=True, num_elements=5)
+    numbers = Var(int, is_array=True, num_elements=5)
+    bind = [3, names, numbers]
+    result = decode_packet(resp, (0, [], [], bind))
+    assert result[1] == 0
+    _assign_out_binds(bind, result)
+    assert names.getvalue() == ['a', 'bb', None]
+    assert numbers.getvalue() == []
+
+
 def test_parse_exec_exposes_bind_meta() -> None:
     from seerdb.common.tns import encode_dictionary_exec
 
