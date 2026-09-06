@@ -165,7 +165,11 @@ class Backend(Protocol):
         error rather than breaking the connection.
     """
 
-    capabilities: frozenset[Capability]
+    @property
+    def capabilities(self) -> frozenset[Capability]:
+        """The features this backend supports. A plain class attribute
+        satisfies this too; a property lets a wrapper defer to what it wraps."""
+        ...
 
     def authenticate(self, username: str) -> str | None:
         """Return the O5LOGON secret (plaintext password) for ``username``, or

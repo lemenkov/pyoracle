@@ -28,6 +28,7 @@ from seerdb.server import (
     Backend,
     BackendError,
     BindVar,
+    Capability,
     ColumnMeta,
     Result,
     UnsupportedFeature,
@@ -85,7 +86,7 @@ class OracleCompatBackend:
         self._user = 'USER'
 
     @property
-    def capabilities(self):  # type: ignore[no-untyped-def]
+    def capabilities(self) -> frozenset[Capability]:
         return self._inner.capabilities
 
     def authenticate(self, username: str) -> str | None:

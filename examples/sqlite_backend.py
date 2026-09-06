@@ -104,12 +104,6 @@ def _register_codecs() -> None:
     sqlite3.register_adapter(int, _adapt_int)
 
 
-def _adapt_int(value: int) -> int | float:
-    if -(2**63) <= value < 2**63:
-        return value
-    return float(value)
-
-
 _register_codecs()
 
 

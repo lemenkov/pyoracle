@@ -884,7 +884,10 @@ _ORA_MESSAGE = {
 
 
 def _ora_code_for(exc) -> int:
-    return _SQLSTATE_TO_ORA.get(getattr(exc, 'sqlstate', None), _ORA_INVALID_SQL)
+    sqlstate = getattr(exc, 'sqlstate', None)
+    if not isinstance(sqlstate, str):
+        return _ORA_INVALID_SQL
+    return _SQLSTATE_TO_ORA.get(sqlstate, _ORA_INVALID_SQL)
 
 
 def _backend_error(
@@ -1053,7 +1056,13 @@ class PostgresBackend:
         # _pgN_M does not exist"). A proxy backend running varied SQL gains little
         # from the cache anyway; the pipeline below is the real round-trip win.
         self._conn.prepare_threshold = None
-        self._credentials = credentials or {}
+        # Shared, not copied, when a dict is given: the example hands one map to
+        # every backend it creates, and ALTER USER ... IDENTIFIED BY rewrites an
+        # entry in place so the new password reaches the next login. A read-only
+        # mapping is copied into a dict the rewrite can touch.
+        self._credentials: dict[str, str] = (
+            credentials if isinstance(credentials, dict) else dict(credentials or {})
+        )
         # Index-organized tables this session created, with their primary-key
         # columns, for the logical-rowid rendering.
         self._iot_pk: dict[str, list[str]] = {}

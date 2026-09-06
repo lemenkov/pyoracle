@@ -38,7 +38,7 @@ _SEEDS = [
 ]
 
 # decode_packet seeds the row decoder with (Cursor, RowFormat, Rows).
-_ACC = (None, None, [])
+_ACC: tuple = (None, None, [])
 
 # Per-input hang guard (Unix). decode_packet must return or raise quickly; if it
 # spins, SIGALRM interrupts it and the input is reported as a hang to fix.

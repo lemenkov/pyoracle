@@ -30,13 +30,19 @@ from seerdb.common.tns_consts import (
     TNS_TYPE_REF,
     TNS_TYPE_REFCURSOR,
 )
-from seerdb.server.backend import BackendError, BindVar, CursorResult, Result
+from seerdb.server.backend import (
+    BackendError,
+    BindVar,
+    Capability,
+    CursorResult,
+    Result,
+)
 
 
 class OraclePassthroughBackend:
     """Relays statements to a real Oracle at ``(host, port, service)``."""
 
-    capabilities = frozenset()
+    capabilities: frozenset[Capability] = frozenset()
 
     def __init__(
         self,
@@ -56,7 +62,7 @@ class OraclePassthroughBackend:
         for name in list(self._credentials):
             if name != name.upper():
                 self._credentials[name.upper()] = self._credentials.pop(name)
-        self._conn = None
+        self._conn: seerdb.OracleConnect | None = None
 
     def authenticate(self, username: str) -> str | None:
         password = self._credentials.get(username.upper())
@@ -80,6 +86,7 @@ class OraclePassthroughBackend:
         return password
 
     def execute(self, sql: str, binds: Sequence = ()) -> Result:
+        assert self._conn is not None  # authenticate() ran before any execute
         cursor = self._conn.cursor()
         # A PL/SQL block hands its binds over as BindVar (value + type + buffer
         # size) so OUT binds can be registered correctly (#483). Bind each as an
@@ -248,6 +255,7 @@ class OraclePassthroughBackend:
         # on the real Oracle; the live upstream session stays authenticated. Then
         # update the shared credential map so a fresh Mirror session authenticates
         # (O5LOGON) with the new password and the old one is rejected (#21/#486).
+        assert self._conn is not None  # authenticate() ran before any execute
         cursor = self._conn.cursor()
         quoted = new_password.replace('"', '""')
         old_quoted = old_password.replace('"', '""')
