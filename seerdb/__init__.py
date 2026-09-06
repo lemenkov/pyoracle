@@ -83,6 +83,7 @@ from seerdb.common.exceptions import (
     ProgrammingError,
     Warning,
 )
+from seerdb.common.tns import _CLIENT_VERSION as __version__
 from seerdb.common.tns_consts import (
     PURITY_DEFAULT,
     PURITY_NEW,
@@ -169,6 +170,7 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    '__version__',
     'apilevel',
     'threadsafety',
     'paramstyle',
