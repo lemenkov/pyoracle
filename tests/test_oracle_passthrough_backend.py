@@ -23,6 +23,8 @@ from oracle_passthrough_backend import (  # noqa: E402
     _relay_error,
 )
 
+from seerdb.server.backend import BindVar  # noqa: E402
+
 
 def test_strips_the_redundant_ora_prefix():
     exc = seerdb.DatabaseError('ORA-00904: "X": invalid identifier', 904)
@@ -96,15 +98,21 @@ class _FakeCursor:
     def var(self, dbtype, size=None):
         return _FakeVar()
 
+    def arrayvar(self, dbtype, value_or_numelements, size=None):
+        var = _FakeVar()
+        var.capacity = value_or_numelements
+        return var
+
     def setinputsizes(self, *args):
         self.declared = args
 
     def execute(self, sql, variables):
         self.bound = list(variables)
-        # Seed each Var with a fake OUT value so getvalue() returns something.
+        # Give each Var the fake OUT value the "block" assigned it; a Var the
+        # block left alone keeps what it was seeded with, as on a real server.
         for i, v in enumerate(self.bound):
-            if isinstance(v, _FakeVar):
-                v.setvalue(0, self._out_values.get(i))
+            if isinstance(v, _FakeVar) and i in self._out_values:
+                v.setvalue(0, self._out_values[i])
 
 
 def _plsql_binds(*binds):
@@ -130,6 +138,22 @@ def test_typed_null_of_an_ordinary_statement_is_declared_upstream():
     assert cursor.bound == [None, 'x']
     assert result.rowcount == 0 and not result.out_binds
     assert not isinstance(cursor.bound[0], BindVar)
+
+
+def test_array_bind_registers_an_array_var_of_the_declared_capacity():
+    # An associative-array BindVar (#743) becomes an arrayvar of the client's
+    # capacity, seeded with the elements sent; its list comes back as the OUT.
+    from seerdb.common.tns_consts import TNS_TYPE_NUMBER
+
+    backend = OraclePassthroughBackend(host='h', port=1, service='s', credentials={})
+    cursor = _FakeCursor(out_values={1: [7, 8, 9]})
+    binds = [
+        BindVar(value=[1, 2], tns_type=TNS_TYPE_NUMBER, max_size=22, array_size=10),
+        BindVar(value=[], tns_type=TNS_TYPE_NUMBER, max_size=22, array_size=4),
+    ]
+    result = backend._execute_plsql(cursor, 'BEGIN p(:1, :2); END;', binds)
+    assert [getattr(v, 'capacity', None) for v in cursor.bound] == [10, 4]
+    assert result.out_binds == [[1, 2], [7, 8, 9]]
 
 
 def test_large_lob_in_bind_is_bound_as_a_plain_value_not_a_var():

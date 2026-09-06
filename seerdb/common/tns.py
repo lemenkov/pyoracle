@@ -289,6 +289,10 @@ class ExecRequest:
     # Per-bind (tns_type, max_size) from the OACs, in bind order — the type +
     # return-buffer size a PL/SQL block's OUT binds need (#483).
     bind_meta: list = field(default_factory=list)
+    # Per-bind capacity of a PL/SQL associative-array bind, 0 for a scalar
+    # (#743). Such a bind's value is a list of elements, and its OUT value has
+    # to come back as one.
+    bind_arrays: list = field(default_factory=list)
     # Per-bind (tns_type, csfrm, max_size) — the bind format the Mirror remembers
     # for a cursor so a cached re-execute (no OACs on the wire) can decode its RXD
     # values (#80/#486).
@@ -339,6 +343,17 @@ class ScalarOutBind:
     """A scalar PL/SQL OUT bind value + its declared type, for the IOV reply."""
 
     value: object
+    tns_type: int
+
+
+@dataclass(frozen=True)
+class ArrayOutBind:
+    """A PL/SQL associative-array OUT bind's value: its elements, in order, with
+    the bind's declared element type (#743). The reply carries the element
+    count and then each element as a value plus a return code, the form the
+    client's decoder reads for a bind it registered with ``arrayvar``."""
+
+    values: list
     tns_type: int
 
 
@@ -1509,11 +1524,16 @@ def parse_exec(
         # (an ordinary single execute is just one row). A cached re-execute omits
         # the OACs, so `after` already sits on the first RXD — use the remembered
         # bind types instead of decoding OACs (#80/#486).
+        # A cached re-execute carries no OACs and is DML only (#703), where no
+        # bind is an array; a block is never cached.
+        capacities: list[int] = []
         if bind_types is not None:
             types = list(bind_types)
+            capacities = [0] * len(types)
         else:
             types = []
             for _ in range(bind_count):
+                capacities.append(_oac_array_capacity(after, field_version))
                 (
                     data_type,
                     maxlen,
@@ -1567,6 +1587,17 @@ def parse_exec(
             row: list = [None] * len(types)
             for index in order:
                 data_type, csfrm, _maxlen, toid = types[index]
+                if capacities[index]:
+                    # An associative-array bind (#122/#743): a ub4 element
+                    # count, then each element as an ordinary value of the
+                    # bind's type. A pure-OUT array sends a count of 0.
+                    (count, after) = decode_ub4(after)
+                    elements = []
+                    for _ in range(count):
+                        element, after = _read_bind_value(data_type, csfrm, after, toid)
+                        elements.append(element)
+                    row[index] = elements
+                    continue
                 row[index], after = _read_bind_value(data_type, csfrm, after, toid)
             bind_rows.append(row)
         if bind_rows:
@@ -1577,6 +1608,7 @@ def parse_exec(
         bind_type_list = list(types)
     else:
         bind_type_list = []
+        capacities = []
         return_binds = frozenset()
 
     return ExecRequest(
@@ -1587,6 +1619,7 @@ def parse_exec(
         binds=binds,
         bind_rows=bind_rows,
         bind_meta=bind_meta,
+        bind_arrays=capacities,
         bind_types=bind_type_list,
         autocommit=autocommit,
         batcherrors=batcherrors,
@@ -1794,7 +1827,7 @@ def _encode_refcursor_out(bind: RefCursorOutBind) -> bytes:
 
 
 def encode_out_bind_response_thin(
-    out_binds: list[ScalarOutBind | RefCursorOutBind],
+    out_binds: list[ScalarOutBind | ArrayOutBind | RefCursorOutBind],
 ) -> bytes:
     """The thin reply returning a PL/SQL block's OUT bind values (#483): a
     TTI_IOV vector + a TTI_RXD row of the values + a success OER.
@@ -1823,6 +1856,11 @@ def encode_out_bind_response_thin(
     for bind in out_binds:
         if isinstance(bind, RefCursorOutBind):
             rxd += _encode_refcursor_out(bind)
+        elif isinstance(bind, ArrayOutBind):
+            # ub4 element count, then each element as a value + return code.
+            rxd += encode_sb4(len(bind.values))
+            for element in bind.values:
+                rxd += encode_value(element, bind.tns_type) + encode_sb4(0)
         else:
             rxd += encode_value(bind.value, bind.tns_type) + encode_sb4(0)
     return iov + bytes(rxd) + encode_status(0)
@@ -2455,14 +2493,11 @@ def decode_lobops_oer(Packet: bytes, FieldVersion: int) -> tuple[int, str | None
     return (0, None)
 
 
-def decode_oac_fields(Data: bytes) -> tuple[int, int, int, int, int, bytes, bytes]:
-    # The full OAC field set, including the charset form (csfrm) byte the common
-    # 5-tuple form skips, and the referenced type's OID (an object / REF bind,
-    # #116/#139). csfrm distinguishes national char data (2 → AL16UTF16 /
-    # UTF-16BE) from ordinary char data (1) — the server needs it to decode an
-    # NCHAR / NVARCHAR bind (#484). Returns (DataType, MaxDataLength, DataScale,
-    # Charset, Csfrm, ToId, Rest).
-    (DataType, Flg, Pre) = struct.unpack('>BBB', Data[:3])
+def _decode_oac_walk(Data: bytes) -> tuple:
+    # Every OAC field in wire order, raw: (DataType, Flg, DataScale,
+    # MaxDataLength, Mal, Fl2, ToId, VSN, Charset, Csfrm, Mxlc, Rest). The
+    # public decoders pick what they need from it.
+    (DataType, Flg, _Pre) = struct.unpack('>BBB', Data[:3])
     (DataScale, R0) = decode_ub4(Data[3:])
     (MaxDataLength, R1) = decode_ub4(R0)
     (Mal, R2) = decode_ub4(R1)
@@ -2482,7 +2517,72 @@ def decode_oac_fields(Data: bytes) -> tuple[int, int, int, int, int, bytes, byte
     (Charset, R6) = decode_ub4(R5)
     Csfrm = R6[0]
     (Mxlc, R7) = decode_ub4(R6[1:])
-    return (DataType, MaxDataLength, DataScale, Charset, Csfrm, ToId, R7)
+    return (
+        DataType,
+        Flg,
+        DataScale,
+        MaxDataLength,
+        Mal,
+        Fl2,
+        ToId,
+        VSN,
+        Charset,
+        Csfrm,
+        Mxlc,
+        R7,
+    )
+
+
+def decode_oac_fields(Data: bytes) -> tuple[int, int, int, int, int, bytes, bytes]:
+    # The full OAC field set, including the charset form (csfrm) byte the common
+    # 5-tuple form skips, and the referenced type's OID (an object / REF bind,
+    # #116/#139). csfrm distinguishes national char data (2 → AL16UTF16 /
+    # UTF-16BE) from ordinary char data (1) — the server needs it to decode an
+    # NCHAR / NVARCHAR bind (#484). Returns (DataType, MaxDataLength, DataScale,
+    # Charset, Csfrm, ToId, Rest).
+    (
+        DataType,
+        _Flg,
+        DataScale,
+        MaxDataLength,
+        _Mal,
+        _Fl2,
+        ToId,
+        _VSN,
+        Charset,
+        Csfrm,
+        _Mxlc,
+        Rest,
+    ) = _decode_oac_walk(Data)
+    return (DataType, MaxDataLength, DataScale, Charset, Csfrm, ToId, Rest)
+
+
+# The ARRAY flag a PL/SQL associative-array bind sets in its OAC (#122). A 12.2+
+# client puts it in the flag byte and the array's capacity in the max-array-size
+# field; an 11g client puts the flag in the second flag word and the capacity in
+# the trailing field (see encode_token_raw). Where the flag is not set the
+# capacity is 0: a scalar bind.
+_OAC_ARRAY_FLAG = 0x40
+
+
+def _oac_array_capacity(Data: bytes, field_version: int) -> int:
+    (
+        _DataType,
+        Flg,
+        _Scale,
+        _MaxLen,
+        Mal,
+        Fl2,
+        _ToId,
+        _VSN,
+        _Cs,
+        _Csfrm,
+        Mxlc,
+        _Rest,
+    ) = _decode_oac_walk(Data)
+    if field_version >= FIELD_VERSION_12_2:
+        return Mal if Flg & _OAC_ARRAY_FLAG else 0
+    return Mxlc if Fl2 & _OAC_ARRAY_FLAG else 0
 
 
 def decode_token_oac(Data: bytes, Acc: tuple) -> tuple[int, int, int, int, bytes]:

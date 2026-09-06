@@ -4149,6 +4149,12 @@ wire. Verified on 21c/23ai (IN / OUT / IN OUT, NUMBER + VARCHAR2 elements);
 clean gate on 10g/11g. Scalar element types only (nested object/collection
 elements are out of scope).
 
+
+The Mirror reads the same forms (#743): the capacity off the OAC (the ARRAY flag
+and max-array-size field of the 12.2+ layout, the second flag word and trailing
+field of the 11g one), the value as its count and elements, and it answers an
+OUT array with the count and one value plus return code per element.
+
 ## 27. Proxy authentication (#126)
 
 Connecting as `proxy_user[schema]` authenticates as `proxy_user` (with its own
