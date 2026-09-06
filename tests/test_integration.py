@@ -125,7 +125,8 @@ _8I_UNSUPPORTED = (
     # Async-only / connectivity tests (AsyncConnectionIntegration, Redirect).
     ('async_iteration', 'CONNECT BY LEVEL returns one row on Oracle 8i'),
     ('fetchall_and_fetchmany', 'CONNECT BY LEVEL returns one row on Oracle 8i'),
-    ('declared_type_governs', '8i mis-types a declared bind, ORA-00902 (#717)'),
+    # The test's column is a TIMESTAMP; 8i honours the declared types it has.
+    ('declared_type_governs', 'TIMESTAMP is a 9i+ type; Oracle 8i has only DATE'),
 )
 
 
