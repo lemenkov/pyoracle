@@ -144,7 +144,9 @@ def _read_packet_body(raw: bytes) -> tuple[int, bytes]:
     try:
         a.sendall(raw)
         a.shutdown(socket.SHUT_WR)
-        return PacketStream(b).read_packet()
+        packet = PacketStream(b).read_packet()
+        assert packet is not None
+        return packet
     finally:
         a.close()
         b.close()

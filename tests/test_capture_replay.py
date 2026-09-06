@@ -80,6 +80,7 @@ class TestUrowidCaptureDecode(unittest.TestCase):
         # A fresh describe-led response decodes from the empty seed context; the
         # positional result is decode_packet's contract (err_code, describe,
         # rows, err_msg at indices 1/3/4/5).
+        assert body is not None
         return decode_packet(body, (None, None, []), self._FIELD_VERSION)
 
     def test_describe_identifies_the_urowid_column(self):

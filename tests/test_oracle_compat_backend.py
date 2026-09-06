@@ -18,13 +18,14 @@ from pathlib import Path
 import pytest
 
 from seerdb.server import BackendError, Result
+from seerdb.server.backend import Capability
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'examples'))
 from oracle_compat_backend import OracleCompatBackend  # noqa: E402
 
 
 class _FakeInner:
-    capabilities = frozenset()
+    capabilities: frozenset[Capability] = frozenset()
 
     def __init__(self) -> None:
         self.calls: list[str] = []

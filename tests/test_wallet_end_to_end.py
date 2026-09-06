@@ -24,6 +24,7 @@ from _tls_proxy import TLSProxy
 import seerdb
 from seerdb.common.tns_consts import TNS_TYPE_VARCHAR
 from seerdb.server import ColumnMeta, Result, UnsupportedFeature, credential_lookup
+from seerdb.server.backend import Capability
 
 WALLET_DIR = os.path.join(os.path.dirname(__file__), 'fixtures', 'wallet')
 CA_CERT = os.path.join(WALLET_DIR, 'ca_cert.pem')
@@ -35,7 +36,7 @@ CLIENT_DN = 'CN=seerdb-test-client'
 class _DualBackend:
     """One-row `dual` backend, per the seerdb.Server test convention."""
 
-    capabilities = frozenset()
+    capabilities: frozenset[Capability] = frozenset()
 
     def authenticate(self, username: str) -> str | None:
         return credential_lookup({'PYO': 'pyo123'}, username)
