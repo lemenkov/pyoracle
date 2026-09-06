@@ -4788,7 +4788,7 @@ gap to be closed for its own sake — while the Mirror deliberately answers *as*
 matters is whether a value has been *decoded* (its structure understood) or is
 still an undifferentiated blob.
 
-### 39.1 Handshake identity — `_handshake_11g.py` (§4.1, §4.2)
+### 39.1 Handshake identity — `server/handshake.py` (§4.1, §4.2)
 
 The PRO / DTY capability block is **computed** (`build_caps_block_reply` frames
 the banner, charset id, and the pieces below into the TTC payload); the pieces it
