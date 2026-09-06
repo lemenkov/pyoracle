@@ -368,6 +368,30 @@ def test_describe_decodes_back_at_a_12c_field_version(version: int) -> None:
     assert decoded[1]['max_size'] == 30
 
 
+@pytest.mark.parametrize('version', [6, 8, 14, 17])  # 11.2, 12.2, 20.1, 23ai
+def test_long_error_message_decodes_back_at_every_field_version(version: int) -> None:
+    # A message over 252 bytes is chunked, and an 11g client reads single-byte
+    # chunk lengths where a 12.2+ one reads ub4 ones; the Mirror's error reply
+    # has to be framed for the version the session negotiated (#734). The
+    # batch-error messages ride the same framing.
+    from seerdb.common.tns import (
+        decode_token_oer,
+        encode_batch_errors_status,
+        encode_error,
+    )
+
+    message = 'ORA-00900: ' + ' '.join(['a long explanation'] * 20)  # > 252 bytes
+    assert len(message.encode()) > 252
+    with _at_field_version(version):
+        error = decode_token_oer(encode_error(900, message), (0, [], []))
+        batch = decode_token_oer(
+            encode_batch_errors_status(1, [(0, 1, message), (2, 900, 'short')]),
+            (0, [], []),
+        )
+    assert error[1] == 900 and error[5] == message
+    assert [e['message'] for e in batch[7]] == [message, 'short']
+
+
 @pytest.mark.parametrize('version', [8, 14, 17])  # 12.2, 20.1, 23ai
 def test_oer_decodes_back_at_a_12c_field_version(version: int) -> None:
     # A 12.1+ client reads an extended error number + rowcount ahead of the
