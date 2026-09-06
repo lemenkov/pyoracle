@@ -917,6 +917,10 @@ _DESCRIBE_WIRE_LENGTH = {
     TNS_TYPE_REF: 2000,
     TNS_TYPE_CLOB: 4000,
     TNS_TYPE_BLOB: 4000,
+    # 23ai describes a BOOLEAN column with length 1 (measured). A zero here tells
+    # the client the column sends no bytes at all, and it then reads the value's
+    # byte as the next column's type (#740).
+    TNS_TYPE_BOOLEAN: 1,
 }
 
 
