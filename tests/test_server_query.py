@@ -26,6 +26,7 @@ from seerdb.common.tns_consts import (
     TNS_TYPE_BDOUBLE,
     TNS_TYPE_BFLOAT,
     TNS_TYPE_BLOB,
+    TNS_TYPE_BOOLEAN,
     TNS_TYPE_CHAR,
     TNS_TYPE_CLOB,
     TNS_TYPE_DATE,
@@ -477,6 +478,8 @@ def test_describe_fills_in_the_length_a_backend_cannot_report() -> None:
         TNS_TYPE_REF: 2000,
         TNS_TYPE_CLOB: 4000,
         TNS_TYPE_BLOB: 4000,
+        # A zero here made the client skip the column's byte entirely (#740).
+        TNS_TYPE_BOOLEAN: 1,
     }
     for data_type, length in expected.items():
         column = ColumnMeta(name=b'C', data_type=data_type, data_length=0, max_size=0)
