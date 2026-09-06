@@ -180,12 +180,8 @@ class ServerCapsTest(unittest.TestCase):
     that the field-version slot the client negotiates off reads back correctly."""
 
     def test_server_caps_reproduce_capture(self):
-        from seerdb.common.tns import (
-            _SERVER_COMPILE_CAPS,
-            _SERVER_RUNTIME_CAPS,
-            CCAP_FIELD_VERSION,
-        )
-        from seerdb.common.tns_consts import FIELD_VERSION_11_2
+        from seerdb.common.tns import _SERVER_COMPILE_CAPS, _SERVER_RUNTIME_CAPS
+        from seerdb.common.tns_consts import CCAP_FIELD_VERSION, FIELD_VERSION_11_2
 
         self.assertEqual(
             _SERVER_COMPILE_CAPS,

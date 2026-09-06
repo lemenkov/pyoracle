@@ -101,6 +101,31 @@ import struct
 from seerdb.common.tns_consts import (
     AL16UTF16_CHARSET,
     AL32UTF8_CHARSET,
+    CCAP_CLIENT_FN,
+    CCAP_DBF_VERSION,
+    CCAP_DEQUEUE_WITH_SELECTOR,
+    CCAP_FEATURE_BACKPORT,
+    CCAP_FEATURE_BACKPORT2,
+    CCAP_FIELD_VERSION,
+    CCAP_LOB,
+    CCAP_LOB2,
+    CCAP_LOGON_TYPES,
+    CCAP_OCI1,
+    CCAP_OCI2,
+    CCAP_OCI3,
+    CCAP_RPC_SIG,
+    CCAP_RPC_VERSION,
+    CCAP_SERVER_DEFINE_CONV,
+    CCAP_SESS_SIGNATURE_VERSION,
+    CCAP_SQL_VERSION,
+    CCAP_TDS_VERSION,
+    CCAP_TTC1,
+    CCAP_TTC2,
+    CCAP_TTC3,
+    CCAP_TTC4,
+    CCAP_TTC5,
+    CCAP_UB2_DTY,
+    CCAP_VECTOR_FEATURES,
     DEFAULT_HOST,
     DEFAULT_PORT,
     DEFAULT_SID,
@@ -115,6 +140,11 @@ from seerdb.common.tns_consts import (
     FIELD_VERSION_21_1,
     FIELD_VERSION_23_1,
     ISO_LATIN_1_CHARSET,
+    RCAP_COMPAT,
+    RCAP_COMPAT_81,
+    RCAP_TTC,
+    RCAP_TTC_32K,
+    RCAP_TTC_ZERO_COPY,
     TNS_AL8I4_ARRAY_DML_ROWCOUNTS,
     TNS_AQ_ARRAY_ENQ,
     TNS_AQ_ARRAY_FLAGS_RETURN_MESSAGE_ID,
@@ -3922,55 +3952,6 @@ def encode_dictionary_description(Dictionary: dict) -> bytes:
 # docs/PROTOCOL.md §4.2). We model them as {index: value} so the vector reads
 # as a feature list instead of an opaque blob, and so a single field-version
 # knob can switch seerdb between the 11g-era and 12c+-era wire contracts.
-
-# Compile-time capability indices (into the compile_caps array):
-CCAP_SQL_VERSION = 0
-CCAP_LOGON_TYPES = 4
-CCAP_FEATURE_BACKPORT = 5
-CCAP_FIELD_VERSION = 7  # gates the auth verifier + version-gated formats
-CCAP_SERVER_DEFINE_CONV = 8
-CCAP_DEQUEUE_WITH_SELECTOR = 9
-CCAP_TTC1 = 15
-CCAP_OCI1 = 16
-CCAP_TDS_VERSION = 17
-CCAP_RPC_VERSION = 18
-CCAP_RPC_SIG = 19
-CCAP_DBF_VERSION = 21
-CCAP_LOB = 23
-CCAP_TTC2 = 26
-CCAP_UB2_DTY = 27  # 2-byte data-type ids (12c+)
-CCAP_OCI2 = 31
-CCAP_CLIENT_FN = 34
-CCAP_OCI3 = 35
-CCAP_TTC3 = 37
-CCAP_SESS_SIGNATURE_VERSION = 39
-CCAP_TTC4 = 40
-CCAP_LOB2 = 42
-CCAP_TTC5 = 44
-CCAP_FEATURE_BACKPORT2 = 45
-CCAP_VECTOR_FEATURES = 52
-
-# Bit within compile_caps[CCAP_FEATURE_BACKPORT2] that advertises the end-user
-# security context piggyback (#460). 26ai advertises caps[45] = 0x03.
-CCAP_FEATURE_BACKPORT2_END_USER_SEC = 0x02
-
-# Bit within compile_caps[CCAP_TTC4] that advertises explicit request boundaries
-# (#464). Paired with the runtime RCAP_TTC_SESSION_STATE_OPS bit.
-CCAP_TTC4_EXPLICIT_BOUNDARY = 0x40
-
-# TNS_CCAP_FIELD_VERSION_* values (the byte written at CCAP_FIELD_VERSION) now
-# live in seerdb.common.tns_consts and are imported at the top of this module — kept
-# importable as `from seerdb.common.tns import FIELD_VERSION_*` for existing callers.
-# They live in the leaf constants module so seerdb.client.cursor can import the 12.1
-# threshold from a lightweight leaf without pulling in the whole encoder.
-
-# Runtime capability indices + the flag bits we set:
-RCAP_COMPAT = 0
-RCAP_TTC = 6
-RCAP_COMPAT_81 = 2
-RCAP_TTC_ZERO_COPY = 0x01
-RCAP_TTC_32K = 0x04
-RCAP_TTC_SESSION_STATE_OPS = 0x10  # server accepts request-boundary markers (#464)
 
 
 def max_string_size(RuntimeCaps: bytes) -> int:

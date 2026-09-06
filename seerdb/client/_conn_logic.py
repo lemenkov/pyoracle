@@ -27,12 +27,6 @@ from seerdb.client.dialect import Dialect, Fv2Dialect, O8iDialect
 from seerdb.common.end_user_sec import EndUserSecurityContext
 from seerdb.common.exceptions import NotSupportedError, ProgrammingError
 from seerdb.common.tns import (
-    CCAP_FEATURE_BACKPORT2,
-    CCAP_FEATURE_BACKPORT2_END_USER_SEC,
-    CCAP_TTC4,
-    CCAP_TTC4_EXPLICIT_BOUNDARY,
-    RCAP_TTC,
-    RCAP_TTC_SESSION_STATE_OPS,
     encode_ano_fragment,
     encode_close_cursors_piggyback,
     encode_end_to_end_piggyback,
@@ -41,9 +35,15 @@ from seerdb.common.tns import (
     max_string_size,
 )
 from seerdb.common.tns_consts import (
+    CCAP_FEATURE_BACKPORT2,
+    CCAP_FEATURE_BACKPORT2_END_USER_SEC,
+    CCAP_TTC4,
+    CCAP_TTC4_EXPLICIT_BOUNDARY,
     FIELD_VERSION_10_2,
     FIELD_VERSION_12_1,
     FIELD_VERSION_23_1,
+    RCAP_TTC,
+    RCAP_TTC_SESSION_STATE_OPS,
     TNS_SESSION_STATE_REQUEST_BEGIN,
     DictionaryType,
 )

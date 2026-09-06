@@ -110,6 +110,9 @@ TNS_END_TO_END_DBOP = 0x0200
 # it to TLS (tcps) transports.
 TNS_FUNC_END_USER_SECURITY_CTX = 205  # 0xCD
 TNS_SECURITY_CONTEXT_ATTACH_FLAG = 0x01
+# The bit in compile_caps[CCAP_FEATURE_BACKPORT2] that advertises it; 26ai
+# advertises caps[45] = 0x03.
+CCAP_FEATURE_BACKPORT2_END_USER_SEC = 0x02
 
 # Request boundaries (#464): a SESSION_STATE piggyback (func 176) that tells the
 # server when a pooled logical request begins / ends, so it can reset or reclaim
@@ -118,6 +121,13 @@ TNS_FUNC_SESSION_STATE = 176  # 0xB0
 TNS_SESSION_STATE_REQUEST_BEGIN = 0x04
 TNS_SESSION_STATE_REQUEST_END = 0x08
 TNS_SESSION_STATE_EXPLICIT_BOUNDARY = 0x40
+# The feature is negotiated by two capability bits, a compile-time one in
+# compile_caps[CCAP_TTC4] and a runtime one in runtime_caps[RCAP_TTC]. The
+# compile bit shares its value with the piggyback flag above, but it is a
+# different field: an advertisement, where the flag marks a boundary. They stay
+# two names so either can change without the other.
+CCAP_TTC4_EXPLICIT_BOUNDARY = 0x40
+RCAP_TTC_SESSION_STATE_OPS = 0x10
 
 TNS_ATTENTION = 13
 TNS_CONTROL = 14
@@ -324,6 +334,42 @@ FIELD_VERSION_20_1 = 14  # AQ JSON-payload pointer gate (#128)
 FIELD_VERSION_21_1 = 16
 FIELD_VERSION_23_1 = 17  # highest the LEGACY 3-message handshake reaches
 FIELD_VERSION_23_4 = 24  # 23ai max; reached only via FAST_AUTH (#89)
+
+# Indices into the compile-time capability array the handshake exchanges
+# (TNS_CCAP_*); the feature bits at a few of them sit with the features they
+# gate (CCAP_TTC4_EXPLICIT_BOUNDARY, CCAP_FEATURE_BACKPORT2_END_USER_SEC).
+CCAP_SQL_VERSION = 0
+CCAP_LOGON_TYPES = 4
+CCAP_FEATURE_BACKPORT = 5
+CCAP_FIELD_VERSION = 7  # gates the auth verifier + version-gated formats
+CCAP_SERVER_DEFINE_CONV = 8
+CCAP_DEQUEUE_WITH_SELECTOR = 9
+CCAP_TTC1 = 15
+CCAP_OCI1 = 16
+CCAP_TDS_VERSION = 17
+CCAP_RPC_VERSION = 18
+CCAP_RPC_SIG = 19
+CCAP_DBF_VERSION = 21
+CCAP_LOB = 23
+CCAP_TTC2 = 26
+CCAP_UB2_DTY = 27  # 2-byte data-type ids (12c+)
+CCAP_OCI2 = 31
+CCAP_CLIENT_FN = 34
+CCAP_OCI3 = 35
+CCAP_TTC3 = 37
+CCAP_SESS_SIGNATURE_VERSION = 39
+CCAP_TTC4 = 40
+CCAP_LOB2 = 42
+CCAP_TTC5 = 44
+CCAP_FEATURE_BACKPORT2 = 45
+CCAP_VECTOR_FEATURES = 52
+
+# Indices into the runtime capability array (TNS_RCAP_*) and the bits at them.
+RCAP_COMPAT = 0
+RCAP_TTC = 6
+RCAP_COMPAT_81 = 2
+RCAP_TTC_ZERO_COPY = 0x01
+RCAP_TTC_32K = 0x04
 
 # Oracle 23ai "fast auth" (#89): a single TNS DATA packet (message type 0x22)
 # bundling the protocol, datatypes, and OSESSKEY messages in one round trip. It is
