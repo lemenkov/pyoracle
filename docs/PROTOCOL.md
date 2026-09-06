@@ -3144,6 +3144,23 @@ arrives in the column's **DB charset** (a single-byte run on a typical 9i, **not
 the UTF-16BE the modern path uses) and is decoded with that charset; BLOB content
 is returned as raw bytes.
 
+A `Var` in a plain statement is an IN bind whose type was declared
+(`setinputsizes`); its descriptor carries the Var's type and size like a block's
+OUT bind, with one exception. 9i treats a CHAR bind as `CHAR(max_size)` and
+blank-pads the value to it, so a declared CHAR sized by the Var's default (2000)
+read back padded to 2000 where 8i and 10g+ return it as sent (#737). A declared
+CHAR that carries a string value is therefore sized to that value's encoded
+length (UTF-8, or UTF-16BE for a national CHAR). A block's binds keep the Var's
+size: there it is the return buffer.
+
+What 9i does with the bind is then right, `LENGTH(:x)` is the value's own
+length, but it still types a `SELECT :x` expression at a width of its own (32
+for a short value, 128 for a longer one, measured) and pads the *fetched*
+expression to it, where 8i and 10g+ return the value as sent whatever width
+they describe. That is the server's CHAR expression typing, not the bind, and
+declaring VARCHAR instead would lose the blank-padded comparison a CHAR bind is
+declared for.
+
 ### 19.6 Anonymous PL/SQL blocks (#102, IN binds)
 
 A `BEGIN … END;` / `DECLARE … ;` block runs as **OOPEN + a single ALL7

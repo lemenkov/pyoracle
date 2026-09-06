@@ -7243,7 +7243,7 @@ def encode_o7_open(Seq: int) -> bytes:
     return bytes([TTI_FUN, 0x02, Seq, 0x01, 0x00])
 
 
-def _o7_bind_oac(Value: object) -> bytes:
+def _o7_bind_oac(Value: object, Statement: bool = False) -> bytes:
     # fv2 bind descriptor (same 13/14-byte shape as a define entry): the
     # client's declared type for an input bind. Number → VARNUM(6); str →
     # VARCHAR sized 4000 (what JDBC declares); bytes → RAW; None defaults to a
@@ -7255,6 +7255,14 @@ def _o7_bind_oac(Value: object) -> bytes:
     # defaults to 32767, matching JDBC). The mode (IN/OUT/IN OUT) is NOT in the
     # OAC — the server infers it from the block and signals it in the bind
     # prompt; see decode_fv2_block_out.
+    #
+    # `Statement` says the bind belongs to a plain SQL statement rather than a
+    # PL/SQL block, so a Var there is an IN bind whose type was declared
+    # (setinputsizes) and needs no return buffer. That matters for CHAR: 9i
+    # treats a CHAR bind as CHAR(max_size) and blank-pads the value to it, so a
+    # declared CHAR sized by the Var's default came back padded to 2000 (#737).
+    # Sized to the value it carries, the bind is the value (LENGTH(:x) agrees);
+    # a SELECT-list `:x` is still typed at a width of 9i's own and padded to it.
     from seerdb.common.datatypes import Var
 
     # Char binds declare AL32UTF8 (csfrm 1) — the driver negotiates an AL32UTF8
@@ -7282,6 +7290,13 @@ def _o7_bind_oac(Value: object) -> bytes:
             Type, MaxSize, Csfrm = 0x06, 22, 1
         elif VType == TNS_TYPE_RAW:
             Type, MaxSize, Csfrm = TNS_TYPE_RAW, Value.size, 0
+        elif (
+            VType == TNS_TYPE_CHAR and Statement and isinstance(Value.getvalue(0), str)
+        ):
+            Held = Value.getvalue(0)
+            assert isinstance(Held, str)
+            Encoding = 'utf-16-be' if Vcsfrm == 2 else 'utf-8'
+            Type, MaxSize, Csfrm = VType, max(len(Held.encode(Encoding)), 1), Vcsfrm
         else:
             Type, MaxSize, Csfrm = VType, Value.size, Vcsfrm
         return _oac(Type, MaxSize, Csfrm)
@@ -7351,7 +7366,7 @@ def encode_o7_parse(Seq: int, Sql: str, Binds: list | None = None) -> bytes:
         + _O7_PARSE_TAIL
     )
     if Binds:
-        Oacs = [_o7_bind_oac(V) for V in Binds]
+        Oacs = [_o7_bind_oac(V, Statement=True) for V in Binds]
         Out += b''.join(Oacs)
         # 9i applies the LONG-class rule too (docs/PROTOCOL.md 5.4, #723): a
         # bind declared wider than 4000 bytes has its value read after the
