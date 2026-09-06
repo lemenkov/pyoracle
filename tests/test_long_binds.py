@@ -12,9 +12,11 @@ just swapped (docs/PROTOCOL.md 5.4).
 
 import unittest
 
+import seerdb
 from seerdb.common.datatypes import Var
 from seerdb.common.tns import (
     _DECODE_FIELD_VERSION,
+    decode_ub4,
     encode_dictionary_exec,
     max_string_size,
     parse_exec,
@@ -244,3 +246,38 @@ class TestTheThresholdIsReadOffTheServerCaps(unittest.TestCase):
 
     def test_no_caps_at_all_means_the_classic_limit(self):
         self.assertEqual(max_string_size(b''), PRE_12C)
+
+
+class Declared9iCharBind(unittest.TestCase):
+    # 9i pads a CHAR bind to the descriptor's max size, so a declared CHAR IN
+    # bind in a plain statement is sized to its value; a block's Var keeps its
+    # buffer size, which is the return buffer there (#737).
+
+    def _max_size(self, oac: bytes) -> int:
+        return decode_ub4(oac[4:])[0]
+
+    def test_declared_char_in_a_statement_is_sized_to_its_value(self):
+        from seerdb.common.datatypes import Var
+        from seerdb.common.tns import _o7_bind_oac
+        from seerdb.common.tns_consts import TNS_TYPE_CHAR
+
+        var = Var(seerdb.DB_TYPE_CHAR)
+        var.setvalue(0, 'ab')
+        oac = _o7_bind_oac(var, Statement=True)
+        self.assertEqual(oac[0], TNS_TYPE_CHAR)
+        self.assertEqual(self._max_size(oac), 2)
+        # In a block the same Var is a return buffer and keeps its size.
+        self.assertEqual(self._max_size(_o7_bind_oac(var)), 2000)
+        # Without a value there is nothing to size by; the default stands.
+        self.assertEqual(
+            self._max_size(_o7_bind_oac(Var(seerdb.DB_TYPE_CHAR), Statement=True)),
+            2000,
+        )
+
+    def test_declared_national_char_is_sized_in_utf16(self):
+        from seerdb.common.datatypes import Var
+        from seerdb.common.tns import _o7_bind_oac
+
+        var = Var(seerdb.DB_TYPE_NCHAR)
+        var.setvalue(0, 'ab')
+        self.assertEqual(self._max_size(_o7_bind_oac(var, Statement=True)), 4)
