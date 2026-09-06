@@ -22,6 +22,7 @@ from dataclasses import replace
 
 import seerdb
 from seerdb.common.datatypes import dbtype_for_oracle_type
+from seerdb.common.sqltext import is_plsql
 from seerdb.common.tns import AL16UTF16_CHARSET, ColumnMeta
 from seerdb.common.tns_consts import (
     TNS_TYPE_BLOB,
@@ -85,7 +86,19 @@ class OraclePassthroughBackend:
         # OUT-capable Var seeded with the input value, run, and return every Var's
         # value; the Mirror marks them OUT and the client keeps its own positions.
         if any(isinstance(b, BindVar) for b in binds):
-            return self._execute_plsql(cursor, sql, binds)
+            if is_plsql(sql):
+                return self._execute_plsql(cursor, sql, binds)
+            # An ordinary statement's BindVar is a typed NULL (#699): declare
+            # the type upstream the way the client did, and bind the NULL.
+            cursor.setinputsizes(
+                *[
+                    dbtype_for_oracle_type(b.tns_type, 1)
+                    if isinstance(b, BindVar)
+                    else None
+                    for b in binds
+                ]
+            )
+            binds = [b.value if isinstance(b, BindVar) else b for b in binds]
         try:
             cursor.execute(sql, list(binds))
         except seerdb.DatabaseError as exc:

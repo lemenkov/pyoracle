@@ -183,8 +183,11 @@ class SqliteBackend:
     def execute(self, sql: str, binds: Sequence = ()) -> Result:
         if binds:
             sql = _ORACLE_BIND.sub('?', sql)
+        # A typed NULL arrives as a BindVar (#699); SQLite types a value, not a
+        # placeholder, so the declaration has nothing to say here.
+        values = tuple(b.value if isinstance(b, BindVar) else b for b in binds)
         try:
-            cursor = self._conn.execute(sql, tuple(binds))
+            cursor = self._conn.execute(sql, values)
         except sqlite3.Error as exc:
             # A SQLite failure surfaces as a clean ORA error — never a desync.
             raise BackendError(str(exc), ora_code=_ORA_INVALID_SQL) from exc

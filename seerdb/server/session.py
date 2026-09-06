@@ -792,8 +792,9 @@ def _answer_query_oci(
         # BindVar so the backend registers them OUT-capable and returns the assigned
         # values — the wire carries no direction, so every bind goes over
         # OUT-capable (the same path the thin exec uses). A plain statement's binds
-        # pass through unchanged.
-        result = backend.execute(request.sql, _plsql_bind_vars(request))
+        # pass through unchanged, except a NULL, which goes over with its declared
+        # type (#699).
+        result = backend.execute(request.sql, _bind_vars(request))
     except BackendError as err:
         # A statement the backend can't run. A failed SELECT (e.g. sqlplus's
         # PRODUCT_PRIVS lookup) must come back as an ORA error — sqlplus expects
@@ -1167,20 +1168,23 @@ def _is_plsql_block(sql: str) -> bool:
     return head.startswith('BEGIN') or head.startswith('DECLARE')
 
 
-def _plsql_bind_vars(request: ExecRequest) -> list:
-    # For a PL/SQL block with binds, wrap each value with its declared type and
-    # return-buffer size so the backend can register OUT binds correctly (#483) —
-    # the wire carries no direction, so every bind is handed over OUT-capable and
-    # the client keeps only the positions it bound as a Var. Any other statement,
-    # or a shape mismatch, passes its plain values unchanged.
-    if (
-        not request.binds
-        or not _is_plsql_block(request.sql)
-        or len(request.bind_meta) != len(request.binds)
-    ):
+def _bind_vars(request: ExecRequest) -> list:
+    # Hand the backend each bind whose value alone cannot say what it is,
+    # wrapped with the type the client declared for it. For a PL/SQL block that
+    # is every bind: the wire carries no direction, so each goes over OUT-capable
+    # with its type and return-buffer size (#483), and the client keeps only the
+    # positions it bound as a Var. For any other statement it is a NULL bind: a
+    # NULL carries no type, the client may have declared one (setinputsizes)
+    # for exactly that reason, and a backend that cannot infer it has nothing
+    # else to go on (#699). A non-NULL value passes through unchanged, as does
+    # everything on a shape mismatch.
+    if not request.binds or len(request.bind_meta) != len(request.binds):
         return request.binds
+    block = _is_plsql_block(request.sql)
     return [
         BindVar(value=value, tns_type=tns_type, max_size=size)
+        if block or value is None
+        else value
         for value, (tns_type, size) in zip(request.binds, request.bind_meta)
     ]
 
@@ -1279,7 +1283,7 @@ def _answer_query(
                         batch_errors.append((offset, err.ora_code, err.ora_message))
                 result = Result(rowcount=affected)
         else:
-            result = backend.execute(sql, _plsql_bind_vars(request))
+            result = backend.execute(sql, _bind_vars(request))
         # Autocommit mode: the client set the commit-on-success option, so
         # persist this statement before replying (an explicit-transaction client
         # leaves the bit clear and drives commit/rollback itself).

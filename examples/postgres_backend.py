@@ -76,19 +76,22 @@ from psycopg.types.composite import CompositeInfo, register_composite
 
 from seerdb.common.datatypes import IntervalYM
 from seerdb.common.dbobject import DbRef
-from seerdb.common.sqltext import strip_returning_into
+from seerdb.common.sqltext import is_plsql, strip_returning_into
 from seerdb.common.tns_consts import (
     TNS_TYPE_BDOUBLE,
     TNS_TYPE_BFLOAT,
     TNS_TYPE_BLOB,
+    TNS_TYPE_BOOLEAN,
     TNS_TYPE_CLOB,
     TNS_TYPE_DATE,
     TNS_TYPE_INTERVALDS,
     TNS_TYPE_INTERVALYM,
+    TNS_TYPE_LONGRAW,
     TNS_TYPE_NUMBER,
     TNS_TYPE_RAW,
     TNS_TYPE_REF,
     TNS_TYPE_TIMESTAMP,
+    TNS_TYPE_TIMESTAMPLTZ,
     TNS_TYPE_TIMESTAMPTZ,
     TNS_TYPE_VARCHAR,
 )
@@ -301,6 +304,32 @@ def _bind_key(name: str) -> str:
     return name if name.isidentifier() else f'b{name}'
 
 
+# The PostgreSQL type a NULL bind is cast to, from the type the client declared
+# for it (#699). A NULL carries no type of its own: PostgreSQL either refuses a
+# parameter it cannot infer ("could not determine data type of parameter") or
+# infers text where the statement needs a number. Oracle reads the type off the
+# bind descriptor; the Mirror hands it over as a BindVar, and the cast says it.
+# The string types are deliberately absent: a NULL nobody declared travels as
+# VARCHAR too, so a text cast would turn `id = :x` on a NUMBER column into
+# `numeric = text` and break it, while an uncast placeholder lets PostgreSQL
+# infer the column's type from context, which is what an Oracle NULL does.
+_NULL_CASTS = {
+    TNS_TYPE_NUMBER: 'numeric',
+    TNS_TYPE_BFLOAT: 'real',
+    TNS_TYPE_BDOUBLE: 'double precision',
+    TNS_TYPE_DATE: 'timestamp',
+    TNS_TYPE_TIMESTAMP: 'timestamp',
+    TNS_TYPE_TIMESTAMPTZ: _TSTZ_TYPE,
+    TNS_TYPE_TIMESTAMPLTZ: 'timestamptz',
+    TNS_TYPE_INTERVALYM: 'interval',
+    TNS_TYPE_INTERVALDS: 'interval',
+    TNS_TYPE_RAW: 'bytea',
+    TNS_TYPE_LONGRAW: 'bytea',
+    TNS_TYPE_BLOB: 'bytea',
+    TNS_TYPE_BOOLEAN: 'boolean',
+}
+
+
 def _translate_binds(sql: str, binds: Sequence) -> tuple[str, dict]:
     """Rewrite Oracle bind references to psycopg named placeholders and build the
     parameter dict (#516). Oracle binds by name, so a bind repeated in the text
@@ -335,7 +364,12 @@ def _translate_binds(sql: str, binds: Sequence) -> tuple[str, dict]:
             value = (
                 values[names.index(name)] if names.index(name) < len(values) else None
             )
-            if isinstance(value, datetime.datetime) and value.tzinfo is not None:
+            if isinstance(value, BindVar):
+                # A typed NULL (#699): the value is None; the cast carries the
+                # declared type, where there is a PostgreSQL type to cast to.
+                cast = _NULL_CASTS.get(value.tns_type)
+                out.append(f'%({key})s::{cast}' if cast else f'%({key})s')
+            elif isinstance(value, datetime.datetime) and value.tzinfo is not None:
                 # An aware datetime binds a TIMESTAMP WITH TIME ZONE — build the
                 # offset-preserving composite so the entered offset survives the
                 # round trip rather than being normalised to UTC (#519).
@@ -358,7 +392,8 @@ def _translate_binds(sql: str, binds: Sequence) -> tuple[str, dict]:
         if idx >= len(values):
             continue
         key = _bind_key(name)
-        params[key] = values[idx]
+        value = values[idx]
+        params[key] = value.value if isinstance(value, BindVar) else value
         if key in tstz_keys:
             params[f'{key}__off'] = int(values[idx].utcoffset().total_seconds())
         elif key in intervalym_keys:
@@ -1106,8 +1141,9 @@ class PostgresBackend:
     def execute(self, sql: str, binds: Sequence = ()) -> Result:
         # A PL/SQL block from callproc / callfunc arrives with BindVar binds (the
         # Mirror's OUT-bind flow); run it via CALL / SELECT and return the OUT
-        # values (#503).
-        if any(isinstance(b, BindVar) for b in binds):
+        # values (#503). An ordinary statement's BindVar is a typed NULL, which
+        # _translate_binds casts (#699).
+        if binds and is_plsql(sql):
             return self._execute_plsql(sql, binds)
         # A `SELECT REF(alias)` object-REF fetch: PostgreSQL has no REF, so stand in
         # the row's ctid as the locator and report the referenced object type from

@@ -88,10 +88,16 @@ class _FakeCursor:
 
     def __init__(self, out_values=None):
         self.bound = None
+        self.declared = None
+        self.description = None
+        self.rowcount = 0
         self._out_values = out_values or {}
 
     def var(self, dbtype, size=None):
         return _FakeVar()
+
+    def setinputsizes(self, *args):
+        self.declared = args
 
     def execute(self, sql, variables):
         self.bound = list(variables)
@@ -105,6 +111,25 @@ def _plsql_binds(*binds):
     from seerdb.server.backend import BindVar
 
     return [BindVar(value=v, tns_type=t, max_size=m) for (v, t, m) in binds]
+
+
+def test_typed_null_of_an_ordinary_statement_is_declared_upstream():
+    # A NULL bind arrives as a BindVar with the type the client declared for
+    # it (#699); the passthrough declares that type on its own cursor the same
+    # way (setinputsizes) and binds the NULL, rather than taking the BindVar
+    # for a PL/SQL OUT bind.
+    from seerdb.common.tns_consts import TNS_TYPE_NUMBER
+    from seerdb.server.backend import BindVar
+
+    backend = OraclePassthroughBackend(host='h', port=1, service='s', credentials={})
+    cursor = _FakeCursor()
+    backend._conn = type('Conn', (), {'cursor': lambda self: cursor})()
+    (typed,) = _plsql_binds((None, TNS_TYPE_NUMBER, 22))
+    result = backend.execute('SELECT id FROM t WHERE :1 IS NULL', [typed, 'x'])
+    assert cursor.declared == (seerdb.DB_TYPE_NUMBER, None)
+    assert cursor.bound == [None, 'x']
+    assert result.rowcount == 0 and not result.out_binds
+    assert not isinstance(cursor.bound[0], BindVar)
 
 
 def test_large_lob_in_bind_is_bound_as_a_plain_value_not_a_var():
