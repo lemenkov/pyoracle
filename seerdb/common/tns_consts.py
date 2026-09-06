@@ -444,11 +444,17 @@ CharsetDict = {
 DEFAULT_HOST = ''
 DEFAULT_PORT = 1521
 DEFAULT_SID = ''
-# The packed release 11.2.0.2.0 (major<<24 | minor<<20 | update<<12 | patch<<8),
-# 186647040: what the captured XE 11.2 reports as AUTH_VERSION_NO, so the Mirror's
-# 11.2 identity and the codec's auth-result default, and also the container
-# version a modern thin client stamps on its ANO negotiation (ano).
+# Packed releases (major<<24 | minor<<20 | update<<12 | patch<<8), each what a
+# captured server reports as AUTH_VERSION_NO and so what the Mirror's identity
+# of that tier claims. 11.2.0.2.0 is also the codec's auth-result default and the
+# container version a modern thin client stamps on its ANO negotiation (ano);
+# 23.1.162.0.0 is also the per-service version a 26ai server echoes in its ANO
+# response. 12.2.0.1.0 is not captured: there is no 12.2 testbed, so it is the
+# release number of that line's first patch set.
 VERSION_11_2_0_2 = 0x0B200200
+VERSION_12_2_0_1 = 0x0C200100
+VERSION_21_3_0_0 = 0x15030000  # which a client renders as 21.0.48.0.0
+VERSION_23_1_162_0 = 0x171A2000
 
 # Default Session Data Unit (0x2000). The negotiated packet payload size; both
 # the client connect defaults and the server (Mirror) framing start here.

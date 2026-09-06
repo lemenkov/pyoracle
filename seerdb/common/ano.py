@@ -36,7 +36,7 @@ import struct
 from dataclasses import dataclass
 from secrets import token_bytes
 
-from seerdb.common.tns_consts import VERSION_11_2_0_2
+from seerdb.common.tns_consts import VERSION_11_2_0_2, VERSION_23_1_162_0
 
 ANO_MAGIC = 0xDEADBEEF
 # The ANO protocol version advertised in the container header and echoed per
@@ -418,9 +418,10 @@ DH_GENERATOR = (2).to_bytes(len(DH_PRIME), 'big')  # generator 2, prime-padded
 # it keys the data-integrity MAC (not the cipher). ASCII, 20 bytes.
 DH_SERVER_IV = b'foo bar baz bat quux'
 
-# The per-service version a real server echoes in its negotiation response. The
-# client ignores it, but a faithful Mirror sends what the wire showed.
-_RESPONSE_VERSION = 0x171A2000
+# The per-service version a real server echoes in its negotiation response: the
+# 26ai testbed's release. The client ignores it, but a faithful Mirror sends what
+# the wire showed.
+_RESPONSE_VERSION = VERSION_23_1_162_0
 
 
 @dataclass

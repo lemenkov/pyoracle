@@ -35,6 +35,9 @@ from seerdb.common.tns_consts import (
     FIELD_VERSION_21_1,
     FIELD_VERSION_23_1,
     VERSION_11_2_0_2,
+    VERSION_12_2_0_1,
+    VERSION_21_3_0_0,
+    VERSION_23_1_162_0,
 )
 
 
@@ -65,7 +68,7 @@ IDENTITY_11_2 = ServerIdentity(
 )
 
 IDENTITY_12_2 = ServerIdentity(
-    version_no=0x0C200100,  # 12.2.0.1.0
+    version_no=VERSION_12_2_0_1,  # 12.2.0.1.0
     version_sql=b'23',
     version_string=b'- 64bit Production',
     banner=(
@@ -74,14 +77,14 @@ IDENTITY_12_2 = ServerIdentity(
 )
 
 IDENTITY_21 = ServerIdentity(
-    version_no=0x15030000,  # 21.3.0.0.0, which a client renders as 21.0.48.0.0
+    version_no=VERSION_21_3_0_0,  # 21.3.0.0.0, which a client renders as 21.0.48.0.0
     version_sql=b'25',
     version_string=b'- Production',
     banner=b'Oracle Database 21c Express Edition Release 21.0.0.0.0 - Production',
 )
 
 IDENTITY_23 = ServerIdentity(
-    version_no=0x171A2000,  # 23.1.162.0.0
+    version_no=VERSION_23_1_162_0,  # 23.1.162.0.0
     version_sql=b'26',
     version_string=b'- Develop, Learn, and Run for Free',
     banner=(
