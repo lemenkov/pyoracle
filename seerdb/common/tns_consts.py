@@ -53,6 +53,15 @@ TNS_PIPELINE_MODE_ABORT_ON_ERROR = 2
 # an absent value — e.g. sqlplus / thick-OCI sends `fd 01` in an OUT bind's value
 # slot (§ OUT-bind request marker), the wire carrying no bind direction.
 TNS_ESCAPE_CHAR = 0xFD
+# The longest value a single length byte may announce (python-oracledb's
+# TNS_MAX_SHORT_LENGTH). The three bytes above it are markers, not lengths:
+# 253 (0xFD) is the escape above, 254 (0xFE) opens a chunked value and 255
+# (0xFF) is NULL. A 253-byte value behind a plain length byte is an escape where
+# the server expects a length, and 12c+ rejects the call with ORA-03125 (#707).
+# The same markers frame object-image attributes (dbobject).
+TNS_MAX_SHORT_LENGTH = 252
+TNS_LONG_LENGTH_INDICATOR = 0xFE
+TNS_NULL_LENGTH_INDICATOR = 0xFF
 
 # Server-side scrollable cursors (#181). The execute al8i4 array carries the
 # scroll request: al8i4[9] gains the SCROLLABLE + NO_CANCEL_ON_EOF exec flags
@@ -60,6 +69,9 @@ TNS_ESCAPE_CHAR = 0xFD
 # orientation, al8i4[11] the 1-based fetch position (ABSOLUTE / RELATIVE).
 TNS_EXEC_FLAGS_SCROLLABLE = 0x02
 TNS_EXEC_FLAGS_NO_CANCEL_ON_EOF = 0x80
+# al8i4[9] bit a query execute sets (oracledb-thin: implicit result sets); its
+# absence is what the DBMS_SQL.RETURN_RESULT path checks for (#121).
+TNS_EXEC_FLAGS_IMPLICIT_RESULTSET = 0x8000
 # Exec-options word bit for a re-execute that re-runs the statement. A scroll
 # re-execute must NOT set it: oracledb-thin's scroll re-execute uses FETCH-only
 # options (0x8040), and leaving EXECUTE (0x20) on makes the server re-run the
@@ -67,6 +79,10 @@ TNS_EXEC_FLAGS_NO_CANCEL_ON_EOF = 0x80
 # top and every orientation comes back empty. set_opts always forces 0x20 on for
 # a Flag=0 select, so encode_dictionary_exec clears it for a scroll re-execute.
 TNS_EXEC_OPTION_EXECUTE = 0x20
+# The other exec-options word bits the execute encoders compose.
+TNS_EXEC_OPTION_PARSE = 0x01
+TNS_EXEC_OPTION_BIND = 0x08
+TNS_EXEC_OPTION_FETCH = 0x40
 TNS_FETCH_ORIENTATION_CURRENT = 0x01
 TNS_FETCH_ORIENTATION_NEXT = 0x02
 TNS_FETCH_ORIENTATION_FIRST = 0x04
@@ -348,6 +364,12 @@ TNS_LOB_OP_GET_CHUNK_SIZE = 0x4000
 TNS_LOB_OP_OPEN = 0x8000
 TNS_LOB_OP_CLOSE = 0x10000
 
+# Bind OAC flag bits: every thin bind uses indicators; a PL/SQL associative-array
+# bind (#122) also sets ARRAY, in the flag byte of the 12.2+ layout and in the
+# second flag word of the 11g one (see encode_token_raw).
+TNS_BIND_USE_INDICATORS = 0x01
+TNS_BIND_ARRAY = 0x40
+
 # Bind directions in the TTI_IOV response (one per bind, in bind order).
 TNS_BIND_DIR_OUTPUT = 16
 TNS_BIND_DIR_INPUT = 32
@@ -376,6 +398,11 @@ CharsetDict = {
 DEFAULT_HOST = ''
 DEFAULT_PORT = 1521
 DEFAULT_SID = ''
+# The packed release (major<<24 | minor<<20 | update<<12 | patch<<8) of the
+# captured XE 11.2.0.2.0 server: the Mirror's 11.2 identity and the codec's
+# default AUTH_VERSION_NO in an auth result.
+SERVER_VERSION_11_2_0_2 = 0x0B200200
+
 # Default Session Data Unit (0x2000). The negotiated packet payload size; both
 # the client connect defaults and the server (Mirror) framing start here.
 DEFAULT_SDU = 8192

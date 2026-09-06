@@ -1109,7 +1109,7 @@ def test_oci_banner_follows_the_advertised_release(
     from seerdb.server.identity import server_identity
     from seerdb.server.session import _serve_oci_session
 
-    version_call = oci.OCI_VERSION_CALL + bytes(_OCI_80SES_FIXED - 2) + b'\x03\x3b'
+    version_call = oci.OCI_PIGGYBACK_80SES + bytes(_OCI_80SES_FIXED - 2) + b'\x03\x3b'
 
     class _Stream:
         def __init__(self) -> None:

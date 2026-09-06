@@ -29,6 +29,8 @@ import builtins
 from seerdb.common.exceptions import NotSupportedError
 from seerdb.common.tns_consts import (
     AL32UTF8_CHARSET,
+    TNS_LONG_LENGTH_INDICATOR,
+    TNS_NULL_LENGTH_INDICATOR,
     TNS_TYPE_BDOUBLE,
     TNS_TYPE_BFLOAT,
     TNS_TYPE_CHAR,
@@ -52,9 +54,6 @@ COLLECTION_PLSQL_INDEX_TABLE = 1
 COLLECTION_NESTED_TABLE = 2
 COLLECTION_VARRAY = 3
 
-# Length markers inside the image (python-oracledb base_impl.pxd).
-_LONG_LENGTH_INDICATOR = 254  # next 4 bytes are a big-endian length
-_NULL_LENGTH_INDICATOR = 255  # NULL attribute (no bytes follow)
 
 # XMLType image flags (#124, python-oracledb constants.pxi).
 _XML_TYPE_LOB = 0x0001  # content is a CLOB locator
@@ -384,9 +383,9 @@ def _read_length(Image: bytes, Pos: int) -> tuple[int | None, int]:
     # indicator (then a 4-byte big-endian length follows) or the NULL marker.
     Length = Image[Pos]
     Pos += 1
-    if Length == _NULL_LENGTH_INDICATOR:
+    if Length == TNS_NULL_LENGTH_INDICATOR:  # NULL attribute, no bytes follow
         return (None, Pos)
-    if Length == _LONG_LENGTH_INDICATOR:
+    if Length == TNS_LONG_LENGTH_INDICATOR:  # next 4 bytes are a big-endian length
         Length = int.from_bytes(Image[Pos : Pos + 4], 'big')
         Pos += 4
     return (Length, Pos)
