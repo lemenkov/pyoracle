@@ -1502,7 +1502,13 @@ rest carried:
 - the describe **timestamp** and **object id** are instance-specific — but sqlplus
   *rejects a describe reply whose timestamp / object id are zero* (it silently
   waits for more, unlike the query describe which tolerates a zeroed timestamp), so
-  the Mirror carries the non-zero captured values verbatim rather than zeroing them.
+  the Mirror carries the non-zero captured values rather than zeroing them. The
+  timestamp is not opaque, though: it is **one 7-byte Oracle DATE** (the moment the
+  dictionary row was analyzed — `78 7e 09 02 0c 28 1b`, 2026-09-02 11:39:26 from
+  the capture), decoded to the named `_OCI_DESC_TIMESTAMP` and reused at every site
+  it appears — the header (three times) and each non-last column block — each time
+  behind a `27 <field-id>` tag as a describe-time DALC (`_oci_desc_dalc`: ub4 len 7,
+  ub1 len 7, the date). Only the surrounding object / version numbers stay carried.
 
 Two framing points matter: the reply body follows the 8-byte TNS header and the
 **2-byte data flags** (`00 00`) — a describe reply that folds the data flags into

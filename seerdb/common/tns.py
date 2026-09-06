@@ -5948,16 +5948,47 @@ _OCI_DCB_NUMCOLS_OFF = 37
 # are zeroed, so the header carries the non-zero, valid values from the capture —
 # the Mirror has no real object numbers and the fields are not rendered, so they
 # are carried verbatim rather than synthesised.
-_OCI_DESC_HDR_PRE = bytes.fromhex('0801000100000027010700000007787e09020c281b00000000')
-_OCI_DESC_HDR_POST = bytes.fromhex(
-    '44c50100000000000000000000010000007244c501000000000001000000be0100000027'
-    '0b0700000007787e09020c281b0000000000000000000000000000000000000000000100'
-    '00000b0102000000be0100000027000700000007787e09020c281b020000000000000000'
-    '000000000000000000000000000000000000000000000000000000000000000000000000'
-    '000000000000000000000000000000000000000000000000000000000000000000000000'
-    '000000000000000000000000000000000100000027090700000007787e09020c281b0200'
-    '000000000000000000000000000000000000000000000000000000000000000000000000'
-    '0000000000000000000000010000'
+# The describe timestamp the DESCRIBE reply reports (the moment the dictionary
+# row was last analyzed). A 7-byte Oracle DATE, carried from the live 11.2
+# capture: 2026-09-02 11:39:26 (century 20, year 26, month 9, day 2, then the
+# +1-biased h/m/s). sqlplus does not render it but hangs if it is zeroed, so the
+# value is carried, not synthesised — but it is one date, reused at every site
+# below (the header and each non-last column block, §39.2), each time as a DALC
+# (`_oci_desc_dalc`): a `27 <field-id>` tag, then `ub4 len 7 | ub1 len 7 | date`.
+_OCI_DESC_TIMESTAMP = bytes.fromhex('787e09020c281b')
+
+# The DESCRIBE reply's fixed header, split around the timestamp field it carries
+# (a `27 01`-tagged describe-time DALC). Everything else is opaque object-metadata
+# framing (object / version numbers), carried verbatim.
+_OCI_DESC_HDR_PRE = (
+    bytes.fromhex('0801000100000027010700000007')
+    + _OCI_DESC_TIMESTAMP
+    + bytes.fromhex('00000000')
+)
+# The post-header, carrying the same describe timestamp three times (each behind
+# a `27 0b` / `27 00` / `27 09` field tag), the rest opaque object-metadata
+# framing (the `be010000` / `44c50100` object and version numbers, then zeros).
+_OCI_DESC_HDR_POST = (
+    bytes.fromhex(
+        '44c50100000000000000000000010000007244c501000000000001000000be0100000027'
+        '0b0700000007'
+    )
+    + _OCI_DESC_TIMESTAMP
+    + bytes.fromhex(
+        '000000000000000000000000000000000000000000010000000b0102000000be01000000'
+        '27000700000007'
+    )
+    + _OCI_DESC_TIMESTAMP
+    + bytes.fromhex(
+        '020000000000000000000000000000000000000000000000000000000000000000000000'
+        '000000000000000000000000000000000000000000000000000000000000000000000000'
+        '000000000000000000000000000000000000000000000000000100000027090700000007'
+    )
+    + _OCI_DESC_TIMESTAMP
+    + bytes.fromhex(
+        '020000000000000000000000000000000000000000000000000000000000000000000000'
+        '00000000000000000000000000010000'
+    )
 )
 _OCI_DESC_BLK = bytes.fromhex(
     '005c160002000100000001430a0201000000000000000000000000000000000000000000'
@@ -6022,7 +6053,9 @@ _OCI_DESC_TIMESTAMP_TYPES = frozenset(
 # around a 7-byte date) in its post-name region — the last block leaves it zero.
 # sqlplus hangs on a multi-column reply whose non-last blocks omit it, so it is
 # patched in (a valid, carried date; the value is not rendered).
-_OCI_DESC_TS_ENTRY = bytes.fromhex('0100000027090700000007787e09020c281b02')
+_OCI_DESC_TS_ENTRY = (
+    bytes.fromhex('0100000027090700000007') + _OCI_DESC_TIMESTAMP + bytes.fromhex('02')
+)
 _OCI_DESC_BLK_TS_OFF = 81  # offset of the entry within a block's post-name region
 
 
