@@ -18,13 +18,23 @@ anchors are 11.2 -> 22, 21c -> 25, 23ai -> 26. **12.2's value is not captured**
 (there is no 12.2 testbed here), so 23 is taken from the gap between those
 anchors. Nothing reads it back — a client decodes only ``AUTH_VERSION_NO`` into
 its version property — so it is descriptive, not load-bearing.
+
+The 21c and 23ai banners are what those two testbeds print after "Connected
+to:" (``v$version``), measured 2026-09-06. The 23ai testbed is the 26ai Free
+build of the 23 lineage, whose engine still reports the 23.1.162 release the
+client decodes while its banner names the 23.26.2 build; both are kept as sent,
+that mismatch being what the real server does.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from seerdb.common.tns_consts import FIELD_VERSION_12_2
+from seerdb.common.tns_consts import (
+    FIELD_VERSION_12_2,
+    FIELD_VERSION_21_1,
+    FIELD_VERSION_23_1,
+)
 
 
 @dataclass(frozen=True)
@@ -62,17 +72,38 @@ IDENTITY_12_2 = ServerIdentity(
     ),
 )
 
+IDENTITY_21 = ServerIdentity(
+    version_no=0x15030000,  # 21.3.0.0.0, which a client renders as 21.0.48.0.0
+    version_sql=b'25',
+    version_string=b'- Production',
+    banner=b'Oracle Database 21c Express Edition Release 21.0.0.0.0 - Production',
+)
+
+IDENTITY_23 = ServerIdentity(
+    version_no=0x171A2000,  # 23.1.162.0.0
+    version_sql=b'26',
+    version_string=b'- Develop, Learn, and Run for Free',
+    banner=(
+        b'Oracle AI Database 26ai Free Release 23.26.2.0.0 '
+        b'- Develop, Learn, and Run for Free'
+    ),
+)
+
 
 def server_identity(field_version: int) -> ServerIdentity:
     """The identity a Mirror advertising ``field_version`` introduces itself with.
 
-    Two tiers for now. A field version below 12.2 keeps the captured 11.2
-    identity; 12.2 and anything above it reports 12.2, because that is the
-    highest release the Mirror has an identity for — a session advertising a
-    21c or 23ai field version would rather say 12.2 than claim to be 11.2, which
-    is what it did before. Adding those tiers is a later step; the captured
-    anchors for them are in this module's docstring.
+    Four tiers, each the highest release there is an identity for at that
+    field version: below 12.2 the captured 11.2, then 12.2 up to the 21c field
+    version, 21c up to the 23ai one, and 23ai from there on. A client gates
+    features on the release it decodes from the login (SODA from 18c, for
+    one), so a Mirror at a 23ai field version that still said 12.2 kept those
+    features out of reach of whatever its backend could do.
     """
+    if field_version >= FIELD_VERSION_23_1:
+        return IDENTITY_23
+    if field_version >= FIELD_VERSION_21_1:
+        return IDENTITY_21
     if field_version >= FIELD_VERSION_12_2:
         return IDENTITY_12_2
     return IDENTITY_11_2
