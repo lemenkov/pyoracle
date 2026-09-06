@@ -36,6 +36,8 @@ import struct
 from dataclasses import dataclass
 from secrets import token_bytes
 
+from seerdb.common.tns_consts import VERSION_11_2_0_2
+
 ANO_MAGIC = 0xDEADBEEF
 # The ANO protocol version advertised in the container header and echoed per
 # service. The server keys its data-packet wire format off this value: it must
@@ -43,7 +45,6 @@ ANO_MAGIC = 0xDEADBEEF
 # completes the negotiation but then closes the connection when it decodes the
 # first encrypted packet with a different (unexpected) format. Verified against
 # a live 26ai server requiring AES256 (#437).
-ANO_VERSION = 0x0B200200
 
 # The big-endian wire forms of the two values above. The magic and the modern
 # version both appear as raw byte prefixes on the wire (a negotiation container
@@ -51,7 +52,7 @@ ANO_VERSION = 0x0B200200
 # body offset 6), so a client or server that only needs to *recognise* them wants
 # the bytes, not the ints.
 ANO_MAGIC_BYTES = ANO_MAGIC.to_bytes(4, 'big')  # b'\xde\xad\xbe\xef'
-ANO_VERSION_BYTES = ANO_VERSION.to_bytes(4, 'big')  # b'\x0b\x20\x02\x00'
+VERSION_BYTES = VERSION_11_2_0_2.to_bytes(4, 'big')  # b'\x0b\x20\x02\x00'
 
 # Service types.
 SERVICE_AUTH = 1
@@ -142,7 +143,7 @@ def sp_ub4(Value: int) -> bytes:
     return _subpacket(SP_UB4, struct.pack('>I', Value))
 
 
-def sp_version(Value: int = ANO_VERSION) -> bytes:
+def sp_version(Value: int = VERSION_11_2_0_2) -> bytes:
     return _subpacket(SP_VERSION, struct.pack('>I', Value))
 
 
@@ -178,13 +179,15 @@ def encode_service(ServiceType: int, SubPackets: list[bytes]) -> bytes:
     return _SERVICE_HEADER.pack(ServiceType, len(SubPackets), 0) + Body
 
 
-def encode_ano(Services: list[bytes], ContainerVersion: int = ANO_VERSION) -> bytes:
+def encode_ano(
+    Services: list[bytes], ContainerVersion: int = VERSION_11_2_0_2
+) -> bytes:
     """Wrap already-encoded services (in wire order) in a container header.
 
     ``ContainerVersion`` is the version stamped in the container header; it
-    defaults to :data:`ANO_VERSION` (what a modern thin client sends). The classic
+    defaults to :data:`VERSION_11_2_0_2` (what a modern thin client sends). The classic
     sqlplus / thick-OCI null-negotiation reply stamps ``0x00000000`` here instead
-    (its per-service versions stay :data:`ANO_VERSION`) — see the Mirror's
+    (its per-service versions stay :data:`VERSION_11_2_0_2`) — see the Mirror's
     ``build_pro_sqlplus_reply``.
     """
     Body = b''.join(Services)

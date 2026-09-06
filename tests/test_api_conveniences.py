@@ -13,6 +13,7 @@ import seerdb
 from seerdb.client.connection import OracleConnect
 from seerdb.client.cursor import Cursor
 from seerdb.common.exceptions import InterfaceError, ProgrammingError
+from seerdb.common.tns_consts import VERSION_11_2_0_2
 
 
 def _stub_cursor(rows, description=None):
@@ -206,7 +207,7 @@ class TestVersion(unittest.TestCase):
 
     def test_decodes_xe_11g(self):
         conn = OracleConnect()
-        conn.server_version = 0x0B200200  # 186647040, as XE 11.2.0.2.0 sends
+        conn.server_version = VERSION_11_2_0_2  # as XE 11.2.0.2.0 sends
         self.assertEqual(conn.version, '11.2.0.2.0')
 
 

@@ -47,8 +47,8 @@ from seerdb.common.tns_consts import (
 # stamps version 0x00000000 (vs a thin client's 0x0B200200); the server answers
 # by selecting the null algorithm for every service, so the session stays
 # plaintext. This same reply doubles as the deadbeef PRO reply. The container
-# version is 0, but each service still echoes the modern ANO_VERSION.
-_DEADBEEF_CONTAINER_VERSION = 0x00000000  # sqlplus/OCI stamp (not ANO_VERSION)
+# version is 0, but each service still echoes the modern VERSION_11_2_0_2.
+_DEADBEEF_CONTAINER_VERSION = 0x00000000  # sqlplus/OCI stamp (not VERSION_11_2_0_2)
 _NULL_ALGO = 0  # null cipher / null checksum selected → plaintext
 
 # --- the deadbeef third-round type reply: a DTY reply (§4.2) ---
@@ -106,14 +106,14 @@ def build_pro_sqlplus_reply() -> bytes:
     Four services (supervisor, auth, encryption, data-integrity); encryption and
     data-integrity both select the null algorithm, so no cipher/MAC is activated
     and the session stays plaintext. The container stamps version 0x00000000 (the
-    sqlplus/OCI form); each service echoes ANO_VERSION. This is the same reply the
+    sqlplus/OCI form); each service echoes VERSION_11_2_0_2. This is the same reply the
     thin ANO path replays as its null-negotiation response — it *is* that response.
     """
     services = [
         ano.encode_service(
             ano.SERVICE_SUPERVISOR,
             [
-                ano.sp_version(),  # ANO_VERSION
+                ano.sp_version(),  # VERSION_11_2_0_2
                 ano.sp_status(ano.SUPERVISOR_STATUS_OK),  # 31
                 ano.sp_ub2_array([ano.SERVICE_SUPERVISOR, ano.SERVICE_AUTH]),  # [4,1]
             ],

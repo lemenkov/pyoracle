@@ -398,10 +398,11 @@ CharsetDict = {
 DEFAULT_HOST = ''
 DEFAULT_PORT = 1521
 DEFAULT_SID = ''
-# The packed release (major<<24 | minor<<20 | update<<12 | patch<<8) of the
-# captured XE 11.2.0.2.0 server: the Mirror's 11.2 identity and the codec's
-# default AUTH_VERSION_NO in an auth result.
-SERVER_VERSION_11_2_0_2 = 0x0B200200
+# The packed release 11.2.0.2.0 (major<<24 | minor<<20 | update<<12 | patch<<8),
+# 186647040: what the captured XE 11.2 reports as AUTH_VERSION_NO, so the Mirror's
+# 11.2 identity and the codec's auth-result default, and also the container
+# version a modern thin client stamps on its ANO negotiation (ano).
+VERSION_11_2_0_2 = 0x0B200200
 
 # Default Session Data Unit (0x2000). The negotiated packet payload size; both
 # the client connect defaults and the server (Mirror) framing start here.

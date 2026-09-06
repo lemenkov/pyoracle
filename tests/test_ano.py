@@ -13,6 +13,7 @@ import struct
 import unittest
 
 from seerdb.common import ano
+from seerdb.common.tns_consts import VERSION_11_2_0_2
 
 
 class TestSubpackets(unittest.TestCase):
@@ -80,7 +81,7 @@ class TestServices(unittest.TestCase):
         (_t, Version) = Parsed['subpackets'][0]
         (_t, Ids) = Parsed['subpackets'][1]
         (_t, Flag) = Parsed['subpackets'][2]
-        self.assertEqual(Version, ano.ANO_VERSION)
+        self.assertEqual(Version, VERSION_11_2_0_2)
         # The offered list is prefixed with the null algorithm (ID 0).
         self.assertEqual(list(Ids), [0, 1, 8, 10, 6, 2, 15, 16, 17])
         self.assertEqual(Flag, 1)
@@ -150,14 +151,14 @@ class TestContainer(unittest.TestCase):
         Packet = self._client_request()
         (Magic, Length, Version, Count, Err) = struct.unpack_from('>IHIHB', Packet, 0)
         self.assertEqual(Magic, ano.ANO_MAGIC)
-        self.assertEqual(Version, ano.ANO_VERSION)
+        self.assertEqual(Version, VERSION_11_2_0_2)
         self.assertEqual(Count, 3)
         self.assertEqual(Err, 0)
         self.assertEqual(Length, len(Packet))  # length counts the whole packet
 
     def test_roundtrip_decode(self):
         Decoded = ano.decode_ano(self._client_request())
-        self.assertEqual(Decoded['version'], ano.ANO_VERSION)
+        self.assertEqual(Decoded['version'], VERSION_11_2_0_2)
         Types = [S['type'] for S in Decoded['services']]
         self.assertEqual(
             Types,
@@ -200,12 +201,12 @@ class TestDecodeResponse(unittest.TestCase):
 
 class TestErrors(unittest.TestCase):
     def test_bad_magic(self):
-        Bad = struct.pack('>IHIHB', 0x12345678, 13, ano.ANO_VERSION, 0, 0)
+        Bad = struct.pack('>IHIHB', 0x12345678, 13, VERSION_11_2_0_2, 0, 0)
         with self.assertRaises(ano.AnoError):
             ano.decode_ano(Bad)
 
     def test_error_flag_raises(self):
-        Bad = struct.pack('>IHIHB', ano.ANO_MAGIC, 13, ano.ANO_VERSION, 0, 5)
+        Bad = struct.pack('>IHIHB', ano.ANO_MAGIC, 13, VERSION_11_2_0_2, 0, 5)
         with self.assertRaises(ano.AnoError):
             ano.decode_ano(Bad)
 

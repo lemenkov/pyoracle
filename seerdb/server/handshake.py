@@ -271,9 +271,7 @@ def negotiated_tns_version(
 def is_ano_negotiation(pro_body: bytes) -> bool:
     """Whether a post-ACCEPT packet is a modern thin client's ANO negotiation
     (vs a TTI_PRO or the sqlplus/OCI ANO, both handled by other paths)."""
-    return (
-        pro_body[:4] == ano.ANO_MAGIC_BYTES and pro_body[6:10] == ano.ANO_VERSION_BYTES
-    )
+    return pro_body[:4] == ano.ANO_MAGIC_BYTES and pro_body[6:10] == ano.VERSION_BYTES
 
 
 def encode_ano_null_reply(*, sdu: int = DEFAULT_SDU) -> bytes:

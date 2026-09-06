@@ -18,7 +18,7 @@ import pytest
 
 import seerdb
 from seerdb.common.tns import ColumnMeta
-from seerdb.common.tns_consts import TNS_DATA, TNS_TYPE_VARCHAR
+from seerdb.common.tns_consts import TNS_DATA, TNS_TYPE_VARCHAR, VERSION_11_2_0_2
 from seerdb.server.backend import (
     Capability,
     Result,
@@ -111,7 +111,7 @@ def test_live_seerdb_login() -> None:
         # A live connection whose field version negotiated down to 11g (6).
         assert conn is not None
         assert conn.field_version == 6
-        assert conn.server_version == 186647040
+        assert conn.server_version == VERSION_11_2_0_2
     finally:
         try:
             conn.close()

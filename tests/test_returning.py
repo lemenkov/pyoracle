@@ -28,6 +28,7 @@ from seerdb.common.tns_consts import (
     TNS_DATA,
     TTI_FOB,
     TTI_STA,
+    VERSION_11_2_0_2,
 )
 
 
@@ -125,7 +126,7 @@ def _exec_bytes(bind, batch, return_binds):
                 'type': 'change',
                 'auto': 0,
                 'fetch': 0,
-                'server_version': 0x0B200200,
+                'server_version': VERSION_11_2_0_2,
                 'cursor': 0,
                 'query': 'insert into t (v) values (:1) returning id into :2',
                 'bind': bind,
