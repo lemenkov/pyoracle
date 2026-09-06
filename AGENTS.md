@@ -19,6 +19,8 @@ tag it. The steps:
 
    `_CLIENT_VERSION` is also packed into the `SESSION_CLIENT_VERSION` the driver
    sends on the wire, so a mismatch is a real bug, not just cosmetic.
+   `seerdb.__version__` is that same string re-exported, so it needs no bump of
+   its own; `tests/test_version.py` fails when the two places drift.
 
 3. **Update the [`ChangeLog`](ChangeLog):** prepend a new `version x.y.z:` block
    at the top (releases are newest-first; bullets within a release run
