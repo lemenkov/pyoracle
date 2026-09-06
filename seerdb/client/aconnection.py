@@ -57,7 +57,6 @@ from seerdb.common.exceptions import (
 from seerdb.common.sqltext import is_reusable_dml
 from seerdb.common.tns import (
     _DTY_8I,
-    CCAP_FIELD_VERSION,
     FLUSH_OUT_BINDS,
     MAX_FLUSH_OUT_BINDS,
     assemble_packet,
@@ -82,6 +81,7 @@ from seerdb.common.tns import (
     set_decode_return_binds,
 )
 from seerdb.common.tns_consts import (
+    CCAP_FIELD_VERSION,
     CONN_STATE_AUTH_NEGOTIATE,
     CONN_STATE_AUTHENTICATED,
     CONN_STATE_CONNECTED,

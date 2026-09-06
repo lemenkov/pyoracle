@@ -21,8 +21,9 @@ from test_handshake_generation import (
 )
 
 from seerdb.common.exceptions import InterfaceError
-from seerdb.common.tns import CCAP_FIELD_VERSION, decode_token_pro
+from seerdb.common.tns import decode_token_pro
 from seerdb.common.tns_consts import (
+    CCAP_FIELD_VERSION,
     FIELD_VERSION_11_2,
     FIELD_VERSION_12_1,
     FIELD_VERSION_12_2,

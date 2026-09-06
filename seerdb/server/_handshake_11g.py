@@ -33,10 +33,10 @@ from seerdb.common.tns import (
     _SERVER_COMPILE_CAPS,
     _SERVER_DTY_TABLE,
     _SERVER_RUNTIME_CAPS,
-    CCAP_FIELD_VERSION,
 )
 from seerdb.common.tns_consts import (
     AL32UTF8_CHARSET,
+    CCAP_FIELD_VERSION,
     FIELD_VERSION_11_2,
     TTI_DTY,
     TTI_PRO,

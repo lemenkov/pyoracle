@@ -10,7 +10,6 @@ import unittest
 
 from seerdb.client.connection import _parse_accept_eor, _parse_accept_sdu
 from seerdb.common.tns import (
-    CCAP_TTC4,
     assemble_packet,
     decode_packet,
     encode_dictionary_dty,
@@ -18,6 +17,7 @@ from seerdb.common.tns import (
     encode_packet,
 )
 from seerdb.common.tns_consts import (
+    CCAP_TTC4,
     TNS_CCAP_END_OF_RESPONSE,
     TNS_DATA,
     TTI_END_OF_RESPONSE,
