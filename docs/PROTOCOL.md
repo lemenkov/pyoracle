@@ -560,8 +560,8 @@ Two framing details make it easy to misroute:
   (`0x11 0x69`) close-cursors piggyback that wraps ordinary executes. Both have a
   fixed 15-byte prefix; the real `TTI_FUN` call begins at offset 15
   (`strip_oci_piggyback`).
-- The post-login **version call** (`OCI_VERSION_CALL`) uses the *same* `0x11 0x6b`
-  TTI_80SES wrapper and 15-byte prefix — they differ only in the wrapped inner
+- The post-login **version call** uses the *same* `0x11 0x6b` TTI_80SES wrapper
+  (`OCI_PIGGYBACK_80SES`) and 15-byte prefix — they differ only in the wrapped inner
   function (`0x03 0x3b` version vs. `0x03 0x73` `TTI_AUTH`). So the recogniser
   keys on the **inner** function (`is_version_call_oci`), else a changepassword is
   answered with the version banner and sqlplus hangs.

@@ -19,16 +19,20 @@ type maps) stay server-side: a client parses whatever the real server sends and
 never emits those.
 """
 
+from seerdb.common.tns_consts import TTI_80SES, TTI_MSG_TYPE_PIGGYBACK
+
 # The 8-byte pointer indicator the OCI dialect uses where a thin client writes a
 # single ``0x01`` marker byte: 0xFFFFFFFFFFFFFFFE, little-endian. It flags a
 # present pointer field (e.g. the SQL text pointer in OALL8, the username pointer
 # in OSESSKEY/AUTH); it is absent on a re-execute that reuses the cursor.
 OCI_INDICATOR = b'\xfe\xff\xff\xff\xff\xff\xff\xff'
 
-# The first thing sqlplus / thick OCI sends after login is a version call whose
-# TTC payload leads with these two bytes; the server answers with its banner and
-# a packed version/flags trailer, and sqlplus prints "Connected to: <banner>".
-OCI_VERSION_CALL = b'\x11\x6b'
+# The TTI_80SES piggyback prefix: a thick-OCI call wrapped in a session-switch
+# preamble. The first thing sqlplus sends after login, its version call, arrives
+# this way (the server answers with its banner and sqlplus prints "Connected
+# to: <banner>"), and so does a changepassword; is_version_call_oci tells them
+# apart by the wrapped function.
+OCI_PIGGYBACK_80SES = bytes([TTI_MSG_TYPE_PIGGYBACK, TTI_80SES])
 
 # O5LOGON field sizes on the OCI dialect wire, as ASCII-hex lengths. The session
 # key is a 48-byte value (96 hex); the AUTH_VFR_DATA salt is a 10-byte value

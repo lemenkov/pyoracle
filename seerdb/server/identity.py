@@ -34,6 +34,7 @@ from seerdb.common.tns_consts import (
     FIELD_VERSION_12_2,
     FIELD_VERSION_21_1,
     FIELD_VERSION_23_1,
+    SERVER_VERSION_11_2_0_2,
 )
 
 
@@ -55,7 +56,7 @@ class ServerIdentity:
 
 
 IDENTITY_11_2 = ServerIdentity(
-    version_no=0x0B200200,  # 11.2.0.2.0
+    version_no=SERVER_VERSION_11_2_0_2,  # 11.2.0.2.0
     version_sql=b'22',
     version_string=b'- 64bit Production',
     banner=(

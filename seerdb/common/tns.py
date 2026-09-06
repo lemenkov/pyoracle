@@ -115,6 +115,7 @@ from seerdb.common.tns_consts import (
     FIELD_VERSION_21_1,
     FIELD_VERSION_23_1,
     ISO_LATIN_1_CHARSET,
+    SERVER_VERSION_11_2_0_2,
     TNS_AL8I4_ARRAY_DML_ROWCOUNTS,
     TNS_AQ_ARRAY_ENQ,
     TNS_AQ_ARRAY_FLAGS_RETURN_MESSAGE_ID,
@@ -126,7 +127,9 @@ from seerdb.common.tns_consts import (
     TNS_AQ_MESSAGE_VERSION,
     TNS_AQ_MSG_BUFFERED,
     TNS_AQ_MSG_PERSISTENT_OR_BUFFERED,
+    TNS_BIND_ARRAY,
     TNS_BIND_DIR_INPUT,
+    TNS_BIND_USE_INDICATORS,
     TNS_CCAP_END_OF_RESPONSE,
     TNS_DATA,
     TNS_DATA_FLAGS_MORE,
@@ -136,10 +139,14 @@ from seerdb.common.tns_consts import (
     TNS_END_TO_END_DBOP,
     TNS_END_TO_END_MODULE,
     TNS_ESCAPE_CHAR,
+    TNS_EXEC_FLAGS_IMPLICIT_RESULTSET,
     TNS_EXEC_FLAGS_NO_CANCEL_ON_EOF,
     TNS_EXEC_FLAGS_SCROLLABLE,
     TNS_EXEC_OPTION_BATCH_ERRORS,
+    TNS_EXEC_OPTION_BIND,
     TNS_EXEC_OPTION_EXECUTE,
+    TNS_EXEC_OPTION_FETCH,
+    TNS_EXEC_OPTION_PARSE,
     TNS_FUNC_AQ_DEQ,
     TNS_FUNC_AQ_ENQ,
     TNS_FUNC_ARRAY_AQ,
@@ -157,7 +164,10 @@ from seerdb.common.tns_consts import (
     TNS_LOB_OP_GET_LENGTH,
     TNS_LOB_OP_READ,
     TNS_LOB_OP_WRITE,
+    TNS_LONG_LENGTH_INDICATOR,
+    TNS_MAX_SHORT_LENGTH,
     TNS_MSG_TYPE_FAST_AUTH,
+    TNS_NULL_LENGTH_INDICATOR,
     TNS_REDIRECT,
     TNS_SECURITY_CONTEXT_ATTACH_FLAG,
     TNS_SERVER_CONVERTS_CHARS,
@@ -201,6 +211,7 @@ from seerdb.common.tns_consts import (
     TTI_AUTH,
     TTI_BVC,
     TTI_DCB,
+    TTI_DNY,
     TTI_DTY,
     TTI_END_OF_RESPONSE,
     TTI_FETCH,
@@ -616,14 +627,14 @@ def _skip_chunked_bytes(Data: bytes) -> bytes:
     # sequence of ub4-prefixed segments terminated by a zero-length segment
     # (length == 254 LONG marker).
     Length = Data[0]
-    if Length == 254:
+    if Length == TNS_LONG_LENGTH_INDICATOR:
         Rest = Data[1:]
         while True:
             (ChunkLen, Rest) = decode_ub4(Rest)
             if ChunkLen == 0:
                 return Rest
             Rest = Rest[ChunkLen:]
-    elif Length == 255:
+    elif Length == TNS_NULL_LENGTH_INDICATOR:
         return Data[1:]
     else:
         return Data[1 + Length :]
@@ -634,7 +645,7 @@ def _read_chunked_bytes(Data: bytes) -> tuple[bytes, bytes]:
     # 1-byte length then that many raw bytes (length < 254), nothing (255 NULL),
     # or a chunked ub4-prefixed sequence terminated by a zero-length chunk (254).
     Length = Data[0]
-    if Length == 254:
+    if Length == TNS_LONG_LENGTH_INDICATOR:
         Rest = Data[1:]
         Out = b''
         while True:
@@ -643,7 +654,7 @@ def _read_chunked_bytes(Data: bytes) -> tuple[bytes, bytes]:
                 return (Out, Rest)
             Out += bytes(Rest[:ChunkLen])
             Rest = Rest[ChunkLen:]
-    elif Length == 255:
+    elif Length == TNS_NULL_LENGTH_INDICATOR:
         return (b'', Data[1:])
     else:
         return (bytes(Data[1 : 1 + Length]), Data[1 + Length :])
@@ -656,22 +667,13 @@ def _skip_bytes_with_length(Data: bytes) -> bytes:
     return Rest
 
 
-# The longest value a single length byte may announce. The three bytes above it
-# are markers, not lengths: 253 (0xFD) is the TTC escape byte, 254 (0xFE) opens
-# a chunked value and 255 (0xFF) is NULL. A 253-byte value sent with a plain
-# length byte is therefore an escape where the server expects a length, and a
-# 12c+ server rejects the whole call with ORA-03125 (#707). Same limit as
-# python-oracledb's TNS_MAX_SHORT_LENGTH.
-_MAX_SHORT_LENGTH = 252
-
-
 def _bytes_with_length(Data: bytes) -> bytes:
     # Inverse of `_skip_chunked_bytes` (oracledb write_bytes_with_length): a
     # 1-byte length + data for short values (<= 252 bytes), or the 254 LONG
     # marker followed by ub4-prefixed chunks terminated by a zero-length chunk.
-    if len(Data) <= _MAX_SHORT_LENGTH:
+    if len(Data) <= TNS_MAX_SHORT_LENGTH:
         return bytes([len(Data)]) + Data
-    Out = bytearray([254])
+    Out = bytearray([TNS_LONG_LENGTH_INDICATOR])
     for I in range(0, len(Data), 0x40):
         Chunk = Data[I : I + 0x40]
         Out += encode_sb4(len(Chunk)) + Chunk
@@ -1097,7 +1099,7 @@ def _encode_oer(
         # captured terminator built at import time needs nothing defined later.
         + (
             _bytes_with_length(message)
-            if len(message) <= _MAX_SHORT_LENGTH
+            if len(message) <= TNS_MAX_SHORT_LENGTH
             else encode_chr(message)
         )
     )
@@ -1281,11 +1283,6 @@ _SERVER_VERSION_SLOT = 5
 _EXEC_OPTION_COMMIT = 0x100
 
 
-# The array-DML batcherrors bit (0x80000): the client sets it to ask the server
-# to apply the good rows and collect per-row failures rather than aborting (#18).
-_EXEC_OPTION_BATCH_ERRORS = 0x80000
-
-
 # A TTI_LOBOPS READ request carries the slice sqlplus wants: a 1-based source
 # offset and an amount, both counts (characters for a CLOB, bytes for a BLOB),
 # at these fixed ub8-LE offsets in the OCI request. sqlplus loops over them (in
@@ -1305,7 +1302,7 @@ def _oci_lob_data(content: bytes) -> bytes:
     # form, a run of <ub1 len><bytes> terminated by a zero-length chunk.
     if len(content) <= _OCI_LOB_CHUNK:
         return bytes([TTI_LOB, len(content)]) + content
-    out = bytearray([TTI_LOB, 0xFE])
+    out = bytearray([TTI_LOB, TNS_LONG_LENGTH_INDICATOR])
     for start in range(0, len(content), _OCI_LOB_CHUNK):
         chunk = content[start : start + _OCI_LOB_CHUNK]
         out += bytes([len(chunk)]) + chunk
@@ -1470,7 +1467,7 @@ def parse_exec(
     rest = payload[3:]  # skip TTI_FUN, TTI_ALL8, seq
     options, rest = decode_ub4(rest)
     autocommit = bool(options & _EXEC_OPTION_COMMIT)
-    batcherrors = bool(options & _EXEC_OPTION_BATCH_ERRORS)
+    batcherrors = bool(options & TNS_EXEC_OPTION_BATCH_ERRORS)
     cursor, rest = decode_ub4(rest)
     query_flag, rest = rest[0], rest[1:]
     query_len, rest = decode_ub4(rest)
@@ -1678,7 +1675,7 @@ def _lob_data_thin(content: bytes) -> bytes:
         return _oci_lob_data(content)
     if len(content) < 0xFE:
         return bytes([TTI_LOB, len(content)]) + content
-    out = bytearray([TTI_LOB, 0xFE])
+    out = bytearray([TTI_LOB, TNS_LONG_LENGTH_INDICATOR])
     for start in range(0, len(content), _OCI_LOB_CHUNK):
         chunk = content[start : start + _OCI_LOB_CHUNK]
         out += encode_sb4(len(chunk)) + chunk
@@ -2004,7 +2001,7 @@ def is_version_call_oci(payload: bytes) -> bool:
     Match the inner function too, so a piggybacked changepassword is not mistaken
     for the version request (and answered with the banner)."""
     return (
-        payload[:2] == oci.OCI_VERSION_CALL
+        payload[:2] == oci.OCI_PIGGYBACK_80SES
         and payload[_OCI_80SES_FIXED : _OCI_80SES_FIXED + 2] == b'\x03\x3b'
     )
 
@@ -2030,7 +2027,7 @@ def encode_version_banner_oci(banner: bytes) -> bytes:
 # piggyback for every statement past the first: `0x11 0x69`, then a fixed prefix
 # (seq, an 8-byte indicator, the ub4 cursor count, and one 8-byte entry per closed
 # cursor), then the real TTI_FUN execute. Strip it so the execute can be parsed.
-_OCI_PIGGYBACK = b'\x11\x69'
+_OCI_PIGGYBACK = bytes([TTI_MSG_TYPE_PIGGYBACK, TTI_OCCA])
 
 
 _OCI_PIGGYBACK_FIXED = 3 + 8 + 4  # 0x11 0x69 seq | indicator | ub4 count
@@ -2041,7 +2038,6 @@ _OCI_PIGGYBACK_FIXED = 3 + 8 + 4  # 0x11 0x69 seq | indicator | ub4 count
 # byte, and a 12-byte session-switch preamble) then the real TTI_FUN call. The
 # preamble length is constant across captures (only the seq/count bytes vary), so
 # the inner call always starts at offset 15.
-_OCI_PIGGYBACK_80SES = b'\x11\x6b'
 _OCI_80SES_FIXED = 15
 
 
@@ -2055,7 +2051,7 @@ def strip_oci_piggyback(body: bytes) -> bytes:
     if body[:2] == _OCI_PIGGYBACK:
         count = int.from_bytes(body[11:15], 'little')
         return body[_OCI_PIGGYBACK_FIXED + count * 8 :]
-    if body[:2] == _OCI_PIGGYBACK_80SES:
+    if body[:2] == oci.OCI_PIGGYBACK_80SES:
         return body[_OCI_80SES_FIXED:]
     return body
 
@@ -2085,10 +2081,8 @@ def encode_fetch_terminator_oci(sequence: int) -> bytes:
     return bytes(oer) + bytes([len(_OCI_END_OF_FETCH_MSG)]) + _OCI_END_OF_FETCH_MSG
 
 
-# Packed server version returned in the auth result (AUTH_VERSION_NO), from a
-# real XE 11.2 auth result: 186647040 = 11.2.0.x. On the wire all these values
-# (session key, salt, proof) are uppercase-hex ASCII.
-_SERVER_VERSION_NO = 186647040
+# On the wire the auth-result values (session key, salt, proof) are
+# uppercase-hex ASCII; the version defaults to the captured 11.2 release.
 
 
 def encode_rpa_kv(pairs: list[tuple[bytes, bytes]]) -> bytes:
@@ -2103,7 +2097,7 @@ def encode_rpa_kv(pairs: list[tuple[bytes, bytes]]) -> bytes:
 
 
 def encode_token_result(
-    *, session_id: int = 0, version_no: int = _SERVER_VERSION_NO
+    *, session_id: int = 0, version_no: int = SERVER_VERSION_11_2_0_2
 ) -> bytes:
     """The token-auth result RPA — version + session id, and no server proof
     (token auth has no ConnKey, so there is nothing for the client to validate)."""
@@ -2169,7 +2163,7 @@ def encode_result(
     session_key: bytes,
     *,
     session_id: int = 0,
-    version_no: int = _SERVER_VERSION_NO,
+    version_no: int = SERVER_VERSION_11_2_0_2,
 ) -> bytes:
     """The auth-result RPA payload — the server proof, version, and session id.
 
@@ -2557,14 +2551,9 @@ def decode_oac_fields(Data: bytes) -> tuple[int, int, int, int, int, bytes, byte
     return (DataType, MaxDataLength, DataScale, Charset, Csfrm, ToId, Rest)
 
 
-# The ARRAY flag a PL/SQL associative-array bind sets in its OAC (#122). A 12.2+
-# client puts it in the flag byte and the array's capacity in the max-array-size
-# field; an 11g client puts the flag in the second flag word and the capacity in
-# the trailing field (see encode_token_raw). Where the flag is not set the
-# capacity is 0: a scalar bind.
-_OAC_ARRAY_FLAG = 0x40
-
-
+# A PL/SQL associative-array bind's capacity (#122): where TNS_BIND_ARRAY is set,
+# the max-array-size field of the 12.2+ OAC layout or the trailing field of the
+# 11g one (the two places encode_token_raw writes it); 0 for a scalar bind.
 def _oac_array_capacity(Data: bytes, field_version: int) -> int:
     (
         _DataType,
@@ -2581,8 +2570,8 @@ def _oac_array_capacity(Data: bytes, field_version: int) -> int:
         _Rest,
     ) = _decode_oac_walk(Data)
     if field_version >= FIELD_VERSION_12_2:
-        return Mal if Flg & _OAC_ARRAY_FLAG else 0
-    return Mxlc if Fl2 & _OAC_ARRAY_FLAG else 0
+        return Mal if Flg & TNS_BIND_ARRAY else 0
+    return Mxlc if Fl2 & TNS_BIND_ARRAY else 0
 
 
 def decode_token_oac(Data: bytes, Acc: tuple) -> tuple[int, int, int, int, bytes]:
@@ -5617,7 +5606,6 @@ _OCI_LOB_LOCATOR_BODY = bytes.fromhex(
 )
 
 _OCI_LOB_CHARSET_ID_OFF = 31 - 9  # charset id ub2 BE, within the body
-_OCI_LOB_CHARSET_ID_AL32UTF8 = 0x0369  # a CLOB's charset; a BLOB carries 0
 
 
 def _oci_lob_locator(is_clob: bool) -> bytes:
@@ -5627,9 +5615,7 @@ def _oci_lob_locator(is_clob: bool) -> bytes:
     charset id set for a CLOB and a zeroed synthetic LID."""
     body = bytearray(_OCI_LOB_LOCATOR_BODY)
     if is_clob:
-        struct.pack_into(
-            '>H', body, _OCI_LOB_CHARSET_ID_OFF, _OCI_LOB_CHARSET_ID_AL32UTF8
-        )
+        struct.pack_into('>H', body, _OCI_LOB_CHARSET_ID_OFF, AL32UTF8_CHARSET)
     header = bytes(
         [
             0x68,
@@ -6602,7 +6588,6 @@ def _decode_describe_oci(payload: bytes) -> list[dict]:
 # chunk) even when it fits one chunk, followed by a trailing ub4 indicator (0),
 # reproduced from a live 11g capture. A NULL LONG is a single 0x00. Character LONG
 # content is UTF-8, LONG RAW is raw bytes.
-_OCI_LONG_CHUNK = 0xFC  # max bytes per inline LONG chunk
 
 
 _OCI_LONG_TRAILER = bytes(4)  # trailing ub4 indicator (actual/return length = 0)
@@ -6621,9 +6606,9 @@ def encode_long_value_oci(value: object) -> bytes:
         content = bytes(value)
     else:
         content = str(value).encode('utf-8')
-    out = bytearray([0xFE])
-    for start in range(0, len(content), _OCI_LONG_CHUNK):
-        chunk = content[start : start + _OCI_LONG_CHUNK]
+    out = bytearray([TNS_LONG_LENGTH_INDICATOR])
+    for start in range(0, len(content), TNS_MAX_SHORT_LENGTH):
+        chunk = content[start : start + TNS_MAX_SHORT_LENGTH]
         out += bytes([len(chunk)]) + chunk
     out += bytes([0])  # zero-length chunk terminates the run
     return bytes(out) + _OCI_LONG_TRAILER
@@ -7206,7 +7191,7 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
     # normal execute; scoping it to blocks keeps the DML/DDL paths untouched.
     if Type == 'block' and FieldVersion >= FIELD_VERSION_12_1 and len(All8) > 9:
         All8 = list(All8)
-        All8[9] = All8[9] | 0x8000
+        All8[9] = All8[9] | TNS_EXEC_FLAGS_IMPLICIT_RESULTSET
 
     # 23ai (fv > 17, #89): the execute framing the server expects under field
     # version 24 differs from the legacy form in three spots, reverse-engineered
@@ -7224,10 +7209,10 @@ def encode_dictionary_exec(Dictionary: dict) -> bytes:
         # setting them on a DDL/DML execute makes the server reject it
         # (ORA-03137 kpoal8Check-5 [32768]).
         if Type in ('select', 'fetch'):
-            Opt |= 0x40
+            Opt |= TNS_EXEC_OPTION_FETCH
             if not ArrayDmlRowCounts and len(All8) > 9:
                 All8 = list(All8)
-                All8[9] = 0x8000
+                All8[9] = TNS_EXEC_FLAGS_IMPLICIT_RESULTSET
 
     # Server-side scrollable cursor (#181): mark the cursor scrollable (and keep
     # it open past EOF) on the opening execute, and carry the scroll request
@@ -7336,7 +7321,6 @@ def encode_dictionary_fetch(Dictionary: dict) -> bytes:
 # from the Oracle JDBC thin driver against a live 9.2.0.4 server (#97). Gate
 # every fv2 path on `field_version < FIELD_VERSION_10_2`.
 # ---------------------------------------------------------------------------
-_O7_DESCRIBE_FUNC = 0x62  # describe columns (RPA carries the metadata)
 _O7_CLOSE_FUNC = 0x14  # close cursor
 
 
@@ -7521,7 +7505,7 @@ def encode_o7_describe(Seq: int) -> bytes:
     return bytes(
         [
             TTI_FUN,
-            _O7_DESCRIBE_FUNC,
+            TTI_DNY,  # describe columns (RPA carries the metadata)
             Seq,
             0x07,
             0x01,
@@ -8011,7 +7995,12 @@ def _encode_8i_oall8(Seq: int, Sql: bytes, StmtType: int, Binds: list) -> bytes:
     IsBlock = StmtType in (O8I_STMT_BEGIN, O8I_STMT_DECLARE)
     Token = _ENCODE_FIELD_VERSION.set(FIELD_VERSION_9_2)
     try:
-        Option = 0x21 | (0x40 if IsQuery else 0) | (0x08 if NumBinds else 0)
+        Option = (
+            TNS_EXEC_OPTION_PARSE
+            | TNS_EXEC_OPTION_EXECUTE
+            | (TNS_EXEC_OPTION_FETCH if IsQuery else 0)
+            | (TNS_EXEC_OPTION_BIND if NumBinds else 0)
+        )
         if IsBlock:
             Byte4, Byte5 = (0x04 if NumBinds else 0x00), 0x04
         else:
@@ -8653,7 +8642,7 @@ def encode_dictionary_lobops(Dictionary: dict) -> bytes:
         Out += struct.pack('>H', len(Locator))  # ub2 locator length prefix
         Out += Locator
         Out += bytes([0x0E])  # WRITE-data marker
-        if len(Data) <= 0xFC:
+        if len(Data) <= TNS_MAX_SHORT_LENGTH:
             Out += bytes([len(Data)]) + Data
         else:
             Out += bytes([0xFE])
@@ -9279,9 +9268,8 @@ def encode_urowid_value(Value: object) -> bytes:
 # The value is the 0xFE-chunked form (a run of <ub1 len><bytes> terminated by a
 # zero-length chunk) even when it fits one chunk; a NULL is a bare 0x00 marker. The
 # sqlplus / OCI dialect frames it with a single ub4 trailer instead. Character LONG
-# content is UTF-8, LONG RAW is raw bytes. Chunks stay ≤ 253 bytes (the single-byte
-# DALC boundary used throughout this codec).
-_THIN_LONG_CHUNK = 253
+# content is UTF-8, LONG RAW is raw bytes. Chunks stay within the single-length
+# DALC boundary used throughout this codec.
 _THIN_LONG_TRAILER = encode_sb4(0) + encode_sb4(0)  # two ub4 indicators (0, 0)
 
 
@@ -9302,9 +9290,9 @@ def encode_long_value_thin(Value: object) -> bytes:
     # session's negotiated version — the same split as the LOB read reply.
     wide = _ENCODE_FIELD_VERSION.get() >= FIELD_VERSION_12_2
     encode_len = encode_sb4 if wide else (lambda n: bytes([n]))
-    Out = bytearray([0xFE])
-    for Start in range(0, len(Content), _THIN_LONG_CHUNK):
-        Chunk = Content[Start : Start + _THIN_LONG_CHUNK]
+    Out = bytearray([TNS_LONG_LENGTH_INDICATOR])
+    for Start in range(0, len(Content), TNS_MAX_SHORT_LENGTH):
+        Chunk = Content[Start : Start + TNS_MAX_SHORT_LENGTH]
         Out += encode_len(len(Chunk)) + Chunk
     Out += encode_len(0)  # zero-length chunk terminates the run
     return bytes(Out) + _THIN_LONG_TRAILER
@@ -9424,7 +9412,7 @@ def decode_dalc(Bytes: bytes) -> tuple[bytes | list, bytes]:
     try:
         if Bytes[0] == 0 or Bytes[0] == 255:
             return ([], Bytes[1:])
-        if Bytes[0] == 254:
+        if Bytes[0] == TNS_LONG_LENGTH_INDICATOR:
             return decode_chr(Bytes)
         Length = Bytes[0]
         return (Bytes[1 : Length + 1], Bytes[Length + 1 :])
@@ -9436,7 +9424,7 @@ def decode_dalc(Bytes: bytes) -> tuple[bytes | list, bytes]:
 
 
 def decode_chr(Bytes: bytes) -> tuple[bytes, bytes]:
-    if Bytes[0] == 254:
+    if Bytes[0] == TNS_LONG_LENGTH_INDICATOR:
         # LONG (chunked) value. 12c+ prefixes each chunk with a ub4 length and
         # ends with a zero-length chunk (same framing as _skip_chunked_bytes);
         # 11g uses a single length byte per chunk. The decode field version is
@@ -9480,7 +9468,13 @@ def encode_chr(String: str | bytes) -> bytes:
         while i < Length - 64:
             Out += bytes([64]) + Bytes[i : i + 64]
             i += 64
-        return bytes([254]) + Out + bytes([Length - i]) + Bytes[i:] + bytes([0])
+        return (
+            bytes([TNS_LONG_LENGTH_INDICATOR])
+            + Out
+            + bytes([Length - i])
+            + Bytes[i:]
+            + bytes([0])
+        )
 
     return bytes([Length]) + Bytes
 
@@ -9979,8 +9973,6 @@ _OBJ_IMAGE_FLAGS = 0x84  # IS_VERSION_81 (0x80) | NO_PREFIX_SEG (0x04)
 _OBJ_IMAGE_FLAGS_COLLECTION = 0x88  # IS_VERSION_81 (0x80) | IS_COLLECTION (0x08)
 _OBJ_IMAGE_VERSION = 1
 _OBJ_TOP_LEVEL = 0x01
-_OBJ_NULL_ATTR = 255  # TNS_NULL_LENGTH_INDICATOR
-_OBJ_LONG_LEN = 254  # TNS_LONG_LENGTH_INDICATOR
 _OBJ_MAX_SHORT_LEN = 245  # TNS_OBJ_MAX_SHORT_LENGTH
 # toid wrapper for a new object: 00 22 (NON_NULL_OID | HAS_EXTENT_OID) + oid +
 # the fixed extent OID (python-oracledb create_new_object).
@@ -9992,7 +9984,7 @@ def _obj_write_length(Length: int) -> bytes:
     # python-oracledb DbObjectPickleBuffer.write_length.
     if Length <= _OBJ_MAX_SHORT_LEN:
         return bytes([Length])
-    return bytes([_OBJ_LONG_LEN]) + struct.pack('>I', Length)
+    return bytes([TNS_LONG_LENGTH_INDICATOR]) + struct.pack('>I', Length)
 
 
 def _obj_two_lengths(Value: bytes) -> bytes:
@@ -10045,7 +10037,7 @@ def _encode_object_attr_field(DataType: int, Charset: int, Value: Any) -> bytes:
     # One image field: a single 0xFF for NULL, else the write_length-prefixed
     # raw scalar bytes.
     if Value is None:
-        return bytes([_OBJ_NULL_ATTR])
+        return bytes([TNS_NULL_LENGTH_INDICATOR])
     Raw = _encode_object_attr(DataType, Charset or AL32UTF8_CHARSET, Value)
     return _obj_write_length(len(Raw)) + Raw
 
@@ -10069,7 +10061,13 @@ def encode_object_image(Obj: 'DbObject') -> bytes:
         # Collection header = flags, version, long-form length, prefix seg (01 01).
         Total = 9 + len(Body)
         return (
-            bytes([_OBJ_IMAGE_FLAGS_COLLECTION, _OBJ_IMAGE_VERSION, _OBJ_LONG_LEN])
+            bytes(
+                [
+                    _OBJ_IMAGE_FLAGS_COLLECTION,
+                    _OBJ_IMAGE_VERSION,
+                    TNS_LONG_LENGTH_INDICATOR,
+                ]
+            )
             + struct.pack('>I', Total)
             + bytes([1, 1])
             + Body
@@ -10085,7 +10083,7 @@ def encode_object_image(Obj: 'DbObject') -> bytes:
     # (the 7-byte header included), matching python-oracledb write_header.
     Total = 7 + len(Body)
     return (
-        bytes([_OBJ_IMAGE_FLAGS, _OBJ_IMAGE_VERSION, _OBJ_LONG_LEN])
+        bytes([_OBJ_IMAGE_FLAGS, _OBJ_IMAGE_VERSION, TNS_LONG_LENGTH_INDICATOR])
         + struct.pack('>I', Total)
         + Body
     )
@@ -10636,7 +10634,7 @@ def encode_token_raw(
             BindCharset, Csfrm = AL16UTF16_CHARSET, 2
         else:
             BindCharset, Csfrm = AL32UTF8_CHARSET, 1
-        FlagByte = 0x41 if Array else 1  # USE_INDICATORS | ARRAY
+        FlagByte = TNS_BIND_USE_INDICATORS | (TNS_BIND_ARRAY if Array else 0)
         return (
             bytes([DataType, FlagByte, 0, 0])
             + encode_sb4(Length)
@@ -10649,7 +10647,7 @@ def encode_token_raw(
             + encode_sb4(0)  # LOB prefetch length
             + encode_sb4(0)
         )  # oaccolid (12.2+)
-    FlagOut = (Flag | 0x40) if Array else Flag
+    FlagOut = (Flag | TNS_BIND_ARRAY) if Array else Flag
     MaxOut = Array if Array else Max
     return (
         bytes([DataType, 3, 0, 0])
