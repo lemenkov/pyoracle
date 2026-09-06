@@ -1015,7 +1015,7 @@ def _encode_batch_messages(messages: list[str]) -> bytes:
     out = bytearray(encode_sb4(len(messages)) + bytes([1]))
     for message in messages:
         text = message.encode('utf-8')
-        out += encode_sb4(len(text)) + _bytes_with_length(text) + bytes([0, 0])
+        out += encode_sb4(len(text)) + encode_chr(text) + bytes([0, 0])
     return bytes(out)
 
 
@@ -1070,7 +1070,17 @@ def _encode_oer(
         + _encode_batch_ub4_array(offsets)  # batch error row offsets
         + _encode_batch_messages(messages)  # batch error messages
         + _oer_version_tail(ora_code, rowcount)
-        + _bytes_with_length(message)  # the message DALC (read only when ora_code≠0)
+        # The message DALC (read only when ora_code≠0). A message over 252 bytes
+        # is chunked, and the chunk framing depends on the field version the
+        # session negotiated: single-byte chunk lengths below 12.2, ub4 ones from
+        # it on. encode_chr picks the form the client will read (#734); a short
+        # message frames the same either way, and stays on the plain path so the
+        # captured terminator built at import time needs nothing defined later.
+        + (
+            _bytes_with_length(message)
+            if len(message) <= _MAX_SHORT_LENGTH
+            else encode_chr(message)
+        )
     )
 
 

@@ -178,6 +178,33 @@ def test_typed_null_bind_is_a_null() -> None:
     assert rows == [(1,)]
 
 
+def test_long_error_message_reaches_the_client() -> None:
+    # A backend error whose text exceeds 252 bytes has to arrive as the ORA
+    # error it is, not break the client's reply decode (#734).
+    listen, server, result = _start_mirror()
+    conn = _connect(listen.getsockname()[1])
+    column = 'x' * 300
+    try:
+        cur = conn.cursor()
+        cur.execute('create table t (id number)')
+        with pytest.raises(seerdb.DatabaseError) as raised:
+            cur.execute(f'select {column} from t')
+        # The connection is still usable afterwards.
+        cur.execute('select count(*) from t')
+        count = cur.fetchone()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        server.join(timeout=5)
+        listen.close()
+
+    assert result.get('error') is None, result.get('error')
+    assert column in str(raised.value)
+    assert count == (0,)
+
+
 def test_encrypted_round_trip() -> None:
     # The Mirror requires ANO, so the client negotiates AES256 + SHA256 and the
     # whole login + query runs encrypted end to end (#448) — the server half on
