@@ -76,6 +76,7 @@ def main() -> int:
         Cur.execute(f'SELECT dump({Expr}) FROM dual')
         Dumped = Cur.fetchone()[0]  # 'Typ=2 Len=2: 193,11'
         Match = re.search(r':\s*([\d, ]+)$', Dumped)
+        assert Match is not None, Dumped
         Hex = bytes(int(X) for X in Match.group(1).split(',')).hex()
         print(f"    ({Expected!r}, '{Hex}'),  # {Expr}")
     Conn.close()
