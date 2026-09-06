@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """Golden test: the 11g PRO/DTY handshake replies are now GENERATED from the
-server's named identity pieces (seerdb.server._handshake_11g) rather than stored
+server's named identity pieces (seerdb.server.handshake) rather than stored
 as verbatim DATA packets. These captures, from a live XE 11.2 listener, pin the
 builders byte-for-byte so the Mirror stays wire-identical to the real server.
 """
@@ -11,7 +11,7 @@ import unittest
 
 from seerdb.common.tns import encode_packet
 from seerdb.common.tns_consts import DEFAULT_SDU, TNS_DATA
-from seerdb.server import _handshake_11g as H
+from seerdb.server import handshake as H
 
 # --- captured golden packets (live XE 11.2) ---
 PRO_REPLY = bytes.fromhex(
